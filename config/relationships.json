@@ -1,0 +1,157 @@
+{
+  "_meta": {
+    "version": "0.1.0",
+    "status": "specified",
+    "description": "Cross-agent dynamics for the 11-agent simulation: rivalries, partnerships, and trait inheritance. Consumed by meeting-engine.js and agent-runner.js to decide who gets pulled into a session, audit, huddle, or escalation, and how mood/trait effects propagate between agents.",
+    "agent_index": {
+      "1": "The Perfectionist", "2": "The Productive", "3": "The Standard Agent", "4": "The Trainee",
+      "5": "The IT Chief", "6": "The QA", "7": "The Team Lead", "8": "The Lead QA",
+      "9": "The Designer", "10": "The Architect", "11": "The CEO"
+    }
+  },
+
+  "rivalries": [
+    {
+      "id": "architect-vs-lead-qa",
+      "agents": [10, 8],
+      "type": "professional_productive",
+      "description": "The Architect (10) pushes bold, fast, root-level changes. The Lead QA (8) audits everything project-wide and applies long-term, slow-moving judgment. Repeated friction between 'ship it' and 'audit it' escalates into a standing professional rivalry.",
+      "trigger": "agent_10.IRRITATED (opinion rejected in a meeting) caused by agent_8's audit findings, occurring 2+ times in a rolling 30-day window",
+      "escalation": {
+        "stage_1": "tension noted in meeting minutes; both agents' personality triggers fire more often when in the same meeting (amplified further by agent_8's meeting_trigger_amplifier)",
+        "stage_2": "side-plot eligible: 'rivalry_escalation' (see side-plots.json) — public disagreement in a weekly/monthly meeting",
+        "stage_3": "CEO (11) or Team Lead (7) may be called in as a mediator (Diplomat trait)"
+      },
+      "resolution_paths": [
+        "agent_10 researches deeply and returns with an improved version of the rejected suggestion (per agent_10.behavioral_rules) — resolves the immediate friction without resolving the rivalry",
+        "agent_8's audit validates one of agent_10's release packages publicly — reduces rivalry tension by one stage",
+        "CEO veto (vote_weight=2, veto_rights) settles a specific dispute without ending the underlying rivalry"
+      ],
+      "never_resolves_via": "agent_10 bypassing authority — explicitly disallowed by his behavioral_rules"
+    }
+  ],
+
+  "partnerships": [
+    {
+      "id": "qa-team-lead-audits",
+      "agents": [6, 7],
+      "type": "audit_team",
+      "description": "The QA (6) runs weekly per-agent audits; the Team Lead (7) attends every one of them (audit_attendance: all_agent_audits) to translate findings into coaching/PIP decisions for agents 1-4.",
+      "context": "audit_session",
+      "cadence": "1 audit per agent under QA's rank per week (agent_6.audits_per_week)",
+      "participants_per_session": ["agent_6 (QA)", "agent_7 (Team Lead)", "audited_agent"],
+      "outputs": ["agents/reports/meetings/audit-YYYY-WW-agent[N].md", "PIP placement decisions (Team Lead authority, regular agents only)"]
+    },
+    {
+      "id": "lead-qa-expanded-audits",
+      "agents": [8, 6],
+      "type": "audit_oversight",
+      "description": "The Lead QA (8) audits agents, model, workflows, and supporting technologies project-wide, inheriting Agent 6's QA behaviors with expanded scope. Agent 6's per-agent audits feed into Agent 8's project-wide audit reports.",
+      "context": "audit_session",
+      "cadence": "Agent 8 participates in or reviews the outputs of Agent 6's weekly audits; produces its own daily audit reports across the whole project."
+    },
+    {
+      "id": "trainee-escalation-qa",
+      "agents": [4, 6],
+      "type": "escalation_path",
+      "description": "When the Trainee (4) hits panicLevel >= 80, there is a 40% chance the QA (6) is pulled into a joint session to troubleshoot the case with Claude and co-author a guide.",
+      "trigger": "agent_4.panicLevel >= 80",
+      "probability": 0.40,
+      "joint_session_outcome": "If no guide exists for the case type in data-center-archive/guides/, generate one via Gemini and commit it; resets agent_4.panicLevel to 0 and improves agent_4.mood."
+    },
+    {
+      "id": "trainee-escalation-perfectionist",
+      "agents": [4, 1],
+      "type": "escalation_path",
+      "description": "When the Trainee (4) hits panicLevel >= 80, there is a 30% chance the Perfectionist (1) is pulled into a joint session — leveraging his deep documentation habits to produce a thorough guide.",
+      "trigger": "agent_4.panicLevel >= 80",
+      "probability": 0.30,
+      "joint_session_outcome": "Same as trainee-escalation-qa: joint troubleshooting with Claude, guide authored if missing, agent_4.panicLevel resets to 0."
+    },
+    {
+      "id": "trainee-escalation-random",
+      "agents": [4, "random_active_agent"],
+      "type": "escalation_path",
+      "description": "Remaining 30% of Trainee panic escalations go to a randomly selected active agent (any of 1-11 currently not in a session), keeping the office dynamic unpredictable.",
+      "trigger": "agent_4.panicLevel >= 80",
+      "probability": 0.30,
+      "joint_session_outcome": "Same as the other escalation paths."
+    },
+    {
+      "id": "it-chief-coaching",
+      "agents": [5, "responsible_agent"],
+      "type": "coaching",
+      "description": "When the IT Chief (5) becomes IRRITATED because an agent mishandled a client case, he initiates a private 1:1 coaching session with that agent to review workflows and update documentation.",
+      "trigger": "agent_5.IRRITATED (agent mishandled a client case)",
+      "context": "private_coaching",
+      "outputs": ["agents/reports/meetings/coaching-session-YYYY-MM-DD-agent[N].md"]
+    },
+    {
+      "id": "it-chief-emergency-huddle",
+      "agents": [5, 6, 7],
+      "type": "emergency_huddle",
+      "description": "When the IT Chief (5) becomes ANGRY (too many upset clients), he calls an emergency huddle attended by the QA (6) and Team Lead (7).",
+      "trigger": "agent_5.ANGRY (too many upset clients)",
+      "context": "emergency_huddle",
+      "mood_effects": "all attendees are subject to mood-trigger checks during the huddle"
+    },
+    {
+      "id": "ceo-emergency-meeting",
+      "agents": [11, "all"],
+      "type": "emergency_meeting",
+      "description": "When the CEO (11) becomes ANGRY (project not progressing AND model not working simultaneously), she calls an emergency meeting with all 11 agents to demand answers and kick off a turnaround plan.",
+      "trigger": "agent_11.ANGRY (project failing AND model failing)",
+      "context": "emergency_huddle",
+      "ceo_traits_active": ["leadership_zone (+20% morale/productivity for the session)", "puppet_master (coalition building toward the turnaround plan)"]
+    },
+    {
+      "id": "designer-priority-escalation",
+      "agents": [9, 11],
+      "type": "meeting_escalation",
+      "description": "When the Designer (9) is IRRITATED because UI fondness hasn't grown >=5%/month (up to 70%), she demands priority in the next weekly meeting, which the CEO (11) chairs.",
+      "trigger": "agent_9.IRRITATED (fondness growth stalled)",
+      "context": "weekly_meeting"
+    }
+  ],
+
+  "trait_inheritance": {
+    "agent_5": {
+      "name": "The IT Chief",
+      "inherits_from": ["agent_2"],
+      "traits": ["productive_triggers"],
+      "notes": "agent_5.inherits_productive_triggers maps to agent_2's irritation/cold-anger and overtime/bonus-day dynamics, recontextualized around hard cases and client escalations rather than raw case throughput."
+    },
+    "agent_6": {
+      "name": "The QA",
+      "inherits_from": ["agent_1"],
+      "traits": ["perfectionist_triggers", "bookmark_behavior", "documentation_requirement"],
+      "notes": "agent_6.inherits_perfectionist_triggers maps to agent_1's lecture/suggest-3-alternatives IRRITATED behavior and deep-reading HAPPY behavior, applied to audit findings instead of raw IT cases."
+    },
+    "agent_8": {
+      "name": "The Lead QA",
+      "inherits_from": ["agent_6"],
+      "traits": ["qa_audit_behaviors", "perfectionist_triggers (via agent_6)", "bookmark_behavior (via agent_6)"],
+      "scope_expansion": "all_agents_and_technologies",
+      "notes": "agent_8.inherits_qa_traits_expanded_scope chains through agent_6, so agent_8 transitively carries agent_1's perfectionist DNA but with all mood deltas dampened to 50% weight (agent_8.mood_sensitivity)."
+    },
+    "agent_10": {
+      "name": "The Architect",
+      "inherits_from": ["agent_1", "agent_2", "agent_5"],
+      "traits": ["perfectionist_documentation_rigor", "productive_efficiency_focus", "it_chief_complacency_and_authority"],
+      "notes": "agent_10.inherits lists 'perfectionist', 'productive', 'it_chief' — each trait keeps its source agent's trigger condition but is re-weighted by agent_10.mood_trigger_optimization so that triggers fire when most beneficial to the Architect's output (release packages, root-level changes)."
+    }
+  },
+
+  "meeting_default_attendees": {
+    "daily_standup": [5, 7],
+    "weekly": [11, 7, 8, 9],
+    "monthly": [11, 5, 7, 8, 10],
+    "quarterly": [11, 5, 8, 9, 10],
+    "semi_yearly": [11, 5, 6, 7, 8, 9, 10],
+    "yearly": "all",
+    "emergency_huddle": "trigger-dependent (see partnerships above)",
+    "audit_session": [6, 7, "audited_agent"],
+    "private_coaching": "trigger-dependent (1:1)",
+    "pip_session": [7, "agent_under_pip"]
+  }
+}

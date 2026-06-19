@@ -1,0 +1,170 @@
+{
+  "_meta": {
+    "version": "0.1.0",
+    "status": "specified",
+    "description": "Promotion paths, eligibility criteria, and the year-end nomination/decision process for the 11-agent simulation. Consumed by meeting-engine.js's 'yearly' meeting and year-tracker.json's day-365 milestone.",
+    "trigger": "Evaluated at the year-end ('yearly') meeting, day 365 of the simulation (see year-tracker.json milestones)."
+  },
+
+  "promotion_paths": {
+    "1": {
+      "label": "The Perfectionist",
+      "to": [5, 6, 7],
+      "notes": "Deep technical rigor and documentation discipline map naturally onto IT Chief (5, hard cases), QA (6, audits), or Team Lead (7, coaching) — the path chosen depends on which trait dominated the year (technical complacency -> 5, audit/lecture behavior -> 6, mentoring of the Trainee -> 7)."
+    },
+    "2": {
+      "label": "The Productive",
+      "to": [5, 6, 7],
+      "notes": "High throughput and cold, evidence-driven incident reports translate to IT Chief (5, efficiency under pressure), QA (6, the 'compare alternatives' habit becomes formal model auditing), or Team Lead (7, productivity coaching)."
+    },
+    "3": {
+      "label": "The Standard Agent",
+      "to": [5, 6, 7],
+      "notes": "Balanced, objective reporting is the baseline qualification for any of the three lead tracks; the Standard Agent's status reports are the most-cited evidence in nomination discussions."
+    },
+    "4": {
+      "label": "The Trainee",
+      "to": [5, 6, 7],
+      "notes": "Only eligible after resolving panic escalations into wins (HAPPY transitions) repeatedly — demonstrates the resilience needed for any lead track. Most likely real-world outcome is a slower climb than agents 1-3."
+    },
+    "5": {
+      "label": "The IT Chief",
+      "to": [8],
+      "notes": "The IT Chief's hard-case authority and 'Proven Record' trait (high respect, frequent mood events) generalize into Lead QA's project-wide audit authority."
+    },
+    "6": {
+      "label": "The QA",
+      "to": [8],
+      "notes": "Direct seniority track: Agent 6's per-agent audits scale up to Agent 8's all-agents-and-technologies audit scope."
+    },
+    "7": {
+      "label": "The Team Lead",
+      "to": [8, 9],
+      "notes": "Two divergent tracks: Lead QA (8, if the Team Lead's year was dominated by audit attendance and PIP rigor) or Designer (9, if the Team Lead's year was dominated by morale/Leadership-trait work and cross-team facilitation, which overlaps with the Designer's 'train the team on AI usage' special mission)."
+    },
+    "8": {
+      "label": "The Lead QA",
+      "to": [],
+      "no_further_promotion": true,
+      "notes": "Top of the QA/audit track. Long-term perspective and 50% mood sensitivity make this agent a stabilizing fixture rather than a promotion candidate."
+    },
+    "9": {
+      "label": "The Designer",
+      "to": [],
+      "specialist_track_only": true,
+      "notes": "Per agent_9's 'Specialist' clearance, promotions stay within the design specialization (e.g., a title change such as 'Principal Designer' with an updated quarterly_updates target) rather than moving into the management hierarchy."
+    },
+    "10": {
+      "label": "The Architect",
+      "to": [],
+      "no_further_promotion": true,
+      "notes": "ROOT clearance, top of the technical/architecture track."
+    },
+    "11": {
+      "label": "The CEO",
+      "to": [],
+      "no_further_promotion": true,
+      "notes": "Top of the hierarchy. Not subject to the promotion process — instead writes the executive summary and recommendations for next year."
+    }
+  },
+
+  "criteria": {
+    "to_it_chief": {
+      "target": 5,
+      "from": [1, 2, 3, 4],
+      "description": "Promotion to IT Chief (5)",
+      "requirements": [
+        "avg_mood >= 60 over the final quarter",
+        "irritation_count trending down over the final quarter",
+        "at least 3 'hard'/'advanced' cases solved cleanly (HAPPY/COMPLACENT transitions on advanced cases)",
+        "no active PIP in the final 2 quarters"
+      ]
+    },
+    "to_qa": {
+      "target": 6,
+      "from": [1, 2, 3, 4],
+      "description": "Promotion to QA (6)",
+      "requirements": [
+        "suggestions_filed in the top half of all agents for the final quarter",
+        "documentation_requirement-style behavior demonstrated (bookmarked/PDF-linked resolutions)",
+        "no unresolved 'incident' reports in the final quarter",
+        "no active PIP in the final 2 quarters"
+      ]
+    },
+    "to_team_lead": {
+      "target": 7,
+      "from": [1, 2, 3, 4],
+      "description": "Promotion to Team Lead (7)",
+      "requirements": [
+        "positive involvement in >= 2 trainee-escalation joint sessions (see relationships.json escalation paths) with HAPPY outcomes",
+        "avg_mood >= 55 over the final quarter",
+        "no active PIP, ever",
+        "Team Lead's own end-of-year recommendation (if a Team Lead already exists) counts as a strong positive signal"
+      ]
+    },
+    "to_lead_qa": {
+      "target": 8,
+      "from": [5, 6, 7],
+      "description": "Promotion to Lead QA (8)",
+      "requirements": [
+        "audit_scope readiness: at least 2 quarters of audit_session or equivalent oversight participation",
+        "avg_mood stable (variance low) over the final 2 quarters — reflects agent_8's mood_sensitivity trait",
+        "Lead QA's happiness_trigger ('high-level project audit') achieved at least once in the final quarter"
+      ]
+    },
+    "to_lead_qa_or_designer": {
+      "target": [8, 9],
+      "from": [7],
+      "description": "Team Lead's dual promotion path",
+      "requirements": [
+        "for 8: same as to_lead_qa",
+        "for 9: demonstrated involvement in UI/workflow audits or AI-usage training sessions during the final 2 quarters",
+        "CEO's nomination determines which of the two paths is offered if both qualify"
+      ]
+    },
+    "designer_specialist_advancement": {
+      "target": 9,
+      "from": [9],
+      "description": "Designer's specialist-track advancement (title/scope change, not hierarchy change)",
+      "requirements": [
+        "fondness_growth_target_per_month (5%) met in >= 3 of the final 4 quarters",
+        "all 4 quarterly_updates (quarterly_updates: 4) shipped on time",
+        "at least 1 INSPIRED state achieved in the final quarter"
+      ]
+    }
+  },
+
+  "year_end_process": {
+    "trigger": "yearly meeting (day 365)",
+    "steps": [
+      "1. meeting-engine.js runs the 'yearly' meeting with all 11 agents attending.",
+      "2. Each eligible agent (per promotion_paths + criteria) is evaluated against weekly_analytics / reports / meetings history.",
+      "3. The CEO (agent 11) nominates candidates for each open path, using her Diplomat/Puppet Master traits to build pre-meeting consensus.",
+      "4. The admin team (agents 5, 6, 7, 8, 9, 10 — i.e. all tier='admin' agents excluding the CEO, plus the CEO herself) votes on each nomination.",
+      "5. Voting: each admin agent has 1 vote; the CEO's vote counts double (vote_weight: 2) and she holds veto_rights over any single decision.",
+      "6. Majority (>50% of weighted votes) approves a promotion. A CEO veto overrides a majority approval for that specific candidate.",
+      "7. Approved promotions are written as `configOverrides` to the promoted agent's Durable Object state (role/tier/clearance/case_focus updates) via meeting-engine.js's applyMeetingEffects, AND recorded in the `promotions` table (track='promotion').",
+      "8. A markdown report is generated and committed to agents/reports/promotion-results-year-1.md (and promotion-results-year-N.md for subsequent years)."
+    ],
+    "voting_body": {
+      "members": [5, 6, 7, 8, 9, 10, 11],
+      "weights": { "11": 2, "default": 1 },
+      "veto": { "agent": 11, "scope": "any single nomination" },
+      "quorum": "all 7 voting members must be present (attendees of the yearly meeting)"
+    }
+  },
+
+  "output": {
+    "path_template": "reports/promotion-results-year-{{n}}.md",
+    "first_output": "reports/promotion-results-year-1.md",
+    "sections": [
+      "Year N Promotion Results",
+      "Nominations (by CEO)",
+      "Voting Record (per nomination, vote breakdown + veto usage)",
+      "Approved Promotions (agent, from role -> to role, effective config_overrides)",
+      "Declined Nominations (agent, reason)",
+      "Designer Specialist-Track Advancement (if applicable)",
+      "Notes for Year N+1"
+    ]
+  }
+}

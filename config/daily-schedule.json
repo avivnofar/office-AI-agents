@@ -1,0 +1,129 @@
+{
+  "_meta": {
+    "version": "0.1.0",
+    "status": "specified",
+    "description": "Tactical 24h schedule the Phase-2 office simulation reads each simulated work day. agent-runner.js's runWorkDayCycle() iterates `blocks` in order within a single invocation (no per-block cron yet — see 'cron_status'). Each block represents a point in the simulated day where a specific activity fires, so the day's ~50-case CRM pool, meetings, AI-experience reports, and spare time are spread out instead of all happening at once.",
+    "cron_status": "WIRED (2026-06-12). agents/wrangler.toml has a single Cloudflare Cron Trigger ('*/30 5-13 * * *', every 30 min 05:00-13:30 UTC = 08:00-16:30 IDT). Each tick, agent-runner.js's scheduled() converts event.scheduledTime to Israel local time (israelTimeParts()) and calls runScheduledBlock(env, time, dayOfWeek), which is a no-op unless a block below has that exact `time` for that day-of-week. Day-in-progress state lives in SIM_KV under 'daily-cycle-state' between blocks. Per-block errors (e.g. Gemini 429) are logged to `reports` (logScheduledError) and do not abort the day.",
+    "week_mapping": {
+      "description": "dayOfWeek = ((current_day - 1) % 7) + 1, as already computed by runWorkDayCycle(). This schedule maps it to an Israeli Sun-Thu work week per the Launch Decisions ('work days Sunday-Thursday'), with Friday as a short summary day and Saturday off.",
+      "1": "Sunday (full work day)",
+      "2": "Monday (full work day)",
+      "3": "Tuesday (full work day)",
+      "4": "Wednesday (full work day)",
+      "5": "Thursday (full work day)",
+      "6": "Friday (short day — weekly summary meeting, reduced case load)",
+      "7": "Saturday (off — idle only, no Gemini/Claude calls)"
+    },
+    "case_volume_design_note": "agents-config.json's per-agent quotas (cases_per_day_min/max: 30-50, esp. agent_5: 15-30) are CAPACITY CEILINGS, not a mandate to generate 30 x 7 agents/day. The CRM engine's existing daily pool (simulationConfig.WORK_DAY, ~50 cases/day total across the ~7 case-handling agents, as observed on Day 1) remains the cost-driving throughput per the $5/mo guard and Launch Decisions' token discipline. This schedule SPREADS that existing pool across the day via `case_batches` rather than multiplying it."
+  },
+
+  "work_hours": { "start": "08:00", "end": "16:00" },
+  "overtime_window": { "start": "16:00", "end": "18:00", "agent_dependent": true, "note": "Per-agent overtime eligibility comes from agents-config.json work_routine.overtime (e.g. agent_2 '30%_of_days', agent_5 'regular', agent_10 'daily'). Overtime cases are drawn from the same daily pool via extendSession(), not a separate pool." },
+
+  "full_day_schedule": {
+    "applies_to_day_of_week": [1, 2, 3, 4, 5],
+    "blocks": [
+      { "time": "08:00", "type": "case_batch", "label": "Morning batch", "case_share": 0.30 },
+      { "time": "09:30", "type": "case_batch", "label": "Mid-morning batch", "case_share": 0.20 },
+      { "time": "11:00", "type": "case_batch", "label": "Late-morning batch", "case_share": 0.20 },
+      { "time": "11:30", "type": "tool_task_window", "label": "Asset/tool-task window (Sun-Thu only, see ai-tools.json)", "ref": "ai-tools.json scheduling_rules" },
+      { "time": "13:00", "type": "case_batch", "label": "Early-afternoon batch", "case_share": 0.20 },
+      { "time": "14:30", "type": "case_batch", "label": "Late-afternoon batch", "case_share": 0.10 },
+      { "time": "15:30", "type": "report", "label": "Daily AI-experience reports + model-education case studies", "ref": "model_education_program" },
+      { "time": "16:00", "type": "meeting", "meeting_type": "daily_standup", "label": "Daily standup (existing meeting-engine.js type)" },
+      { "time": "16:00", "type": "spare_time", "label": "Spare time: coworker interaction or idle (token-saving)", "ref": "spare_time_program" }
+    ]
+  },
+
+  "friday_schedule": {
+    "applies_to_day_of_week": [6],
+    "label": "Short day: reduced case load, weekly executive summary at 12:00",
+    "blocks": [
+      { "time": "08:00", "type": "case_batch", "label": "Friday morning batch", "case_share": 0.60 },
+      { "time": "10:00", "type": "case_batch", "label": "Friday late-morning batch", "case_share": 0.40 },
+      { "time": "10:30", "type": "report", "label": "Daily AI-experience reports + model-education case studies", "ref": "model_education_program" },
+      { "time": "12:00", "type": "weekly_summary", "label": "Weekly executive summary meeting + PDF/Excel generation", "ref": "weekly_summary_program" },
+      { "time": "12:00", "type": "meeting", "meeting_type": "daily_standup", "label": "Daily standup (existing meeting-engine.js type)" },
+      { "time": "12:00", "type": "spare_time", "label": "Spare time: coworker interaction or idle (token-saving)", "ref": "spare_time_program" }
+    ]
+  },
+
+  "saturday_schedule": {
+    "applies_to_day_of_week": [7],
+    "label": "Day off: no case batches, no meetings, no Gemini/Claude calls. Pure idle to preserve tokens.",
+    "blocks": [
+      { "time": "08:00", "type": "spare_time", "label": "Full-day idle (off day)", "force_idle": true, "ref": "spare_time_program" }
+    ]
+  },
+
+  "model_education_program": {
+    "description": "Educates the app's Claude (data-center-api) — the 'main model' the office exists to train. Runs once per work day at the 'report' block, after that day's case batches.",
+    "daily_ai_experience_report": {
+      "who": "every agent who handled at least one case today (workers 1-4 and any admin agents with case_focus that touched cases)",
+      "what": "a short, casual fileStatusReport()-style note (1-2 paragraphs) on today's AI Search/Diagnose experience: what worked, what didn't, tone matches the agent's personality.",
+      "permission_level": "private (staff/agents + owner) per CLAUDE.md report tiering — these are internal mood/experience notes, not business-facing."
+    },
+    "model_education_case_study": {
+      "trigger": "any interaction today where evaluateResponseQuality() < quality_threshold (i.e. the model did NOT handle the case flawlessly)",
+      "quality_threshold": 0.6,
+      "max_per_day": 3,
+      "what": "a structured case study: the query, the model's response summary, what was missing/wrong, and a suggested fix — written from the agent's perspective.",
+      "routing": "fileModelEducationCaseStudy() persists a `reports` row (type='model_education') and, if GITHUB_TOKEN is configured, opens a GitHub Issue labeled 'claude-action' + 'model-education'. If GITHUB_TOKEN is absent (current state), it stays queued in D1 `reports` for a human/Claude-Code session to batch-file.",
+      "permission_level": "special (AI staff + owner) — may reference internal scoring/prompts."
+    }
+  },
+
+  "spare_time_program": {
+    "description": "Fires whenever an agent has no more assigned cases for the day and no meeting to attend. Two outcomes, chosen per agent:",
+    "coworker_interaction_chance": 0.20,
+    "coworker_interaction": {
+      "what": "one short Gemini call generating a brief in-character exchange between this agent and a related agent (relationships.json partnerships/rivalries preferred), logged as an `interactions` row (type='coworker_chat'). Costs exactly 1 Gemini call.",
+      "permission_level": "private"
+    },
+    "idle": {
+      "chance": 0.80,
+      "what": "agent goes idle: state is saved as-is, an `interactions` row (type='idle', no query/response) is logged for the daily summary, and ZERO Gemini/Claude calls are made. This is the default and MUST be the only path on Saturdays (force_idle).",
+      "token_savings": "this is the primary token-discipline lever for spare time, per Launch Decisions."
+    }
+  },
+
+  "weekly_summary_program": {
+    "description": "Friday 12:00. Generates the week's executive package and bumps product versions for any asset_pipeline items that reached 'implemented' this week.",
+    "outputs": [
+      {
+        "file": "agents/reports/weekly/week-{{week_number}}-summary.md",
+        "format": "markdown, ~10 sections, print-ready (consistent with the existing index.html PDF Export convention — open and use the browser's Print to PDF for an actual 10-page PDF).",
+        "sections": [
+          "Executive Summary",
+          "Case Volume & Categories",
+          "Agent Performance & Mood",
+          "Model (Claude) Performance & Education Findings",
+          "Incidents & Escalations",
+          "Side Plots & Narrative Highlights",
+          "Asset Pipeline Status",
+          "Suggestions Queue (by permission tier)",
+          "Cost & Token Usage Estimate",
+          "Action Items for Next Week"
+        ],
+        "permission_level": "private/special — internal weekly package, not for public distribution."
+      },
+      {
+        "file": "agents/reports/weekly/week-{{week_number}}-data.csv",
+        "format": "CSV (Excel-openable, no xlsx binary dependency per CLAUDE.md 'no build step, ever'). One row per agent: cases handled, mood start/end, irritation events, happy events, app-call count, comparisons, quality avg.",
+        "permission_level": "private/special"
+      },
+      {
+        "file": "agents/reports/weekly/week-{{week_number}}-public-summary.md",
+        "format": "short markdown, business-facing excerpt (clean framing, no internal mood/score detail).",
+        "permission_level": "public"
+      }
+    ]
+  },
+
+  "product_versioning": {
+    "description": "Each admin-tier agent (5-11, can_generate_assets: true) may own at most one 'weekly project' at a time, tracked as an agents/reports/asset-pipeline/board.json entry with a `product_id`. On the Friday weekly_summary_program, any board item whose stage advanced to 'implemented' this week bumps that product's version by +0.01 (starting at 1.00) in year_stats.stats.product_versions, and the board entry's `version` field is updated to match.",
+    "version_format": "X.YY (e.g. 1.00 -> 1.01 -> 1.02 ... -> 1.99 -> 2.00)",
+    "increment": 0.01,
+    "starting_version": 1.00
+  }
+}

@@ -1,0 +1,58 @@
+name = "data-center-agents"
+main = "workers/agent-runner.js"
+compatibility_date = "2026-06-11"
+
+# D1 database — storage for agents/agent_sessions/cases/interactions/reports/
+# suggestions/weekly_analytics/meetings/side_plots/promotions/year_stats
+# (database/schema.sql).
+[[d1_databases]]
+binding = "DB"
+database_name = "data-center-db"
+database_id = "0819c65e-fa93-40cb-9894-c8dae0906f09"
+
+# Live simulation overrides (inspection_mode/paused/phase) — see
+# getSimulationState()/updateSimulationState() in agent-runner.js.
+[[kv_namespaces]]
+binding = "SIM_KV"
+id = "62dd88c9524c4d048f99022a751a895e"
+
+# Per-agent persisted state (mood/irritation/configOverrides) — see
+# state-manager.js AgentStateDO.
+[[durable_objects.bindings]]
+name = "AGENT_STATE"
+class_name = "AgentStateDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["AgentStateDO"]
+
+# Service binding to data-center-api — required because Cloudflare blocks a
+# Worker from fetch()-ing another Worker's *.workers.dev URL directly (error
+# 1042). interactWithApp() in agents/agent-base.js uses this binding.
+[[services]]
+binding = "APP_API"
+service = "data-center-api"
+
+# Workers AI — case routing/classification (callCFRouter()) and the
+# fallback when Groq is unavailable or Gemini returns 429 (quota exhausted).
+# Account-scoped binding, no extra credentials needed. See
+# workers/gemini-client.js callCFRouter() / callCloudflareFallback().
+[ai]
+binding = "AI"
+
+# Secrets (set via `wrangler secret put <NAME>`, not here):
+#   GEMINI_API_KEY    - required, report synthesis (monthly/quarterly/semi_yearly/yearly)
+#   GROQ_API_KEY      - required, routine per-case agent work (callGroq(), config/token-economy.json)
+#   GOOGLE_AI_API_KEY - optional, reserved for Google AI Studio report tooling (see token-economy.json)
+#   ADMIN_TOKEN       - required, validates X-Admin-Token on /api/agents/*
+#   GITHUB_TOKEN      - optional, gates report/guide commits + claude-action issues to GitHub
+
+# Per-block office-simulation cron (2026-06-12 launch). Fires every 30 min,
+# 05:00-13:30 UTC = 08:00-16:30 IDT (Israel Daylight Time, UTC+3). Each tick,
+# scheduled() converts to Israel local time and calls runScheduledBlock(),
+# which is a no-op unless config/daily-schedule.json has a block at
+# that exact time for that day-of-week. DST CAVEAT: when Israel switches to
+# IST (UTC+2, late Oct) or back to IDT (late Mar), update BOTH this cron
+# window and ISRAEL_UTC_OFFSET_HOURS in agent-runner.js — see CLAUDE.md.
+[triggers]
+crons = ["*/30 5-13 * * *"]

@@ -1,0 +1,150 @@
+{
+  "_meta": {
+    "version": "0.1.0",
+    "description": "Human-in-the-loop asset pipeline task board. Each item moves through stages: queued -> in-progress (human working in the external tool) -> returned (asset/link back in repo) -> tested (agents validated it) -> optimized -> implemented (live, version-bumped). Agents append/advance items; humans execute the actual tool work. See config/ai-tools.json for the tool-access matrix and reports/asset-pipeline/issues/ for full specs.",
+    "stages": ["queued", "in-progress", "returned", "tested", "optimized", "implemented"]
+  },
+  "items": [
+    {
+      "id": "qa-knowledge-base",
+      "title": "QA Knowledge-Base Build (NotebookLM)",
+      "owner_agents": [6],
+      "tool": "notebooklm",
+      "stage": "queued",
+      "version": 1.00,
+      "spec_file": "reports/asset-pipeline/issues/qa-knowledge-base.md",
+      "description": "QA designs and builds NotebookLM notebooks that become the canonical knowledge sources for the Claude AI Search to draw from almost exclusively.",
+      "created_day": 1,
+      "updated_day": 1,
+      "history": [
+        { "day": 1, "stage": "queued", "note": "Seeded during daily-automation build session." }
+      ]
+    },
+    {
+      "id": "archives-app",
+      "title": "Archives App (Stitch/Base44, joint QA + Architect + Designer)",
+      "owner_agents": [6, 9, 10],
+      "tool": "stitch",
+      "stage": "queued",
+      "version": 1.00,
+      "spec_file": "reports/asset-pipeline/issues/archives-app.md",
+      "description": "Lightweight 'archive mentality' app with a thin AI-agent brain: per-directory TOC, crop-to-essential views, search/summarize over data-center-archive content.",
+      "created_day": 1,
+      "updated_day": 1,
+      "history": [
+        { "day": 1, "stage": "queued", "note": "Seeded during daily-automation build session." }
+      ]
+    },
+    {
+      "id": "designer-tooling-suite",
+      "title": "Design Tooling Suite (Designer, free tools)",
+      "owner_agents": [9],
+      "tool": "base44",
+      "stage": "queued",
+      "version": 1.00,
+      "spec_file": "reports/asset-pipeline/issues/designer-tooling-suite.md",
+      "description": "Several small, free, company-owned design/generative-AI tools, each its own optimized lightweight product with a great UI for a core user need.",
+      "created_day": 1,
+      "updated_day": 1,
+      "history": [
+        { "day": 1, "stage": "queued", "note": "Seeded during daily-automation build session." }
+      ]
+    },
+    {
+      "id": "architect-org-products",
+      "title": "Architect Org Products",
+      "owner_agents": [10],
+      "tool": "google_ai_studio",
+      "stage": "queued",
+      "version": 1.00,
+      "spec_file": "reports/asset-pipeline/issues/architect-org-products.md",
+      "description": "Architect builds quality org-facing products using any available tool, pairing with the Designer (joint Stitch/Base44/Google AI Studio sessions) on important projects.",
+      "created_day": 1,
+      "updated_day": 1,
+      "history": [
+        { "day": 1, "stage": "queued", "note": "Seeded during daily-automation build session." }
+      ]
+    },
+    {
+      "id": "commandflow",
+      "title": "CommandFlow / Terminal Academy (Stitch + Base44 import)",
+      "owner_agents": [9, 10, 6],
+      "tool": "stitch_base44",
+      "stage": "returned",
+      "version": 1.00,
+      "spec_file": "reports/asset-pipeline/issues/commandflow.md",
+      "description": "First real imported asset from the human-in-the-loop pipeline: an interactive multi-platform terminal simulator (Bash, PowerShell, Cisco, Cloud, Networking, Security, Databases). Owner-built standalone product now lives at tools/commandflow/ (full Stitch 'Terminal Academy' design) and its shared engine/data (commandflow-core.js + commands.json) now also powers CLI Mode in the main app's AI Search tab (data-center styling). Reference pattern for future tool imports — see CLAUDE.md asset pipeline section.",
+      "origin": {
+        "source": "Stitch + Base44 export",
+        "incoming_path": "assets/incoming/commandflow/ (code.html, DESIGN.md, screen.png)",
+        "built_by": "owner (avivnofar) + Claude Code session",
+        "date": "2026-06-12"
+      },
+      "created_day": 1,
+      "updated_day": 1,
+      "history": [
+        {
+          "day": 1,
+          "stage": "returned",
+          "note": "Owner-built standalone product (tools/commandflow/) + CLI Mode integration committed to repo. Queued for AGENT-9 (design review), AGENT-10 (architecture review), AGENT-6 (QA testing) per reports/asset-pipeline/issues/commandflow.md."
+        }
+      ]
+    },
+    {
+      "id": "runbook",
+      "title": "Runbook Demo Integration (Terminal/Timeline/Metrics)",
+      "owner_agents": [9, 10],
+      "owners": ["agent-9", "agent-10"],
+      "tool": null,
+      "stage": "in-progress",
+      "status": "in-progress",
+      "priority": "week",
+      "version": 1.00,
+      "spec_file": null,
+      "description": "Extract Terminal Demo, Incident Timeline, and Metrics Dashboard logic from assets/incoming/datacenter-runbook-optimized/datacenter-export/dist/public/assets/ (built React/Vite components) into dependency-free vanilla-JS modules under tools/runbook/. Terminal Demo's command outputs (ping/systemctl/df) were also merged into tools/commandflow/commands.json for more realistic CLI Mode output. Remaining: wire incident-timeline.js into 'Solve a Case' mode to visualize diagnosis progress, and metrics-dashboard.js into the admin/Office tab.",
+      "created_day": 1,
+      "updated_day": 1,
+      "history": [
+        {
+          "day": 1,
+          "stage": "in-progress",
+          "note": "tools/runbook/{terminal-demo.js, incident-timeline.js, metrics-dashboard.js} created (vanilla JS, render/mount APIs). commands.json gained the 3 demo commands (ping -c 4 192.168.1.1, systemctl status nginx, df -h /var/log). Index.html wiring into Solve-a-Case and admin/Office tab not yet done — see PENDING-WORK.md."
+        }
+      ]
+    },
+    {
+      "id": "database-integration",
+      "title": "Database Integration Plan (D1 schema + helpers)",
+      "owner_agents": [10],
+      "owner": "agent-10",
+      "tool": null,
+      "stage": "queued",
+      "status": "planned",
+      "estimated": "this-week",
+      "version": null,
+      "spec_file": null,
+      "description": "Plan (not yet implemented) for adopting the schema/db-helper templates from assets/incoming/database-integration-complete/database-integration-complete/templates/ (schema-template.ts, db-helpers-template.ts) for the agent simulation's D1 database. See PENDING-WORK.md for the implementation plan written this session.",
+      "created_day": 1,
+      "updated_day": 1,
+      "history": [
+        { "day": 1, "stage": "queued", "note": "Implementation plan written to PENDING-WORK.md (Feature B). Not implemented per token-budget instruction — queued for agent-10 this week." }
+      ]
+    },
+    {
+      "id": "crm-placeholder",
+      "title": "CRM (placeholder — flagged for future serious development)",
+      "owner_agents": [],
+      "tool": null,
+      "stage": "queued",
+      "version": null,
+      "spec_file": null,
+      "description": "Placeholder only. The simulation's case-management needs are currently served by workers/crm-engine.js (in-memory client pool + case generator). A real CRM product is flagged for serious development at some point but is NOT scheduled and has no owner agent yet.",
+      "not_scheduled": true,
+      "created_day": 1,
+      "updated_day": 1,
+      "history": [
+        { "day": 1, "stage": "queued", "note": "Seeded as a flag per Launch Decisions Part 3 — not built this session." }
+      ]
+    }
+  ]
+}

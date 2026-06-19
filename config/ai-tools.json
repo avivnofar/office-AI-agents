@@ -1,0 +1,82 @@
+{
+  "_meta": {
+    "version": "0.1.0",
+    "status": "specified",
+    "description": "Tool-access matrix and scheduling rules for the AI-agent office's external creative-tool usage (NotebookLM, Stitch, Base44, Google AI Studio). None of these tools have an unattended API — agents DECIDE and QUEUE tool-tasks (asset-pipeline board entry + asset-task issue spec), a human executes the work in the real tool, and the returned asset comes back into the repo for agent testing/optimization. This config is read by agent-runner.js's tool_task_window block (see daily-schedule.json) to decide, each Sun-Thu sim day, which agent (if any) may open a new tool-task.",
+    "human_in_the_loop": "Agents never call these tools programmatically. 'Opening a tool-task' means: append a row to agents/reports/asset-pipeline/board.json (status: queued) and write an asset-task spec file under agents/reports/asset-pipeline/issues/. A human picks it up, does the work in the real tool, and updates the board row to 'returned' with a path/link to the asset. Agents then move it through tested -> optimized -> implemented."
+  },
+
+  "tools": {
+    "notebooklm": {
+      "display_name": "NotebookLM",
+      "primary_agents": [6],
+      "secondary_agents": [9, 10],
+      "agent_roles": {
+        "6": "primary — builds and extends the project's databases / knowledge centers",
+        "9": "may use for design-research notebooks",
+        "10": "may use for architecture-research notebooks"
+      },
+      "goal": "The Claude app's AI Search should eventually answer almost exclusively from QA-built NotebookLM knowledge centers (see standing project #1 in asset-pipeline board).",
+      "session_mode": "solo_or_secondary",
+      "default_product_type": "knowledge_base"
+    },
+    "stitch": {
+      "display_name": "Stitch",
+      "primary_agents": [9, 10],
+      "agent_roles": {
+        "9": "joint sessions with Architect — large/high-value tool & UI generation",
+        "10": "joint sessions with Designer — large/high-value tool & UI generation"
+      },
+      "session_mode": "joint_only",
+      "joint_partners": [9, 10],
+      "purpose": "Generate large, high-value tools/projects (e.g. the Archives app, Designer tooling suite components).",
+      "default_product_type": "lightweight_app"
+    },
+    "base44": {
+      "display_name": "Base44",
+      "eligible_agents": [5, 6, 7, 8, 9, 10, 11],
+      "preferred_agents": [9, 10],
+      "agent_roles": {
+        "any_admin": "may use for small admin-tier product needs",
+        "9": "most frequent — design tooling suite products",
+        "10": "most frequent — org products, often paired with Designer"
+      },
+      "session_mode": "any_with_joint_priority",
+      "joint_partners": [9, 10],
+      "default_product_type": "lightweight_app"
+    },
+    "google_ai_studio": {
+      "display_name": "Google AI Studio",
+      "primary_agents": [9, 10],
+      "agent_roles": {
+        "9": "joint or independent — generative design/content tooling",
+        "10": "joint or independent — generative architecture/content tooling"
+      },
+      "session_mode": "joint_or_independent",
+      "joint_partners": [9, 10],
+      "default_product_type": "lightweight_app"
+    }
+  },
+
+  "scheduling_rules": {
+    "description": "Applied at the daily 'tool_task_window' block (full_day_schedule, Sun-Thu only — see daily-schedule.json).",
+    "general": [
+      "Use ONLY the four listed tools for content/product generation. Routine cases and information-gathering use the regular models (Gemini for sim, Claude for AI Search) — never burn creative-tool budget on routine cases.",
+      "Default product type is a LIGHTWEIGHT app/document unless the spec explicitly calls for something heavier (e.g. Stitch's 'large, high-value' remit).",
+      "Stagger usage: no two agents may use the SAME tool in the SAME day's tool_task_window.",
+      "Joint sessions (Stitch always; Base44/Google AI Studio when both Designer and Architect opt in) get priority booking over solo sessions for the same tool/day.",
+      "An agent may only open a new tool-task if its current open (queued or in-progress) board.json items for that tool are below max_concurrent_per_agent_per_tool."
+    ],
+    "max_concurrent_per_agent_per_tool": 1,
+    "eligibility_check": "At each Sun-Thu sim-day start, for the day's assigned tool (per weekly_rotation), check the assigned agent(s)' open board.json items for that tool. If below the concurrency limit AND a standing project (asset-pipeline board) has a 'queued'-eligible next step, open one new tool-task (board row + asset-task spec file). Otherwise, skip silently (no API cost either way — this is a D1/file read + conditional file write, not a Gemini/Claude call)."
+  },
+
+  "weekly_rotation": {
+    "description": "5-day Sun-Thu rotation, one tool-task slot per day, staggered across tools and agents so no two agents compete for the same tool on the same day.",
+    "1": { "day": "Sunday",    "tool": "notebooklm",       "agents": [6],      "session": "solo",  "standing_project_ref": "qa-knowledge-base" },
+    "2": { "day": "Monday",    "tool": "stitch",           "agents": [9, 10],  "session": "joint", "standing_project_ref": "archives-app" },
+    "3": { "day": "Tuesday",   "tool": "base44",           "agents": [9],      "session": "solo",  "standing_project_ref": "designer-tooling-suite" },
+    "4": { "day": "Wednesday", "tool": "google_ai_studio", "agents": [10],     "session": "solo",  "standing_project_ref": "architect-org-products" },
+    "5": { "day": "Thursday",  "tool": "base44",           "agents": [9, 10],  "session": "joint", "standing_project_ref": "archives-app" }
+  }
+}

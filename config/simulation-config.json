@@ -1,0 +1,63 @@
+{
+  "TIME_SCALE": {
+    "real_hours_per_work_week": 24,
+    "real_minutes_per_work_day": 60,
+    "description": "24 real hours = 1 simulated work week of 5 days"
+  },
+  "case_distribution": {
+    "1com": 0.30,
+    "mirtapbx": 0.20,
+    "general_it": 0.50,
+    "_note": "Matches PLATFORM_WEIGHTS in crm-engine.js. 1COM and MirtaPBX are Netvill's primary VoIP platforms."
+  },
+  "WORK_DAY": {
+    "cases_per_day_min": 30,
+    "cases_per_day_max": 50,
+    "overtime_extension_percent": 30,
+    "inspection_mode_multiplier": 2
+  },
+  "GEMINI": {
+    "model": "gemini-2.5-flash-lite",
+    "max_tokens": 1024,
+    "temperature": 0.8,
+    "api_endpoint": "https://generativelanguage.googleapis.com/v1beta/models"
+  },
+  "SIMULATION": {
+    "phase": 1,
+    "active_agents": [1, 2, 3, 4],
+    "stub_agents": [5, 6, 7, 8, 9, 10, 11],
+    "inspection_mode": false,
+    "weekly_report_day": "monday"
+  },
+  "PERMISSIONS": {
+    "root": [10, 11],
+    "sudo": [5, 6, 7, 8],
+    "specialist": [9],
+    "standard": [1, 2, 3, 4]
+  },
+  "day_3_rules": {
+    "description": "Max case resolution day — app usage emphasis",
+    "agent_focus": "solve_cases_via_app",
+    "collaboration_agents_case_share": 0.20,
+    "collaboration_agents": [6, 7, 8],
+    "architect_designer_rule": "planning_only_after_cases_complete",
+    "architect_designer_max_tokens": 200,
+    "new_features": "BLOCKED — optimization and training only",
+    "app_usage_emphasis": true,
+    "model_training_priority": "high"
+  },
+  "day_4_rules": {
+    "description": "Same pattern as Day 3",
+    "agent_focus": "solve_cases_via_app",
+    "collaboration_agents_case_share": 0.20,
+    "new_features": "BLOCKED"
+  },
+  "tomorrow_focus": "cases_only",
+  "agent_exceptions": {
+    "agent_9_designer": "feature work only after cases done + token allows",
+    "agent_10_architect": "DB integration plan only after cases done"
+  },
+  "new_features_policy": "BLOCKED for all except architect/designer post-cases",
+  "model_training_priority": "HIGH",
+  "token_economy": "cases first, features only if leftover token"
+}

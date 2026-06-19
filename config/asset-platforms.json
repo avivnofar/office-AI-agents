@@ -1,0 +1,32 @@
+{
+  "_meta": {
+    "version": "0.1.0",
+    "status": "specified",
+    "description": "Reference list of external AI/asset-generation platforms admin-tier agents (can_generate_assets: true in agents-config.json) may use to produce assets and web-app prototypes for the asset_pipeline (year-tracker.json). This is a REFERENCE LIST ONLY — none of these are wired up as Worker integrations or hard dependencies. Names are as given by the project owner; verify current product names/URLs before any real integration."
+  },
+  "platforms": [
+    {
+      "id": "base64-tooling",
+      "name": "Base64 tooling",
+      "purpose": "Encode/decode small binary assets (icons, generated images) for inline embedding in index.html or D1 without a separate asset host.",
+      "integration_status": "reference_only"
+    },
+    {
+      "id": "stitch",
+      "name": "Stitch",
+      "purpose": "AI UI/UX design generation (Google's Stitch tool) — candidate for Designer (agent 9) to prototype UI mockups/screens.",
+      "integration_status": "reference_only"
+    },
+    {
+      "id": "google-ai-studio",
+      "name": "Google AI Studio",
+      "purpose": "Gemini model access/playground — already the source of the GEMINI_API_KEY used by data-center-agents; also usable ad hoc for prototyping prompts.",
+      "integration_status": "reference_only"
+    }
+  ],
+  "usage_notes": [
+    "Agents proposing an asset record it in year-tracker.json's asset_pipeline.items at stage 'generated'.",
+    "Promotion to 'tested' / 'optimized' / 'implemented' happens via agent review (QA/Lead QA) — never auto-promoted.",
+    "Implementing an asset in this repo follows the same rules as any other change: no build step, validate before committing, pause before push."
+  ]
+}

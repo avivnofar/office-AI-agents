@@ -1,0 +1,54 @@
+{
+  "_meta": {
+    "description": "First-ever runWorkDayCycle() execution (month-1 launch session, 2026-06-11). Triggered via POST /api/agents/trigger {\"type\":\"day\"}. Result: HTTP 500 after 449s — Gemini API quota exceeded. This is a CHECKPOINT OF A FAILED/INCOMPLETE DAY 1, kept for diagnosis before retrying.",
+    "visibility": "private (staff + owner)"
+  },
+  "trigger": {
+    "started_at": "2026-06-11T21:50:39Z",
+    "ended_at": "2026-06-11T21:58:08Z",
+    "duration_seconds": 449.49,
+    "http_status": 500,
+    "endpoint": "POST /api/agents/trigger {\"type\":\"day\"}"
+  },
+  "error": {
+    "source": "agents/workers/gemini-client.js queryGemini()",
+    "raw": "Gemini API error (429): { \"error\": { \"code\": 429, \"message\": \"You exceeded your current quota, please check your plan and billing details. For more information on this error, head to: https://ai.google.dev/gemini-api/docs/rate-limits. To monitor your current usage, head to: https://ai.dev/rate-limit. \\n* Quota ex[...truncated by gemini-client.js's .slice(0,300)]\"",
+    "diagnosis": "GEMINI_API_KEY's Google AI Studio project hit a 429 quota/billing limit on gemini-2.5-flash-lite partway through day 1's case loop. Not a code bug — runWorkDayCycle and queryGemini both behaved correctly (no retry/backoff exists, so the first 429 propagated as a 500). CLAUDE.md assumes a 'paid' Gemini tier; this key appears to be on free-tier limits (or the daily free quota was already partly consumed by prior testing sessions).",
+    "action_required": "User must check https://aistudio.google.com (or the linked Google Cloud project's billing) for the GEMINI_API_KEY, confirm gemini-2.5-flash-lite has a paid-tier quota, and either enable billing or wait for the free-tier daily quota to reset before re-running day 1."
+  },
+  "partial_d1_state": {
+    "cases": { "total": 62, "new_for_day_1": 50, "ids": "crm-2026-w01-d1-001..050", "note": "all 50 generated/persisted via persistCrmCases (INSERT OR IGNORE) before the loop started; status still 'open' for all (handleCase doesn't mark cases resolved yet — known DRAFT-status placeholder)" },
+    "agent_sessions": { "total_new": 47, "note": "47 of 50 day-1 cases were processed by handleCase() before the 48th call's Gemini request hit 429" },
+    "interactions": { "total_new": 26, "by_type": { "app_search": 25, "app_diagnose": 1 }, "by_agent": { "1": 4, "2": 2, "3": 7, "5": 9, "6": 2, "11": 2 }, "note": "every interaction row = a real Claude (data-center-api -> claude-sonnet-4-6) call via the APP_API service binding. These succeeded fine — only Gemini hit quota." },
+    "reports": { "total_new": 10, "all": "Status report — The Standard Agent (agent 3, status_report_chance=1.00)" },
+    "year_stats": { "rows": 0, "note": "runWorkDayCycle failed before persistYearState/standup meeting ran, so current_day is still 0 — day 1 never officially completed." }
+  },
+  "agent_status_after": [
+    { "id": 1, "name": "The Perfectionist", "mood": 80, "irritation": 0, "isHappy": true, "isAngry": false, "panicLevel": 0 },
+    { "id": 2, "name": "The Productive", "mood": 60, "irritation": 0, "isHappy": true, "isAngry": false, "panicLevel": 0 },
+    { "id": 3, "name": "The Standard Agent", "mood": 80, "irritation": 2, "isHappy": true, "isAngry": false, "panicLevel": 0 },
+    { "id": 4, "name": "The Trainee", "mood": 50, "irritation": 0, "isHappy": false, "isAngry": false, "panicLevel": 25 },
+    { "id": 5, "name": "The IT Chief", "mood": 60, "irritation": 0, "isHappy": true, "isAngry": false, "panicLevel": 0 },
+    { "id": 6, "name": "The QA", "mood": 50, "irritation": 1, "isHappy": false, "isAngry": false, "panicLevel": 0 },
+    { "id": 7, "name": "The Team Lead", "mood": 50, "irritation": 0, "isHappy": false, "isAngry": false, "panicLevel": 0 },
+    { "id": 8, "name": "The Lead QA", "mood": 50, "irritation": 0, "isHappy": false, "isAngry": false, "panicLevel": 0 },
+    { "id": 9, "name": "The Designer", "mood": 50, "irritation": 0, "isHappy": false, "isAngry": false, "panicLevel": 0 },
+    { "id": 10, "name": "The Architect", "mood": 50, "irritation": 0, "isHappy": false, "isAngry": false, "panicLevel": 0 },
+    { "id": 11, "name": "The CEO", "mood": 60, "irritation": 0, "isHappy": true, "isAngry": false, "panicLevel": 0 }
+  ],
+  "estimated_cost_usd": {
+    "gemini": 0.00,
+    "claude_sonnet_4_6": "~0.10-0.50 (26 data-center-api calls, ~25 search + 1 diagnose; not metered precisely this session)",
+    "total_estimate": "well under the $5 cost cap",
+    "note": "the 429 was a quota/rate limit, not a billing exhaustion -- no cost circuit-breaker concern. Spend is negligible."
+  },
+  "admin_token": {
+    "rotated_this_session": true,
+    "note": "ADMIN_TOKEN was rotated via wrangler secret put as part of this launch session. New value given to the user directly in chat (not stored in repo). dc-admin-token in the dashboard's localStorage needs updating."
+  },
+  "before_retrying_day_1": [
+    "Resolve the Gemini quota/billing issue (see error.action_required above).",
+    "Decide how to handle the 47 partial sessions / 26 interactions / 10 reports already written for day 1: either (a) leave them and accept that a retried day-1 will reprocess all 50 cases as a second pass (since cases/year_stats aren't marked complete and persistCrmCases is idempotent via INSERT OR IGNORE, but agent.handleCase has no 'already done' check), producing duplicate sessions/interactions for cases 1-47, or (b) manually delete the day-1 partial rows from agent_sessions/interactions/reports/cases (crm-2026-w01-d1-*) for a clean retry.",
+    "Consider adding retry/backoff to agents/workers/gemini-client.js (e.g. exponential backoff on 429) and/or a per-case 'already processed today' guard in runWorkDayCycle, before the next attempt -- not done this session per the 'no behavior changes during the run' rule."
+  ]
+}

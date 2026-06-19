@@ -1,0 +1,94 @@
+{
+  "_meta": {
+    "version": "0.1.0",
+    "status": "specified",
+    "description": "Tracks the simulation's progress through its 365-day (1 simulated year) run. agent-runner.js's scheduled() advances current_day/week/month/quarter on each work-day cycle, checks `milestones` for the current day, and updates `stats`. This file holds the INITIAL state at simulation start; live state is persisted in D1 (`year_stats` table, schema.sql Part 10) and KV (SIM_KV) — this file is the seed/reset value, not a live document."
+  },
+
+  "simulation_start": null,
+  "current_day": 0,
+  "current_week": 0,
+  "current_month": 0,
+  "current_quarter": 0,
+  "total_days": 365,
+
+  "time_scale": {
+    "description": "Mirrors simulation-config.json TIME_SCALE: 1 real hour (the scheduler's hourly cron) = 1 simulated work day.",
+    "real_hours_per_simulated_work_day": 1,
+    "simulated_work_days_per_simulated_week": 5,
+    "simulated_weeks_per_simulated_month": 4,
+    "simulated_months_per_simulated_quarter": 3,
+    "simulated_quarters_per_simulated_year": 4,
+    "total_simulated_work_days_per_year": 260,
+    "total_calendar_days_per_year": 365,
+    "note": "current_day counts calendar days (1-365); current_week/month/quarter are derived from elapsed simulated work days (260/year) for meeting cadence, while milestones below are keyed to calendar day numbers."
+  },
+
+  "milestones": {
+    "day_1": {
+      "label": "Simulation Kickoff",
+      "description": "First simulated work day. Daily standups begin (relationships.json meeting_default_attendees.daily_standup: agents 5 and 7). All agents start at mood=50, irritation=0.",
+      "actions": ["run daily_standup meeting", "initialize year_stats row"]
+    },
+    "day_30": {
+      "label": "First UI Update Due",
+      "description": "Designer (agent 9) first_update_deadline_days (30) — the first of 4 quarterly_updates is due. Monthly review meeting also occurs around this point.",
+      "actions": ["run monthly meeting", "check agent_9 quarterly_updates[0] shipped", "log to large_ui_updates[0]"]
+    },
+    "day_90": {
+      "label": "Q1 Quarterly Review",
+      "description": "First quarterly review. IT Chief (agent 5) raises quarterly_demand (equipment/network/programming optimization). Architect (agent 10) files quarterly_report (big project updates). Designer's 2nd quarterly_update target window opens.",
+      "actions": ["run quarterly meeting", "evaluate agent_5 quarterly_demand", "evaluate agent_10 quarterly_report"]
+    },
+    "day_180": {
+      "label": "Mid-Year Semi-Yearly Review",
+      "description": "Semi-yearly review. Promotion candidates (promotion-config.json criteria) are first formally discussed, though no promotions are decided until day 365. Designer's 3rd quarterly_update target window opens.",
+      "actions": ["run semi_yearly meeting", "pre-evaluate promotion-config.json criteria for all eligible agents", "log to large_ui_updates[1]"]
+    },
+    "day_270": {
+      "label": "Q3 Quarterly Review",
+      "description": "Third quarterly review. Architect's quarterly_report and IT Chief's quarterly_demand re-evaluated. Designer's 4th and final quarterly_update target window opens.",
+      "actions": ["run quarterly meeting", "evaluate agent_5 quarterly_demand", "evaluate agent_10 quarterly_report", "log to large_ui_updates[2]"]
+    },
+    "day_365": {
+      "label": "Year-End Review & Promotions",
+      "description": "Yearly meeting. Full promotion-config.json year_end_process runs: CEO nominations, admin team vote (CEO vote_weight=2 + veto_rights), promotion-results-year-1.md generated. CEO writes the executive summary and recommendations for next year. Designer's 4th quarterly_update should be complete.",
+      "actions": ["run yearly meeting", "run promotion-config.json year_end_process", "generate agents/reports/promotion-results-year-1.md", "log to large_ui_updates[3]", "reset year-tracker for year 2 (current_day -> 1, increment a year counter in year_stats)"]
+    }
+  },
+
+  "large_ui_updates": [
+    { "target_day": 30, "version": null, "shipped": false, "shipped_day": null, "summary": null },
+    { "target_day": 180, "version": null, "shipped": false, "shipped_day": null, "summary": null },
+    { "target_day": 270, "version": null, "shipped": false, "shipped_day": null, "summary": null },
+    { "target_day": 365, "version": null, "shipped": false, "shipped_day": null, "summary": null }
+  ],
+
+  "asset_pipeline": {
+    "_meta": {
+      "description": "Tracks AI-generated assets/web-app prototypes from admin-tier agents (see agents-config.json can_generate_assets and agents/config/asset-platforms.json) through review. Live state persists in D1 (a future `assets` table); this is the seed/reset value.",
+      "stages": ["generated", "tested", "optimized", "implemented"]
+    },
+    "items": []
+  },
+
+  "stats": {
+    "total_cases_handled": 0,
+    "total_assets_by_stage": { "generated": 0, "tested": 0, "optimized": 0, "implemented": 0 },
+    "total_cases_by_agent": {},
+    "total_meetings": 0,
+    "total_meetings_by_type": {},
+    "total_side_plots": 0,
+    "total_side_plots_by_type": {},
+    "total_incidents": 0,
+    "total_suggestions_filed": 0,
+    "total_suggestions_approved": 0,
+    "total_promotions": 0,
+    "total_pip_placements": 0,
+    "total_trainee_panic_escalations": 0,
+    "total_guides_generated": 0,
+    "avg_mood_by_agent": {},
+    "rivalry_escalation_count": 0,
+    "product_versions": {}
+  }
+}

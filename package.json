@@ -1,0 +1,6 @@
+{
+  "name": "data-center-agents",
+  "private": true,
+  "type": "module",
+  "description": "ES module scope for agents/ — Workers (agent-runner.js, scheduler.js, etc.) and Node helper scripts under .github/scripts/ both use import/export against these files."
+}
