@@ -11,17 +11,18 @@
   "app_search_model": "anthropic/claude-sonnet-4-6",
   "architect_model": "human+claude-code",
 
-  "claude_daily_cap": 5,
+  "claude_daily_cap": 30,
+  "claude_cap_rationale": "30 calls/day = ~$6/month. Distributed across 10 active agents by model_usage_rate. Primary purpose: model training through realistic IT interactions.",
   "groq_primary": true,
   "cf_ai_fallback": true,
   "run_until_quota_exhausted": true,
-  "description": "Groq and CF AI are free — run agents hard. Claude API is paid — cap at 5 calls/day maximum across ALL agents combined.",
+  "description": "Groq and CF AI are free — run agents hard. Claude API is paid — cap at 30 calls/day maximum across ALL agents combined, distributed per-agent by model_usage_rate so the model gets meaningful, spread-out training exposure rather than being front-run by whichever agent runs first.",
 
   "daily_limits": {
     "groq": 14400,
     "cloudflare_ai": 10000,
     "gemini": 1500,
-    "claude_api": 5
+    "claude_api": 30
   },
 
   "gemini_reset_israel": "11:00",

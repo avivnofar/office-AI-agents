@@ -13,6 +13,7 @@
 
 import { callGemini, callCloudflareFallback } from '../workers/gemini-client.js';
 import { callGroq } from '../workers/groq-client.js';
+import tokenEconomy from '../config/token-economy.json';
 
 const MOOD_MIN = 0;
 const MOOD_MAX = 100;
@@ -350,17 +351,40 @@ export class AgentBase {
    * @param {'search'|'diagnose'} [mode]
    */
   async interactWithApp(query, mode = 'search') {
-    // Hard daily cap on Claude API calls (token-economy.json claude_daily_cap: 5).
-    // If today's global claude interaction count is at or above the cap, resolve
-    // the case with Groq instead (free) so the simulation keeps running.
-    const CLAUDE_DAILY_CAP = 5;
+    // Hard daily cap on Claude API calls, distributed fairly across agents
+    // (config/token-economy.json claude_daily_cap: 30, claude_cap_rationale).
+    // Two checks, either of which routes this case to Groq instead (free) so
+    // the simulation keeps running and no single early-running agent can
+    // exhaust the whole day's cap before later agents get a turn:
+    //   1. Global cap: today's claude interaction count across ALL agents.
+    //   2. Per-agent soft cap: floor(this.config.model_usage_rate * CAP) —
+    //      this agent's own share of today's claude interactions.
+    const CLAUDE_DAILY_CAP = tokenEconomy.claude_daily_cap ?? 30;
     if (this.env.DB) {
-      const row = await this.env.DB.prepare(
+      const globalRow = await this.env.DB.prepare(
         `SELECT COUNT(*) AS n FROM interactions WHERE model_source = 'claude' AND DATE(timestamp) = DATE('now')`
       ).first().catch(() => null);
-      const claudeCount = row?.n ?? 0;
-      if (claudeCount >= CLAUDE_DAILY_CAP) {
-        console.warn(`[agent-${this.id}] Claude daily cap (${CLAUDE_DAILY_CAP}) reached — using Groq fallback`);
+      const claudeCountGlobal = globalRow?.n ?? 0;
+      const globalCapHit = claudeCountGlobal >= CLAUDE_DAILY_CAP;
+
+      const usageRate = typeof this.config.model_usage_rate === 'number' ? this.config.model_usage_rate : 0.1;
+      const perAgentCap = Math.floor(usageRate * CLAUDE_DAILY_CAP);
+      let agentCapHit = false;
+      if (!globalCapHit && perAgentCap > 0) {
+        const agentRow = await this.env.DB.prepare(
+          `SELECT COUNT(*) AS n FROM interactions WHERE model_source = 'claude' AND agent_id = ? AND DATE(timestamp) = DATE('now')`
+        ).bind(this.id).first().catch(() => null);
+        agentCapHit = (agentRow?.n ?? 0) >= perAgentCap;
+      } else if (!globalCapHit && perAgentCap === 0) {
+        agentCapHit = true;
+      }
+
+      if (globalCapHit || agentCapHit) {
+        if (globalCapHit) {
+          console.warn(`[agent-${this.id}] Claude daily cap (${CLAUDE_DAILY_CAP}) reached — using Groq for this case`);
+        } else {
+          console.warn(`[agent-${this.id}] Per-agent Claude cap (${perAgentCap}) reached — using Groq for this case`);
+        }
         const moodBefore = this.mood;
         const groqResult = await callGroq({
           apiKey: this.env.GROQ_API_KEY,

@@ -1198,11 +1198,11 @@ export async function runWorkDayCycle(env) {
 
   const work = simulationConfig.WORK_DAY;
   const multiplier = sim.inspection_mode ? work.inspection_mode_multiplier : 1;
-  const dailyCount = Math.round(50 * multiplier);
+  const casesPerAgent = Math.round((simulationConfig.cases_per_day_per_agent || 20) * multiplier);
 
   const cases = isOffDay
     ? []
-    : generateAssignedDailyBatch(dayOfWeek, { count: dailyCount, weekNumber: yearState.current_week || 1 });
+    : generateAssignedDailyBatch(dayOfWeek, { casesPerAgent, weekNumber: yearState.current_week || 1 });
   if (cases.length) await persistCrmCases(env, cases);
 
   // ── Case batches, spread across the day per daily-schedule.json ──
@@ -1421,11 +1421,11 @@ export async function runScheduledBlock(env, israelTime, dayOfWeek) {
 
     const work = simulationConfig.WORK_DAY;
     const multiplier = sim.inspection_mode ? work.inspection_mode_multiplier : 1;
-    const dailyCount = Math.round(50 * multiplier);
+    const casesPerAgent = Math.round((simulationConfig.cases_per_day_per_agent || 20) * multiplier);
 
     const cases = isOffDay
       ? []
-      : generateAssignedDailyBatch(dayOfWeek, { count: dailyCount, weekNumber: yearState.current_week || 1 });
+      : generateAssignedDailyBatch(dayOfWeek, { casesPerAgent, weekNumber: yearState.current_week || 1 });
     if (cases.length) await persistCrmCases(env, cases);
 
     cycle = {

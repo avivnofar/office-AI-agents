@@ -14,8 +14,13 @@
     "cases_per_day_min": 30,
     "cases_per_day_max": 50,
     "overtime_extension_percent": 30,
-    "inspection_mode_multiplier": 2
+    "inspection_mode_multiplier": 2,
+    "_note": "Legacy flat-pool bounds, used only by the unwired workers/scheduler.js and crm-engine.js's legacy generateDailyCaseBatch()/generateWeeklyCaseBatches(). The live simulation generates per-agent — see cases_per_day_per_agent/cases_per_day_total below and crm-engine.js CASES_PER_AGENT."
   },
+  "cases_per_day_per_agent": 20,
+  "cases_per_day_total": 200,
+  "claude_daily_cap": 30,
+  "claude_monthly_budget_usd": 6,
   "GEMINI": {
     "model": "gemini-2.5-flash-lite",
     "max_tokens": 1024,
