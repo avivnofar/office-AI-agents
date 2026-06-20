@@ -1,0 +1,123 @@
+name: Agent Simulation — Weekly Report
+
+on:
+  schedule:
+    - cron: "0 8 * * 2"   # Every Tuesday at 08:00 UTC
+  workflow_dispatch:        # Allow manual trigger
+
+jobs:
+  weekly-report:
+    name: Run weekly reset cycle and generate report
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Check configuration
+        id: config
+        run: |
+          if [ -n "${{ vars.AGENTS_API_BASE }}" ] && [ -n "${{ secrets.ADMIN_TOKEN }}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip notice
+        if: steps.config.outputs.ready != 'true'
+        run: |
+          echo "### Agent Simulation — Weekly Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Skipped: set the \`AGENTS_API_BASE\` repo variable and the \`ADMIN_TOKEN\` secret to enable (see agents/README.md)." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Trigger weekly reset cycle
+        if: steps.config.outputs.ready == 'true'
+        run: |
+          curl -sf -X POST "${{ vars.AGENTS_API_BASE }}/api/agents/trigger" \
+            -H "X-Admin-Token: ${{ secrets.ADMIN_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"type":"week_reset"}' \
+            -o /tmp/weekly-summary.json
+
+      - name: Fetch incident reports
+        if: steps.config.outputs.ready == 'true'
+        run: |
+          curl -sf "${{ vars.AGENTS_API_BASE }}/api/agents/reports?type=incident" \
+            -H "X-Admin-Token: ${{ secrets.ADMIN_TOKEN }}" \
+            -o /tmp/incidents.json
+
+      - name: Fetch suggestions
+        if: steps.config.outputs.ready == 'true'
+        run: |
+          curl -sf "${{ vars.AGENTS_API_BASE }}/api/agents/suggestions" \
+            -H "X-Admin-Token: ${{ secrets.ADMIN_TOKEN }}" \
+            -o /tmp/suggestions.json
+
+      - name: Fetch agent status
+        if: steps.config.outputs.ready == 'true'
+        run: |
+          curl -sf "${{ vars.AGENTS_API_BASE }}/api/agents/status" \
+            -H "X-Admin-Token: ${{ secrets.ADMIN_TOKEN }}" \
+            -o /tmp/status.json
+
+      - name: Generate report markdown
+        if: steps.config.outputs.ready == 'true'
+        env:
+          WEEKLY_SUMMARY_FILE: /tmp/weekly-summary.json
+          INCIDENTS_FILE: /tmp/incidents.json
+          SUGGESTIONS_FILE: /tmp/suggestions.json
+          STATUS_FILE: /tmp/status.json
+        run: node .github/scripts/generate-weekly-report.mjs
+
+      - name: Commit weekly report
+        if: steps.config.outputs.ready == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add agents/reports/*-weekly-summary.md
+          git diff --cached --quiet || git commit -m "docs(agents): weekly simulation report [skip ci]"
+          git push
+
+      - name: Open issue for critical incidents
+        if: steps.config.outputs.ready == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let incidents = [];
+            try {
+              incidents = JSON.parse(fs.readFileSync('/tmp/incidents.json', 'utf8'));
+            } catch {
+              return;
+            }
+
+            const since = Date.now() - 7 * 24 * 60 * 60 * 1000;
+            const critical = incidents.filter((i) => i.severity === 'critical' && new Date(i.created_at).getTime() >= since);
+            if (critical.length === 0) return;
+
+            const date = new Date().toISOString().split('T')[0];
+            const body = [
+              '## Critical Agent Incidents This Week',
+              '',
+              ...critical.map((i) => `- **Agent #${i.agent_id}**: ${i.title} — ${i.created_at}`),
+              '',
+              '_See the Admin tab (Reports → Incidents) for full details._',
+              '',
+              '---',
+              '_Auto-opened by the weekly agent simulation report workflow._',
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `[Agent Simulation] Critical incidents — ${date}`,
+              body,
+              labels: ['agent-incident', 'automated'],
+            });
