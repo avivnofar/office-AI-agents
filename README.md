@@ -1,6 +1,7 @@
 # 🏢 Office AI Agents
 
-> A 1-year autonomous AI office simulation that trains and optimizes AI models through realistic IT work scenarios.
+> An autonomous AI office simulation that trains and optimizes AI models
+> through realistic IT work scenarios at [Netvill](https://netvill.co).
 
 **Companion project:** [Data Center — IT Knowledge Base](https://avivnofar.github.io/data-center/)
 
@@ -8,198 +9,310 @@
 
 ## 🎯 What is this?
 
-11 AI agents simulate a full IT office work year — solving cases, holding meetings, writing reports, and continuously optimizing the AI model they work with. The office runs autonomously, generates real data, and produces yearly executive summaries, Excel reports, and improvement recommendations.
+11 AI agents simulate a full IT office — solving cases, holding meetings,
+writing reports, and continuously improving the AI model they work with.
+The office runs autonomously every night and generates real performance data,
+model-education case studies, and improvement recommendations.
 
-**Goal:** Maximize model accuracy and UI quality through simulated real-world usage at [Netvill](https://netvill.co) — an Israeli B2B telecom company.
+**Goal:** Maximize model accuracy and UI quality through simulated
+real-world usage, with a full yearly cycle producing executive summaries,
+Excel reports, and upgrade roadmaps.
+
+---
+
+## ⚙️ How it runs
+
+The simulation has **two parallel automation paths:**
+
+### 1. Cloudflare Worker Cron (live, during the day)
+Fires every 30 minutes between **08:00–16:30 Israel time**, every day.
+Each tick checks `daily-schedule.json` and runs the block due at that time —
+case batches, tool-task windows, standup meetings, spare time.
+State is preserved between ticks in Cloudflare KV.
+
+### 2. GitHub Actions (nightly)
+Fires at **02:30 Israel time, Sunday–Thursday**.
+Runs one full simulated work day end-to-end via a direct Claude API session
+and commits a daily report to the repo.
+Friday and Saturday are intentionally skipped (Israeli weekend).
+
+> One simulated day = one completed day-cycle (either path).
+> The simulation does not enforce a fixed real-time ratio.
+
+---
+
+## 🤖 AI Model Distribution
+
+| Model | Provider | Role | Cost |
+|-------|----------|------|------|
+| `llama3-8b-8192` | **Groq** | Primary model for all routine per-case agent work | Free ~14,400 req/day |
+| `llama-3.1-8b-instruct-fp8` | **Cloudflare Workers AI** | Case routing/classification + automatic fallback when Groq is unavailable | Free ~10,000 req/day |
+| `gemini-2.5-flash-lite` | **Google AI Studio** | Report synthesis only — monthly, quarterly, semi-yearly, yearly meetings | Free tier |
+| `claude-sonnet-4-6` | **Anthropic** | App AI Search bar + hard-case escalations. **Hard cap: 30 calls/day across all agents** | Paid ~$6/month |
+| `human + Claude Code` | n/a | Agent 10 (Architect) — never calls an AI; cases are filed as GitHub Issues for human review | n/a |
 
 ---
 
 ## 👥 The Team
 
-### 🔵 Workers
+### 🔵 Workers (Dedicated Classes)
 
 ---
 
 ### Agent 1 — The Perfectionist
-`Worker` · `Standard Clearance`
+`active` · `standard` · `PerfectionistAgent` · Groq primary
 
 > *"The veteran who has seen it all and wants Claude to be worthy of her standards."*
 
-A meticulous senior agent who uses Claude primarily for complex cases and syntax checks. She deep-dives into articles, carefully manages her bookmarks, and extends her sessions by 50% when satisfied. If Claude gives a wrong answer, she lectures it and demands correction — but never gives up on educating the algorithm.
+Uses Claude for complex cases and syntax checks. Deep-dives into articles,
+manages her bookmarks meticulously, and extends sessions 50% when satisfied.
+Wrong answers trigger a lecture — she never gives up on educating the algorithm.
 
-**Mood:** Happy → uses Claude more frequently · Irritated → critical and corrective · Never angry  
-**Purpose:** Quality check for the project  
-**Claude usage:** 30% of cases · 60% extended session chance
+**Mood:** Happy → uses Claude more · Irritated → critical and corrective · Never angry
+**Claude usage:** 30% of cases · 60% extended session chance · 35 sessions logged
 
 ---
 
 ### Agent 2 — The Productive
-`Worker` · `Standard Clearance`
+`active` · `standard` · `ProductiveAgent` · Groq primary
 
 > *"No time to waste. Short answers, fast results, or I'm finding another tool."*
 
-A results-driven agent who works overtime 30% of days and earns a bonus day when productivity exceeds the weekly target by 30%. He despises sloppy UI and misleading AI responses. His irritation stacks across visits — three unresolved frustrations and he files a comprehensive incident report and leaves.
+Works overtime 30% of days. Earns a bonus day when productivity exceeds
+the weekly target by 30%. Irritation stacks across visits — three unresolved
+frustrations trigger a comprehensive incident report and exit.
 
-**Mood:** Happy → gives Claude a detailed brief and praises good work · Irritated → mocks AI inefficiency · Angry → files incident report and leaves  
-**Purpose:** Efficiency check for the project  
-**Claude usage:** 40% of cases · 10% extended session chance
+**Mood:** Happy → briefs Claude and praises good work · Angry → files incident report and leaves
+**Claude usage:** 40% of cases · 10% extended session chance · 30 sessions logged
 
 ---
 
 ### Agent 3 — The Standard Agent
-`Worker` · `Standard Clearance`
+`active` · `standard` · `StandardAgent` · Groq primary
 
 > *"A fair observer. If Claude earns it, he'll use it more. If not, he won't."*
 
-The control group. His Claude usage scales proportionally with his satisfaction — from 0% to 100% depending on results. He evaluates user-friendliness, design, and resource accessibility. Always issues a balanced status report after a session. Compensates missed daily quotas with overtime.
+The control group. Claude usage scales 0–100% with satisfaction.
+Evaluates user-friendliness, design, and resource accessibility.
+Always issues a balanced status report after a session.
 
-**Mood:** Happy (above 50% satisfaction) → uses Claude more · Irritated → points out flaws · Angry → writes management report  
-**Purpose:** Balanced benchmark for the project  
-**Claude usage:** 0–100% depending on happiness · 30% extended session chance
+**Mood:** Happy (above 50%) → uses Claude more · Angry → writes management report
+**Claude usage:** 0–100% based on happiness · 30% extended session chance · 30 sessions logged
 
 ---
 
 ### Agent 4 — The Trainee
-`Worker` · `Standard Clearance`
+`active` · `standard` · `TraineeAgent` · Groq primary
 
 > *"New to IT, eager to learn, and easily overwhelmed — but resilient when guided well."*
 
-A junior agent in training who relies heavily on step-by-step guides and PDFs. He panics when things get complicated and may call the QA (40%), Perfectionist (30%), or another agent (30%) for help. When a teammate joins, they analyze the case together and write a guide if one doesn't exist.
+Relies on step-by-step guides and PDFs. When panicked, calls QA (40%),
+Perfectionist (30%), or another agent (30%) for help. The teammate joins
+the session and writes a guide if one doesn't exist.
 
-**Mood:** Happy → 40% productivity boost for 5 sessions · Panicked → calls for help  
-**Purpose:** Documentation checker for the project  
-**Claude usage:** 70% of cases · 90% extended session chance
+**Mood:** Happy → 40% productivity boost for 5 sessions · Panicked → calls for help
+**Claude usage:** 70% of cases · 90% extended session chance · 24 sessions logged
 
 ---
 
-### 🟠 Admins (SUDO)
+### 🟠 Admins — SUDO (Generic StubAgent + Full Behavioral Spec)
+
+All admin agents are fully wired and case-eligible. They run through
+`agent-stub.js` reading their complete behavioral spec from `agents-config.json`.
 
 ---
 
 ### Agent 5 — The IT Chief
-`Admin` · `SUDO Clearance`
+`active` · `sudo` · `StubAgent` · Groq primary · **44 sessions logged**
 
 > *"The senior troubleshooter. Hard cases, high standards, zero tolerance for client failures."*
 
-The highest-level technical authority in the office. Handles complex client escalations, network optimization, and advanced troubleshooting. When a client is mishandled by another agent, he initiates a private coaching session. When too many clients are unhappy, he calls the whole team to a huddle. Solves very hard cases → gets complacent → receives temporary Leadership trait.
+Highest-level technical authority. Handles complex client escalations and
+network optimization. When a client is mishandled, initiates private coaching
+with the responsible agent. When too many clients are unhappy — calls a team huddle.
 
-**Mood:** Happy → 300% productivity boost, 150% more Claude usage · Irritated → stays irritated until resolved · Angry → team huddle  
-**Purpose:** Technical marker for the project  
-**Claude usage:** 90% of cases · 30% extended session chance
+**Mood:** Happy → 300% productivity boost · Irritated → stays until resolved · Angry → team huddle
 
 ---
 
 ### Agent 6 — The QA
-`Admin` · `SUDO Clearance`
+`active` · `sudo` · `StubAgent` · Groq primary · **2 sessions logged (stale)**
 
 > *"Audits every agent, every week. High standards are not a preference — they're a requirement."*
 
-Runs weekly audits with the Team Lead, sampling random cases from each agent's previous week. Rates the model vs. the agent and suggests optimizations for both. Inherits the Perfectionist's traits — deep-dives into articles, collects bookmarks, lectures the AI when wrong. Hard to please, but fair.
+Runs weekly audits alongside the Team Lead, sampling random cases from each
+agent's previous week. Rates the model vs. the agent. Inherits the Perfectionist's
+traits — deep-dives, collects bookmarks, lectures the AI when wrong.
 
-**Mood:** Happy at the start of each week (temporarily) · Irritated by every mistake noticed  
-**Purpose:** QA for the team  
-**Claude usage:** 100% of cases · 80% extended session chance
+**Note:** Only 2 sessions logged, last active June 11 — scheduling issue under investigation.
 
 ---
 
 ### Agent 7 — The Team Lead
-`Admin` · `SUDO Clearance`
+`active` · `sudo` · `StubAgent` · Groq primary · **0 sessions logged**
 
 > *"Her job is to make everyone better. She listens, coaches, and holds people accountable."*
 
-Responsible for agent development and productivity. Meets regularly with each agent and suggests behavioral optimizations. Can place underperforming agents (1–4) on a 1-month PIP (Personal Improvement Plan). Sits in on all QA audits. Generates high morale for the first 2 days of each week.
+Responsible for agent development and productivity. Can place underperforming
+agents (1–4) on a 1-month PIP. Sits in on all QA audits. Generates high morale
+for the first 2 days of each week.
 
-**Mood:** Happy → increased influence over agents · Irritated → raises concerns in meetings  
-**Purpose:** Agent coach and productivity manager  
-**Claude usage:** 50% of cases · 10% extended session chance
+**Note:** Has never run a session — scheduling bug being investigated.
 
 ---
 
 ### Agent 8 — The Lead QA
-`Admin` · `SUDO Clearance`
+`active` · `sudo` · `StubAgent` · Groq primary · **0 sessions logged**
 
 > *"Audits everything — agents, workflows, technologies, and the model itself."*
 
-The chief quality officer. Inherits all QA traits but operates on a larger scope. Happiness and irritation move slowly — he has a long-term perspective and isn't rattled by single events. When he speaks in a meeting, personality triggers fire more frequently for everyone present until the meeting ends.
+Chief quality officer. Inherits all QA traits with broader scope. Mood moves
+slowly — long-term perspective. When he speaks in a meeting, personality
+triggers fire more frequently for everyone present.
 
-**Mood:** Happy when the project is audited at a high level · Irritation/happiness affected at 50% weight  
-**Purpose:** Lead QA for the entire project  
-**Claude usage:** 60% of cases · 60% extended session chance
+**Note:** Has never run a session — scheduling bug being investigated.
 
 ---
 
 ### Agent 9 — The Designer
-`Admin` · `Specialist`
+`active` · `specialist` · `StubAgent` · Groq primary · **1 session logged**
 
 > *"She has an eye for design and the patience of someone who knows exactly what she wants."*
 
-Focused exclusively on the GitHub repository and the Claude app UI. Issues 2 reports per week — an early flag report and a decision meeting. Starts with 0% fondness and grows over time. Becomes **Inspired** at 51% fondness (artistic capabilities +300%). Delivers 4 major quarterly updates and 2 large semi-yearly UI overhauls.
-
-**Mood:** Inspired (≥51% fondness) → creative surge · Not inspired → relentlessly pushes for changes · Irritated → demands meeting priority  
-**Purpose:** Designer for the project  
-**Claude usage:** 100% of cases · 70% extended session chance
+Focused on the GitHub repository and Claude app UI. Issues 2 reports per week.
+Starts at 0% fondness, grows over time. Becomes **Inspired** at 51% fondness
+(artistic capabilities +300%). Delivers 4 major quarterly UI updates.
 
 ---
 
-### 🔴 Management (ROOT)
+### 🔴 Management — ROOT
 
 ---
 
 ### Agent 10 — The Architect
-`Admin` · `ROOT Clearance`
+`active` · `root` · `StubAgent (special)` · **No AI model** · **3 sessions logged**
 
 > *"The mastermind. Knows every corner of the product. Dreams big, executes bigger."*
 
-The most powerful agent in the office. Has ROOT permissions across all layers. Releases numbered update packages (v1.0, v1.1...), implements new technologies, and opens new repositories. Combines Perfectionist, Productive, and IT Chief traits — all optimized for his context. His ego leads to productive rivalries, especially with the Lead QA.
-
-**Mood:** Happy → avoids conflict, maximizes output · Irritated → researches deeply and returns with a stronger pitch  
-**Special traits:** Vision · Superstar Mentality · Proven Record  
-**Purpose:** Builder of the project  
-**Claude usage:** Optimized dynamically · Works overtime every day
+ROOT permissions across all layers. **Never calls an AI for routine cases** —
+instead, cases are logged and filed as a single GitHub Issue (`claude-action`,
+`architect-task`) for human/Claude Code review. Releases numbered update
+packages (v1.0, v1.1...). Combines Perfectionist, Productive, and IT Chief
+traits. Professional rivalry with Lead QA is the simulation's most
+productive tension.
 
 ---
 
 ### Agent 11 — The CEO
-`Admin` · `ROOT Clearance`
+`active` · `root` · `StubAgent` · Groq primary · **14 sessions logged**
 
 > *"The big boss. Every decision at the organizational level goes through her."*
 
-Leads all meetings, holds veto rights, and casts votes that count double. Creates a zone of influence — everyone in joint sessions with the CEO gets a **+20% boost to morale and productivity**. Generates high morale for the first 2 days of every week. 20% of her cases are unique high-value clients whose outcomes shape her model opinion.
-
-**Mood:** Happy → considers expansion options · Irritated → delegates and monitors · Angry → emergency all-hands meeting  
-**Special traits:** Vision · Diplomat · Puppet Master · CEO Proven Record · Leadership Zone  
-**Purpose:** Organizational leader and final decision maker  
-**Claude usage:** Tailored to CEO's strategic timeline
+Leads all meetings, votes count double. Creates a zone of influence —
+everyone in joint sessions gets a **+20% boost to morale and productivity**.
+20% of her cases are unique high-value clients whose outcomes shape her
+model opinion.
 
 ---
 
-## ⚙️ Architecture
+## 📊 Live Stats (as of June 2026)
+
+| Metric | Value |
+|--------|-------|
+| Total sessions in D1 | 183+ |
+| Interactions logged | 143+ |
+| Primary model used | Groq (89 interactions) |
+| Claude API calls | 15 (historical total, pre-cap-increase; well within the new 30/day cap) |
+| Gemini calls | 0 (no monthly report due yet) |
+| Cloudflare AI fallback | 0 (Groq has not failed) |
+| Most active agent | Agent 5 — IT Chief (44 sessions) |
+| Agents never run | 7 (Team Lead), 8 (Lead QA) — bug |
+
+---
+
+## 📅 Schedule
+
+| Day | Activity |
+|-----|----------|
+| Sun–Thu | Full work day — 5 case batches, tool-task window, standup, reports |
+| Friday | Short day — 2 case batches, weekly executive summary |
+| Saturday | Full day off — zero API calls, pure idle |
+
+---
+
+## 🏗️ Architecture
 
 | Component | Technology |
 |-----------|-----------|
-| Agent runtime | Cloudflare Workers |
-| Primary model | Groq — llama3-8b-8192 (free) |
-| Fallback model | Cloudflare Workers AI |
-| Reports model | Google Gemini 2.5 Flash-Lite |
-| Storage | Cloudflare D1 (SQLite) |
-| Time compression | 24 real hours = 1 simulated work week |
-| Cases | 30/day · 5-day weeks · 1 month holiday/agent |
+| Worker runtime | Cloudflare Workers (`data-center-agents`) |
+| State storage | Cloudflare D1 (`data-center-db`) + KV + Durable Objects |
+| Primary agent model | Groq `llama3-8b-8192` (free) |
+| Routing + fallback | Cloudflare Workers AI (free) |
+| Report synthesis | Google Gemini 2.5 Flash-Lite |
+| App AI Search | Claude Sonnet 4.6 — 30 calls/day cap, distributed by agent role |
+| Nightly automation | GitHub Actions → Anthropic API direct session |
+| Cases per day | 20 per agent · distributed by model_usage_rate per agent |
+| Weekend | Friday short day · Saturday off |
 
-## 💰 Token Economy
+---
 
-- **Groq:** primary for all agent work — free, ~14,400 req/day
-- **Cloudflare AI:** automatic fallback on Groq 429
-- **Gemini:** monthly and quarterly reports only
-- **Claude API:** max 5 calls/day — reserved for the app's AI Search bar
+## 📁 Repository Structure
+office-AI-agents/
 
-## 📊 Yearly Deliverables
+├── workers/          # Cloudflare Worker source
+
+│   ├── agent-runner.js    # Main simulation engine + cron handler
+
+│   ├── agent-base.js      # Base class for all agents
+
+│   ├── agent-1-perfectionist.js  # Dedicated agent classes (1-4)
+
+│   ├── agent-stub.js      # Generic class for agents 5-11
+
+│   ├── groq-client.js     # Primary model client
+
+│   ├── gemini-client.js   # Reports model + CF fallback
+
+│   ├── meeting-engine.js  # Meeting simulation
+
+│   └── crm-engine.js      # Case generation
+
+├── config/           # Simulation configuration
+
+│   ├── agents-config.json      # Full behavioral spec for all 11 agents
+
+│   ├── simulation-config.json  # Global settings
+
+│   ├── token-economy.json      # Model usage rules and caps
+
+│   ├── daily-schedule.json     # Block-by-block day schedule
+
+│   └── ai-tools.json           # Tool access matrix (NotebookLM, Stitch, etc.)
+
+├── database/         # D1 schema and seed files
+
+├── reports/          # Generated daily/weekly reports
+
+├── .github/
+
+│   ├── workflows/scheduled-claude.yml  # Nightly automation
+
+│   └── scripts/                        # Session runner scripts
+
+├── CURRENT-SPEC.md   # Authoritative technical specification
+
+└── wrangler.toml     # Cloudflare Worker configuration
+
+---
+
+## 🚀 Yearly Deliverables
 
 - 12-month Excel with collected metrics
 - 10-page executive summary PDF
-- README with fixes and upgrades for next year
-- Agent performance report with optimization suggestions
+- Agent performance report with optimization suggestions  
+- README with fixes and upgrade roadmap for next year
 - GitHub README introducing the project to the world
 
 ---
 
-*Autonomous simulation · Powered by Groq + Cloudflare + Gemini · Built by Aviv Nofar*
+*Autonomous simulation · Groq + Cloudflare Workers AI + Gemini + Claude · Built by Aviv Nofar*
