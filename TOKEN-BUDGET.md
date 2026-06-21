@@ -7,11 +7,11 @@ priorities. See `CLAUDE.md`'s "Current Strategy (authoritative)" section and
 
 ## ⏳ Next
 
-- Maintenance — Verify the 02:30 IL nightly automation (scheduled-claude.yml)
-  now runs clean (input was fixed — TOKEN-BUDGET.md truncated to last 50 lines).
-  Check GitHub Actions logs the morning of 2026-06-19. Also check D1 for
-  simulation Day 2+ data (`SELECT COUNT(*) FROM agent_sessions`) and confirm
-  the Worker is committing daily summaries to `agents/reports/daily/`.
+- Verify agents 7+8 received cases after redeploy. Check D1 tomorrow morning
+  (`SELECT assigned_to, COUNT(*) FROM cases WHERE assigned_to IN (6,7,8,9) GROUP BY assigned_to`
+  after 2026-06-21 night's run) — the Worker was redeployed 2026-06-21 to
+  ship commit `3c1e684`'s per-agent case generator (had been committed but
+  not deployed since 2026-06-20). See `reports/daily/STATUS-REPORT-2026-06-21.md`.
 
 ## Queue
 
