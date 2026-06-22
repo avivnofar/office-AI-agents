@@ -59,8 +59,14 @@
           "day": 1,
           "stage": "queued",
           "note": "Seeded during daily-automation build session."
+        },
+        {
+          "day": 6,
+          "stage": "queued",
+          "note": "asset-task issue filed (auto, tool_task_window)"
         }
-      ]
+      ],
+      "asset_task_issue_filed": true
     },
     {
       "id": "designer-tooling-suite",
