@@ -1,0 +1,12 @@
+agent_id,name,weekly_cases,mood,irritation
+1,The Perfectionist,0,100,3
+2,The Productive,0,60,3
+3,The Standard Agent,0,100,2
+4,The Trainee,0,98,5
+5,The IT Chief,0,100,2
+6,The QA,0,79,5
+7,The Team Lead,1,75,1
+8,The Lead QA,0,100,5
+9,The Designer,0,67,5
+10,The Architect,0,50,0
+11,The CEO,0,100,5
