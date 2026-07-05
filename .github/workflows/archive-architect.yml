@@ -1,0 +1,57 @@
+name: Archive Architect - Daily Research
+
+# Israel time (Asia/Jerusalem) is UTC+3 in summer (DST) and UTC+2 in
+# winter. GitHub Actions cron is always UTC and does not shift with DST,
+# so 15:00 Israel time maps to a different UTC hour across the year.
+# Both candidate crons are scheduled every weekday; the runtime check in
+# the "Check if this is the correct Israel-time trigger" step below
+# verifies the actual local time in Asia/Jerusalem and skips the run
+# that doesn't land on 15:00 local. This self-corrects across DST
+# changes with no manual maintenance twice a year.
+on:
+  schedule:
+    - cron: '0 12 * * 0-4'
+    - cron: '0 13 * * 0-4'
+  workflow_dispatch: {}
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: avivnofar/local-archive-galil-elion
+          path: archive
+          token: ${{ secrets.ARCHIVE_REPO_TOKEN }}
+
+      - name: Check if this is the correct Israel-time trigger and not weekend
+        id: time_check
+        run: |
+          CURRENT_HOUR=$(TZ=Asia/Jerusalem date +%H)
+          DAY=$(TZ=Asia/Jerusalem date +%u)
+          if [ "$CURRENT_HOUR" != "15" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          elif [ "$DAY" -eq 5 ] || [ "$DAY" -eq 6 ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Run Architect research
+        if: steps.time_check.outputs.skip == 'false'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+        run: |
+          pip install requests
+          python3 agents/architect_agent.py
+
+      - name: Commit suggestion file
+        if: steps.time_check.outputs.skip == 'false'
+        run: |
+          cd archive
+          git config user.name "Architect Agent"
+          git config user.email "architect@noreply.github.com"
+          git add docs/architect-suggestions/
+          git commit -m "Architect suggestion for $(date +%Y-%m-%d)" || echo "Nothing to commit"
+          git push
