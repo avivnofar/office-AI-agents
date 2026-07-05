@@ -18,7 +18,11 @@ jobs:
   research:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout office-AI-agents (this repo)
+        uses: actions/checkout@v4
+
+      - name: Checkout local-archive-galil-elion
+        uses: actions/checkout@v4
         with:
           repository: avivnofar/local-archive-galil-elion
           path: archive
