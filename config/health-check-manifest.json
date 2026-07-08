@@ -1,0 +1,129 @@
+{
+  "_meta": {
+    "version": "0.1.0",
+    "status": "DESIGN — not wired into any schedule yet (2026-07-08)",
+    "description": "Declarative list of cross-project automations to verify by REAL OUTPUT (a file's last commit, a JSON endpoint field, a log line's status) rather than by trusting a workflow's own exit code — the pattern this month found repeatedly: a workflow can report green while its real step was skipped (Weekly Report's missing AGENTS_API_BASE), silently crashed before writing anything (Weekly Case Batch's stale import), or ran but failed to report (Notebook-X health check's missing issues:write). See scripts/cross-project-health-check.mjs for the runner and TOKEN-BUDGET.md's 2026-07-08 session entry for the design writeup.",
+    "gating_note": "Every check names the GitHub Actions workflow that's supposed to produce its evidence (`gatingWorkflow`). Before evaluating a check, the runner looks up that workflow's current enabled/disabled state via the GitHub API. If it's disabled_manually, the check reports SKIPPED (not FAIL) — this repo's whole set of automations is currently paused on purpose (see TOKEN-BUDGET.md), and a health check that screams about intentionally-paused work is exactly the kind of alert-fatigue that makes people stop trusting alerts. Checks with no `gatingWorkflow` (Worker-cron-driven, not GitHub-Actions-driven) always evaluate for real — there's no GitHub 'enabled' signal to gate them on; see the Worker-cron caveat in TOKEN-BUDGET.md.",
+    "auth_note": "office-AI-agents and data-center are public repos — no token needed for read checks. Notebook-X and local-archive-galil-elion are private — checks against them need a read-scoped token (GH_TOKEN env var) with access to that repo. None is provisioned yet for a live run (PAT creation is explicitly deferred this month); this manifest documents the requirement rather than assuming it exists. Local/manual runs of this script inherit the operator's own `gh` auth, which is why it can be dry-run today without provisioning anything.",
+    "digest_note": "When this is eventually wired live, results should batch into ONE issue in office-AI-agents (mirroring the model-education digest pattern in workers/agent-runner.js's fileModelEducationDigest()) — not one issue per check and not one per project. Only file if at least one check is FAIL (not SKIPPED/PASS)."
+  },
+
+  "checks": [
+    {
+      "id": "office-agents-weekly-case-batch",
+      "project": "office-agents",
+      "label": "Weekly Case Batch produced this week's case file",
+      "gatingWorkflow": { "repo": "avivnofar/office-AI-agents", "name": "Agent Simulation — Weekly Case Batch" },
+      "type": "github_file_freshness",
+      "repo": "avivnofar/office-AI-agents",
+      "pathTemplate": "database/cases-{{isoYear}}-w{{isoWeekPadded}}.json",
+      "maxAgeHours": 192,
+      "extra": "Also parses the file's own `count` field — a file that exists but has count:0 should still FAIL, not PASS, since an empty batch is exactly the 'exit-code-green-but-nothing-real-happened' failure mode this check exists to catch."
+    },
+    {
+      "id": "office-agents-weekly-report",
+      "project": "office-agents",
+      "label": "Weekly Report committed this week's summary",
+      "gatingWorkflow": { "repo": "avivnofar/office-AI-agents", "name": "Agent Simulation — Weekly Report" },
+      "type": "github_file_freshness",
+      "repo": "avivnofar/office-AI-agents",
+      "pathTemplate": "agents/reports/{{isoYear}}-w{{isoWeekPadded}}-weekly-summary.md",
+      "maxAgeHours": 192,
+      "extra": "NOTE: as of 2026-07-08 this path is itself unverified — generate-weekly-report.mjs has the same stale agents/config/ import pattern already fixed in generate-agent-cases.mjs, but fixing it was explicitly out of scope this session (Weekly Report's blocker is deferred, ADMIN_TOKEN-gated). This check will need its pathTemplate re-confirmed once that script is fixed."
+    },
+    {
+      "id": "office-agents-night-office-session",
+      "project": "office-agents",
+      "label": "Scheduled Claude (night-office) logged a completed session recently",
+      "gatingWorkflow": { "repo": "avivnofar/office-AI-agents", "name": "Scheduled Claude Automation" },
+      "type": "token_budget_log_line",
+      "repo": "avivnofar/office-AI-agents",
+      "path": "TOKEN-BUDGET.md",
+      "linePrefix": "- [",
+      "lineMarker": "Auto-session:",
+      "maxAgeHours": 30,
+      "requireStatus": "completed",
+      "extra": "commit-and-log.sh already appends an honest status line ('completed' / 'failed: auth_error' / 'failed: api_error' / 'completed (no changes)') distinguishing real completion from various failure modes — this check just reads that existing signal instead of re-deriving it, and treats anything other than a bare 'completed'/'completed (no changes)' as FAIL."
+    },
+    {
+      "id": "office-agents-model-education-digest",
+      "project": "office-agents",
+      "label": "Worker's daily model-education digest (if any cases were flagged) landed",
+      "gatingWorkflow": null,
+      "type": "github_file_freshness",
+      "repo": "avivnofar/office-AI-agents",
+      "pathTemplate": "reports/model-education/data-center/{{today}}.md",
+      "maxAgeHours": 30,
+      "extra": "Worker-cron-driven (wrangler.toml crons, not a GitHub Actions workflow), so there's no gatingWorkflow to check enabled/disabled state against. Also legitimately absent on a day where zero cases fell below the quality threshold — a missing file here is only worth flagging if paired with independent evidence a work day actually ran (e.g. the D1 `agent_sessions` check below), which this manifest doesn't yet cross-reference. Documented as a known gap, not solved this session."
+    },
+    {
+      "id": "notebook-x-storage-health",
+      "project": "notebook-x",
+      "label": "Notebook-X's own /api/health reports real notebooks + GitHub connectivity",
+      "gatingWorkflow": { "repo": "avivnofar/Notebook-X", "name": "Notebook Health Check" },
+      "type": "http_endpoint_check",
+      "url": "https://notebook-x-api.onrender.com/api/health",
+      "assertions": [
+        { "jsonPath": "notebookCount", "op": ">=", "value": 3 },
+        { "jsonPath": "githubConnected", "op": "==", "value": true }
+      ],
+      "extra": "This is the ALREADY-real check (notebook-health-check.yml never trusted its own exit code blindly — it inspects the endpoint's actual reported state). What was broken was purely the alerting path (missing issues:write — see reports/health-check/notebook-x-health-check-permission-fix.yml, prepared but not pushed this session). Reused here as-is, generalized into the shared manifest format rather than living only in Notebook-X's own workflow."
+    },
+    {
+      "id": "data-center-daily-link-check",
+      "project": "data-center",
+      "label": "Daily Link Check ran and updated its output",
+      "gatingWorkflow": { "repo": "avivnofar/data-center", "name": "Daily Link Check" },
+      "type": "workflow_run_recency",
+      "repo": "avivnofar/data-center",
+      "workflowName": "Daily Link Check",
+      "maxAgeHours": 30,
+      "extra": "Weakest check type in this manifest (falls back to run recency, not a real-output check) because the specific output artifact (which file changes on a clean link-check run) wasn't traced this session — placeholder pending a real output-based check, same honesty principle as everything else here: don't claim more verification than actually exists."
+    },
+    {
+      "id": "data-center-weekly-data-quality",
+      "project": "data-center",
+      "label": "Weekly Data Quality Report ran",
+      "gatingWorkflow": { "repo": "avivnofar/data-center", "name": "Weekly Data Quality Report" },
+      "type": "workflow_run_recency",
+      "repo": "avivnofar/data-center",
+      "workflowName": "Weekly Data Quality Report",
+      "maxAgeHours": 192
+    },
+    {
+      "id": "data-center-monthly-source-review",
+      "project": "data-center",
+      "label": "Monthly Source Review Reminder ran",
+      "gatingWorkflow": { "repo": "avivnofar/data-center", "name": "Monthly Source Review Reminder" },
+      "type": "workflow_run_recency",
+      "repo": "avivnofar/data-center",
+      "workflowName": "Monthly Source Review Reminder",
+      "maxAgeHours": 768
+    },
+    {
+      "id": "data-center-changelog",
+      "project": "data-center",
+      "label": "Generate Changelog ran",
+      "gatingWorkflow": { "repo": "avivnofar/data-center", "name": "Generate Changelog" },
+      "type": "workflow_run_recency",
+      "repo": "avivnofar/data-center",
+      "workflowName": "Generate Changelog",
+      "maxAgeHours": 192
+    },
+    {
+      "id": "data-center-validate-json",
+      "project": "data-center",
+      "label": "Validate JSON Data ran",
+      "gatingWorkflow": { "repo": "avivnofar/data-center", "name": "Validate JSON Data" },
+      "type": "workflow_run_recency",
+      "repo": "avivnofar/data-center",
+      "workflowName": "Validate JSON Data",
+      "maxAgeHours": 192
+    }
+  ],
+
+  "not_included": {
+    "archive-architect": "Deliberately excluded per explicit 2026-07-08 instruction — no further work on archive-architect.yml this session or any future session until told otherwise. Its email-delivery question (Step 5 of the prior session) is also unresolved, so a freshness check here would need a delivery signal this project doesn't have access to anyway.",
+    "local-archive-galil-elion": "No GitHub Actions workflows exist in this repo at all (confirmed via gh workflow list — empty). Nothing to check yet."
+  }
+}

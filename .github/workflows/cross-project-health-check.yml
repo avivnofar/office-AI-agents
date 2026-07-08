@@ -1,0 +1,32 @@
+name: Cross-Project Health Check (manual, design-stage)
+
+# DESIGN-STAGE, 2026-07-08 — intentionally has NO `schedule:` trigger.
+# workflow_dispatch only, so this never runs unattended until it's been
+# reviewed and someone deliberately adds a schedule. See
+# config/health-check-manifest.json and scripts/cross-project-health-check.mjs
+# for the design writeup, and TOKEN-BUDGET.md's 2026-07-08 session entry.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Read-only against office-AI-agents/data-center (public). Private
+      # repos (Notebook-X, local-archive-galil-elion) would need their own
+      # read-scoped GH_TOKEN here once this is reviewed and actually wired
+      # live — not provisioned this session (PAT creation deferred). Until
+      # then, checks against private repos will report UNKNOWN, not a
+      # false PASS/FAIL.
+      - name: Run cross-project health check
+        run: node scripts/cross-project-health-check.mjs
