@@ -14,6 +14,9 @@ on:
     - cron: '0 13 * * 0-4'
   workflow_dispatch: {}
 
+permissions:
+  contents: write
+
 jobs:
   research:
     runs-on: ubuntu-latest
@@ -21,13 +24,31 @@ jobs:
       - name: Checkout office-AI-agents (this repo)
         uses: actions/checkout@v4
 
-      - name: Checkout local-archive-galil-elion
+      # Read-only research input (a "pull", allowed under the General
+      # agent-conduct rules — config/project-permissions.json's
+      # archive-galil-elion entry is push:false, not pull:false). This
+      # workflow fires at most once/day, so it's within the repo-wide
+      # 1-pull/day cap by construction. ARCHIVE_REPO_TOKEN stays scoped
+      # only to local-archive-galil-elion, read access only.
+      - name: Checkout local-archive-galil-elion (read-only research input)
         uses: actions/checkout@v4
         with:
           repository: avivnofar/local-archive-galil-elion
           path: archive
           token: ${{ secrets.ARCHIVE_REPO_TOKEN }}
 
+      # 2026-07-08 fix: GitHub Actions' scheduling delay for low-traffic
+      # repos has historically run this job 1.5-4h after either candidate
+      # cron fires (empirically confirmed via `gh run view --json jobs` on
+      # 2026-07-06/07 runs — see TOKEN-BUDGET.md), which the old exact-hour
+      # match ("$CURRENT_HOUR" != "15") always missed, silently skipping the
+      # research+email every day since 2026-07-06 despite a green run.
+      # Replaced with a +/-90min tolerance window around 15:00 Israel time.
+      # Both candidate cron slots (12:00 and 13:00 UTC = 15:00 and 16:00
+      # IDT) now land inside that window on the same day, so a same-day
+      # dedup guard (today's suggestion file already existing in this
+      # checkout) prevents a double-fire/double-email if both slots'
+      # delayed runs land within tolerance on the same day.
       - name: Check if this is the correct Israel-time trigger and not weekend
         id: time_check
         run: |
@@ -37,12 +58,28 @@ jobs:
             echo "skip=false" >> $GITHUB_OUTPUT
             exit 0
           fi
+
+          TOLERANCE_MINUTES=90
+          TARGET_MINUTES=$((15 * 60))  # 15:00 Israel time
+
+          # 10#... forces base-10 (date's zero-padded "08"/"09" would
+          # otherwise be misread as invalid octal literals in arithmetic).
           CURRENT_HOUR=$(TZ=Asia/Jerusalem date +%H)
+          CURRENT_MIN=$(TZ=Asia/Jerusalem date +%M)
           DAY=$(TZ=Asia/Jerusalem date +%u)
-          if [ "$CURRENT_HOUR" != "15" ]; then
+          TODAY=$(TZ=Asia/Jerusalem date +%Y-%m-%d)
+          NOW_MINUTES=$((10#$CURRENT_HOUR * 60 + 10#$CURRENT_MIN))
+          DIFF=$(( NOW_MINUTES > TARGET_MINUTES ? NOW_MINUTES - TARGET_MINUTES : TARGET_MINUTES - NOW_MINUTES ))
+
+          if [ "$DIFF" -gt "$TOLERANCE_MINUTES" ]; then
             echo "skip=true" >> $GITHUB_OUTPUT
+            echo "Skip: now ${CURRENT_HOUR}:${CURRENT_MIN} Israel time, ${DIFF}min from the 15:00 target (tolerance +/-${TOLERANCE_MINUTES}min)."
           elif [ "$DAY" -eq 5 ] || [ "$DAY" -eq 6 ]; then
             echo "skip=true" >> $GITHUB_OUTPUT
+            echo "Skip: weekend (Fri/Sat)."
+          elif [ -f "reports/architect-suggestions/${TODAY}.md" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+            echo "Skip: reports/architect-suggestions/${TODAY}.md already exists - already ran today (dedup guard against both cron slots landing inside the tolerance window on the same day)."
           else
             echo "skip=false" >> $GITHUB_OUTPUT
           fi
@@ -56,12 +93,17 @@ jobs:
           pip install requests
           python3 agents/architect_agent.py
 
-      - name: Commit suggestion file
+      # No push to local-archive-galil-elion anymore (see project
+      # decision, 2026-07-08): the suggestion file was written by
+      # architect_agent.py directly into reports/architect-suggestions/
+      # in THIS checkout (office-AI-agents), so a normal same-repo commit
+      # is all that's needed — no ARCHIVE_REPO_TOKEN involved, no
+      # cross-repo push. Uses the job's default contents:write GITHUB_TOKEN.
+      - name: Commit suggestion file to office-AI-agents
         if: steps.time_check.outputs.skip == 'false'
         run: |
-          cd archive
           git config user.name "Architect Agent"
           git config user.email "architect@noreply.github.com"
-          git add docs/architect-suggestions/
-          git commit -m "Architect suggestion for $(date +%Y-%m-%d)" || echo "Nothing to commit"
+          git add reports/architect-suggestions/
+          git commit -m "chore(architect): suggestion for $(date +%Y-%m-%d) [skip ci]" || echo "Nothing to commit"
           git push

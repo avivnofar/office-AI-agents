@@ -2,8 +2,34 @@
 // scheduled-claude.yml session. Reads SESSION_TYPE/TASK from env, writes
 // claude_result.json (file changes applied) or claude_error.txt (failure)
 // or claude_summary.txt (text-only reply, no file changes).
-const https = require('https');
-const fs = require('fs');
+//
+// ESM (not CommonJS): root package.json has "type": "module", so a plain
+// `require()` here throws ReferenceError before this script does anything
+// at all (found and fixed 2026-07-08 — this had been silently crashing on
+// every scheduled run; see TOKEN-BUDGET.md's repeated "failed: api_error"/
+// "failed: auth_error" log lines, at least some of which were actually this).
+import https from 'node:https';
+import fs from 'node:fs';
+
+// General agent-conduct rule (TODO.md's General section / workers/permission-guard.js
+// CODE_FILE_EXTENSIONS, mirrored here since this is a plain CommonJS script,
+// not bundled by wrangler/esbuild): agents write reports/config/docs freely,
+// but do NOT write code files unless the triggering task explicitly says so.
+// Scheduled runs never set EXPLICIT_CODE_TASK, so code-file writes are
+// blocked by default; a manual workflow_dispatch run can opt in.
+const CODE_FILE_EXTENSIONS = new Set([
+  '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs',
+  '.py', '.rb', '.go', '.rs', '.java', '.kt', '.swift',
+  '.c', '.cpp', '.h', '.hpp', '.cs', '.php',
+  '.sh', '.ps1', '.psm1', '.sql',
+]);
+const EXPLICIT_CODE_TASK = process.env.EXPLICIT_CODE_TASK === 'true';
+
+function isCodeFilePath(filePath) {
+  const dot = filePath.lastIndexOf('.');
+  if (dot === -1) return false;
+  return CODE_FILE_EXTENSIONS.has(filePath.slice(dot).toLowerCase());
+}
 
 const systemPrompt = `You are the autonomous maintainer of the
 data-center IT knowledge base and office simulation project.
@@ -71,15 +97,24 @@ const req = https.request({
         return;
       }
       const result = JSON.parse(text.slice(start, end));
+      const blocked = [];
       result.files.forEach(f => {
+        if (isCodeFilePath(f.path) && !EXPLICIT_CODE_TASK) {
+          console.warn(`Blocked (code-write-guard): ${f.path} — code file, EXPLICIT_CODE_TASK not set for this run.`);
+          blocked.push(f.path);
+          return;
+        }
         const dir = f.path.split('/').slice(0, -1).join('/');
         if (dir) fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(f.path, f.content);
         console.log('Written:', f.path);
       });
+      const summary = blocked.length
+        ? `${result.summary}\n\n_Blocked by the code-write guard (not an explicit code-writing task): ${blocked.join(', ')}_`
+        : result.summary;
       fs.writeFileSync('claude_result.json', JSON.stringify({
         commit_message: result.commit_message,
-        summary: result.summary
+        summary
       }));
     } catch (e) {
       console.error('Parse error:', e.message);

@@ -16,6 +16,11 @@ on:
       task_override:
         description: 'Override task (leave empty to use default)'
         required: false
+      explicit_code_task:
+        description: 'Allow this run to write code files (.js/.py/.ts/etc.) — only set true when task_override explicitly asks for a code change'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   night-office:
@@ -41,6 +46,7 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           GOOGLE_AI_API_KEY: ${{ secrets.GOOGLE_AI_API_KEY }}
+          EXPLICIT_CODE_TASK: "${{ github.event.inputs.explicit_code_task || 'false' }}"
         run: node .github/scripts/run-claude-session.js
       - name: Commit changes and log session
         run: bash .github/scripts/commit-and-log.sh

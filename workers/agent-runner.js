@@ -51,11 +51,29 @@ import {
   recordCompareAlternatives,
   getModelUsageAdjustment,
 } from './crm-engine.js';
+import { resolveWriteTarget, resolveIssueTarget, checkCodeWriteAllowed } from './permission-guard.js';
+import { runChoreRotationSlot } from './chore-runner.js';
 
 const ALLOWED_ORIGINS = ['https://avivnofar.github.io', 'http://localhost:3000', 'http://127.0.0.1:5500'];
 const REPO_OWNER = 'avivnofar';
 const REPO_NAME = 'office-AI-agents';
 const ARCHIVE_REPO_NAME = 'data-center-archive';
+
+// Maps this file's GitHub repo constants to config/project-permissions.json
+// keys, so commitFileToRepo()/fileGitHubIssue() can enforce push permission
+// per the General rule (see workers/permission-guard.js) for EVERY repo
+// they might write to, including this one. REPO_NAME (office-AI-agents) is
+// deliberately included, not exempted — as of the 2026-07-08 config-driven
+// self-write session, self-repo writes are gated by the real
+// "office-agents" project-permissions.json entry (push:true, currently)
+// like any other project, not by a hardcoded bypass. If "office-agents"
+// were ever missing or push:false, self-writes would be redirected into
+// agent-output/office-agents/... same as any other blocked project — see
+// project-permissions.json's office_agents_push_true_is_load_bearing note.
+const REPO_TO_PROJECT_KEY = {
+  [REPO_NAME]: 'office-agents',
+  [ARCHIVE_REPO_NAME]: 'data-center',
+};
 
 /** Maps year-tracker.json milestone keys to the meeting they trigger (in
  * addition to the daily standup, which always runs). */
@@ -342,8 +360,31 @@ function updateYearStats(prevStats, { summary, standup, sidePlotStarted, sidePlo
  * Commits a file to a repo via the GitHub Contents API. No-ops if
  * env.GITHUB_TOKEN (a Worker secret, never shipped to the browser) isn't
  * configured.
+ *
+ * Enforces the two General agent-conduct rules before ever calling GitHub:
+ *   1. Code-file writes are blocked unless `opts.explicitCodeTask` is true
+ *      (agents don't write code files unless directly instructed).
+ *   2. Writes to a project repo (including this one — see
+ *      REPO_TO_PROJECT_KEY's comment) are redirected into REPO_NAME under
+ *      agent-output/<projectKey>/ when that project's
+ *      config/project-permissions.json entry has push:false (agents may
+ *      only recommend/write-to-own-repo for those projects).
+ * See workers/permission-guard.js.
  */
-async function commitFileToRepo(env, repoName, path, content, message) {
+async function commitFileToRepo(env, repoName, path, content, message, opts = {}) {
+  const codeCheck = checkCodeWriteAllowed({ filePath: path, explicitCodeTask: opts.explicitCodeTask });
+  if (!codeCheck.allowed) {
+    return { committed: false, reason: codeCheck.reason, blocked: 'code-write-guard' };
+  }
+
+  const projectKey = REPO_TO_PROJECT_KEY[repoName];
+  if (projectKey) {
+    const target = resolveWriteTarget({ projectKey, ownRepoName: REPO_NAME, targetRepoName: repoName, path });
+    repoName = target.repoName;
+    path = target.path;
+    if (target.redirected) message = `${message} [redirected: push disabled for "${target.projectKey}"]`;
+  }
+
   if (!env.GITHUB_TOKEN) return { committed: false, reason: 'GITHUB_TOKEN not configured' };
 
   const headers = {
@@ -369,8 +410,24 @@ async function commitFileToRepo(env, repoName, path, content, message) {
   return { committed: res.ok, status: res.status, path };
 }
 
-/** Generic GitHub Issue creation. No-ops without env.GITHUB_TOKEN. */
+/**
+ * Generic GitHub Issue creation. No-ops without env.GITHUB_TOKEN.
+ *
+ * Enforces the same "no external push when push:false" General rule as
+ * commitFileToRepo() (see workers/permission-guard.js) — a filed-Issue is a
+ * write to that project's repo just as much as a file commit is, so an
+ * attempt to open an Issue in a push:false project gets redirected into
+ * REPO_NAME instead of landing in the external repo.
+ */
 async function fileGitHubIssue(env, repoName, { title, body, labels }) {
+  const projectKey = REPO_TO_PROJECT_KEY[repoName];
+  if (projectKey) {
+    const target = resolveIssueTarget({ projectKey, ownRepoName: REPO_NAME, targetRepoName: repoName, title, body });
+    repoName = target.repoName;
+    title = target.title;
+    body = target.body;
+  }
+
   if (!env.GITHUB_TOKEN) return { created: false, reason: 'GITHUB_TOKEN not configured' };
 
   const url = `https://api.github.com/repos/${REPO_OWNER}/${repoName}/issues`;
@@ -399,18 +456,54 @@ async function fetchAssetBoard(env) {
   }
 }
 
+/** Only project the model-education program covers today (data-center-api's
+ * AI Search). Add per-case project routing here if it ever covers more than
+ * one target project. */
+const MODEL_EDUCATION_PROJECT = 'data-center';
+
 /**
- * Files a 'claude-action' + 'model-education' Issue for a case the model
- * (data-center-api / Claude) did not handle flawlessly. No-ops without
- * env.GITHUB_TOKEN — the underlying `reports` row (type='model_education')
- * stays queued either way for batch-filing.
+ * Batches today's model-education case studies (already generated by
+ * runDailyAiExperienceReports, each with its responsible agent's own
+ * root-cause writeup) into ONE report file under
+ * reports/model-education/<project>/<date>.md, then files AT MOST ONE
+ * 'claude-action' + 'model-education' Issue in REPO_NAME (office-AI-agents
+ * — never data-center directly, see fileGitHubIssue()'s permission-guard
+ * check) linking to that file. No-ops (returns null) if there were no case
+ * studies today — never files an empty digest.
  */
-async function fileModelEducationIssue(env, agent, entry, content) {
-  return fileGitHubIssue(env, REPO_NAME, {
-    title: `[Model Education] Case ${entry.caseId} — quality ${entry.quality.toFixed(2)}`,
-    body: `Filed by Agent ${agent.id} (${agent.name}) via the daily model-education program.\n\n${content}`,
+async function fileModelEducationDigest(env, caseStudies) {
+  if (!caseStudies.length) return null;
+
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const reportPath = `reports/model-education/${MODEL_EDUCATION_PROJECT}/${dateStr}.md`;
+  const plural = caseStudies.length === 1 ? '' : 's';
+
+  const fileContent = `# Model Education — ${MODEL_EDUCATION_PROJECT} — ${dateStr}\n\n`
+    + `${caseStudies.length} case${plural} fell below the model-education quality threshold today. `
+    + `Each write-up below is the responsible agent's own root-cause analysis (query, mode, ownership).\n\n`
+    + caseStudies.map((c) => `## Case \`${c.caseId}\` — Agent ${c.agentId} (${c.agentName}), quality ${c.quality.toFixed(2)}/1.0\n\n${c.writeup}`).join('\n\n');
+
+  const commit = await commitFileToRepo(
+    env, REPO_NAME, reportPath, fileContent,
+    `chore(model-education): ${dateStr} digest (${caseStudies.length} case${plural})`
+  );
+
+  const reportUrl = `https://github.com/${REPO_OWNER}/${REPO_NAME}/blob/master/${reportPath}`;
+  const issueBody = [
+    `${caseStudies.length} case${plural} flagged for model-education review today (quality below `
+      + `${dailyScheduleConfig.model_education_program.model_education_case_study.quality_threshold}). `
+      + `Full root-cause write-ups: [${reportPath}](${reportUrl}).`,
+    '',
+    ...caseStudies.map((c) => `- **${c.caseId}** (Agent ${c.agentId}, quality ${c.quality.toFixed(2)}/1.0) — ${c.writeup.split(/(?<=[.!?])\s/)[0]}`),
+  ].join('\n');
+
+  const issue = await fileGitHubIssue(env, REPO_NAME, {
+    title: `[Model Education] Daily digest — ${dateStr} (${caseStudies.length} case${plural})`,
+    body: issueBody,
     labels: ['claude-action', 'model-education'],
   });
+
+  return { reportPath, committed: commit.committed, issue };
 }
 
 /**
@@ -644,7 +737,7 @@ ${scheduleSection}`;
 
 /** Renders the tactical-schedule section (case batches, tool-task window, AI-experience reports, spare time, weekly summary). */
 function renderScheduleSection(scheduleInfo) {
-  const { schedule, batches, toolTask, aiExperience, spareTime, weeklySummary, versionBumps } = scheduleInfo;
+  const { schedule, batches, toolTask, aiExperience, spareTime, weeklySummary, versionBumps, choreRotation } = scheduleInfo;
 
   const batchLines = batches
     .map((b) => `- ${b.block.time || '—'} ${b.block.label}: ${b.cases.length} case(s)`)
@@ -656,10 +749,18 @@ function renderScheduleSection(scheduleInfo) {
       : `No new asset-task opened (${toolTask.reason || 'n/a'}).`
     : '_Not a tool-task day (Fri/Sat)._';
 
+  const choreRotationLine = choreRotation
+    ? `**${choreRotation.projectKey}**: ${choreRotation.reason}${choreRotation.routedModel ? ` (would route to ${choreRotation.routedModel})` : ''}`
+    : '_No chore-rotation block today._';
+
   const statusReportLines = (aiExperience?.statusReports || [])
     .map((r) => `- Agent ${r.agentId}: "${r.note}"`).join('\n') || '_None filed today._';
   const caseStudyLines = (aiExperience?.caseStudies || [])
-    .map((c) => `- Agent ${c.agentId}, case ${c.caseId} -> reports row \`${c.reportId}\`${c.issue?.created ? ' (GitHub Issue filed)' : ' (queued — no GITHUB_TOKEN)'}`).join('\n') || '_None — no interactions below the model-education quality threshold today._';
+    .map((c) => `- Agent ${c.agentId}, case ${c.caseId} (quality ${c.quality.toFixed(2)}/1.0) -> reports row \`${c.reportId}\``).join('\n') || '_None — no interactions below the model-education quality threshold today._';
+  const digestLine = aiExperience?.digest
+    ? `[\`${aiExperience.digest.reportPath}\`](https://github.com/${REPO_OWNER}/${REPO_NAME}/blob/master/${aiExperience.digest.reportPath})`
+      + `${aiExperience.digest.issue?.created ? ' — GitHub Issue filed' : ' — queued (no GITHUB_TOKEN, or Issue creation failed)'}`
+    : '_No model-education digest filed today (no cases below threshold)._';
 
   const spareTimeLines = spareTime
     .map((s) => s.mode === 'idle' ? `- Agent ${s.agentId}: idle (token-saving)` : `- Agent ${s.agentId}: chatted with agent ${s.partner}`)
@@ -693,6 +794,10 @@ ${batchLines}
 
 ${toolTaskLine}
 
+### Cross-Project Chore Rotation
+
+${choreRotationLine}
+
 ### Daily AI-Experience Reports
 
 ${statusReportLines}
@@ -700,6 +805,8 @@ ${statusReportLines}
 ### Model-Education Case Studies
 
 ${caseStudyLines}
+
+**Daily digest**: ${digestLine}
 
 ### Spare Time
 
@@ -950,13 +1057,32 @@ async function runDailyAiExperienceReports(env, agentInstances, lowQualityLog) {
   for (const entry of worst) {
     const agent = agentInstances.get(entry.agentId);
     if (!agent) continue;
-    const content = `Case ${entry.caseId} (quality ${entry.quality.toFixed(2)}/1.0): ${entry.caseSummary}. The AI Search response did not fully resolve this case — flagged for model-education review.`;
-    const reportId = await agent.fileModelEducationCaseStudy(content);
-    const issue = await fileModelEducationIssue(env, agent, entry, content);
-    caseStudies.push({ agentId: entry.agentId, caseId: entry.caseId, reportId, issue });
+
+    // Ownership: the responsible agent produces its own root-cause writeup
+    // (existing Groq/Gemini budget via queryGemini()) rather than just
+    // re-flagging the quality score — what likely failed, where the
+    // knowledge-base gap probably is, and a suggested direction.
+    let writeup;
+    try {
+      writeup = await agent.queryGemini(
+        `You handled case ${entry.caseId} today: ${entry.caseSummary}. The AI Search assistant's response scored `
+        + `${entry.quality.toFixed(2)}/1.0 and did not fully resolve it. Write a short root-cause case study (3-5 `
+        + `sentences, in character) covering: (1) what most likely caused the response to fall short, (2) where the `
+        + `underlying data-center knowledge-base gap probably is, (3) one concrete suggested direction to close it.`
+      );
+    } catch (err) {
+      writeup = `Case ${entry.caseId} (quality ${entry.quality.toFixed(2)}/1.0): ${entry.caseSummary}. The AI Search `
+        + `response did not fully resolve this case — flagged for model-education review. (Root-cause writeup `
+        + `unavailable: ${err.message})`;
+    }
+
+    const reportId = await agent.fileModelEducationCaseStudy(writeup);
+    caseStudies.push({ agentId: entry.agentId, agentName: agent.name, caseId: entry.caseId, quality: entry.quality, reportId, writeup });
   }
 
-  return { statusReports, caseStudies };
+  const digest = await fileModelEducationDigest(env, caseStudies);
+
+  return { statusReports, caseStudies, digest };
 }
 
 /**
@@ -1436,7 +1562,7 @@ export async function runScheduledBlock(env, israelTime, dayOfWeek) {
       batches: partitionCasesByShare(cases, schedule.blocks).map((b) => ({ ...b, done: false })),
       agentStats: {},
       lowQualityLog: [],
-      results: { toolTask: null, aiExperience: null, standup: null, spareTime: [], weeklySummary: null, versionBumps: [] },
+      results: { toolTask: null, aiExperience: null, standup: null, spareTime: [], weeklySummary: null, versionBumps: [], choreRotation: null },
     };
   }
 
@@ -1483,6 +1609,13 @@ export async function runScheduledBlock(env, israelTime, dayOfWeek) {
         const yearState = await getYearState(env);
         cycle.results.weeklySummary = await generateWeeklySummary(env, yearState, yearState.current_week || 1);
         cycle.results.versionBumps = await checkProductVersionBumps(env, yearState, cycle.day);
+      } else if (block.type === 'chore_rotation') {
+        // Cross-project chore rotation (Notebook-X/data-center/archive-alpha),
+        // see config/chore-schedule.json + workers/chore-runner.js. Reuses
+        // this existing cron tick — no wrangler.toml change. Wiring-only:
+        // resolves/logs model routing, never calls a model, per the
+        // 2026-07-08 session scope (TOKEN-BUDGET.md).
+        cycle.results.choreRotation = await runChoreRotationSlot(env, { label: `${israelTime} chore_rotation` });
       }
     } catch (err) {
       await logScheduledError(env, { israelTime, dayOfWeek, blockType: block.type, error: err });
@@ -1552,7 +1685,7 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
     });
   }
 
-  const { standup, toolTask, aiExperience, spareTime, weeklySummary, versionBumps } = cycle.results;
+  const { standup, toolTask, aiExperience, spareTime, weeklySummary, versionBumps, choreRotation } = cycle.results;
 
   const sidePlotStarted = await maybeStartSidePlots(env, { day: nextDay, summary, cases: cycle.cases, standup });
   const sidePlotUpdates = await advanceSidePlots(env, nextDay);
@@ -1598,7 +1731,7 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
     current_quarter: Math.ceil(nextDay / 91),
     stats: newStats,
   };
-  const scheduleInfo = { schedule, dayOfWeek, batches: cycle.batches, toolTask, aiExperience, spareTime, weeklySummary, versionBumps };
+  const scheduleInfo = { schedule, dayOfWeek, batches: cycle.batches, toolTask, aiExperience, spareTime, weeklySummary, versionBumps, choreRotation };
   const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo);
   const report = await commitFileToRepo(
     env, REPO_NAME, `reports/daily/day-${pad(nextDay, 3)}-summary.md`, markdown,

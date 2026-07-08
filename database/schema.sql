@@ -149,6 +149,25 @@ CREATE TABLE IF NOT EXISTS year_stats (
   recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Chore-automation Claude budget (config/token-economy.json chore_automation,
+-- workers/model-router.js) — a SEPARATE $4.50/month soft cap from the
+-- office-simulation's per-day case-escalation cap (interactions.model_source).
+CREATE TABLE IF NOT EXISTS claude_budget_usage (
+  month TEXT PRIMARY KEY,
+  spent_usd REAL DEFAULT 0,
+  call_count INTEGER DEFAULT 0,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- General agent-conduct rule: max 1 pull (external repo checkout/fetch) per
+-- day, repo-wide, regardless of config/project-permissions.json push state.
+-- See workers/permission-guard.js checkAndRecordPull().
+CREATE TABLE IF NOT EXISTS pull_log (
+  date TEXT PRIMARY KEY,
+  count INTEGER DEFAULT 0,
+  last_pulled_at TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_sessions_agent ON agent_sessions(agent_id);
 CREATE INDEX IF NOT EXISTS idx_cases_assigned ON cases(assigned_to);
 CREATE INDEX IF NOT EXISTS idx_interactions_session ON interactions(session_id);

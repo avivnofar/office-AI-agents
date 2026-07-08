@@ -1,0 +1,17 @@
+{
+  "_meta": {
+    "version": "1.0.0",
+    "MANUALLY_MAINTAINED": "This file is hand-edited, not auto-derived from TODO.md's prose each run. Permission state is security-relevant (it gates every GitHub API write call made on behalf of an agent — see workers/permission-guard.js) and must not depend on successfully parsing free text out of a document. When the person updates push permissions in 'TO DO LIST.docx' (General section), they must update THIS file to match as a separate, deliberate second step — running scripts/sync-todo.js does NOT touch this file.",
+    "push_semantics": "push:true means an agent may write directly into that project's own repo. push:false means an agent may only research/recommend/write-to-its-own-repo — any attempted external write is redirected into office-AI-agents (this repo, under agent-output/<project-key>/) instead of being pushed out, and the redirect is logged. Pull (read-only checkout/fetch) is always allowed regardless of push, but capped at 1/day repo-wide by the same guard module (config/project-permissions.json does not carry the pull cap — it's a fixed General rule, not per-project).",
+    "unknown_project_key_default": "deny (fail closed) — see workers/permission-guard.js canPushToProject()",
+    "office_agents_push_true_is_load_bearing": "office-agents: push:true is NOT a formality — as of the 2026-07-08 config-driven-self-write session, workers/agent-runner.js's REPO_TO_PROJECT_KEY maps office-AI-agents' own repo name to this 'office-agents' key too (the old hardcoded REPO_NAME exemption was removed), so commitFileToRepo()/fileGitHubIssue() now run every self-repo write through canPushToProject('office-agents') like any other project. If this is ever flipped to false, EVERY report-writing workflow (daily/weekly summaries, incident reports, model-education digests, side-plot resolutions, the Architect's suggestion files) gets silently redirected into agent-output/office-agents/... instead of its real path — the exact class of bug this project has spent the month finding. Change this value deliberately, never as a side effect of a broader edit.",
+    "code_write_policy": "code_write:false on office-agents means neither the 11-agent simulation nor the Architect (office Agent 10, and the separate agents/architect_agent.py Smart Archive research script) have any autonomous code-writing path today — both are research/recommendation/markdown-report-and-Issue output only (see workers/permission-guard.js checkCodeWriteAllowed(), which already blocks .js/.py/.ts/... writes repo-wide unless explicitCodeTask is set). This flag documents that as a standing fact, not a switch to flip: if a future session adds any code-writing capability for the Architect or any other agent, code_write must stay a per-change decision — do NOT flip this to true as a standing permission. Any future code-writing action requires (1) explicit human approval for that specific change, given at the time, not a durable flag, and (2) a generated documentation artifact explaining the change, produced at the time of the change. See POLICY.md.",
+    "last_manually_reviewed": "2026-07-08"
+  },
+
+  "notebook-x": { "push": true },
+  "office-agents": { "push": true, "code_write": false },
+  "data-center": { "push": false },
+  "archive-galil-elion": { "push": false },
+  "archive-alpha": { "push": false }
+}

@@ -3,21 +3,29 @@
  *
  * Run by .github/workflows/agent-cases.yml every Monday. Generates a
  * 200-300 case batch (2x in inspection mode) for the upcoming simulated
- * work week and writes it to agents/database/cases-<year>-w<week>.json.
+ * work week and writes it to database/cases-<year>-w<week>.json.
  *
  * Status: DRAFT (Phase 1 foundation).
+ *
+ * Path note (2026-07-08 fix): this repo was migrated out of
+ * data-center/agents/ on 2026-06-19 (see CLAUDE.md "What this repo is"),
+ * flattening agents/workers/ -> workers/, agents/config/ -> config/,
+ * agents/database/ -> database/. This script's imports/output path had
+ * been left pointing at the old agents/-prefixed layout ever since,
+ * crashing every scheduled run with ERR_MODULE_NOT_FOUND — see
+ * TOKEN-BUDGET.md's 2026-07-08 sessions for the diagnosis and this fix.
  */
 
 import { writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { generateCaseBatch } from '../../agents/workers/case-generator.js';
+import { generateCaseBatch } from '../../workers/case-generator.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..', '..');
 const require = createRequire(import.meta.url);
-const simulationConfig = require('../../agents/config/simulation-config.json');
+const simulationConfig = require('../../config/simulation-config.json');
 
 function isoWeekNumber(date) {
   const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
@@ -43,7 +51,7 @@ const count = inspection ? baseCount * 2 : baseCount;
 
 const cases = generateCaseBatch(count, { weekNumber: week, year });
 
-const outDir = path.join(repoRoot, 'agents', 'database');
+const outDir = path.join(repoRoot, 'database');
 const outPath = path.join(outDir, `cases-${year}-w${pad(week, 2)}.json`);
 
 await mkdir(outDir, { recursive: true });

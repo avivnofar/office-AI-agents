@@ -27,6 +27,6 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add agents/database/cases-*.json
+          git add database/cases-*.json
           git diff --cached --quiet || git commit -m "chore(agents): generate weekly case batch [skip ci]"
           git push

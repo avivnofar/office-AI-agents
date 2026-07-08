@@ -46,5 +46,24 @@
     "daily_limit": 10000,
     "resets_utc": "00:00",
     "use_when": "groq_unavailable_or_gemini_429"
+  },
+
+  "chore_automation": {
+    "_meta": {
+      "added": "2026-07-08",
+      "description": "SEPARATE budget/routing from the office-simulation economy above (primary_case_model/claude_daily_cap etc., which governs the 11-agent case simulation and is untouched by this block). This governs the TODO.md-driven chore/content-generation automation (see config/daily-schedule.json's 00:00-06:00 night sweep and the Notebook-X/data-center/archive-alpha rotation) — see workers/model-router.js for the selection logic that reads this config.",
+      "relationship_to_case_sim_cap": "Independent budgets. The 30-calls/day case-simulation cap and this $4.50/month chore-automation cap are tracked separately (different D1 tables: interactions.model_source counts vs. claude_budget_usage) and do not share or offset each other."
+    },
+    "claude_budget_usd_per_month": 4.50,
+    "claude_scope": "code-writing tasks and approval/review decisions only, by default. Notebook-X overrides this scope — see notebook_x_override below.",
+    "claude_pricing_note": "Estimated at current Sonnet 5 intro pricing: $2/M input tokens, $10/M output tokens (workers/model-router.js CLAUDE_PRICING). This changes to $3/M input / $15/M output after 2026-08-31 — model-router.js already branches on that date, but double check the real published price at that time before trusting the estimate.",
+    "gemini_role": "expanded — default writer for routine content generation across chore-automation tasks (previously reserved for report synthesis only in the office-simulation economy above).",
+    "groq_role": "routine/easy sub-tasks only (simple formatting, short lookups, classification) — not full content generation.",
+    "notebook_x_override": {
+      "applies_to": "notebook-x project only — other projects (data-center, archive-alpha) use the general chore_automation economy above, unchanged.",
+      "default_writer": "gemini",
+      "claude_when": "task complexity/quality genuinely demands it. Still drawn from the SAME $4.50/mo claude_budget_usd_per_month cap above — this override does not add a second budget.",
+      "groq_scope": "clearly 'easy' sub-tasks only within Notebook-X work (e.g. simple formatting, short lookups) — never content generation itself."
+    }
   }
 }

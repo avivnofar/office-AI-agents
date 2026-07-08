@@ -1,0 +1,52 @@
+{
+  "_meta": {
+    "version": "1.0.0",
+    "added": "2026-07-08",
+    "status": "wired, not live — see workers/chore-runner.js and TOKEN-BUDGET.md's 2026-07-08 session entry",
+    "description": "00:00-17:00 Israel-time daily window for the TODO.md-driven cross-project chore automation (Notebook-X / data-center / archive-alpha). Layered ALONGSIDE (not replacing) the existing 11-agent office-simulation schedule in daily-schedule.json — the 06:00-08:00 and 08:00-16:30 windows below describe/reuse the EXISTING case-simulation cron (wrangler.toml's `*/30 5-13 * * *` = 08:00-16:30 IDT), they don't add a second Cloudflare Cron Trigger. The 00:00-06:00 night sweep is NOT wired to any live trigger this session (would require a new wrangler.toml cron or GitHub Actions job, explicitly out of scope for 2026-07-08's wiring-only session) — see night_sweep_status below.",
+    "night_sweep_status": "config/chore-runner.js's runChoreRotationSlot() and the routing logic it depends on (model-router.js) are fully wired and verified in isolation (scripts/verify-chore-rotation.js), but nothing currently CALLS runChoreRotationSlot() during 00:00-06:00 IL — the existing scheduled-claude.yml 'night-office' GitHub Actions job (cron 30 23 * * 0-4 UTC = 02:30 IL, inside this window) is the natural home for it, but wasn't extended to call it this session to avoid standing up new live automated behavior without explicit sign-off. Next-session action item."
+  },
+
+  "windows": [
+    {
+      "start": "00:00",
+      "end": "06:00",
+      "label": "Night sweep",
+      "pacing": "gemini",
+      "handler": "night_sweep",
+      "wired_to_live_trigger": false
+    },
+    {
+      "start": "06:00",
+      "end": "08:00",
+      "label": "Existing case simulation buffer (Groq, untouched — see daily-schedule.json / wrangler.toml cron, not modified by this file)",
+      "pacing": "groq",
+      "handler": "existing_case_sim_untouched",
+      "wired_to_live_trigger": true,
+      "note": "wrangler.toml's cron actually starts at 08:00 IDT, not 06:00 — this window is reserved/documented as specified but the existing cron does not currently fire inside it. Flagged, not silently 'fixed', since wrangler.toml is explicitly out of scope this session."
+    },
+    {
+      "start": "08:00",
+      "end": "16:30",
+      "label": "Existing Worker cron window, extended with a Gemini-routed chore_rotation block",
+      "pacing": "gemini",
+      "handler": "cron_extended_chores",
+      "wired_to_live_trigger": true,
+      "note": "See config/daily-schedule.json full_day_schedule's new 12:30 chore_rotation block and workers/agent-runner.js runScheduledBlock()'s chore_rotation case, which calls workers/chore-runner.js runChoreRotationSlot(). This DOES fire on the existing cron (no wrangler.toml change needed) but only ever resolves routing and logs — never calls a model, per the wiring-only scope."
+    },
+    {
+      "start": "16:30",
+      "end": "17:00",
+      "label": "Wind-down",
+      "pacing": "none",
+      "handler": "wind_down",
+      "wired_to_live_trigger": false
+    }
+  ],
+
+  "project_rotation": {
+    "description": "Cross-project chore rotation for the night_sweep and cron_extended_chores handlers. Cycles nightly through the projects below by day-of-year modulo (workers/chore-runner.js getRotatedProject()). Only notebook-x has real TODO.md content today; data-center/archive-alpha slots no-op gracefully ('no tasks configured for this project yet') until their TODO.md sections are populated.",
+    "projects": ["notebook-x", "data-center", "archive-alpha"],
+    "cycle": "day_of_year % projects.length"
+  }
+}

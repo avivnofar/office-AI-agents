@@ -6,7 +6,34 @@ from datetime import datetime
 GEMINI_KEY = os.environ["GEMINI_API_KEY"]
 RESEND_KEY = os.environ["RESEND_API_KEY"]
 ARCHIVE_PATH = "archive"
+OUTPUT_FOLDER = "reports/architect-suggestions"
 FROM_ADDRESS = "Smart Archive <onboarding@resend.dev>"
+PERMISSIONS_PATH = "config/project-permissions.json"
+
+
+def assert_no_push_to_archive():
+    """Defense-in-depth check, not the only enforcement: this script no
+    longer attempts to write into local-archive-galil-elion at all (see
+    write_suggestion_file below), but if config/project-permissions.json
+    is ever manually flipped to push:true for archive-galil-elion without
+    this script being revisited, that's worth a loud log line rather than
+    a silent behavior change."""
+    try:
+        with open(PERMISSIONS_PATH, encoding="utf-8") as f:
+            perms = json.load(f)
+        push_enabled = perms.get("archive-galil-elion", {}).get("push", False)
+        if push_enabled:
+            print("[architect_agent] WARNING: config/project-permissions.json now has "
+                  "push:true for archive-galil-elion, but this script still writes "
+                  "suggestions into office-AI-agents only (reports/architect-suggestions/). "
+                  "Revisit this script if direct-to-archive writes are wanted again.")
+        else:
+            print("[architect_agent] archive-galil-elion push:false confirmed — "
+                  "writing suggestion into office-AI-agents (this repo) instead.")
+    except FileNotFoundError:
+        print(f"[architect_agent] WARNING: {PERMISSIONS_PATH} not found — proceeding with "
+              "the office-AI-agents-only write behavior regardless.")
+
 
 def read_todo():
     path = f"{ARCHIVE_PATH}/GALIL_ELION_TODO.md"
@@ -58,7 +85,14 @@ Return ONLY valid JSON, no markdown fences:
 
 def write_suggestion_file(result):
     date_str = datetime.now().strftime("%Y-%m-%d")
-    folder = f"{ARCHIVE_PATH}/docs/architect-suggestions"
+    # Written into office-AI-agents (this checkout), NOT into
+    # local-archive-galil-elion — see assert_no_push_to_archive() and the
+    # "Stop Architect Agent auto-pushing" project decision (2026-07-08).
+    # Push is disabled for archive-galil-elion in
+    # config/project-permissions.json, so this is treated as an
+    # office-repo report, staged here for the owner's manual review/push
+    # into the archive repo if they want it there.
+    folder = OUTPUT_FOLDER
     os.makedirs(folder, exist_ok=True)
     filepath = f"{folder}/{date_str}.md"
 
@@ -78,9 +112,12 @@ def send_approval_email(result):
       <p><strong>משימה:</strong> {result['task_name']}</p>
       <p>{result['executive_summary']}</p>
       <p style="font-size:13px;color:#666;">
-        הפרומפט המלא נשמר בקובץ ב-docs/architect-suggestions/ בריפו של הארכיון.
-        אין צורך באישור אוטומטי בשלב זה - זהו סיכום מחקר בלבד. אם תרצה
-        להריץ את המשימה, פתח את הקובץ והדבק את הפרומפט ב-Claude Code בעצמך.
+        הפרומפט המלא נשמר בקובץ ב-reports/architect-suggestions/ בריפו
+        office-AI-agents (לא בריפו של הארכיון - ה-Architect כבר לא דוחף
+        (push) שינויים לארכיון ישירות, ההצעה ממתינה לבדיקה ולהעברה ידנית
+        שלך אם תרצה). אין צורך באישור אוטומטי בשלב זה - זהו סיכום מחקר
+        בלבד. אם תרצה להריץ את המשימה, פתח את הקובץ והדבק את הפרומפט
+        ב-Claude Code בעצמך.
       </p>
       <p style="font-size:12px;color:#888;margin-top:16px;">
         לא נדרשת פעולה. הצעה זו תישאר זמינה ותתעדכן שוב מחר.
@@ -102,6 +139,7 @@ def send_approval_email(result):
     res.raise_for_status()
 
 def main():
+    assert_no_push_to_archive()
     todo = read_todo()
     log = read_recent_log()
     result = pick_task_and_research(todo, log)

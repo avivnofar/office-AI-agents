@@ -27,6 +27,7 @@
       { "time": "09:30", "type": "case_batch", "label": "Mid-morning batch", "case_share": 0.20 },
       { "time": "11:00", "type": "case_batch", "label": "Late-morning batch", "case_share": 0.20 },
       { "time": "11:30", "type": "tool_task_window", "label": "Asset/tool-task window (Sun-Thu only, see ai-tools.json)", "ref": "ai-tools.json scheduling_rules" },
+      { "time": "12:30", "type": "chore_rotation", "label": "Cross-project chore rotation (Notebook-X/data-center/archive-alpha, Gemini-routed, wiring-only)", "ref": "chore-schedule.json" },
       { "time": "13:00", "type": "case_batch", "label": "Early-afternoon batch", "case_share": 0.20 },
       { "time": "14:30", "type": "case_batch", "label": "Late-afternoon batch", "case_share": 0.10 },
       { "time": "15:30", "type": "report", "label": "Daily AI-experience reports + model-education case studies", "ref": "model_education_program" },
