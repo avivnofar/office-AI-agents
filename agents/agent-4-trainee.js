@@ -31,7 +31,7 @@ export class TraineeAgent extends AgentBase {
     let result = null;
     if (Math.random() < (this.config.model_usage_rate ?? 0.55)) {
       const questions = await this.formulateQuestions(caseData);
-      result = await this.interactWithApp(questions, 'diagnose');
+      result = await this.interactWithApp(questions, 'diagnose', { platform: caseData.platform });
     }
 
     await this.updatePanic(guide, result);

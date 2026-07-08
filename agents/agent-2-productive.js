@@ -33,7 +33,7 @@ export class ProductiveAgent extends AgentBase {
     let result = null;
     if (Math.random() < (this.config.model_usage_rate ?? 0.40)) {
       const query = await this.formulateQuery(caseData);
-      result = await this.interactWithApp(query, 'search');
+      result = await this.interactWithApp(query, 'search', { platform: caseData.platform });
 
       if (result.quality < 0.4 && Math.random() < (this.config.irritation_stack?.bad_answer_chance ?? 0.45)) {
         await this.addIrritiation();

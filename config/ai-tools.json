@@ -1,9 +1,38 @@
 {
   "_meta": {
-    "version": "0.1.0",
+    "version": "0.2.0",
     "status": "specified",
-    "description": "Tool-access matrix and scheduling rules for the AI-agent office's external creative-tool usage (NotebookLM, Stitch, Base44, Google AI Studio). None of these tools have an unattended API — agents DECIDE and QUEUE tool-tasks (asset-pipeline board entry + asset-task issue spec), a human executes the work in the real tool, and the returned asset comes back into the repo for agent testing/optimization. This config is read by agent-runner.js's tool_task_window block (see daily-schedule.json) to decide, each Sun-Thu sim day, which agent (if any) may open a new tool-task.",
-    "human_in_the_loop": "Agents never call these tools programmatically. 'Opening a tool-task' means: append a row to agents/reports/asset-pipeline/board.json (status: queued) and write an asset-task spec file under agents/reports/asset-pipeline/issues/. A human picks it up, does the work in the real tool, and updates the board row to 'returned' with a path/link to the asset. Agents then move it through tested -> optimized -> implemented."
+    "description": "Tool-access matrix and scheduling rules for the AI-agent office's external tool usage. notebooklm/stitch/base44/google_ai_studio are creative tools with NO unattended API — agents DECIDE and QUEUE tool-tasks (asset-pipeline board entry + asset-task issue spec), a human executes the work in the real tool, and the returned asset comes back into the repo for agent testing/optimization. This config is read by agent-runner.js's tool_task_window block (see daily-schedule.json) to decide, each Sun-Thu sim day, which agent (if any) may open a new tool-task. notebook_x (added 2026-07-01) is the one exception — it DOES have a live, unauthenticated REST API and IS called programmatically per-case, not via the tool-task queue. See its own entry below.",
+    "human_in_the_loop": "Agents never call notebooklm/stitch/base44/google_ai_studio programmatically. 'Opening a tool-task' means: append a row to agents/reports/asset-pipeline/board.json (status: queued) and write an asset-task spec file under agents/reports/asset-pipeline/issues/. A human picks it up, does the work in the real tool, and updates the board row to 'returned' with a path/link to the asset. Agents then move it through tested -> optimized -> implemented."
+  },
+
+  "notebook_x": {
+    "display_name": "Notebook-X",
+    "kind": "unattended_api",
+    "description": "Live, per-case reference lookup queried directly by the assigned agent (workers/notebookx-client.js) before deciding whether to escalate a case to Claude — the goal is fewer Claude escalations for cases Notebook-X already answers well. Unlike the four tools below, this is NOT a human-in-the-loop tool-task: no board row, no asset-task issue, no weekly_rotation slot.",
+    "base_url": "https://notebook-x-api.onrender.com",
+    "auth": "none — confirmed via GET /openapi.json: no securitySchemes defined on any endpoint. No NOTEBOOK_X_API_KEY secret needed.",
+    "endpoint_used": "POST /api/knowledge-notebooks/{notebook_id}/ask",
+    "scope_this_integration": "Only cases whose platform has a seeded notebook are wired: platform 'linux' -> kb-linux, platform '1com' -> kb-1com. kb-bash covers the same cases as kb-linux (same seeded content) so it is not queried separately this session — querying kb-linux once per linux case is treated as covering kb-bash too, to avoid a duplicate API call with no added signal. Other case platforms (windows, network, cross-platform, mirtapbx) are out of scope — not seeded yet.",
+    "case_platform_map": {
+      "linux": "kb-linux",
+      "1com": "kb-1com"
+    },
+    "kb_slugs": {
+      "kb-linux": "fully seeded per project spec",
+      "kb-bash": "fully seeded per project spec — mirrors kb-linux's trigger, not queried separately (see scope_this_integration)",
+      "kb-1com": "fully seeded per project spec"
+    },
+    "known_issues": [
+      "2026-07-01 verification call: GET /api/knowledge-notebooks and GET /api/notebooks both returned {\"notebooks\":[]}, and GET /api/health reported {\"status\":\"degraded\",\"notebookCount\":0,\"githubConnected\":false}. Asking kb-linux directly returned {\"detail\":\"GitHub GET notebooks/kb-linux.json: HTTP 401\"}. So as of that check, none of kb-linux/kb-bash/kb-1com were actually reachable despite being 'fully seeded per spec' — Notebook-X's own GitHub-backed storage connection needs to be restored on its side before this integration can return real answers. The client/wiring degrade gracefully (return null, fall through to normal Claude-cap logic) when this happens — see workers/notebookx-client.js."
+    ],
+    "access_by_clearance": {
+      "standard": true,
+      "specialist": true,
+      "sudo": true,
+      "root": true,
+      "note": "No gating beyond normal case assignment — any agent handling a linux/1com case may query it, matching this repo's existing pattern of not restricting read-only reference lookups by clearance."
+    }
   },
 
   "tools": {

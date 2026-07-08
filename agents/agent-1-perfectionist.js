@@ -31,7 +31,7 @@ export class PerfectionistAgent extends AgentBase {
     if (this.shouldUseApp(caseData)) {
       const mode = caseData.difficulty === 'advanced' ? 'diagnose' : 'search';
       const query = await this.formulateQuery(caseData);
-      result = await this.interactWithApp(query, mode);
+      result = await this.interactWithApp(query, mode, { platform: caseData.platform });
 
       if (this.irritation > 0) {
         await this.demandCorrection(caseData, result);
@@ -90,6 +90,6 @@ export class PerfectionistAgent extends AgentBase {
       `Given the case "${caseData.title}" (${caseData.category}), what's one related topic you'd want to explore next? Reply with a short search query only.`
     );
     if (!followUp) return null;
-    return this.interactWithApp(followUp, 'search');
+    return this.interactWithApp(followUp, 'search', { platform: caseData.platform });
   }
 }

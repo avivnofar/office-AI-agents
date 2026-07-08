@@ -21,7 +21,7 @@ export class StandardAgent extends AgentBase {
 
     if (Math.random() < usageRate) {
       const query = await this.formulateQuery(caseData);
-      result = await this.interactWithApp(query, 'search');
+      result = await this.interactWithApp(query, 'search', { platform: caseData.platform });
 
       if (!result.ok) {
         // Critical error detected -> 100% irritation trigger.

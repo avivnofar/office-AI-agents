@@ -13,7 +13,9 @@
 
 import { callGemini, callCloudflareFallback } from '../workers/gemini-client.js';
 import { callGroq } from '../workers/groq-client.js';
+import { queryNotebookX } from '../workers/notebookx-client.js';
 import tokenEconomy from '../config/token-economy.json';
+import aiToolsConfig from '../config/ai-tools.json';
 
 const MOOD_MIN = 0;
 const MOOD_MAX = 100;
@@ -349,8 +351,35 @@ export class AgentBase {
    * based on a (placeholder) quality score.
    * @param {string} query
    * @param {'search'|'diagnose'} [mode]
+   * @param {object} [opts]
+   * @param {string} [opts.platform] - caseData.platform, used to check
+   *   Notebook-X (config/ai-tools.json notebook_x.case_platform_map) for
+   *   relevant reference material BEFORE escalating to Claude. A found
+   *   answer short-circuits this call entirely — no Claude cap consumed.
    */
-  async interactWithApp(query, mode = 'search') {
+  async interactWithApp(query, mode = 'search', opts = {}) {
+    const kbSlug = aiToolsConfig.notebook_x?.case_platform_map?.[opts.platform];
+    if (kbSlug) {
+      const nbResult = await queryNotebookX({ kbSlug, question: query });
+      if (nbResult) {
+        const moodBefore = this.mood;
+        const quality = Math.min(1, nbResult.text.length / 600);
+        if (this.session) this.session.cases_handled += 1;
+        await this.logInteraction({
+          type: `app_${mode}`,
+          query,
+          response_summary: nbResult.text.slice(0, 500),
+          mood_before: moodBefore,
+          mood_after: this.mood,
+          irritation_change: 0,
+          state_change: null,
+          model_source: null,
+          tool_used: 'notebook-x',
+        });
+        return { ok: true, quality, response: nbResult.text, tool_used: 'notebook-x' };
+      }
+    }
+
     // Hard daily cap on Claude API calls, distributed fairly across agents
     // (config/token-economy.json claude_daily_cap: 30, claude_cap_rationale).
     // Two checks, either of which routes this case to Groq instead (free) so
@@ -482,14 +511,14 @@ export class AgentBase {
     return Math.min(1, responseText.length / 800);
   }
 
-  async logInteraction({ type, query, response_summary, mood_before, mood_after, irritation_change, state_change, model_source }) {
+  async logInteraction({ type, query, response_summary, mood_before, mood_after, irritation_change, state_change, model_source, tool_used }) {
     if (!this.env.DB || !this.session) return null;
 
     const id = crypto.randomUUID();
     await this.env.DB.prepare(
       `INSERT INTO interactions
-         (id, session_id, agent_id, timestamp, type, query, response_summary, mood_before, mood_after, irritation_change, state_change, model_source)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         (id, session_id, agent_id, timestamp, type, query, response_summary, mood_before, mood_after, irritation_change, state_change, model_source, tool_used)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       id,
       this.session.id,
@@ -502,7 +531,8 @@ export class AgentBase {
       mood_after ?? this.mood,
       irritation_change || 0,
       state_change || null,
-      model_source || this.lastModelSource || null
+      model_source || this.lastModelSource || null,
+      tool_used || null
     ).run();
 
     return id;

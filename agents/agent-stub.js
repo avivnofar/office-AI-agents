@@ -21,7 +21,7 @@ export class StubAgent extends AgentBase {
     let result = null;
     if (Math.random() < (this.config.model_usage_rate ?? STUB_DEFAULT_USAGE_RATE)) {
       const query = `${caseData.title}. ${caseData.description}`;
-      result = await this.interactWithApp(query, 'search');
+      result = await this.interactWithApp(query, 'search', { platform: caseData.platform });
     }
 
     await this.endSession();

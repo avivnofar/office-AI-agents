@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS interactions (
   irritation_change INTEGER DEFAULT 0,
   state_change TEXT,
   model_source TEXT,
+  tool_used TEXT,
   FOREIGN KEY (session_id) REFERENCES agent_sessions(id)
 );
 
