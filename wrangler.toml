@@ -55,4 +55,12 @@ binding = "AI"
 # IST (UTC+2, late Oct) or back to IDT (late Mar), update BOTH this cron
 # window and ISRAEL_UTC_OFFSET_HOURS in agent-runner.js — see CLAUDE.md.
 [triggers]
-crons = ["*/30 5-13 * * *"]
+# PAUSED 2026-07-08 — every GitHub Actions workflow across all 4 project
+# repos has been disabled_manually all month (gh workflow disable never
+# touches this Worker-native Cloudflare Cron Trigger, which is why this
+# kept firing unpaused the whole time despite that). To restore: delete
+# the "crons = []" line below, uncomment the original line right above
+# it, and run `npx wrangler triggers deploy` (no code changes needed —
+# see TOKEN-BUDGET.md's 2026-07-08 session entry).
+# crons = ["*/30 5-13 * * *"]
+crons = []
