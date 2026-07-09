@@ -5,3 +5,18 @@
 - Outcome: blocked-no-repo-token
 - General-work findings: kb-linux: dataQuality=complete, sections=10, commands=15, issues=10, glossary=12, updatedAt=2026-06-30T19:27:35.899718Z (9d ago); kb-bash: dataQuality=complete, sections=10, commands=10, issues=10, glossary=10, updatedAt=2026-06-30T19:27:33.975448Z (9d ago); kb-1com: dataQuality=complete, sections=9, commands=5, issues=10, glossary=15, updatedAt=2026-06-30T19:27:31.795360Z (9d ago)
 - Gemini calls: 19, Claude calls: 0, Groq calls: 0
+
+### Follow-up (same day, manual completion)
+
+The automated run above correctly stopped at the missing `NOTEBOOK_X_REPO_TOKEN`
+secret rather than failing silently. With explicit owner authorization, the
+push (`kb-voip-sip-content.json` to `avivnofar/Notebook-X` repo root) and
+`POST /api/admin/ingest-content-files` were completed manually using a
+personal `gh` token — not yet a standing automated capability. Verified
+independently via a direct GitHub API read (not just Notebook-X's own
+response): `kb-voip-sip.json` now has real content in all 8 sections,
+`dataQuality` changed `skeleton` -> `complete`, commit `137d0efe` landed,
+and `_index-public.json` reflects the update. Item marked `done` in
+`config/notebook-x-progress.json`.
+
+**Final outcome: done (with manual bridge for the cross-repo push step).**

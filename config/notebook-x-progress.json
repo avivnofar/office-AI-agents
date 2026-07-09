@@ -22,9 +22,11 @@
       "id": "kb-voip-sip-content-fill",
       "label": "Fill kb-voip-sip's 8 skeleton sections (VoIP Fundamentals, SIP Protocol, RTP & Media, NAT Traversal, Codecs, SIP Trunking, DTMF, Call Quality Troubleshooting) with real content, plus commands/glossary/commonIssues",
       "source": "TODO.md Notebook-X bullet 3 (sip/voip)",
-      "status": "pending",
+      "status": "done",
       "kind": "existing_notebook_fill",
-      "target_notebook_name": "kb-voip-sip"
+      "target_notebook_name": "kb-voip-sip",
+      "completed": "2026-07-09",
+      "completion_note": "notebook-x-daily.yml (run 29048206355) generated all 8 sections + commands/issues/glossary/summary via 19 real Gemini (gemini-3.1-flash-lite) calls and staged them locally; correctly stopped there since no NOTEBOOK_X_REPO_TOKEN secret exists yet for the cross-repo push. The push + POST /api/admin/ingest-content-files were completed manually (owner-authorized bridge for this session, not a standing capability) using a personal gh token. Verified independently via a direct GitHub API read of notebooks/kb-voip-sip.json (not just Notebook-X's own response): all 8 sections have real content (2800-3200 chars each), dataQuality changed skeleton -> complete, commit 137d0efe landed in avivnofar/Notebook-X, and _index-public.json reflects the update. This item is NOT yet fully automatable end-to-end without that secret — see TOKEN-BUDGET.md."
     },
     {
       "id": "kb-mirtapbx-content-fill",
