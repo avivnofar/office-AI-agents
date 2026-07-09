@@ -1,0 +1,41 @@
+name: TEMP - Gemini model string diagnostic (one-off, delete after use)
+
+# Diagnostic-only workflow, not meant to linger. Tests two Gemini model
+# strings against the real secrets.GEMINI_API_KEY in one pass, to settle
+# whether gemini-2.5-flash-lite is actually deprecated (as Notebook-X's
+# backend reported) and whether gemini-2.5-flash is a valid replacement.
+# Deleted immediately after this run — see TOKEN-BUDGET.md for the result.
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  test-models:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Test gemini-2.5-flash-lite
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent" \
+            -H "Content-Type: application/json" \
+            -H "x-goog-api-key: ${GEMINI_API_KEY}" \
+            -d '{"contents":[{"role":"user","parts":[{"text":"Reply with exactly one word: OK"}]}],"generationConfig":{"maxOutputTokens":10}}')
+          echo "=== gemini-2.5-flash-lite result ==="
+          echo "$RESPONSE"
+
+      - name: Test gemini-2.5-flash
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent" \
+            -H "Content-Type: application/json" \
+            -H "x-goog-api-key: ${GEMINI_API_KEY}" \
+            -d '{"contents":[{"role":"user","parts":[{"text":"Reply with exactly one word: OK"}]}],"generationConfig":{"maxOutputTokens":10}}')
+          echo "=== gemini-2.5-flash result ==="
+          echo "$RESPONSE"
