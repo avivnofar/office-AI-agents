@@ -64,3 +64,60 @@ export async function queryNotebookX({ kbSlug, question }) {
   const text = (data?.answer || data?.response || data?.text || '').trim();
   return text ? { text, source: 'notebook-x' } : null;
 }
+
+/**
+ * GET /api/knowledge-notebooks — the curated GitHub-backed listing (real
+ * signal; see the module comment on why GET /api/health is NOT). Used by
+ * the daily automation's content-health pass. Returns [] on any failure
+ * rather than throwing — this is a read-only check, never fatal to a
+ * caller.
+ */
+export async function listKnowledgeNotebooks() {
+  try {
+    const res = await fetch(`${NOTEBOOKX_API_BASE}/api/knowledge-notebooks`);
+    if (!res.ok) return [];
+    const data = await res.json().catch(() => null);
+    return Array.isArray(data?.notebooks) ? data.notebooks : [];
+  } catch (err) {
+    console.warn(`[notebook-x] listKnowledgeNotebooks failed: ${err.message}`);
+    return [];
+  }
+}
+
+/**
+ * POST /api/admin/ingest-content-files — scans Notebook-X's own Render
+ * filesystem for `{notebook-id}-content.json` fragments (repo root or
+ * notebooks/) and merges each into its matching existing knowledge
+ * notebook via normalize_notebook() (GitHub read -> merge -> GitHub
+ * write -> public-index update). Requires the fragment file to already
+ * be present on Notebook-X's deployed filesystem — i.e. pushed to
+ * avivnofar/Notebook-X's repo root *and* Render redeployed — before
+ * calling this; see notebook-x-daily.mjs for the full sequence.
+ */
+export async function triggerIngestContentFiles() {
+  try {
+    const res = await fetch(`${NOTEBOOKX_API_BASE}/api/admin/ingest-content-files`, { method: 'POST' });
+    const data = await res.json().catch(() => null);
+    if (!res.ok) {
+      return { ok: false, status: res.status, error: data || (await res.text().catch(() => '')) };
+    }
+    return { ok: true, ...data };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+/**
+ * GET /api/health — kept for logging only. Per the module comment above,
+ * `githubConnected`/`notebookCount` here are unreliable (look like local
+ * Render-disk state, which resets on redeploy) — do not gate any decision
+ * on this response, it's diagnostic context only.
+ */
+export async function getNotebookXHealth() {
+  try {
+    const res = await fetch(`${NOTEBOOKX_API_BASE}/api/health`);
+    return await res.json().catch(() => null);
+  } catch (err) {
+    return { error: err.message };
+  }
+}

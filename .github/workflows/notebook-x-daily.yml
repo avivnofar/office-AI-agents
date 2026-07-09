@@ -1,0 +1,48 @@
+name: Notebook-X Daily Automation
+
+# Daily 00:00-17:00 IL window slot for this automation (see
+# config/chore-schedule.json). Picked 14:00 UTC (17:00 IDT) — the last
+# hour of the window, after the 06:00-08:00 UTC case-simulation block and
+# clear of the 08:00-16:30 UTC office-simulation cron entirely. Commented
+# out until the person is satisfied with manual test runs — enabling is a
+# one-line uncomment.
+# schedule:
+#   - cron: '0 14 * * *'
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  notebook-x-daily:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run Notebook-X daily automation
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NOTEBOOK_X_REPO_TOKEN: ${{ secrets.NOTEBOOK_X_REPO_TOKEN }}
+        run: node .github/scripts/notebook-x-daily.mjs
+
+      - name: Commit staged content + progress + daily log
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add reports/notebook-x/ config/notebook-x-progress.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "notebook-x-daily: automated run $(date -u +%Y-%m-%d)"
+            git pull --rebase origin master
+            git push origin master
+          fi

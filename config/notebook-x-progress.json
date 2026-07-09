@@ -1,0 +1,78 @@
+{
+  "_meta": {
+    "version": "1.1.0",
+    "added": "2026-07-09",
+    "description": "Manually maintained completed/pending list mirroring TODO.md's Notebook-X section, one item per day picked in list order by .github/scripts/notebook-x-daily.mjs. MANUALLY_MAINTAINED, same reasoning as config/project-permissions.json: this is state that should persist and be manually correctable, not re-derived from TODO.md's prose each run. If TODO.md's Notebook-X section is edited, update this file as a separate, deliberate step.",
+    "completion_rule": "An item is marked done only after the automation confirms a real write landed (re-reads the notebook back from GitHub after the ingest step, not just trusting a 200 response). A failed, blocked, or skipped attempt leaves the item pending for the next run.",
+    "scoping_note_2026-07-09": "Live-checked config/ai-tools.json / GET /api/knowledge-notebooks before writing this list: kb-linux, kb-bash, kb-1com are dataQuality:'complete'; kb-voip-sip, kb-mirtapbx, kb-cloud-devops, kb-cybersecurity, kb-firewall, kb-networking, kb-vpn already exist as dataQuality:'skeleton'. Items below are split finer than TODO.md's single prose bullet so each is a completable one-day unit.",
+    "revision_note_2026-07-09b": "Cloned avivnofar/Notebook-X read-write this session (to fix the retired-Gemini-model bug) and read notebook_backend.py directly. Two corrections to the plan above, made BEFORE running anything: (1) 'remote-access-tools-notebook' (a brand-new custom notebook) is NOT buildable via Notebook-X's real API — its knowledge-notebook system is a fixed catalog of 12 predefined NOTEBOOK_DEFINITIONS in notebook_backend.py; there is no endpoint to add a 13th custom topic. Marked 'blocked_infeasible' below, not 'pending'. (2) The real, schema-safe write mechanism for existing skeletons IS available: push a `{notebook-id}-content.json` knowledgeBase-fragment file to the Notebook-X repo root (same shape as the existing kb-linux-content.json/kb-1com-content.json/kb-bash-content.json already in that repo), wait for Render's auto-redeploy, then call POST /api/admin/ingest-content-files (normalize_notebook() merges it into the existing GitHub skeleton and updates the public index) — confirmed by reading ingest_content_files()/normalize_notebook() directly, not guessed. This unblocks the two 'existing_notebook_fill' items below now that Notebook-X's Gemini model is fixed. Split the old combined 'voip-sip-pbx-content-fill' item into one item per notebook so each day's unit of work is a single notebook."
+  },
+
+  "items": [
+    {
+      "id": "remote-access-tools-notebook",
+      "label": "New notebook: MicroSIP, PortSIP, FortiGate/Checkpoint remote connections, TeamViewer/RustDesk/AnyDesk, Network Watcher",
+      "source": "TODO.md Notebook-X bullet 3 (the sub-topics not already covered by any existing kb-* notebook)",
+      "status": "blocked_infeasible",
+      "kind": "new_notebook",
+      "target_notebook_name": "kb-remote-access-tools",
+      "blocked_reason": "Notebook-X's knowledge-notebook system only supports the 12 notebooks hardcoded in NOTEBOOK_DEFINITIONS (notebook_backend.py) — no API path creates a new custom knowledge-notebook ID. Would need a code change in Notebook-X itself (add a 13th definition + run create-knowledge-notebooks) — a deliberate, separate decision, not a daily content-automation task. Revisit only if that code change is explicitly wanted."
+    },
+    {
+      "id": "kb-voip-sip-content-fill",
+      "label": "Fill kb-voip-sip's 8 skeleton sections (VoIP Fundamentals, SIP Protocol, RTP & Media, NAT Traversal, Codecs, SIP Trunking, DTMF, Call Quality Troubleshooting) with real content, plus commands/glossary/commonIssues",
+      "source": "TODO.md Notebook-X bullet 3 (sip/voip)",
+      "status": "pending",
+      "kind": "existing_notebook_fill",
+      "target_notebook_name": "kb-voip-sip"
+    },
+    {
+      "id": "kb-mirtapbx-content-fill",
+      "label": "Fill kb-mirtapbx's 8 skeleton sections (Architecture, Extension Configuration, Trunk Setup, Dialplan, IVR & Ring Groups, Asterisk CLI, Common Issues, Integration with 1COM) with real content, plus commands/glossary/commonIssues",
+      "source": "TODO.md Notebook-X bullet 3 (pbx)",
+      "status": "pending",
+      "kind": "existing_notebook_fill",
+      "target_notebook_name": "kb-mirtapbx"
+    },
+    {
+      "id": "docker-cloudflare-gcp-content-fill",
+      "label": "Fill kb-cloud-devops's 7 skeleton sections (Cloud Concepts, Docker Basics, CI/CD Fundamentals, GitHub Actions, Environment Management, Monitoring & Alerting, Vercel & Render Deployment Patterns) with real content, plus commands/glossary/commonIssues",
+      "source": "TODO.md Notebook-X bullet 3 (docker/cloudflare/google cloud)",
+      "status": "pending",
+      "kind": "existing_notebook_fill",
+      "target_notebook_name": "kb-cloud-devops"
+    },
+    {
+      "id": "sidebar-pinning",
+      "label": "Attach existing notebooks to the Notebook-X UI, pinned to sidebar",
+      "source": "TODO.md Notebook-X bullet 4",
+      "status": "pending",
+      "kind": "frontend_code_change",
+      "note": "This is a UI/frontend change in the Notebook-X app's own repo/code, not a content write through its REST API. Out of scope for this content-generation automation as designed; flag for a separate code-focused session against the Notebook-X repo."
+    },
+    {
+      "id": "cluster-unification",
+      "label": "Unify notebooks into higher-level clusters if needed",
+      "source": "TODO.md Notebook-X bullet 5",
+      "status": "pending",
+      "kind": "structural_review",
+      "note": "Judgment call on information architecture across all 12 notebooks — needs human review of the full set before any restructuring, not a mechanical daily task."
+    },
+    {
+      "id": "smart-search-bar",
+      "label": "Add an AI-powered smart main search bar that searches all notebooks' content",
+      "source": "TODO.md Notebook-X bullet 6",
+      "status": "pending",
+      "kind": "feature_build",
+      "note": "Backend/frontend feature work in the Notebook-X app, not a content write."
+    },
+    {
+      "id": "data-center-pipeline-research",
+      "label": "Research + suggest an optimization plan for a live data-center (IT Claude) <-> Notebook-X knowledge-sharing pipeline",
+      "source": "TODO.md Notebook-X bullet 7",
+      "status": "pending",
+      "kind": "research_document",
+      "note": "Deliverable is a research/recommendation markdown document, not a Notebook-X API write. Fits this automation's 'general work' half better than the '1 daily item' write-confirmation model — reconsider whether this belongs in this list at all, or should be its own one-off research task."
+    }
+  ]
+}
