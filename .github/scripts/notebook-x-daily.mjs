@@ -29,9 +29,31 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { selectModelForChoreTask } from '../../workers/model-router.js';
 import { callGemini } from '../../workers/gemini-client.js';
 import { listKnowledgeNotebooks, getNotebookXHealth, triggerIngestContentFiles } from '../../workers/notebookx-client.js';
+
+// NOT imported from workers/model-router.js: that module does
+// `import tokenEconomy from '../config/token-economy.json'` with no import
+// assertion, which esbuild (the Cloudflare Worker's bundler) accepts fine
+// but Node 20's native ESM loader rejects (ERR_IMPORT_ASSERTION_TYPE_MISSING)
+// when run directly via `node script.mjs`, as this script is. Rather than
+// add an import assertion to a file shared with the Worker's build (untested
+// blast radius on the wrangler/esbuild bundle), this inlines just the one
+// branch of selectModelForChoreTask() this script needs — verified against
+// workers/model-router.js's actual notebook-x branch on 2026-07-09. Keep in
+// sync manually if that function's notebook-x logic ever changes.
+function selectModelForChoreTask({ taskType, requiresHighQuality = false, overBudget = false }) {
+  if (taskType === 'easy') {
+    return { model: 'groq', reason: 'Notebook-X override: groq_scope covers easy sub-tasks (simple formatting, short lookups).' };
+  }
+  if (requiresHighQuality && !overBudget) {
+    return { model: 'claude', reason: 'Notebook-X override: task complexity/quality genuinely demands Claude (drawn from the shared $4.50/mo cap).' };
+  }
+  if (requiresHighQuality && overBudget) {
+    return { model: 'gemini', reason: 'Notebook-X override wanted Claude, but the $4.50/mo chore-automation cap is exhausted this month — falling back to Gemini (default writer).' };
+  }
+  return { model: 'gemini', reason: 'Notebook-X override: Gemini is the default writer for content generation.' };
+}
 
 const GEMINI_MODEL = 'gemini-3.1-flash-lite';
 const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
