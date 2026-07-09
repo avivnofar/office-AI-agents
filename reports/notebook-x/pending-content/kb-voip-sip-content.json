@@ -1,0 +1,475 @@
+{
+  "knowledgeBase": {
+    "summary": "This knowledge base provides a comprehensive overview of VoIP and SIP telephony, covering essential concepts ranging from fundamental signaling protocols and media transport to advanced technical configurations. It serves as a practical guide for managing SIP trunking, optimizing codecs, resolving NAT traversal challenges, and troubleshooting call quality issues to ensure reliable voice communications.",
+    "lastWebVerified": null,
+    "webSources": [],
+    "sections": [
+      {
+        "id": "voip-fundamentals",
+        "title": "VoIP Fundamentals",
+        "content": "### VoIP Fundamentals\n\nVoIP architecture relies on the encapsulation of voice traffic into IP packets, primarily utilizing the **Real-time Transport Protocol (RTP)** for media and **Session Initiation Protocol (SIP)** for signaling.\n\n#### Signaling and Media Flow\n*   **SIP (RFC 3261):** Operates at the Application Layer, typically over UDP/5060 or TCP/TLS 5061. It manages session setup, modification, and teardown.\n*   **RTP/RTCP:** Carries the actual audio stream. RTP uses dynamic UDP ports (typically 10000–20000 range). RTCP provides out-of-band statistics (jitter, packet loss).\n*   **SDP (Session Description Protocol):** Embedded within SIP messages to negotiate codecs, IP addresses, and port numbers for the RTP stream.\n\n#### Codec Selection and Bandwidth\nBandwidth calculation must account for Layer 2/3 overhead (IP/UDP/RTP headers = 40 bytes).\n*   **G.711 (μ-law/a-law):** Uncompressed, 64 kbps payload. Total bandwidth per call: ~87 kbps.\n*   **G.729:** Compressed, 8 kbps payload. Total bandwidth per call: ~31 kbps.\n\n#### Quality of Service (QoS)\nVoIP is latency-sensitive. Implement **Differentiated Services Code Point (DSCP)** tagging at the ingress switch port:\n*   **Voice Bearer (RTP):** DSCP 46 (Expedited Forwarding - EF).\n*   **Voice Signaling (SIP):** DSCP 24 (CS3).\n\n**Cisco IOS Configuration Example:**\n```bash\nclass-map match-any VOICE-TRAFFIC\n match dscp ef\n match dscp cs3\n\npolicy-map QOS-POLICY\n class VOICE-TRAFFIC\n  priority percent 30\n\ninterface GigabitEthernet0/1\n service-policy output QOS-POLICY\n```\n\n#### Troubleshooting Commands\nUse these commands to verify connectivity and identify signaling bottlenecks.\n\n**SIP Registration Verification (Asterisk CLI):**\n```bash\nsip show peers\n# Check for \"Status: OK\" and correct latency (ms)\n```\n\n**Packet Capture (CLI/Linux):**\nCapture signaling and media to diagnose one-way audio (typically NAT or firewall issues).\n```bash\ntcpdump -i eth0 udp portrange 5060-5061 or udp portrange 10000-20000 -w voip_trace.pcap\n```\n\n**Common Troubleshooting Matrix:**\n| Symptom | Likely Cause |\n| :--- | :--- |\n| **One-way audio** | NAT/PAT blocking RTP stream; SIP ALG modifying headers incorrectly. |\n| **Registration failure** | Incorrect credentials, DNS SRV record failure, or firewall blocking 5060. |\n| **Choppy audio** | Jitter, insufficient bandwidth, or lack of QoS prioritization. |\n| **Call drops at 30s** | SIP ACK not reaching the provider (NAT timeout or firewall). |\n\n#### NAT Traversal\nVoIP headers contain internal IP addresses. When traversing a NAT boundary, the SDP payload must be rewritten to the public IP. Use **STUN** (Session Traversal Utilities for NAT) or **ICE** (Interactive Connectivity Establishment) to resolve reachability. If using a Session Border Controller (SBC), ensure \"SIP Header Manipulation\" is configured to replace the `Contact` and `Via` headers with the public-facing interface address.",
+        "subsections": [],
+        "tags": [],
+        "lastUpdated": "2026-07-09T20:32:05.056Z",
+        "sources": []
+      },
+      {
+        "id": "sip-protocol",
+        "title": "SIP Protocol",
+        "content": "### SIP Protocol\n\nSession Initiation Protocol (SIP) is an application-layer control protocol (RFC 3261) used for establishing, modifying, and terminating multimedia sessions. It operates primarily over UDP/TCP port 5060 (unencrypted) or 5061 (TLS).\n\n#### Transaction Model\nSIP transactions consist of a request and its associated responses.\n*   **Requests:** `INVITE`, `ACK`, `CANCEL`, `OPTIONS`, `BYE`, `REGISTER`, `INFO`, `SUBSCRIBE`, `NOTIFY`.\n*   **Response Codes:**\n    *   **1xx (Provisional):** 100 Trying, 180 Ringing, 183 Session Progress.\n    *   **2xx (Success):** 200 OK.\n    *   **3xx (Redirection):** 302 Moved Temporarily.\n    *   **4xx (Client Error):** 401 Unauthorized, 403 Forbidden, 404 Not Found, 486 Busy Here.\n    *   **5xx (Server Error):** 500 Server Internal Error, 503 Service Unavailable.\n    *   **6xx (Global Failure):** 603 Decline.\n\n#### Message Structure\nSIP messages are text-based, following an ABNF syntax similar to HTTP.\n```text\nINVITE sip:user@domain.com SIP/2.0\nVia: SIP/2.0/UDP 192.168.1.5:5060;branch=z9hG4bK776asdz8\nFrom: \"Caller\" <sip:100@domain.com>;tag=19283\nTo: <sip:200@domain.com>\nCall-ID: a84b4c76e66710@192.168.1.5\nCSeq: 314159 INVITE\nContact: <sip:100@192.168.1.5:5060>\nContent-Type: application/sdp\nContent-Length: 142\n```\n\n#### SDP Integration\nThe Session Description Protocol (SDP) is carried in the body of SIP messages to negotiate media parameters.\n*   **m=audio:** Defines media type, port, and transport (e.g., `m=audio 16384 RTP/AVP 0 8 101`).\n*   **a=rtpmap:** Maps payload types to codecs (e.g., `a=rtpmap:0 PCMU/8000`).\n*   **c=IN IP4:** Defines the connection address for media streams.\n\n#### Practical Diagnostics\nFor troubleshooting, use `sngrep` or `tcpdump` to capture traffic.\n\n**Capture command:**\n```bash\ntcpdump -i any port 5060 -s 0 -w sip_capture.pcap\n```\n\n**Common Asterisk/FreePBX CLI Commands:**\n*   `pjsip set logger on`: Enables SIP packet logging in the console.\n*   `pjsip show endpoints`: Lists all configured SIP endpoints.\n*   `pjsip show endpoint <name>`: Displays detailed configuration of a specific peer.\n*   `pjsip show registrations`: Verifies status of inbound/outbound trunks.\n\n#### Configuration Best Practices\n*   **NAT Traversal:** Always define `external_media_address` and `external_signaling_address` in your SIP profile when behind a NAT/Firewall.\n*   **Keep-Alives:** Use `qualify=yes` (Asterisk) or `keepalive` (Kamailio) to maintain NAT mappings in stateful firewalls.\n*   **Security:** Implement `permit/deny` ACLs on trunks. Use `SIP Digest Authentication` for all endpoints. Disable `allowguest` to prevent unauthorized relaying.\n*   **Transport:** Prefer `TLS` (SIPS) for signaling and `SRTP` for media to prevent eavesdropping and toll fraud via packet sniffing.\n\n#### Header Precision\n*   **Via:** Tracks the path taken by the request to ensure responses follow the same route.\n*   **Record-Route:** Used by proxies to stay in the signaling path for the duration of the dialog.\n*   **Contact:** Specifies the URI for direct communication, bypassing proxies for subsequent requests within the dialog.",
+        "subsections": [],
+        "tags": [],
+        "lastUpdated": "2026-07-09T20:32:18.501Z",
+        "sources": []
+      },
+      {
+        "id": "rtp-and-media",
+        "title": "RTP & Media",
+        "content": "### RTP & Media\n\nReal-time Transport Protocol (RTP) carries voice and video payloads over UDP. In VoIP architectures, media flows are negotiated via SDP (Session Description Protocol) within SIP signaling.\n\n#### RTP Header Structure\nThe 12-byte fixed header is critical for jitter buffer management and packet reordering:\n*   **Payload Type (7 bits):** Defines the codec (e.g., PCMU=0, PCMA=8, G.729=18).\n*   **Sequence Number (16 bits):** Increments by one for each RTP packet; used to detect packet loss and reorder out-of-order arrivals.\n*   **Timestamp (32 bits):** Reflects the sampling instant of the first octet in the packet.\n*   **SSRC (32 bits):** Synchronization Source identifier; uniquely identifies the media stream source.\n\n#### Media Negotiation (SDP)\nSDP defines the media capabilities. A typical `m=` line format:\n`m=audio 16384 RTP/AVP 0 8 101`\n*   `16384`: Port number for the media stream.\n*   `RTP/AVP`: Profile (Audio/Video Profile).\n*   `0 8 101`: Payload types (G.711u, G.711a, and RFC 2833/4733 DTMF).\n\n#### Common Troubleshooting Commands\n\n**1. Packet Capture (tcpdump)**\nTo isolate RTP traffic on a specific interface and port range:\n```bash\ntcpdump -ni eth0 udp portrange 10000-20000 -w media_capture.pcap\n```\n*Use `tshark -r media_capture.pcap -q -z rtp,streams` to analyze stream statistics and jitter.*\n\n**2. Asterisk RTP Debugging**\nTo inspect RTP flow in real-time within the Asterisk CLI:\n```bash\nrtp set debug on\nrtp set debug ip <remote_ip>\n```\n*Look for \"Sent RTP packet\" and \"Got RTP packet\" logs to verify bidirectional media flow.*\n\n**3. RTCP Analysis**\nRTCP (RTP Control Protocol) provides out-of-band statistics. Monitor these to identify network degradation:\n*   **Jitter:** Variation in packet arrival time. High jitter (>30ms) causes audio artifacts.\n*   **Fraction Lost:** Percentage of packets lost since the last report.\n*   **RTT (Round Trip Time):** Calculated via RTCP Sender/Receiver Reports.\n\n#### Configuration Best Practices\n*   **Port Ranges:** Ensure firewalls are configured for the specific RTP port range defined in your PBX (e.g., `rtpstart=10000`, `rtpend=20000` in `rtp.conf`).\n*   **DSCP Tagging:** To prioritize media over data, mark RTP packets with DSCP 46 (Expedited Forwarding).\n    *   *Linux (iptables):* `iptables -t mangle -A OUTPUT -p udp --dport 10000:20000 -j DSCP --set-dscp 46`\n*   **NAT Traversal:** If media is one-way, verify `nat=yes` or `force_rport=yes` in SIP configurations. Use STUN/TURN servers if the endpoint is behind a symmetric NAT.\n*   **Codec Mismatch:** Ensure the `allow` list in your SIP peer configuration matches the SDP offer from the remote gateway. Use `transcoding` only when necessary, as it increases CPU load and latency.\n\n#### Common Media Issues\n*   **One-way Audio:** Usually caused by NAT/Firewall blocking the RTP port range or the SDP containing a private IP address (requires `externip` or `media_address` configuration).\n*   **Clipping/Robotic Audio:** Indicates packet loss or excessive jitter. Check for interface congestion or duplex mismatches on the network switch.\n*   **DTMF Failure:** Ensure `dtmfmode` (RFC2833, Inband, or Info) matches between endpoints. RFC 2833 is the industry standard.",
+        "subsections": [],
+        "tags": [],
+        "lastUpdated": "2026-07-09T20:32:32.405Z",
+        "sources": []
+      },
+      {
+        "id": "nat-traversal",
+        "title": "NAT Traversal",
+        "content": "### NAT Traversal\n\nNetwork Address Translation (NAT) disrupts real-time protocols (SIP/RTP) by modifying packet headers, causing signaling mismatches and one-way audio. Effective traversal requires managing the stateful mapping between private internal addresses and public WAN interfaces.\n\n#### STUN (Session Traversal Utilities for NAT)\nSTUN (RFC 5389) allows an endpoint to discover its public IP and port mapping.\n*   **Mechanism:** The client sends a Binding Request to a STUN server. The server returns the source IP/port seen on the public internet.\n*   **Limitation:** Fails with Symmetric NAT, where the mapping changes based on the destination IP/port.\n\n#### TURN (Traversal Using Relays around NAT)\nWhen STUN fails (Symmetric NAT), TURN (RFC 5766) acts as a relay.\n*   **Mechanism:** All media traffic is proxied through the TURN server.\n*   **Configuration:** Requires high bandwidth allocation on the relay server.\n*   **Syntax (Asterisk `rtp.conf`):**\n    ```ini\n    [general]\n    stunaddr=stun.l.google.com:19302\n    icesupport=yes\n    ```\n\n#### ICE (Interactive Connectivity Establishment)\nICE (RFC 8445) is the framework that orchestrates STUN and TURN. It gathers \"candidates\" (Host, Server Reflexive, Relayed) and performs connectivity checks to determine the optimal path.\n\n#### SIP-Specific Handling\nSIP headers (`Via`, `Contact`, `Record-Route`) often contain private IP addresses.\n*   **SIP ALG (Application Layer Gateway):** Most SOHO routers implement SIP ALG, which attempts to rewrite SIP headers. **Recommendation:** Disable SIP ALG on all edge firewalls/routers, as it frequently corrupts SDP payloads.\n*   **Manual NAT Configuration:** If the PBX is behind NAT, explicitly define the external address.\n*   **Asterisk `sip.conf` (chan_sip):**\n    ```ini\n    [general]\n    nat=force_rport,comedia\n    externip=203.0.113.1\n    localnet=192.168.1.0/255.255.255.0\n    ```\n*   **PJSIP Configuration:**\n    ```ini\n    [transport-udp]\n    type=transport\n    protocol=udp\n    bind=0.0.0.0:5060\n    external_media_address=203.0.113.1\n    external_signaling_address=203.0.113.1\n    ```\n\n#### Port Forwarding vs. Port Triggering\n*   **Port Forwarding:** Static mapping of WAN ports to internal PBX/Endpoint IPs. Use for static deployments.\n    *   *Example (iptables):* `iptables -t nat -A PREROUTING -p udp --dport 5060 -j DNAT --to-destination 192.168.1.50:5060`\n*   **Port Triggering:** Dynamic mapping based on outbound traffic. Generally discouraged for VoIP due to timeout risks and inconsistent port ranges.\n\n#### Troubleshooting Commands\n1.  **Verify Mapping:** Use `tcpdump` to inspect if the `Contact` header matches the public IP.\n    `tcpdump -ni eth0 udp port 5060 -vv`\n2.  **Check NAT Timeout:** If calls drop after 30 seconds, the NAT mapping has expired. Implement SIP Keep-Alives (Options packets) every 20-30 seconds.\n    *   *Asterisk:* `qualify=yes` or `keep_alive=20`\n3.  **Symmetric NAT Detection:** Use `pjnath-test` or similar utilities to identify if the router performs port-restricted mapping, which necessitates a TURN relay.",
+        "subsections": [],
+        "tags": [],
+        "lastUpdated": "2026-07-09T20:32:46.191Z",
+        "sources": []
+      },
+      {
+        "id": "codecs",
+        "title": "Codecs",
+        "content": "### Codecs\n\nCodecs (coder-decoder) define the compression and decompression algorithms for digital audio/video streams. In VoIP, the choice of codec dictates the balance between bandwidth consumption, CPU overhead, and Mean Opinion Score (MOS).\n\n#### Common Codec Specifications\n\n| Codec | Bitrate (kbps) | Sampling (kHz) | Payload Size (ms) | Characteristics |\n| :--- | :--- | :--- | :--- | :--- |\n| **G.711 (PCMU/A)** | 64 | 8 | 20 | Uncompressed; high quality; high bandwidth. |\n| **G.729** | 8 | 8 | 20 | CS-ACELP; high compression; high CPU load. |\n| **G.722** | 64 | 16 | 20 | Wideband; superior clarity; requires G.722 support. |\n| **Opus** | 6–510 | 8–48 | 20 | Adaptive; low latency; variable bitrate (VBR). |\n\n#### Bandwidth Calculation\nBandwidth per call is calculated as: `(Codec Bitrate + IP/UDP/RTP Overhead) / Packetization Interval`.\n*   **Overhead:** Standard RTP/UDP/IP header is 40 bytes (320 bits).\n*   **Example (G.711 @ 20ms):** \n    *   Payload = 160 bytes (1280 bits).\n    *   Total = 1600 bits per 20ms packet = 80 kbps per stream.\n\n#### Asterisk Configuration (`codecs.conf` / `pjsip.conf`)\nTo prioritize codecs in Asterisk PJSIP, define the `disallow` and `allow` directives within the endpoint configuration. Order of `allow` statements defines preference.\n\n```ini\n[endpoint_template](!)\ntype=endpoint\ndisallow=all\nallow=opus\nallow=g722\nallow=ulaw\n```\n\n#### Transcoding Management\nTranscoding occurs when the ingress codec differs from the egress codec, consuming significant CPU cycles. Use `show translation` in the Asterisk CLI to monitor cost:\n\n```bash\n# Check translation paths and cost (in units of 1/256th of a second)\nasterisk -rx \"core show translation\"\n```\n\nTo minimize transcoding, ensure endpoints negotiate common codecs. If transcoding is unavoidable, monitor system load:\n\n```bash\n# Linux system load monitoring\ntop -b -n 1 | grep asterisk\n# Check active media streams\nasterisk -rx \"pjsip show channels\"\n```\n\n#### SDP Negotiation\nCodecs are negotiated via Session Description Protocol (SDP) in the SIP INVITE/200 OK exchange. The `m=audio` line lists supported codecs in order of preference.\n\n*   **Example SDP snippet:**\n    `m=audio 16384 RTP/AVP 0 8 101`\n    *   `0`: PCMU (G.711u)\n    *   `8`: PCMA (G.711a)\n    *   `101`: Telephone-event (RFC 2833/4733 DTMF)\n\n#### Practical Implementation Notes\n1.  **Packetization (ptime):** Standardize on 20ms. Lower values (10ms) increase packet rate/CPU load; higher values (30ms+) increase latency and jitter sensitivity.\n2.  **DTMF Interop:** Always include `telephone-event` (RFC 4733) in the codec list. If missing, DTMF digits will fail to pass through gateways.\n3.  **VAD/CNG:** Disable Voice Activity Detection (VAD) and Comfort Noise Generation (CNG) if experiencing \"choppy\" audio or one-way audio issues, as these can interfere with echo cancellers and jitter buffers.\n4.  **Opus:** When using Opus, ensure `fmtp` parameters (e.g., `maxplaybackrate=48000`) are correctly passed in the SDP to avoid downsampling artifacts.",
+        "subsections": [],
+        "tags": [],
+        "lastUpdated": "2026-07-09T20:32:59.495Z",
+        "sources": []
+      },
+      {
+        "id": "sip-trunking",
+        "title": "SIP Trunking",
+        "content": "### SIP Trunking\n\nSIP Trunking replaces traditional TDM circuits (PRI/BRI) by delivering voice services over IP via the Session Initiation Protocol (RFC 3261). \n\n#### Core Architecture\n*   **SIP Proxy/SBC:** Acts as the demarcation point. The Session Border Controller (SBC) handles NAT traversal, topology hiding, and protocol normalization.\n*   **Transport:** Typically UDP/5060 for signaling; TCP/TLS (5061) for encrypted signaling. RTP/RTCP (typically UDP 10000–20000) handles media streams.\n*   **Codec Negotiation:** SDP (Session Description Protocol) within the SIP INVITE/200 OK exchange determines the codec (G.711u/a, G.729, G.722).\n\n#### Authentication Methods\n1.  **IP-Based (Trusted):** The provider whitelists the enterprise public IP. No registration required.\n2.  **Registration-Based:** The PBX sends a `REGISTER` request with credentials.\n    *   *Syntax:* `REGISTER sip:provider.com SIP/2.0`\n    *   *Header:* `Authorization: Digest username=\"user\", realm=\"provider.com\", nonce=\"...\", uri=\"sip:provider.com\", response=\"...\"`\n\n#### Configuration Example (Asterisk `pjsip.conf`)\nFor a standard IP-based trunk, define the endpoint, auth, and registration:\n\n```ini\n[my_trunk]\ntype=endpoint\ncontext=from-trunk\ndisallow=all\nallow=ulaw,alaw\noutbound_auth=my_auth\naors=my_aor\n\n[my_aor]\ntype=aor\ncontact=sip:provider_ip:5060\n\n[my_auth]\ntype=auth\nauth_type=userpass\nusername=trunk_user\npassword=secure_password\n```\n\n#### Troubleshooting & Diagnostics\nUse `sngrep` or `tcpdump` to capture signaling. Filter by the provider’s IP to isolate the flow.\n\n**Common CLI Commands:**\n*   **Asterisk:** `pjsip set logger on` (Enable SIP debug)\n*   **Cisco IOS:** `debug ccsip messages` (Display SIP signaling)\n*   **Packet Capture:** `tcpdump -ni eth0 udp port 5060 -w trunk_trace.pcap`\n\n#### Critical Parameters\n*   **DTMF Relay:** Ensure alignment between PBX and provider. Use `rfc2833` (in-band signaling) or `info` (SIP INFO messages).\n*   **NAT Traversal:** If the PBX is behind a NAT, ensure the `Contact` header reflects the public IP. Use `nat=force_rport,comedia` in Asterisk.\n*   **Keep-Alives:** Use SIP `OPTIONS` packets to monitor trunk health.\n    *   *Asterisk:* `qualify_frequency=60`\n*   **Media Anchoring:** If one-way audio occurs, verify that the SDP `c=` (connection) line contains the correct public IP and that the RTP port range is open on the firewall.\n\n#### Security Best Practices\n1.  **ACLs:** Restrict inbound SIP traffic to the provider’s specific signaling IP ranges.\n2.  **TLS/SRTP:** Enforce TLS for signaling and SRTP for media to prevent eavesdropping.\n3.  **Rate Limiting:** Configure the SBC to drop INVITE floods to prevent toll fraud and resource exhaustion.\n4.  **Header Sanitization:** Strip internal headers (e.g., `X-Asterisk-Info`) before forwarding to the provider to prevent topology leakage.",
+        "subsections": [],
+        "tags": [],
+        "lastUpdated": "2026-07-09T20:33:13.262Z",
+        "sources": []
+      },
+      {
+        "id": "dtmf",
+        "title": "DTMF",
+        "content": "### DTMF (Dual-Tone Multi-Frequency)\n\nDTMF is the signaling system used for telephony to communicate dialed digits or control signals over an analog or digital voice channel. Each digit is represented by a unique combination of two sine waves (one low-frequency, one high-frequency).\n\n#### Signaling Methods\nIn VoIP environments, DTMF transmission is categorized into three primary methods:\n\n1.  **In-Band (Audio):** DTMF tones are sent as raw audio within the RTP stream. Highly susceptible to packet loss and compression artifacts (e.g., G.729 codec), which often causes digit corruption.\n2.  **RFC 2833 / RFC 4733 (Out-of-Band):** DTMF tones are encapsulated as RTP events (payload type 101 by default). The audio stream remains clean, and the receiver reconstructs the tone based on the event packet. This is the industry standard for SIP-based systems.\n3.  **SIP INFO:** DTMF digits are sent as SIP signaling messages (application/dtmf-relay). This occurs outside the media path.\n\n#### Configuration Examples\n\n**Asterisk (chan_sip)**\nIn `sip.conf`, define the DTMF mode globally or per-peer. `rfc2833` is the recommended setting.\n```ini\n[general]\ndtmfmode=rfc2833\n\n[peer_name]\ndtmfmode=rfc2833\n```\n\n**FreeSWITCH**\nIn the dialplan or endpoint configuration, ensure the `dtmf_type` is set correctly.\n```xml\n<!-- In sip_profile/internal.xml -->\n<param name=\"dtmf-type\" value=\"rfc2833\"/>\n```\n\n**Cisco IOS (Dial-Peer)**\nTo configure DTMF relay on a Cisco voice gateway, use the `dtmf-relay` command under the dial-peer:\n```text\ndial-peer voice 100 voip\n destination-pattern 555....\n session protocol sipv2\n dtmf-relay rfc2833\n codec g711ulaw\n```\n\n#### Troubleshooting & Diagnostics\n\n*   **Packet Capture (Wireshark):** Filter by `rtp.p_type == 101` to verify RFC 2833 events. If you see the packets but the PBX does not respond, verify that the `telephone-event` payload type matches between endpoints.\n*   **Codec Mismatch:** If using In-Band DTMF, ensure the codec is G.711 (u-law/a-law). Compressed codecs like G.729 or G.723.1 will almost certainly degrade the tone frequency, leading to \"missed\" digits.\n*   **Gain Issues:** If digits are not detected, check for excessive jitter or low volume levels. DTMF detection requires a minimum signal-to-noise ratio; if the audio is too quiet, the DSP/software detector will fail.\n*   **Payload Type Mismatch:** If one side expects RFC 2833 on payload 101 and the other sends it on 96, the digits will be ignored. Check the SDP `a=rtpmap` attribute in the SIP INVITE:\n    `a=rtpmap:101 telephone-event/8000`\n\n#### Best Practices\n*   **Always prefer RFC 2833/4733.** It is the most robust method for modern VoIP networks.\n*   **Disable In-Band DTMF** if RFC 2833 is active to prevent \"double-dialing\" or echo-related false positives.\n*   **Interoperability:** When connecting to legacy PSTN gateways, ensure the gateway is configured to transcode or relay DTMF correctly, as some older TDM equipment only supports In-Band.",
+        "subsections": [],
+        "tags": [],
+        "lastUpdated": "2026-07-09T20:33:26.548Z",
+        "sources": []
+      },
+      {
+        "id": "call-quality-troubleshooting",
+        "title": "Call Quality Troubleshooting",
+        "content": "### Call Quality Troubleshooting\n\nEffective troubleshooting requires isolating the fault domain: Layer 1/2 physical/link issues, Layer 3 QoS/routing, or SIP/RTP signaling anomalies.\n\n#### 1. Network Path Analysis\nUse `mtr` (My Traceroute) to identify jitter and packet loss at specific hops. Unlike `ping`, `mtr` provides continuous statistics per hop.\n*   **Command:** `mtr -rw [destination_ip]`\n*   **Thresholds:** Jitter > 30ms, Latency > 150ms (one-way), or Packet Loss > 1% typically result in audible degradation.\n\n#### 2. QoS Verification\nEnsure DSCP markings are preserved across the path. EF (Expedited Forwarding, 46) should be applied to RTP traffic, and AF41 to SIP signaling.\n*   **Cisco IOS Verification:**\n    ```bash\n    show policy-map interface [interface_id]\n    ```\n    Look for \"packet drops\" in the priority queue. If drops exist, the bandwidth allocation for the `priority` command is insufficient.\n*   **Packet Capture (PCAP):** Use `tcpdump` on the SBC or gateway to verify DSCP markings in the IP header.\n    ```bash\n    tcpdump -ni eth0 udp portrange 10000-20000 -v\n    ```\n    Check the `tos` field in the output.\n\n#### 3. RTP Stream Analysis\nIf audio is one-way or choppy, analyze the RTP stream for sequence errors or out-of-order packets.\n*   **Wireshark:** Navigate to **Telephony > RTP > RTP Streams**. Select the stream and click **Analyze**.\n*   **Key Metrics:**\n    *   **Delta:** Time between packets. High variance indicates jitter.\n    *   **Jitter:** Variation in packet arrival time.\n    *   **Skew:** Cumulative difference between expected and actual arrival.\n    *   **Max Delta:** If this exceeds the jitter buffer size, audio clipping occurs.\n\n#### 4. SIP Signaling & Codec Negotiation\nVerify that the negotiated codec matches the bandwidth availability. G.711 (64kbps) is standard, but G.729 (8kbps) is preferred for bandwidth-constrained links.\n*   **Check SDP (Session Description Protocol):**\n    Ensure the `m=audio` line contains the correct port and codec payload types.\n    ```sip\n    m=audio 16384 RTP/AVP 0 8 101\n    a=rtpmap:0 PCMU/8000\n    a=rtpmap:101 telephone-event/8000\n    ```\n*   **Common Issue:** Mismatched DTMF methods (RFC 2833 vs. In-band). If DTMF fails, verify the `telephone-event` payload type in the SDP.\n\n#### 5. Gateway/SBC Diagnostics\nFor VoIP gateways, check for DSP resource exhaustion.\n*   **Cisco IOS:**\n    ```bash\n    show voice dsp group all\n    show voice call summary\n    ```\n    If `State` shows `FXO/FXS` or `T1/E1` errors, check physical framing (e.g., `show controller t1`). Look for \"Slip\" errors, which indicate clock synchronization issues between the provider and the local PBX.\n\n#### 6. Troubleshooting Checklist\n1.  **Clocking:** If using T1/E1, ensure the local device is set to `clock source line`.\n2.  **NAT/Firewall:** If one-way audio persists, verify that the SIP ALG is disabled on the edge firewall. SIP ALG often mangles the SDP `c=` (connection) line, causing the media stream to be sent to an unreachable private IP.\n3.  **MTU:** If calls drop exactly at 30 seconds, check for MTU mismatches causing fragmented SIP packets that the firewall drops. Ensure MTU is set to 1500 or lower if tunneling (VPN/GRE) is involved.",
+        "subsections": [],
+        "tags": [],
+        "lastUpdated": "2026-07-09T20:33:40.524Z",
+        "sources": []
+      }
+    ],
+    "glossary": [
+      {
+        "term": "SIP",
+        "definition": "Session Initiation Protocol; a signaling protocol used to initiate, maintain, and terminate real-time communication sessions like voice and video."
+      },
+      {
+        "term": "VoIP",
+        "definition": "Voice over Internet Protocol; a technology that enables voice communication and multimedia sessions over Internet Protocol networks."
+      },
+      {
+        "term": "RTP",
+        "definition": "Real-time Transport Protocol; a network protocol for delivering audio and video over IP networks, carrying the actual media stream."
+      },
+      {
+        "term": "PBX",
+        "definition": "Private Branch Exchange; a private telephone network used within an organization to manage internal and external calls."
+      },
+      {
+        "term": "Codec",
+        "definition": "Coder-Decoder; software or hardware that compresses and decompresses digital audio data to optimize bandwidth usage."
+      },
+      {
+        "term": "SIP Trunking",
+        "definition": "A method of delivering voice services and unified communications to customers equipped with IP-based PBX, replacing traditional analog lines."
+      },
+      {
+        "term": "Jitter",
+        "definition": "The variation in the delay of received packets, which can cause audio distortion or choppy sound in VoIP calls."
+      },
+      {
+        "term": "Latency",
+        "definition": "The time it takes for a data packet to travel from the source to the destination; high latency results in noticeable delays during conversation."
+      },
+      {
+        "term": "SBC",
+        "definition": "Session Border Controller; a network element used to protect and regulate SIP-based voice traffic, often acting as a firewall for VoIP."
+      },
+      {
+        "term": "DID",
+        "definition": "Direct Inward Dialing; a feature that allows callers to reach a specific extension on a PBX directly without going through an operator."
+      },
+      {
+        "term": "Softphone",
+        "definition": "A software application that allows a computer or mobile device to function as a telephone for making VoIP calls."
+      },
+      {
+        "term": "Packet Loss",
+        "definition": "The failure of one or more transmitted data packets to reach their destination, often resulting in audio gaps or robotic voice quality."
+      }
+    ],
+    "commonIssues": [
+      {
+        "problem": "One-way audio",
+        "cause": "NAT traversal issues blocking RTP traffic",
+        "solution": "Configure STUN/TURN servers or adjust port forwarding on the firewall",
+        "tags": [
+          "NAT",
+          "Firewall",
+          "Audio"
+        ]
+      },
+      {
+        "problem": "Jitter and choppy audio",
+        "cause": "Network congestion or insufficient bandwidth",
+        "solution": "Implement Quality of Service (QoS) tagging for voice traffic",
+        "tags": [
+          "QoS",
+          "Network",
+          "Latency"
+        ]
+      },
+      {
+        "problem": "SIP Registration failure",
+        "cause": "Incorrect credentials or firewall blocking SIP signaling (UDP 5060)",
+        "solution": "Verify SIP account settings and ensure SIP ALG is disabled on the router",
+        "tags": [
+          "SIP",
+          "Authentication",
+          "ALG"
+        ]
+      },
+      {
+        "problem": "Dropped calls after a specific interval",
+        "cause": "SIP session timer mismatch or NAT timeout",
+        "solution": "Adjust keep-alive intervals or session timer settings on the PBX",
+        "tags": [
+          "SIP",
+          "Timeout",
+          "Connectivity"
+        ]
+      },
+      {
+        "problem": "Echo during calls",
+        "cause": "Acoustic feedback or improper gain settings on hardware",
+        "solution": "Enable echo cancellation on the VoIP gateway or adjust microphone sensitivity",
+        "tags": [
+          "Audio",
+          "Hardware",
+          "Configuration"
+        ]
+      },
+      {
+        "problem": "Ghost calls",
+        "cause": "Public exposure of SIP port to malicious scanners",
+        "solution": "Restrict SIP access to trusted IP ranges or use a VPN/SBC",
+        "tags": [
+          "Security",
+          "SIP",
+          "Spam"
+        ]
+      },
+      {
+        "problem": "Delayed call setup (Post-Dial Delay)",
+        "cause": "DNS resolution issues or inefficient routing",
+        "solution": "Use local DNS caching or optimize the dial plan/routing table",
+        "tags": [
+          "DNS",
+          "Performance",
+          "Routing"
+        ]
+      },
+      {
+        "problem": "Codec mismatch",
+        "cause": "Incompatibility between provider and endpoint supported codecs",
+        "solution": "Force a common codec like G.711 or G.729 on both ends",
+        "tags": [
+          "Codec",
+          "Compatibility",
+          "Audio"
+        ]
+      },
+      {
+        "problem": "Inbound calls failing to route",
+        "cause": "Incorrect DID mapping or firewall blocking incoming INVITE requests",
+        "solution": "Check DID configuration in the PBX and verify inbound firewall rules",
+        "tags": [
+          "DID",
+          "Routing",
+          "Firewall"
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "class-map match-any VOICE-TRAFFIC\n match dscp ef\n match dscp cs3\n\npolicy-map QOS-POLICY\n class VOICE-TRAFFIC\n  priority percent 30\n\ninterface GigabitEthernet0/1\n service-policy output QOS-POLICY",
+        "description": "Cisco IOS configuration for QoS prioritization of voice traffic.",
+        "platform": "both"
+      },
+      {
+        "command": "sip show peers",
+        "description": "Verify SIP registration status and latency in Asterisk CLI.",
+        "platform": "both"
+      },
+      {
+        "command": "tcpdump -i eth0 udp portrange 5060-5061 or udp portrange 10000-20000 -w voip_trace.pcap",
+        "description": "Capture SIP signaling and RTP media packets for troubleshooting.",
+        "platform": "linux"
+      },
+      {
+        "command": "tcpdump -i any port 5060 -s 0 -w sip_capture.pcap",
+        "description": "Captures SIP traffic on port 5060 and saves it to a pcap file.",
+        "platform": "linux"
+      },
+      {
+        "command": "pjsip set logger on",
+        "description": "Enables SIP packet logging in the Asterisk/FreePBX console.",
+        "platform": "both"
+      },
+      {
+        "command": "pjsip show endpoints",
+        "description": "Lists all configured SIP endpoints in Asterisk/FreePBX.",
+        "platform": "both"
+      },
+      {
+        "command": "pjsip show endpoint <name>",
+        "description": "Displays detailed configuration of a specific SIP peer.",
+        "platform": "both"
+      },
+      {
+        "command": "pjsip show registrations",
+        "description": "Verifies the status of inbound/outbound trunks.",
+        "platform": "both"
+      },
+      {
+        "command": "m=audio 16384 RTP/AVP 0 8 101",
+        "description": "SDP media line format example",
+        "platform": "both"
+      },
+      {
+        "command": "tcpdump -ni eth0 udp portrange 10000-20000 -w media_capture.pcap",
+        "description": "Capture RTP traffic on a specific interface and port range",
+        "platform": "linux"
+      },
+      {
+        "command": "tshark -r media_capture.pcap -q -z rtp,streams",
+        "description": "Analyze RTP stream statistics and jitter from a pcap file",
+        "platform": "linux"
+      },
+      {
+        "command": "rtp set debug on",
+        "description": "Enable RTP debugging in Asterisk CLI",
+        "platform": "both"
+      },
+      {
+        "command": "rtp set debug ip <remote_ip>",
+        "description": "Enable RTP debugging for a specific IP in Asterisk CLI",
+        "platform": "both"
+      },
+      {
+        "command": "rtpstart=10000",
+        "description": "Configuration snippet for rtp.conf to define start port",
+        "platform": "both"
+      },
+      {
+        "command": "rtpend=20000",
+        "description": "Configuration snippet for rtp.conf to define end port",
+        "platform": "both"
+      },
+      {
+        "command": "iptables -t mangle -A OUTPUT -p udp --dport 10000:20000 -j DSCP --set-dscp 46",
+        "description": "Apply DSCP tagging to RTP packets using iptables",
+        "platform": "linux"
+      },
+      {
+        "command": "[general]\nstunaddr=stun.l.google.com:19302\nicesupport=yes",
+        "description": "Asterisk rtp.conf configuration for STUN and ICE support",
+        "platform": "both"
+      },
+      {
+        "command": "[general]\nnat=force_rport,comedia\nexternip=203.0.113.1\nlocalnet=192.168.1.0/255.255.255.0",
+        "description": "Asterisk sip.conf configuration for NAT traversal",
+        "platform": "both"
+      },
+      {
+        "command": "[transport-udp]\ntype=transport\nprotocol=udp\nbind=0.0.0.0:5060\nexternal_media_address=203.0.113.1\nexternal_signaling_address=203.0.113.1",
+        "description": "PJSIP configuration for NAT traversal",
+        "platform": "both"
+      },
+      {
+        "command": "iptables -t nat -A PREROUTING -p udp --dport 5060 -j DNAT --to-destination 192.168.1.50:5060",
+        "description": "iptables command for static port forwarding",
+        "platform": "linux"
+      },
+      {
+        "command": "tcpdump -ni eth0 udp port 5060 -vv",
+        "description": "Verify SIP traffic mapping using tcpdump",
+        "platform": "linux"
+      },
+      {
+        "command": "qualify=yes",
+        "description": "Asterisk configuration for SIP keep-alives",
+        "platform": "both"
+      },
+      {
+        "command": "keep_alive=20",
+        "description": "Asterisk configuration for SIP keep-alives",
+        "platform": "both"
+      },
+      {
+        "command": "pjnath-test",
+        "description": "Utility to detect Symmetric NAT",
+        "platform": "both"
+      },
+      {
+        "command": "[endpoint_template](!)\ntype=endpoint\ndisallow=all\nallow=opus\nallow=g722\nallow=ulaw",
+        "description": "Asterisk PJSIP endpoint configuration to prioritize codecs",
+        "platform": "both"
+      },
+      {
+        "command": "asterisk -rx \"core show translation\"",
+        "description": "Check translation paths and cost in Asterisk CLI",
+        "platform": "both"
+      },
+      {
+        "command": "top -b -n 1 | grep asterisk",
+        "description": "Linux system load monitoring for Asterisk",
+        "platform": "linux"
+      },
+      {
+        "command": "asterisk -rx \"pjsip show channels\"",
+        "description": "Check active media streams in Asterisk",
+        "platform": "both"
+      },
+      {
+        "command": "m=audio 16384 RTP/AVP 0 8 101",
+        "description": "SDP snippet for codec negotiation",
+        "platform": "both"
+      },
+      {
+        "command": "REGISTER sip:provider.com SIP/2.0",
+        "description": "SIP registration request syntax",
+        "platform": "both"
+      },
+      {
+        "command": "Authorization: Digest username=\"user\", realm=\"provider.com\", nonce=\"...\", uri=\"sip:provider.com\", response=\"...\"",
+        "description": "SIP Authorization header syntax",
+        "platform": "both"
+      },
+      {
+        "command": "[my_trunk]\ntype=endpoint\ncontext=from-trunk\ndisallow=all\nallow=ulaw,alaw\noutbound_auth=my_auth\naors=my_aor\n\n[my_aor]\ntype=aor\ncontact=sip:provider_ip:5060\n\n[my_auth]\ntype=auth\nauth_type=userpass\nusername=trunk_user\npassword=secure_password",
+        "description": "Asterisk pjsip.conf configuration snippet",
+        "platform": "both"
+      },
+      {
+        "command": "pjsip set logger on",
+        "description": "Enable SIP debug in Asterisk",
+        "platform": "both"
+      },
+      {
+        "command": "debug ccsip messages",
+        "description": "Display SIP signaling in Cisco IOS",
+        "platform": "both"
+      },
+      {
+        "command": "tcpdump -ni eth0 udp port 5060 -w trunk_trace.pcap",
+        "description": "Packet capture command for SIP signaling",
+        "platform": "linux"
+      },
+      {
+        "command": "nat=force_rport,comedia",
+        "description": "Asterisk NAT traversal configuration parameter",
+        "platform": "both"
+      },
+      {
+        "command": "qualify_frequency=60",
+        "description": "Asterisk SIP keep-alive configuration parameter",
+        "platform": "both"
+      },
+      {
+        "command": "dtmfmode=rfc2833",
+        "description": "Configure DTMF mode in Asterisk sip.conf",
+        "platform": "both"
+      },
+      {
+        "command": "<param name=\"dtmf-type\" value=\"rfc2833\"/>",
+        "description": "Configure DTMF type in FreeSWITCH sip_profile",
+        "platform": "both"
+      },
+      {
+        "command": "dtmf-relay rfc2833",
+        "description": "Configure DTMF relay on a Cisco voice gateway dial-peer",
+        "platform": "both"
+      },
+      {
+        "command": "rtp.p_type == 101",
+        "description": "Wireshark filter to verify RFC 2833 events",
+        "platform": "both"
+      },
+      {
+        "command": "a=rtpmap:101 telephone-event/8000",
+        "description": "SDP attribute for RFC 2833 payload mapping",
+        "platform": "both"
+      },
+      {
+        "command": "mtr -rw [destination_ip]",
+        "description": "Identify jitter and packet loss at specific hops.",
+        "platform": "linux"
+      },
+      {
+        "command": "show policy-map interface [interface_id]",
+        "description": "Verify QoS policy-map and check for packet drops in the priority queue.",
+        "platform": "both"
+      },
+      {
+        "command": "tcpdump -ni eth0 udp portrange 10000-20000 -v",
+        "description": "Capture packets to verify DSCP markings in the IP header.",
+        "platform": "linux"
+      },
+      {
+        "command": "m=audio 16384 RTP/AVP 0 8 101\na=rtpmap:0 PCMU/8000\na=rtpmap:101 telephone-event/8000",
+        "description": "SDP (Session Description Protocol) example for codec negotiation.",
+        "platform": "both"
+      },
+      {
+        "command": "show voice dsp group all",
+        "description": "Check for DSP resource exhaustion on Cisco gateways.",
+        "platform": "both"
+      },
+      {
+        "command": "show voice call summary",
+        "description": "Check for active voice call summaries on Cisco gateways.",
+        "platform": "both"
+      },
+      {
+        "command": "show controller t1",
+        "description": "Check physical framing and clock synchronization errors on T1/E1 controllers.",
+        "platform": "both"
+      },
+      {
+        "command": "clock source line",
+        "description": "Set the clock source for T1/E1 interfaces.",
+        "platform": "both"
+      }
+    ]
+  }
+}
