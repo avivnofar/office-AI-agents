@@ -7,7 +7,7 @@
 
   "primary_case_model": "groq/llama3-8b-8192",
   "routing_model": "cloudflare/@cf/meta/llama-3.1-8b-instruct-fp8",
-  "report_model": "google/gemini-2.5-flash-lite",
+  "report_model": "google/gemini-3.1-flash-lite",
   "app_search_model": "anthropic/claude-sonnet-4-6",
   "architect_model": "human+claude-code",
 

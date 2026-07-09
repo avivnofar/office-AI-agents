@@ -73,7 +73,7 @@ Return ONLY valid JSON, no markdown fences:
 {{"task_name": "...", "reasoning": "...", "executive_summary": "...", "full_prompt": "..."}}"""
 
     response = requests.post(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent",
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent",
         headers={"x-goog-api-key": GEMINI_KEY},
         json={"contents": [{"parts": [{"text": prompt}]}]},
         timeout=60

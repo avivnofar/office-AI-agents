@@ -8,11 +8,24 @@
  * ai-tools.json case_platform_map). No API key: the live OpenAPI spec
  * defines no securitySchemes on any endpoint.
  *
- * Status: DRAFT — as of 2026-07-01 Notebook-X's own GitHub-backed storage
- * is disconnected (GET /api/health -> githubConnected:false, 0 notebooks),
- * so real calls currently fail with a 401 from Notebook-X's backend. This
- * client treats that (and any other failure) as best-effort: return null,
- * caller falls through to normal Claude-escalation logic.
+ * Status: as of 2026-07-09, Notebook-X's Render env was given a new GitHub
+ * token — verified live via a real create/upload/read/cleanup round-trip
+ * (independently confirmed via `gh api` against avivnofar/Notebook-X, not
+ * just Notebook-X's own success responses). GET /api/health still reports
+ * `githubConnected:false` — that field is stale/unreliable (looks like it
+ * reflects local Render disk state, which resets on redeploy, not the
+ * actual GitHub connection) and should not be trusted; GET
+ * /api/knowledge-notebooks and the write endpoints below are the real
+ * signal. Separately, `POST /api/knowledge-notebooks/{id}/ask` was 500ing
+ * because Notebook-X's own backend called a deprecated Gemini model
+ * (`gemini-2.5-flash-lite`, retired by Google) — fixed same day in
+ * Notebook-X's `notebook_backend.py` (`GEMINI_MODEL` constant switched to
+ * `gemini-3.1-flash-lite`, confirmed live end-to-end with a real kb-linux
+ * ask returning a real answer). This repo's own Gemini calls
+ * (config/simulation-config.json, config/agents-config.json,
+ * config/token-economy.json, agent-base.js/meeting-engine.js fallback
+ * defaults) were pinned to the same retired model and were fixed in the
+ * same session — see TOKEN-BUDGET.md.
  */
 
 const NOTEBOOKX_API_BASE = 'https://notebook-x-api.onrender.com';

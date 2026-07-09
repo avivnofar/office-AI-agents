@@ -240,7 +240,7 @@ export class AgentBase {
       const simConfig = this.env.SIM_CONFIG?.GEMINI || {};
       const result = await callGemini({
         apiKey: this.env.GEMINI_API_KEY,
-        model: simConfig.model || 'gemini-2.5-flash-lite',
+        model: simConfig.model || 'gemini-3.1-flash-lite',
         endpoint: simConfig.api_endpoint || 'https://generativelanguage.googleapis.com/v1beta/models',
         temperature: simConfig.temperature ?? 0.8,
         maxTokens: Math.max(simConfig.max_tokens ?? 1024, 2048),

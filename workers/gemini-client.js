@@ -30,7 +30,7 @@ const CF_WORKERS_AI_MODEL = '@cf/meta/llama-3.1-8b-instruct-fp8';
 /**
  * @param {object} opts
  * @param {string} opts.apiKey - GEMINI_API_KEY (Worker secret)
- * @param {string} opts.model - e.g. "gemini-2.5-flash-lite"
+ * @param {string} opts.model - e.g. "gemini-3.1-flash-lite"
  * @param {string} opts.endpoint - base endpoint, e.g. simulation-config.json GEMINI.api_endpoint
  * @param {string} opts.prompt - the user-turn prompt
  * @param {string} [opts.systemPrompt] - system instruction (agent personality + state)
