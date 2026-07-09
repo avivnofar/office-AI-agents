@@ -28,31 +28,13 @@ jobs:
           echo "=== raw response (in case jq parsing above missed anything) ==="
           cat models.json
 
-      - name: Pick cheapest/fastest generateContent-capable model
+      - name: Isolated live test against gemini-3.1-flash-lite
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-          PICK=$(jq -r '
-            [.models[] | select(.supportedGenerationMethods // [] | index("generateContent"))]
-            | (map(select(.name | test("flash-lite"; "i")))
-               + map(select(.name | test("flash"; "i") and (.name | test("flash-lite"; "i") | not)))
-               + .) [0].name // empty
-          ' models.json)
-          echo "Picked model: $PICK"
-          echo "PICK=$PICK" >> "$GITHUB_ENV"
-
-      - name: Isolated live test against the picked model
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          if [ -z "$PICK" ]; then
-            echo "No candidate model found by the selection heuristic — nothing to test."
-            exit 0
-          fi
-          MODEL_ID="${PICK#models/}"
-          echo "=== testing: $MODEL_ID ==="
+          echo "=== testing: gemini-3.1-flash-lite ==="
           RESPONSE=$(curl -s -w "\nHTTP_STATUS:%{http_code}" \
-            "https://generativelanguage.googleapis.com/v1beta/models/${MODEL_ID}:generateContent" \
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-flash-lite:generateContent" \
             -H "Content-Type: application/json" \
             -H "x-goog-api-key: ${GEMINI_API_KEY}" \
             -d '{"contents":[{"role":"user","parts":[{"text":"Reply with exactly one word: OK"}]}],"generationConfig":{"maxOutputTokens":10}}')
