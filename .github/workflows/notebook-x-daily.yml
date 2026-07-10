@@ -1,15 +1,16 @@
 name: Notebook-X Daily Automation
 
-# Daily 00:00-17:00 IL window slot for this automation (see
-# config/chore-schedule.json). Picked 14:00 UTC (17:00 IDT) — the last
-# hour of the window, after the 06:00-08:00 UTC case-simulation block and
-# clear of the 08:00-16:30 UTC office-simulation cron entirely. Commented
-# out until the person is satisfied with manual test runs — enabling is a
-# one-line uncomment.
-# schedule:
-#   - cron: '0 14 * * *'
-
+# LIVE as of 2026-07-10. Fires daily at 01:00 Israel time, inside
+# config/chore-schedule.json's 00:00-06:00 IL "Night sweep" window and
+# clear of the 06:00-08:00 IL case-simulation buffer and the
+# 08:00-16:30 IL office-simulation cron. Israel is UTC+3 (IDT) as of this
+# date (see ISRAEL_UTC_OFFSET_HOURS in workers/agent-runner.js) — 01:00 IDT
+# = 22:00 UTC the previous day, hence the cron below. IMPORTANT: when
+# Israel switches to IST (UTC+2, late Oct) or back to IDT (late Mar),
+# update this cron the same way agent-runner.js's DST caveat describes.
 on:
+  schedule:
+    - cron: '0 22 * * *'
   workflow_dispatch: {}
 
 permissions:
