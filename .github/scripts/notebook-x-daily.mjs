@@ -30,7 +30,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { callGemini } from '../../workers/gemini-client.js';
-import { listKnowledgeNotebooks, getNotebookXHealth, triggerIngestContentFiles } from '../../workers/notebookx-client.js';
+import { listKnowledgeNotebooks, getNotebookXHealth, waitForNotebookXWarm, ingestAndVerify } from '../../workers/notebookx-client.js';
 
 // NOT imported from workers/model-router.js: that module does
 // `import tokenEconomy from '../config/token-economy.json'` with no import
@@ -331,11 +331,17 @@ async function main() {
       console.log(`SAVE FAILED: push to ${NOTEBOOK_X_REPO} returned HTTP ${pushResult.status}: ${JSON.stringify(pushResult.data).slice(0, 300)}`);
       outcome = 'push-failed';
     } else {
-      console.log('Push succeeded. Waiting for Render to redeploy before calling ingest-content-files...');
-      await sleep(60_000);
-      const ingestResult = await triggerIngestContentFiles();
-      console.log(`ingest-content-files result: ${JSON.stringify(ingestResult)}`);
-      outcome = ingestResult.ok ? 'ingested-unverified' : 'ingest-failed';
+      console.log('Push succeeded. Polling Notebook-X until responsive before calling ingest-content-files (replaces the fixed-sleep approach that failed on 2026-07-10 — see TOKEN-BUDGET.md)...');
+      const warmup = await waitForNotebookXWarm();
+      if (!warmup.warm) {
+        console.log(`SAVE INCOMPLETE: Notebook-X did not become responsive within the polling window (${warmup.attempts} attempts, ${Math.round(warmup.elapsedMs / 1000)}s). Content is pushed to ${NOTEBOOK_X_REPO} but not yet ingested — item remains pending for the next run.`);
+        outcome = 'warmup-timeout';
+      } else {
+        console.log(`Notebook-X responsive after ${warmup.attempts} attempt(s), ${Math.round(warmup.elapsedMs / 1000)}s. Calling ingest-content-files and independently verifying the result...`);
+        const ingest = await ingestAndVerify(item.target_notebook_name);
+        console.log(`ingest-content-files verification: ${JSON.stringify({ outcome: ingest.outcome, attempts: ingest.attempts, before: ingest.before && { dataQuality: ingest.before.dataQuality, updatedAt: ingest.before.updatedAt }, after: ingest.after && { dataQuality: ingest.after.dataQuality, updatedAt: ingest.after.updatedAt } })}`);
+        outcome = ingest.outcome;
+      }
     }
   }
 

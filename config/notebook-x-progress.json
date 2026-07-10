@@ -32,9 +32,11 @@
       "id": "kb-mirtapbx-content-fill",
       "label": "Fill kb-mirtapbx's 8 skeleton sections (Architecture, Extension Configuration, Trunk Setup, Dialplan, IVR & Ring Groups, Asterisk CLI, Common Issues, Integration with 1COM) with real content, plus commands/glossary/commonIssues",
       "source": "TODO.md Notebook-X bullet 3 (pbx)",
-      "status": "pending",
+      "status": "done",
       "kind": "existing_notebook_fill",
-      "target_notebook_name": "kb-mirtapbx"
+      "target_notebook_name": "kb-mirtapbx",
+      "completed": "2026-07-10",
+      "completion_note": "notebook-x-daily.yml (run 29076132390, 2026-07-10) generated all 8 sections + commands/issues/glossary/summary via 19 real Gemini (gemini-3.1-flash-lite) calls and pushed the fragment to avivnofar/Notebook-X automatically (NOTEBOOK_X_REPO_TOKEN working, no manual bridge needed this time). The ingest-content-files call itself failed that run (fixed 60s sleep too short + a separate bug — see below) and the item was correctly left pending. Fixed same day: workers/notebookx-client.js now has waitForNotebookXWarm() (polls GET /api/health instead of a blind sleep) and ingestAndVerify() (retries ingest, checks the TARGET notebook's own per-file result rather than the batch-level {ok:true} -- found ingest-content-files processes all pending fragments in one call and can report overall ok while a specific notebook's merge failed with a transient 'GitHub GET ... HTTP 502' inside its own merge step -- and independently re-reads the notebook listing to confirm dataQuality actually changed, with its own short retry for a listing-endpoint race observed immediately after a successful ingest). Re-ran the fix against this exact stranded content (not regenerated) via a standalone script calling the real production functions directly: warm in 1 attempt (~1.2s, service was not actually cold this time -- the original failure was the GitHub-side 502 in the merge step, not a Render cold start), ingest's per-file result for kb-mirtapbx showed status:'ok', dataQuality:'complete', sectionCount 8, commandCount 79, issueCount 9 -- matching generated content exactly. Independently verified via direct GitHub read of notebooks/kb-mirtapbx.json (not just Notebook-X's own response): new commit 87589399 (2026-07-10T07:40:22Z, replacing the 2026-06-30 skeleton commit), 8 sections present, first section 3234 chars, 79 commands. See TOKEN-BUDGET.md 2026-07-10 entries for full detail."
     },
     {
       "id": "docker-cloudflare-gcp-content-fill",

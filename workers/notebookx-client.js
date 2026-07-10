@@ -121,3 +121,117 @@ export async function getNotebookXHealth() {
     return { error: err.message };
   }
 }
+
+/**
+ * Poll GET /api/health until Notebook-X responds, instead of a single fixed
+ * sleep after a push. Found necessary 2026-07-10: a real run pushed content
+ * successfully then called ingest-content-files after a blind 60s sleep and
+ * got a 502 — independently confirmed the target notebook never actually
+ * updated (not a false-negative error), consistent with Render's free-tier
+ * cold start taking longer than 60s. A fixed sleep can't adapt to that; this
+ * polls instead, with a timeout generous enough for a genuinely cold
+ * instance rather than just a bigger fixed number (same fragile pattern with
+ * a higher ceiling).
+ *
+ * IMPORTANT CAVEAT: a fast /api/health response proves the Render instance
+ * is up and answering requests. It does NOT prove the specific redeploy
+ * containing the just-pushed commit has finished building and is what's
+ * currently serving — Notebook-X exposes no deploy-status/commit-SHA
+ * endpoint to check that directly. So this narrows the failure mode (dead
+ * service) but doesn't eliminate "warm old build, new build still cooking";
+ * that residual case is why the caller should retry the ingest call itself
+ * too, not just gate once on this.
+ *
+ * @param {object} [opts]
+ * @param {number} [opts.timeoutMs=300000] - overall budget (default 5min)
+ * @param {number} [opts.intervalMs=12000] - delay between polls
+ * @returns {Promise<{warm: boolean, attempts: number, elapsedMs: number}>}
+ */
+export async function waitForNotebookXWarm({ timeoutMs = 300_000, intervalMs = 12_000 } = {}) {
+  const start = Date.now();
+  let attempts = 0;
+  while (Date.now() - start < timeoutMs) {
+    attempts += 1;
+    const health = await getNotebookXHealth();
+    if (health && !health.error && health.status) {
+      return { warm: true, attempts, elapsedMs: Date.now() - start, health };
+    }
+    if (Date.now() - start + intervalMs >= timeoutMs) break;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return { warm: false, attempts, elapsedMs: Date.now() - start };
+}
+
+/**
+ * Call ingest-content-files, retrying on failure (a cold/still-building
+ * instance can 502 even after /api/health looks warm — see
+ * waitForNotebookXWarm's caveat), then INDEPENDENTLY confirm the target
+ * notebook's dataQuality/updatedAt actually changed via a fresh
+ * listKnowledgeNotebooks() read. Do not trust the endpoint's own {ok:true}
+ * response as proof of success — 2026-07-09's session established that
+ * standard (verified kb-voip-sip via a direct GitHub read after a manual
+ * ingest) and the point of this function is to make that same standard the
+ * automation's own default, not a manual follow-up step.
+ *
+ * Distinguishes three outcomes on purpose, per the incident this was built
+ * for: "the service was cold" (retries resolve it), "ingest is genuinely
+ * broken" (retries exhaust, still failing) and "ingest claims success but
+ * nothing changed" (a different, real bug — a silent no-op merge — that
+ * must not be reported the same as either of the above).
+ *
+ * @param {string} targetNotebookId - e.g. "kb-mirtapbx"
+ * @param {object} [opts]
+ * @param {number} [opts.timeoutMs=180000] - overall retry budget (3min)
+ * @param {number} [opts.intervalMs=15000] - delay between ingest attempts
+ * @returns {Promise<{outcome: string, verified: boolean, attempts: number, before: object|null, after: object|null, lastResult: object|null}>}
+ */
+export async function ingestAndVerify(targetNotebookId, { timeoutMs = 180_000, intervalMs = 15_000 } = {}) {
+  const beforeList = await listKnowledgeNotebooks();
+  const before = beforeList.find((n) => n.id === targetNotebookId) || null;
+
+  const start = Date.now();
+  let attempts = 0;
+  let lastResult = null;
+  let targetFileResult = null;
+  while (Date.now() - start < timeoutMs) {
+    attempts += 1;
+    lastResult = await triggerIngestContentFiles();
+    // ingest-content-files processes ALL pending fragments in one batch and
+    // its top-level {ok:true} only means the request itself was accepted —
+    // NOT that our specific notebook's merge succeeded. Confirmed
+    // 2026-07-10 against real stranded content: the endpoint returned
+    // {status:"ok", results:[...]} while kb-mirtapbx's own entry inside
+    // `results` had status:"error" ("GitHub GET notebooks/kb-mirtapbx.json:
+    // HTTP 502" — a transient GitHub API read failure inside Notebook-X's
+    // own merge step), because other notebooks in the same batch succeeded.
+    // Must check the target's own per-file result, not the batch status.
+    targetFileResult = lastResult?.results?.find((r) => r.id === targetNotebookId) || null;
+    if (lastResult.ok && targetFileResult?.status === 'ok') break;
+    if (Date.now() - start + intervalMs >= timeoutMs) break;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+
+  if (!lastResult?.ok || targetFileResult?.status !== 'ok') {
+    return { outcome: 'ingest-failed', verified: false, attempts, before, after: null, lastResult, targetFileResult };
+  }
+
+  // The ingest endpoint's per-file "ok" already reports the merge happened,
+  // but confirmed 2026-07-10 that an immediate listKnowledgeNotebooks() call
+  // right after a successful ingest can race a listing-endpoint refresh and
+  // return nothing for the target notebook (transient, not a real absence —
+  // the notebook obviously still exists). Give the listing a few short
+  // retries of its own before concluding verification failed.
+  let after = null;
+  for (let i = 0; i < 4; i += 1) {
+    const afterList = await listKnowledgeNotebooks();
+    after = afterList.find((n) => n.id === targetNotebookId) || null;
+    if (after) break;
+    await new Promise((resolve) => setTimeout(resolve, 5_000));
+  }
+  const changed = !!after && (after.dataQuality !== before?.dataQuality || after.updatedAt !== before?.updatedAt);
+
+  if (changed) {
+    return { outcome: 'ingested-verified', verified: true, attempts, before, after, lastResult, targetFileResult };
+  }
+  return { outcome: 'ingest-reported-ok-but-unverified', verified: false, attempts, before, after, lastResult, targetFileResult };
+}
