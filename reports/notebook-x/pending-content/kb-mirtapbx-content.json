@@ -1,0 +1,632 @@
+{
+  "knowledgeBase": {
+    "summary": "The MirtaPBX Reference notebook serves as a comprehensive technical guide covering the system's core architecture, including essential configurations for extensions, trunks, dialplans, IVR menus, and ring groups. It further provides advanced troubleshooting resources via the Asterisk CLI, solutions for common operational issues, and documentation for seamless integration with 1COM services.",
+    "lastWebVerified": null,
+    "webSources": [],
+    "sections": [
+      {
+        "id": "mirtapbx-architecture",
+        "title": "MirtaPBX Architecture",
+        "content": "### MirtaPBX Architecture\n\nMirtaPBX is a multi-tenant, modular communication platform built on a distributed microservices architecture. It decouples the signaling layer (SIP/WebRTC) from the business logic and media processing layers.\n\n#### Core Components\n1.  **Mirta Engine (Core):** The central controller written in Node.js. It manages the database (MariaDB), API requests, and inter-process communication via Redis.\n2.  **Media Server (FreeSWITCH):** Handles RTP streams, transcoding, and conferencing. Mirta interacts with FreeSWITCH via the Event Socket Layer (ESL).\n3.  **Provisioning Server:** An Nginx-based service that serves configuration files to endpoints via HTTP/HTTPS.\n4.  **Database Layer:** MariaDB stores tenant configurations, CDRs, and routing rules. Redis acts as the real-time state cache for active calls and registration status.\n\n#### Communication Flow\n*   **Signaling:** SIP/WebRTC traffic hits the FreeSWITCH instance.\n*   **Event Handling:** FreeSWITCH pushes events to the Mirta Engine via ESL.\n*   **Logic Execution:** The Engine evaluates the dialplan, checks permissions, and executes business logic (e.g., IVR, queues, call recording).\n*   **Persistence:** CDRs are written to MariaDB; real-time presence updates are pushed to Redis.\n\n#### Configuration & Management\nThe system is managed primarily through the Mirta CLI and the REST API.\n\n**CLI Utility**\nThe `mirta-cli` tool is the primary interface for system-level debugging and maintenance.\n*   **Check service status:** `systemctl status mirta-engine`\n*   **View real-time logs:** `journalctl -u mirta-engine -f`\n*   **Reload configuration:** `mirta-cli reload`\n\n**FreeSWITCH Integration**\nDirect interaction with the media server is performed via `fs_cli`.\n*   **Access console:** `fs_cli -P 8021`\n*   **Check active channels:** `show channels`\n*   **Debug SIP signaling:** `sofia global siptrace on`\n\n#### Database Schema & Optimization\nThe database is partitioned by `tenant_id`. To maintain performance under high load, ensure the following indices are optimized:\n*   `cdr` table: Index on `calldate`, `src`, and `dst`.\n*   `registrations` table: Index on `user_id` and `expiry`.\n\n**Querying CDRs (Example):**\n```sql\nSELECT calldate, src, dst, duration \nFROM cdr \nWHERE tenant_id = '1001' \nAND calldate > NOW() - INTERVAL 24 HOUR;\n```\n\n#### API Integration\nMirtaPBX exposes a RESTful API for external integrations (CRM, billing). Authentication is handled via Bearer tokens.\n*   **Endpoint:** `https://<pbx-ip>/api/v1/`\n*   **Example Request (Create Extension):**\n```bash\ncurl -X POST https://<pbx-ip>/api/v1/extensions \\\n  -H \"Authorization: Bearer <token>\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"extension\": \"101\", \"name\": \"John Doe\", \"secret\": \"secure_password\"}'\n```\n\n#### High Availability (HA)\nMirtaPBX supports active-passive failover using `keepalived` for virtual IP (VIP) management.\n*   **Configuration Path:** `/etc/keepalived/keepalived.conf`\n*   **Synchronization:** Ensure `/etc/mirta/` and the MariaDB data directory are synchronized across nodes using `rsync` or a shared storage backend (NFS/DRBD).\n*   **Redis Replication:** Configure `replicaof` in `redis.conf` to maintain state consistency between nodes.",
+        "subsections": [],
+        "tags": [],
+        "lastUpdated": "2026-07-10T07:16:27.666Z",
+        "sources": []
+      },
+      {
+        "id": "extension-configuration",
+        "title": "Extension Configuration",
+        "content": "### Extension Configuration\n\nExtensions are defined within the dialplan configuration file (typically `extensions.conf`). Each extension is categorized by context, priority, and application.\n\n#### Syntax Structure\nThe standard format for an extension entry is:\n`exten => name,priority,application(arguments)`\n\n*   **name**: The extension number or pattern (e.g., `101`, `_2XX`).\n*   **priority**: An integer (starting at 1) or label (e.g., `n` for next).\n*   **application**: The function to execute (e.g., `Dial`, `Answer`, `Playback`).\n\n#### Pattern Matching\nUse pattern matching to handle ranges of extensions efficiently. The underscore (`_`) prefix denotes a pattern:\n*   `X`: Matches any digit 0-9.\n*   `Z`: Matches any digit 1-9.\n*   `N`: Matches any digit 2-9.\n*   `.`: Wildcard; matches one or more characters.\n\n**Example:** `exten => _2XX,1,Dial(PJSIP/${EXTEN})` matches any 3-digit extension starting with 2 and routes it to the corresponding PJSIP endpoint.\n\n#### Common Configuration Patterns\n\n**1. Standard Endpoint Dialing**\nTo route an incoming call to a specific PJSIP endpoint with a 20-second timeout:\n```ini\n[internal]\nexten => 100,1,Answer()\nexten => 100,n,Dial(PJSIP/100,20)\nexten => 100,n,Hangup()\n```\n\n**2. Voicemail Integration**\nUtilize the `VoiceMail` application to handle unanswered calls:\n```ini\nexten => 100,n,Dial(PJSIP/100,20)\nexten => 100,n,VoiceMail(100@default,u) ; 'u' for unavailable\n```\n\n**3. Conditional Routing (Goto)**\nUse `Goto` to jump between contexts or priorities based on logic:\n```ini\nexten => 500,1,GotoIf($[\"${CALLERID(num)}\" = \"1234\"]?vip,s,1:default,s,1)\n```\n\n#### Reloading Configuration\nAfter modifying `extensions.conf`, apply changes without restarting the PBX service using the CLI:\n```bash\nasterisk -rx \"dialplan reload\"\n```\n\n#### Verification Commands\nUse the following CLI commands to debug and verify extension behavior:\n*   `dialplan show <extension>@<context>`: Displays the compiled dialplan for a specific extension.\n*   `pjsip show endpoints`: Lists all registered PJSIP endpoints to verify connectivity.\n*   `core set verbose 3`: Increases logging granularity to monitor call flow in real-time.\n\n#### Best Practices\n*   **Context Isolation**: Keep internal, outbound, and inbound routes in separate contexts to prevent unauthorized toll usage.\n*   **Priority Labels**: Use `n` (next) instead of hardcoding integers to simplify dialplan maintenance.\n*   **Include Statements**: Use `include => <context_name>` to modularize dialplans, keeping the `[default]` context clean.\n*   **Security**: Always use `Set(CHANNEL(language)=en)` and `Set(CDR(accountcode)=...)` for billing and localization tracking within the extension logic.",
+        "subsections": [],
+        "tags": [],
+        "lastUpdated": "2026-07-10T07:16:40.913Z",
+        "sources": []
+      },
+      {
+        "id": "trunk-setup",
+        "title": "Trunk Setup",
+        "content": "### Trunk Setup\n\nA SIP trunk configuration requires precise alignment between the PBX and the ITSP (Internet Telephony Service Provider). Ensure firewall rules permit UDP/TCP traffic on ports 5060/5061 and the RTP range (typically 10000–20000) before proceeding.\n\n#### Configuration Parameters\nWhen defining a trunk, utilize the following standard parameters. Adjust based on your specific PBX platform (e.g., Asterisk/FreePBX, 3CX, or Kamailio).\n\n*   **Host/IP:** The FQDN or IP address of the ITSP SBC.\n*   **Transport:** UDP (default), TCP, or TLS (recommended for security).\n*   **DTMF Mode:** `rfc2833` (standard), `info`, or `inband`.\n*   **Codec Priority:** `g729` (low bandwidth), `g711u/a` (high quality).\n*   **Qualify:** Set to `yes` or a specific interval (e.g., `60`) to monitor latency and availability.\n\n#### Asterisk/PJSIP Configuration Example\nIn `pjsip.conf`, define the endpoint, auth, and registration objects.\n\n```ini\n[my_trunk]\ntype=endpoint\ncontext=from-trunk\ndisallow=all\nallow=g729,ulaw\noutbound_auth=my_trunk_auth\naors=my_trunk_aor\n\n[my_trunk_auth]\ntype=auth\nauth_type=userpass\nusername=your_username\npassword=your_password\n\n[my_trunk_aor]\ntype=aor\ncontact=sip:sip.provider.com\n\n[my_trunk_identify]\ntype=identify\nendpoint=my_trunk\nmatch=sip.provider.com\n```\n\n#### Verification Commands\nUse the CLI to validate registration status and packet flow.\n\n**Asterisk (PJSIP):**\n*   `pjsip show endpoints`: Verify the trunk status is `Unavailable` or `Idle`.\n*   `pjsip show registrations`: Confirm the registration state is `Registered`.\n*   `pjsip set logger on`: Enable SIP packet logging to debug handshake failures (401 Unauthorized, 403 Forbidden).\n\n**Linux/Network Level:**\n*   `sngrep`: Use this ncurses-based tool to capture and visualize SIP traffic in real-time.\n*   `tcpdump -ni any port 5060`: Verify that SIP packets are reaching the interface.\n*   `mtr -u <provider_ip>`: Check for packet loss or jitter on the path to the SBC.\n\n#### Common Troubleshooting\n1.  **401 Unauthorized:** Mismatch in `auth_user` or `secret`. Verify credentials against the provider portal.\n2.  **403 Forbidden:** Often indicates an IP whitelist issue. Ensure your PBX public IP is registered in the provider’s dashboard.\n3.  **One-way Audio:** Typically a NAT/Firewall issue. Ensure `external_media_address` and `local_net` are correctly defined in your PBX configuration to prevent the PBX from sending internal IP addresses in the SDP headers.\n4.  **Registration Flapping:** Check for multiple devices registering with the same credentials or a firewall aggressively closing UDP states. Increase `qualify_frequency` if necessary.\n\n#### Security Best Practices\n*   **ACLs:** Restrict `permit` and `deny` fields to the ITSP’s specific IP ranges.\n*   **TLS/SRTP:** Always prefer TLS for signaling and SRTP for media encryption to prevent eavesdropping.\n*   **Rate Limiting:** Implement outbound call limits to mitigate toll fraud in the event of a compromised extension.",
+        "subsections": [],
+        "tags": [],
+        "lastUpdated": "2026-07-10T07:16:54.216Z",
+        "sources": []
+      },
+      {
+        "id": "dialplan",
+        "title": "Dialplan",
+        "content": "### Dialplan\n\nThe dialplan is the core logic engine of the PBX, dictating call routing, feature access, and signaling behavior. It is structured as a series of **Contexts**, **Extensions**, and **Priorities**.\n\n#### Syntax Structure\nThe standard configuration (e.g., `extensions.conf`) follows this hierarchy:\n`exten => extension,priority,application(arguments)`\n\n*   **Context:** A logical grouping of extensions (e.g., `[internal]`, `[outbound-pstn]`). Calls must enter a context to be processed.\n*   **Extension:** The dialed number or pattern. Patterns must begin with an underscore (`_`).\n    *   `X`: Any digit 0-9.\n    *   `Z`: Any digit 1-9.\n    *   `N`: Any digit 2-9.\n    *   `.`: Wildcard (matches one or more characters).\n*   **Priority:** Sequential integer (starting at 1) or `n` (next).\n*   **Application:** The action to execute (e.g., `Dial`, `Playback`, `Hangup`).\n\n#### Pattern Matching Example\n```asterisk\n; Match any 4-digit extension starting with 2\nexten => _2XXX,1,Dial(PJSIP/${EXTEN},20)\nexten => _2XXX,n,Hangup()\n\n; Match 10-digit NANP numbers for outbound routing\nexten => _NXXNXXXXXX,1,Dial(PJSIP/${EXTEN}@trunk-provider)\n```\n\n#### Key Applications\n*   **`Dial(Technology/Resource,Timeout,Options)`:** Initiates a call. Common options: `r` (ringback), `t` (allow callee to transfer), `m` (hold music).\n*   **`Goto(context,extension,priority)`:** Redirects execution flow.\n*   **`Answer()`:** Explicitly answers the channel. Required before playing audio files.\n*   **`Playback(filename)`:** Plays a sound file without interruption.\n*   **`Background(filename)`:** Plays audio but allows the user to interrupt by dialing an extension.\n*   **`Set(VAR=VAL)`:** Assigns values to channel variables. Access via `${VAR}`.\n\n#### Channel Variables\nVariables are scoped to the channel. Use `GLOBAL(var)` for system-wide persistence or `SHARED(var,channel)` for inter-channel communication.\n*   **Built-in variables:** `${EXTEN}` (current extension), `${CALLERID(num)}` (caller ID), `${CHANNEL}` (current channel technology/name).\n\n#### Include Logic\nUse `include => context` to allow a context to inherit extensions from another. Order matters; the PBX searches included contexts if no match is found in the current context.\n\n#### Best Practices for Production\n1.  **Modularization:** Use `#include` to split large dialplans into functional files (e.g., `extensions_users.conf`, `extensions_trunks.conf`).\n2.  **Safety:** Always terminate extensions with a `Hangup()` or `Busy()` priority to prevent fall-through errors.\n3.  **Debugging:** Use the CLI command `dialplan show [context]` to verify the loaded logic and `core set verbose 3` to monitor execution in real-time.\n4.  **Security:** Never allow anonymous inbound calls to reach internal contexts. Use a dedicated `[from-outside]` context with strict authentication or IP-based ACLs.\n\n#### Reloading\nAfter modifying configuration files, apply changes without dropping active calls:\n`dialplan reload`",
+        "subsections": [],
+        "tags": [],
+        "lastUpdated": "2026-07-10T07:17:07.793Z",
+        "sources": []
+      },
+      {
+        "id": "ivr-and-ring-groups",
+        "title": "IVR & Ring Groups",
+        "content": "### IVR & Ring Groups\n\n#### IVR (Interactive Voice Response)\nThe IVR acts as the primary entry point for inbound traffic, utilizing DTMF detection to route calls. Configuration must prioritize failover logic and input validation.\n\n**Key Configuration Parameters:**\n*   **Timeout:** The duration (seconds) the system waits for user input before executing the `Timeout Destination`. Standard: 5–8 seconds.\n*   **Invalid Retries:** Number of attempts allowed for invalid input before routing to the `Invalid Destination`.\n*   **Digit Length:** Define the expected number of digits (e.g., 3 for extension dialing).\n\n**Asterisk Dialplan Implementation (Example):**\n```asterisk\n[ivr-main]\nexten => s,1,Answer()\nexten => s,n,Background(welcome-message)\nexten => s,n,WaitExten(5)\n\n; Direct extension dialing\nexten => _XXX,1,Goto(internal-extensions,${EXTEN},1)\n\n; Menu options\nexten => 1,1,Goto(sales-ring-group,s,1)\nexten => 2,1,Goto(support-ring-group,s,1)\n\n; Error handling\nexten => i,1,Playback(invalid-option)\nexten => i,n,Goto(ivr-main,s,1)\nexten => t,1,Playback(goodbye)\nexten => t,n,Hangup()\n```\n\n#### Ring Groups\nRing groups facilitate simultaneous or sequential alerting of multiple endpoints. When configuring, ensure the `Ring Strategy` is optimized for the specific call volume and agent availability.\n\n**Common Ring Strategies:**\n*   **ringall:** Rings all available channels simultaneously. Best for small teams.\n*   **hunt:** Rings extensions sequentially based on the order defined in the list.\n*   **memoryhunt:** Rings the first extension, then the first and second, then the first, second, and third.\n*   **firstavailable:** Rings only the first idle extension.\n\n**Configuration Syntax (Asterisk `queues.conf` or `extensions.conf`):**\nFor high-availability environments, prefer `Queue()` over simple `Dial()` strings to leverage advanced logging and member state tracking.\n\n```asterisk\n; Dialing multiple endpoints simultaneously\n[sales-ring-group]\nexten => s,1,Dial(PJSIP/101&PJSIP/102&PJSIP/103,20,tr)\nexten => s,n,Goto(voicemail-main,100,1) ; Failover to VM\n```\n\n#### Technical Considerations for IT Professionals\n1.  **DTMF Signaling:** Ensure `dtmfmode` is consistent across the trunk and endpoints (RFC2833 is the industry standard). Mismatched modes result in \"ignored\" IVR keypresses.\n2.  **Ring Timer:** The `Dial` timeout must be shorter than the provider’s inbound trunk timeout to prevent the carrier from dropping the call before the PBX can route it to voicemail.\n3.  **Concurrency Limits:** When using `ringall`, monitor the `max_channels` limit. Each leg of the call consumes a license/channel; excessive simultaneous ringing can lead to audio degradation or dropped calls if the trunk capacity is reached.\n4.  **Loop Prevention:** Always define explicit `Invalid` and `Timeout` destinations. Avoid routing IVR options back to the same IVR menu without a clear exit condition to prevent infinite recursion.\n5.  **State Monitoring:** Use `pjsip show endpoints` to verify device registration status before adding them to a ring group to prevent \"ghost\" ringing on offline devices.",
+        "subsections": [],
+        "tags": [],
+        "lastUpdated": "2026-07-10T07:17:20.727Z",
+        "sources": []
+      },
+      {
+        "id": "asterisk-cli",
+        "title": "Asterisk CLI",
+        "content": "The Asterisk Command Line Interface (CLI) is the primary tool for real-time system monitoring, debugging, and configuration management. Access the CLI via `asterisk -r` (or `asterisk -rvvv` for increased verbosity).\n\n### Core Operational Commands\n\n*   **`core show channels`**: Lists all active channels, their current application, and bridge state.\n*   **`core show uptime`**: Displays system boot time and last reload time.\n*   **`dialplan show <exten>@<context>`**: Displays the logic for a specific extension. Use `dialplan show 100@internal` to verify routing.\n*   **`module show`**: Lists loaded modules. Use `module reload <module_name>` to apply configuration changes without restarting the service.\n\n### Debugging and Verbosity\nVerbosity levels (1–5) control the detail of console output.\n*   **`core set verbose <level>`**: Sets the global verbosity level.\n*   **`core set debug <level> <module>`**: Enables module-specific debug logging.\n*   **`pjsip set logger on`**: Captures SIP signaling (INVITE, OPTIONS, REGISTER) for PJSIP channels. Use `pjsip set logger host <ip>` to filter by specific endpoint.\n\n### PJSIP Troubleshooting\nModern Asterisk deployments rely on `res_pjsip`. Use these commands to inspect endpoint health:\n*   **`pjsip show endpoints`**: Lists all configured PJSIP endpoints and their current status (Available/Unavailable).\n*   **`pjsip show endpoint <name>`**: Displays detailed configuration, including associated AORs, auth objects, and active channels.\n*   **`pjsip show registrations`**: Shows status of outbound registrations to ITSP trunks.\n*   **`pjsip show contacts`**: Displays the IP, port, and user-agent of registered devices.\n\n### Database and Realtime\nIf using `res_config_mysql` or `res_config_odbc` for Realtime architecture:\n*   **`realtime load <family> <col>=<val>`**: Queries the database directly through the Asterisk abstraction layer to verify connectivity and mapping.\n*   **`realtime show cache`**: Displays currently cached database objects.\n\n### CLI Best Practices\n1.  **Tab Completion**: The CLI supports robust tab completion for commands, contexts, and extensions.\n2.  **Execution from Shell**: Execute single commands without entering the interactive shell using `asterisk -rx \"<command>\"`. This is essential for cron jobs or monitoring scripts.\n    *   *Example:* `asterisk -rx \"pjsip show endpoint 100\" | grep \"device_state\"`\n3.  **Logging**: CLI output is mirrored to `/var/log/asterisk/messages` and `/var/log/asterisk/full`. If the CLI is flooded, check these files for historical context.\n4.  **Security**: Access to the CLI is controlled via `/etc/asterisk/manager.conf`. Ensure `permit` and `deny` rules are strictly defined for remote CLI access (AMI).\n\n### Configuration Reloading\nAvoid `core restart now` in production. Prefer granular reloads:\n*   `dialplan reload`: Reloads `extensions.conf`.\n*   `pjsip reload`: Reloads `pjsip.conf` and associated files.\n*   `module reload`: Reloads specific modules (e.g., `module reload res_pjsip.so`).\n\nAlways verify syntax after changes using `dialplan reload` and monitoring the console for \"Error\" or \"Warning\" strings before placing the system into production traffic.",
+        "subsections": [],
+        "tags": [],
+        "lastUpdated": "2026-07-10T07:17:34.324Z",
+        "sources": []
+      },
+      {
+        "id": "common-issues",
+        "title": "Common Issues",
+        "content": "### Common Issues\n\n#### 1. SIP Registration Failures (401/403/408 Errors)\n*   **401 Unauthorized:** Typically indicates a credential mismatch. Verify `secret` in `pjsip.conf` or `sip.conf`. Ensure `auth_type` matches the provider (usually `md5`).\n*   **403 Forbidden:** Often triggered by IP ACLs or incorrect `from_domain` settings. Check if the provider requires the `From` header to match the registered trunk domain.\n*   **408 Request Timeout:** Indicates a network path issue or firewall interference. \n    *   **Diagnostic:** Run `pjsip set logger on` and `pjsip show endpoints`. \n    *   **Fix:** Ensure `rtp_symmetric=yes` and `force_rport=yes` are set in the endpoint configuration to handle NAT traversal. Verify that the PBX firewall allows inbound UDP traffic on the signaling port (default 5060) and the RTP range (default 10000-20000).\n\n#### 2. One-Way Audio (NAT/RTP Issues)\nOne-way audio is almost exclusively a result of incorrect SDP negotiation or NAT traversal failure.\n*   **Symptoms:** Caller hears callee, but callee hears silence (or vice versa).\n*   **Configuration:** Ensure `direct_media=no` is set if the PBX is behind a NAT, forcing the media stream to proxy through the PBX.\n*   **Verification:** Use `rtp set debug on` to inspect the media flow. Check the `c=` (connection) line in the SDP packet; if it contains a private IP (e.g., 192.168.x.x) instead of the public WAN IP, the PBX is failing to rewrite the SDP.\n*   **Fix:** Explicitly define `external_media_address` and `external_signaling_address` in your `transport` section.\n\n#### 3. Trunk Congestion (503 Service Unavailable)\n*   **Cause:** Often due to exhausted channel limits or DNS resolution failures.\n*   **Diagnostic:** Run `pjsip show registrations`. If the status is `Rejected` or `Unreachable`, check DNS resolution for the provider’s FQDN.\n*   **Fix:** If using SRV records, ensure the PBX is configured to perform DNS lookups. If the provider limits concurrent calls, check `max_contacts` and `set_var` parameters to ensure the PBX isn't attempting to exceed the provider's licensed capacity.\n\n#### 4. DTMF Mismatch\n*   **Symptoms:** IVR systems fail to recognize key presses.\n*   **Configuration:** Ensure `dtmf_mode` is consistent across the trunk and the endpoint. \n    *   `rfc2833` is the industry standard. \n    *   `inband` should be avoided unless necessary for legacy hardware.\n*   **Verification:** Use `pjsip set logger on` and filter for `telephone-event`. If the PBX is receiving the event but the downstream provider is not, the issue lies in the SDP negotiation of the `fmtp` attribute.\n\n#### 5. Database/CDR Bloat\n*   **Issue:** High disk I/O or database latency caused by excessive CDR logging.\n*   **Fix:** Rotate logs and prune the `cdr` table.\n    *   **SQL Cleanup:** `DELETE FROM cdr WHERE calldate < DATE_SUB(NOW(), INTERVAL 6 MONTH);`\n    *   **Optimization:** Ensure the `calldate` and `uniqueid` columns are indexed in your database schema to maintain query performance during high call volumes.",
+        "subsections": [],
+        "tags": [],
+        "lastUpdated": "2026-07-10T07:17:46.779Z",
+        "sources": []
+      },
+      {
+        "id": "integration-with-1com",
+        "title": "Integration with 1COM",
+        "content": "### Integration with 1COM\n\nThe integration between the PBX and the 1COM platform is achieved via a SIP trunking architecture utilizing a dedicated SBC (Session Border Controller) or a direct peering configuration. This integration supports voice traffic, T.38 faxing, and real-time presence synchronization.\n\n#### Prerequisites\n*   **Public IP Whitelisting:** Ensure the PBX signaling and media IP addresses are whitelisted on the 1COM edge gateways.\n*   **Codec Priority:** 1COM mandates G.711u (PCMU) or G.729a. Ensure the PBX codec preference list is ordered accordingly.\n*   **TLS/SRTP:** If encryption is required, ensure the PBX has the 1COM CA certificate imported into the trusted store.\n\n#### SIP Trunk Configuration\nConfigure the SIP trunk using the following parameters in the PBX trunk settings:\n\n*   **Hostname/IP:** `sip.1com.provider.com`\n*   **Transport:** UDP (default) or TLS (port 5061)\n*   **Registration:** Required (if using dynamic IP) or IP-based authentication (if using static peer).\n*   **DTMF Mode:** RFC2833\n*   **Outbound Proxy:** `proxy.1com.provider.com`\n\n**Example Configuration (Asterisk `pjsip.conf`):**\n```ini\n[1com_trunk]\ntype=endpoint\ncontext=from-1com\ndisallow=all\nallow=ulaw,alaw,g729\noutbound_auth=1com_auth\naors=1com_aor\n\n[1com_auth]\ntype=auth\nauth_type=userpass\nusername=YOUR_TRUNK_ID\npassword=YOUR_SECRET\n\n[1com_aor]\ntype=aor\ncontact=sip:sip.1com.provider.com\n```\n\n#### Number Translation and DID Mapping\n1COM delivers calls in E.164 format. You must implement an inbound route translation to strip the country code or prefix if your internal dial plan uses local extensions.\n\n**Example Dialplan Logic (Asterisk `extensions.conf`):**\n```asterisk\n[from-1com]\n; Strip +1 prefix and route to local extension\nexten => _+1NXXNXXXXXX,1,Goto(internal,${EXTEN:2},1)\nexten => _NXXXXXX,1,Dial(PJSIP/${EXTEN})\n```\n\n#### Troubleshooting and Verification\nUse the following CLI commands to verify connectivity and debug signaling issues:\n\n1.  **Check Trunk Status:**\n    `pjsip show endpoints` (Verify status is 'Available')\n2.  **Monitor Signaling:**\n    `pjsip set logger on`\n    `pjsip set logger host <1COM_IP>`\n3.  **Trace Media Path:**\n    `rtp set debug on`\n\n**Common Error Codes:**\n*   **403 Forbidden:** Typically indicates a mismatch in the `Auth User` or `From` header. Ensure the `From` domain matches the 1COM provisioned trunk domain.\n*   **408 Request Timeout:** Indicates a firewall or ACL issue. Verify that UDP 5060 and the RTP range (typically 10000-20000) are open bi-directionally.\n*   **488 Not Acceptable Here:** Indicates a codec mismatch. Check the `allow` list in your trunk configuration against the 1COM SDP offer.\n\n#### Presence Synchronization\nTo enable 1COM status updates (BLF), ensure the PBX is configured to send `PUBLISH` or `SUBSCRIBE` messages to the 1COM presence server. Verify that the `User-Agent` string is set to the PBX model to ensure compatibility with 1COM’s proprietary presence headers.",
+        "subsections": [],
+        "tags": [],
+        "lastUpdated": "2026-07-10T07:17:59.947Z",
+        "sources": []
+      }
+    ],
+    "glossary": [
+      {
+        "term": "Extension",
+        "definition": "A unique internal identifier assigned to a specific user or device within the PBX system."
+      },
+      {
+        "term": "SIP Trunk",
+        "definition": "A virtual connection that allows the PBX to send and receive calls over the internet using the Session Initiation Protocol."
+      },
+      {
+        "term": "IVR",
+        "definition": "Interactive Voice Response; an automated telephony system that interacts with callers through voice menus."
+      },
+      {
+        "term": "DID",
+        "definition": "Direct Inward Dialing; a service that allows callers to reach a specific extension directly without going through an operator."
+      },
+      {
+        "term": "Ring Group",
+        "definition": "A configuration that allows multiple extensions to ring simultaneously or sequentially when a specific number is called."
+      },
+      {
+        "term": "Queue",
+        "definition": "A call distribution method that holds callers in a line until an available agent is ready to answer."
+      },
+      {
+        "term": "Codec",
+        "definition": "Software or hardware used to compress and decompress voice data for transmission over the network."
+      },
+      {
+        "term": "CDR",
+        "definition": "Call Detail Record; a data file containing information about a call, such as duration, source, and destination."
+      },
+      {
+        "term": "Voicemail-to-Email",
+        "definition": "A feature that automatically sends recorded voicemails as audio file attachments to a user's email address."
+      },
+      {
+        "term": "Outbound Route",
+        "definition": "A set of rules that determines which trunk or gateway is used when a user places an external call."
+      },
+      {
+        "term": "Inbound Route",
+        "definition": "A set of rules that directs incoming calls from specific DIDs to a destination like an IVR or extension."
+      },
+      {
+        "term": "Paging",
+        "definition": "A feature that allows one-way audio broadcasting to a group of IP phones or speakers."
+      },
+      {
+        "term": "BLF",
+        "definition": "Busy Lamp Field; a light on an IP phone that indicates the current status (idle or busy) of another extension."
+      },
+      {
+        "term": "Provisioning",
+        "definition": "The process of automatically configuring IP phones with network and account settings via the PBX."
+      },
+      {
+        "term": "Failover",
+        "definition": "A backup mechanism that redirects traffic to an alternative route or server if the primary connection fails."
+      }
+    ],
+    "commonIssues": [
+      {
+        "problem": "One-way audio on external calls",
+        "cause": "NAT traversal issues or incorrect RTP port forwarding in the firewall",
+        "solution": "Configure STUN/TURN servers or ensure proper NAT settings in the SIP trunk profile",
+        "tags": [
+          "audio",
+          "NAT",
+          "SIP"
+        ]
+      },
+      {
+        "problem": "Registration timeout for remote extensions",
+        "cause": "Firewall blocking SIP traffic or aggressive keep-alive settings",
+        "solution": "Adjust SIP registration timers and ensure firewall allows UDP 5060/5061",
+        "tags": [
+          "connectivity",
+          "SIP",
+          "firewall"
+        ]
+      },
+      {
+        "problem": "High latency or jitter in voice packets",
+        "cause": "Network congestion or lack of Quality of Service (QoS) prioritization",
+        "solution": "Implement DSCP tagging and prioritize voice traffic on the network switch/router",
+        "tags": [
+          "QoS",
+          "network",
+          "performance"
+        ]
+      },
+      {
+        "problem": "Calls dropping after exactly 15 or 30 minutes",
+        "cause": "Session Timer mismatch between the PBX and the ITSP",
+        "solution": "Adjust the session-expires parameter in the SIP trunk configuration",
+        "tags": [
+          "SIP",
+          "stability",
+          "ITSP"
+        ]
+      },
+      {
+        "problem": "Inbound calls failing to route to the correct IVR",
+        "cause": "Incorrect DID mapping or misconfigured inbound routes",
+        "solution": "Verify DID patterns and ensure the inbound route matches the incoming SIP header",
+        "tags": [
+          "routing",
+          "IVR",
+          "configuration"
+        ]
+      },
+      {
+        "problem": "Voicemail to email delivery failure",
+        "cause": "SMTP authentication issues or incorrect relay settings",
+        "solution": "Update SMTP credentials and verify the mail server relay permissions",
+        "tags": [
+          "voicemail",
+          "SMTP",
+          "email"
+        ]
+      },
+      {
+        "problem": "Echo on calls",
+        "cause": "Improper gain settings or acoustic feedback from hardware phones",
+        "solution": "Adjust the transmit/receive gain levels and enable echo cancellation in the extension settings",
+        "tags": [
+          "audio",
+          "hardware",
+          "tuning"
+        ]
+      },
+      {
+        "problem": "Unauthorized outbound calls (toll fraud)",
+        "cause": "Weak extension passwords or exposed SIP ports",
+        "solution": "Implement strong authentication, restrict IP access, and use fail2ban for SIP",
+        "tags": [
+          "security",
+          "fraud",
+          "authentication"
+        ]
+      },
+      {
+        "problem": "Busy signal when calling internal extensions",
+        "cause": "Extension limit reached or call forwarding loop",
+        "solution": "Check concurrent call limits and clear any circular call forwarding rules",
+        "tags": [
+          "extensions",
+          "routing",
+          "limits"
+        ]
+      }
+    ],
+    "commands": [
+      {
+        "command": "systemctl status mirta-engine",
+        "description": "Check service status",
+        "platform": "linux"
+      },
+      {
+        "command": "journalctl -u mirta-engine -f",
+        "description": "View real-time logs",
+        "platform": "linux"
+      },
+      {
+        "command": "mirta-cli reload",
+        "description": "Reload configuration",
+        "platform": "linux"
+      },
+      {
+        "command": "fs_cli -P 8021",
+        "description": "Access console",
+        "platform": "linux"
+      },
+      {
+        "command": "show channels",
+        "description": "Check active channels",
+        "platform": "linux"
+      },
+      {
+        "command": "sofia global siptrace on",
+        "description": "Debug SIP signaling",
+        "platform": "linux"
+      },
+      {
+        "command": "SELECT calldate, src, dst, duration FROM cdr WHERE tenant_id = '1001' AND calldate > NOW() - INTERVAL 24 HOUR;",
+        "description": "Querying CDRs",
+        "platform": "both"
+      },
+      {
+        "command": "curl -X POST https://<pbx-ip>/api/v1/extensions -H \"Authorization: Bearer <token>\" -H \"Content-Type: application/json\" -d '{\"extension\": \"101\", \"name\": \"John Doe\", \"secret\": \"secure_password\"}'",
+        "description": "Example Request (Create Extension)",
+        "platform": "both"
+      },
+      {
+        "command": "replicaof",
+        "description": "Configure Redis replication in redis.conf",
+        "platform": "both"
+      },
+      {
+        "command": "exten => name,priority,application(arguments)",
+        "description": "Standard format for an extension entry in extensions.conf",
+        "platform": "both"
+      },
+      {
+        "command": "exten => _2XX,1,Dial(PJSIP/${EXTEN})",
+        "description": "Example of pattern matching to route 3-digit extensions starting with 2",
+        "platform": "both"
+      },
+      {
+        "command": "[internal]\nexten => 100,1,Answer()\nexten => 100,n,Dial(PJSIP/100,20)\nexten => 100,n,Hangup()",
+        "description": "Standard endpoint dialing configuration snippet",
+        "platform": "both"
+      },
+      {
+        "command": "exten => 100,n,Dial(PJSIP/100,20)\nexten => 100,n,VoiceMail(100@default,u)",
+        "description": "Voicemail integration configuration snippet",
+        "platform": "both"
+      },
+      {
+        "command": "exten => 500,1,GotoIf($[\"${CALLERID(num)}\" = \"1234\"]?vip,s,1:default,s,1)",
+        "description": "Conditional routing configuration snippet",
+        "platform": "both"
+      },
+      {
+        "command": "asterisk -rx \"dialplan reload\"",
+        "description": "Apply configuration changes without restarting the PBX service",
+        "platform": "linux"
+      },
+      {
+        "command": "dialplan show <extension>@<context>",
+        "description": "Displays the compiled dialplan for a specific extension",
+        "platform": "both"
+      },
+      {
+        "command": "pjsip show endpoints",
+        "description": "Lists all registered PJSIP endpoints to verify connectivity",
+        "platform": "both"
+      },
+      {
+        "command": "core set verbose 3",
+        "description": "Increases logging granularity to monitor call flow",
+        "platform": "both"
+      },
+      {
+        "command": "[my_trunk]\ntype=endpoint\ncontext=from-trunk\ndisallow=all\nallow=g729,ulaw\noutbound_auth=my_trunk_auth\naors=my_trunk_aor\n\n[my_trunk_auth]\ntype=auth\nauth_type=userpass\nusername=your_username\npassword=your_password\n\n[my_trunk_aor]\ntype=aor\ncontact=sip:sip.provider.com\n\n[my_trunk_identify]\ntype=identify\nendpoint=my_trunk\nmatch=sip.provider.com",
+        "description": "Asterisk PJSIP configuration snippet for pjsip.conf",
+        "platform": "linux"
+      },
+      {
+        "command": "pjsip show endpoints",
+        "description": "Verify the trunk status in Asterisk",
+        "platform": "linux"
+      },
+      {
+        "command": "pjsip show registrations",
+        "description": "Confirm the registration state in Asterisk",
+        "platform": "linux"
+      },
+      {
+        "command": "pjsip set logger on",
+        "description": "Enable SIP packet logging in Asterisk",
+        "platform": "linux"
+      },
+      {
+        "command": "sngrep",
+        "description": "Capture and visualize SIP traffic",
+        "platform": "linux"
+      },
+      {
+        "command": "tcpdump -ni any port 5060",
+        "description": "Verify SIP packets reaching the interface",
+        "platform": "linux"
+      },
+      {
+        "command": "mtr -u <provider_ip>",
+        "description": "Check for packet loss or jitter",
+        "platform": "linux"
+      },
+      {
+        "command": "exten => extension,priority,application(arguments)",
+        "description": "Standard dialplan configuration syntax",
+        "platform": "both"
+      },
+      {
+        "command": "exten => _2XXX,1,Dial(PJSIP/${EXTEN},20)",
+        "description": "Example of matching a 4-digit extension starting with 2",
+        "platform": "both"
+      },
+      {
+        "command": "exten => _2XXX,n,Hangup()",
+        "description": "Example of hanging up after a dial attempt",
+        "platform": "both"
+      },
+      {
+        "command": "exten => _NXXNXXXXXX,1,Dial(PJSIP/${EXTEN}@trunk-provider)",
+        "description": "Example of matching 10-digit NANP numbers for outbound routing",
+        "platform": "both"
+      },
+      {
+        "command": "Dial(Technology/Resource,Timeout,Options)",
+        "description": "Application to initiate a call",
+        "platform": "both"
+      },
+      {
+        "command": "Goto(context,extension,priority)",
+        "description": "Application to redirect execution flow",
+        "platform": "both"
+      },
+      {
+        "command": "Answer()",
+        "description": "Application to explicitly answer the channel",
+        "platform": "both"
+      },
+      {
+        "command": "Playback(filename)",
+        "description": "Application to play a sound file",
+        "platform": "both"
+      },
+      {
+        "command": "Background(filename)",
+        "description": "Application to play audio while allowing user interruption",
+        "platform": "both"
+      },
+      {
+        "command": "Set(VAR=VAL)",
+        "description": "Application to assign values to channel variables",
+        "platform": "both"
+      },
+      {
+        "command": "include => context",
+        "description": "Syntax to inherit extensions from another context",
+        "platform": "both"
+      },
+      {
+        "command": "#include",
+        "description": "Directive to split dialplans into functional files",
+        "platform": "both"
+      },
+      {
+        "command": "dialplan show [context]",
+        "description": "CLI command to verify loaded dialplan logic",
+        "platform": "both"
+      },
+      {
+        "command": "core set verbose 3",
+        "description": "CLI command to monitor execution in real-time",
+        "platform": "both"
+      },
+      {
+        "command": "dialplan reload",
+        "description": "CLI command to apply configuration changes without dropping active calls",
+        "platform": "both"
+      },
+      {
+        "command": "[ivr-main]\nexten => s,1,Answer()\nexten => s,n,Background(welcome-message)\nexten => s,n,WaitExten(5)\n\n; Direct extension dialing\nexten => _XXX,1,Goto(internal-extensions,${EXTEN},1)\n\n; Menu options\nexten => 1,1,Goto(sales-ring-group,s,1)\nexten => 2,1,Goto(support-ring-group,s,1)\n\n; Error handling\nexten => i,1,Playback(invalid-option)\nexten => i,n,Goto(ivr-main,s,1)\nexten => t,1,Playback(goodbye)\nexten => t,n,Hangup()",
+        "description": "Asterisk Dialplan implementation for an IVR menu.",
+        "platform": "linux"
+      },
+      {
+        "command": "[sales-ring-group]\nexten => s,1,Dial(PJSIP/101&PJSIP/102&PJSIP/103,20,tr)\nexten => s,n,Goto(voicemail-main,100,1)",
+        "description": "Asterisk configuration for a ring group using the Dial application.",
+        "platform": "linux"
+      },
+      {
+        "command": "pjsip show endpoints",
+        "description": "Command to verify device registration status in Asterisk.",
+        "platform": "linux"
+      },
+      {
+        "command": "asterisk -r",
+        "description": "Access the Asterisk CLI",
+        "platform": "linux"
+      },
+      {
+        "command": "asterisk -rvvv",
+        "description": "Access the Asterisk CLI with increased verbosity",
+        "platform": "linux"
+      },
+      {
+        "command": "core show channels",
+        "description": "Lists all active channels, their current application, and bridge state",
+        "platform": "linux"
+      },
+      {
+        "command": "core show uptime",
+        "description": "Displays system boot time and last reload time",
+        "platform": "linux"
+      },
+      {
+        "command": "dialplan show <exten>@<context>",
+        "description": "Displays the logic for a specific extension",
+        "platform": "linux"
+      },
+      {
+        "command": "dialplan show 100@internal",
+        "description": "Verify routing for extension 100 in the internal context",
+        "platform": "linux"
+      },
+      {
+        "command": "module show",
+        "description": "Lists loaded modules",
+        "platform": "linux"
+      },
+      {
+        "command": "module reload <module_name>",
+        "description": "Applies configuration changes for a specific module without restarting",
+        "platform": "linux"
+      },
+      {
+        "command": "core set verbose <level>",
+        "description": "Sets the global verbosity level",
+        "platform": "linux"
+      },
+      {
+        "command": "core set debug <level> <module>",
+        "description": "Enables module-specific debug logging",
+        "platform": "linux"
+      },
+      {
+        "command": "pjsip set logger on",
+        "description": "Captures SIP signaling for PJSIP channels",
+        "platform": "linux"
+      },
+      {
+        "command": "pjsip set logger host <ip>",
+        "description": "Filters PJSIP logger by specific endpoint IP",
+        "platform": "linux"
+      },
+      {
+        "command": "pjsip show endpoints",
+        "description": "Lists all configured PJSIP endpoints and their status",
+        "platform": "linux"
+      },
+      {
+        "command": "pjsip show endpoint <name>",
+        "description": "Displays detailed configuration for a PJSIP endpoint",
+        "platform": "linux"
+      },
+      {
+        "command": "pjsip show registrations",
+        "description": "Shows status of outbound registrations to ITSP trunks",
+        "platform": "linux"
+      },
+      {
+        "command": "pjsip show contacts",
+        "description": "Displays the IP, port, and user-agent of registered devices",
+        "platform": "linux"
+      },
+      {
+        "command": "realtime load <family> <col>=<val>",
+        "description": "Queries the database directly through the Asterisk abstraction layer",
+        "platform": "linux"
+      },
+      {
+        "command": "realtime show cache",
+        "description": "Displays currently cached database objects",
+        "platform": "linux"
+      },
+      {
+        "command": "asterisk -rx \"<command>\"",
+        "description": "Execute single commands without entering the interactive shell",
+        "platform": "linux"
+      },
+      {
+        "command": "asterisk -rx \"pjsip show endpoint 100\" | grep \"device_state\"",
+        "description": "Example of executing a command from the shell and filtering output",
+        "platform": "linux"
+      },
+      {
+        "command": "core restart now",
+        "description": "Restarts the Asterisk service",
+        "platform": "linux"
+      },
+      {
+        "command": "dialplan reload",
+        "description": "Reloads extensions.conf",
+        "platform": "linux"
+      },
+      {
+        "command": "pjsip reload",
+        "description": "Reloads pjsip.conf and associated files",
+        "platform": "linux"
+      },
+      {
+        "command": "module reload",
+        "description": "Reloads specific modules",
+        "platform": "linux"
+      },
+      {
+        "command": "module reload res_pjsip.so",
+        "description": "Reloads the res_pjsip module",
+        "platform": "linux"
+      },
+      {
+        "command": "pjsip set logger on",
+        "description": "Enable PJSIP logging for diagnostic purposes.",
+        "platform": "both"
+      },
+      {
+        "command": "pjsip show endpoints",
+        "description": "Display information about configured PJSIP endpoints.",
+        "platform": "both"
+      },
+      {
+        "command": "rtp set debug on",
+        "description": "Enable RTP debugging to inspect media flow.",
+        "platform": "both"
+      },
+      {
+        "command": "pjsip show registrations",
+        "description": "Display status of PJSIP registrations.",
+        "platform": "both"
+      },
+      {
+        "command": "DELETE FROM cdr WHERE calldate < DATE_SUB(NOW(), INTERVAL 6 MONTH);",
+        "description": "SQL command to prune CDR records older than 6 months.",
+        "platform": "both"
+      },
+      {
+        "command": "[1com_trunk]\ntype=endpoint\ncontext=from-1com\ndisallow=all\nallow=ulaw,alaw,g729\noutbound_auth=1com_auth\naors=1com_aor\n\n[1com_auth]\ntype=auth\nauth_type=userpass\nusername=YOUR_TRUNK_ID\npassword=YOUR_SECRET\n\n[1com_aor]\ntype=aor\ncontact=sip:sip.1com.provider.com",
+        "description": "Asterisk pjsip.conf configuration snippet for 1COM trunk",
+        "platform": "linux"
+      },
+      {
+        "command": "[from-1com]\nexten => _+1NXXNXXXXXX,1,Goto(internal,${EXTEN:2},1)\nexten => _NXXXXXX,1,Dial(PJSIP/${EXTEN})",
+        "description": "Asterisk extensions.conf dialplan logic for number translation",
+        "platform": "linux"
+      },
+      {
+        "command": "pjsip show endpoints",
+        "description": "Check trunk status",
+        "platform": "linux"
+      },
+      {
+        "command": "pjsip set logger on",
+        "description": "Enable SIP signaling logging",
+        "platform": "linux"
+      },
+      {
+        "command": "pjsip set logger host <1COM_IP>",
+        "description": "Enable SIP signaling logging for a specific host",
+        "platform": "linux"
+      },
+      {
+        "command": "rtp set debug on",
+        "description": "Trace media path",
+        "platform": "linux"
+      }
+    ]
+  }
+}
