@@ -27,3 +27,10 @@ and `_index-public.json` reflects the update. Item marked `done` in
 - Outcome: ingest-failed
 - General-work findings: kb-linux: dataQuality=complete, sections=10, commands=15, issues=10, glossary=12, updatedAt=2026-07-09T21:07:51.206498Z (0d ago); kb-bash: dataQuality=complete, sections=10, commands=10, issues=10, glossary=10, updatedAt=2026-07-09T21:07:43.243257Z (0d ago); kb-1com: dataQuality=complete, sections=9, commands=5, issues=10, glossary=15, updatedAt=2026-07-09T21:07:33.216743Z (0d ago)
 - Gemini calls: 19, Claude calls: 0, Groq calls: 0
+
+## 2026-07-10 — docker-cloudflare-gcp-content-fill
+
+- Item: Fill kb-cloud-devops's 7 skeleton sections (Cloud Concepts, Docker Basics, CI/CD Fundamentals, GitHub Actions, Environment Management, Monitoring & Alerting, Vercel & Render Deployment Patterns) with real content, plus commands/glossary/commonIssues
+- Outcome: ingest-failed
+- General-work findings: kb-linux: dataQuality=complete, sections=10, commands=15, issues=10, glossary=12, updatedAt=2026-07-10T07:40:17.023702Z (0d ago); kb-bash: dataQuality=complete, sections=10, commands=10, issues=10, glossary=10, updatedAt=2026-07-10T07:40:13.389915Z (0d ago); kb-1com: dataQuality=complete, sections=9, commands=5, issues=10, glossary=15, updatedAt=2026-07-10T07:40:10.338652Z (0d ago)
+- Gemini calls: 17, Claude calls: 0, Groq calls: 0
