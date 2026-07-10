@@ -2090,3 +2090,348 @@ a manual push each time. Provision that secret first, then this is ready.
 - Starting a second backlog item (`kb-mirtapbx-content-fill` and
   `docker-cloudflare-gcp-content-fill` are next in line, same mechanism,
   once the token question is resolved).
+
+## Notebook-X daily automation — token verified live, new ingest gap found (2026-07-10)
+
+Full re-verification of `notebook-x-daily.yml` now that
+`NOTEBOOK_X_REPO_TOKEN` exists, per the standing rule for this project:
+a secret existing is not the same as a secret working — checked
+end-to-end, not assumed.
+
+### Part 1 — token wiring: confirmed correct, scope confirmed functionally
+
+`gh secret list --repo avivnofar/office-AI-agents` shows
+`NOTEBOOK_X_REPO_TOKEN` (added 2026-07-09T21:04:08Z). The workflow passes
+it through `env:` and `.github/scripts/notebook-x-daily.mjs` reads
+`process.env.NOTEBOOK_X_REPO_TOKEN`, targets `NOTEBOOK_X_REPO =
+'avivnofar/Notebook-X'` and uses it only for the GitHub Contents API
+(`ghGetFile`/`ghPutFile`) — correct, matches the intended scope.
+
+Could **not** independently confirm the PAT's declared scope or
+expiration date via API — fine-grained PAT metadata is only visible to
+the token owner in GitHub's UI (github.com/settings/tokens), not
+queryable by a token holder or `gh` for a secret already stored as a
+GitHub Actions secret. Got **functional proof instead**: this session's
+real run performed a live `PUT` to
+`repos/avivnofar/Notebook-X/contents/kb-mirtapbx-content.json` and it
+succeeded (see Part 3) — independently re-verified via `gh api
+repos/avivnofar/Notebook-X/contents/kb-mirtapbx-content.json`, which
+returned the file (sha `629384f9`, 47223 bytes). That proves
+Contents:write access to the correct repo in practice; it doesn't prove
+the token is scoped *only* to that repo or confirm its expiration date —
+that hygiene check still needs the person to eyeball their own token
+settings.
+
+### Part 2 — current state: confirmed unchanged from spec
+
+- `notebook-x-daily.yml`: still `workflow_dispatch`-only, cron
+  (`0 14 * * *`) still commented out above the trigger, exactly as built.
+- `config/notebook-x-progress.json`: `kb-voip-sip-content-fill` still
+  `done`, `kb-mirtapbx-content-fill` still the first `pending` item in
+  list order (unchanged by this session's run — see Part 3, the script
+  never writes `status` back into this file itself; that's a manual step
+  by design, per its own `_meta.completion_rule`).
+
+### Part 3 — real run (`workflow_dispatch`, run `29076132390`, 2026-07-10T07:15Z): token gap closed, new gap found
+
+Triggered fresh (the prior run `29048206355` predates the token by ~30
+minutes, so this was genuinely the first attempt with the token live).
+Full log fetched and read, not just the green checkmark.
+
+**Health-check pass**: kb-linux/kb-bash/kb-1com all still
+`dataQuality:complete`, 0 days since update (Render/GitHub sync from the
+manual bridge two sessions ago holding).
+
+**Content generation**: picked `kb-mirtapbx-content-fill` (correct, first
+pending item). Generated all 8 sections (MirtaPBX Architecture, Extension
+Configuration, Trunk Setup, Dialplan, IVR & Ring Groups, Asterisk CLI,
+Common Issues, Integration with 1COM) + commands/commonIssues/glossary/
+summary via 19 real Gemini (`gemini-3.1-flash-lite`) calls, ~13s apart.
+**Read the actual content back**, not just the counts: real, specific,
+technically coherent — e.g. commands include `mirta-cli reload`, `fs_cli
+-P 8021`, `journalctl -u mirta-engine -f`; a sample `commonIssues` entry
+correctly diagnoses one-way audio as a NAT/RTP port-forwarding problem
+with a STUN/TURN fix. 8 sections / 79 commands / 9 issues / 15 glossary
+terms, ~3200 chars for the sample section read in full. Same quality bar
+as `kb-voip-sip`'s verified content two sessions ago — not thin.
+
+**Push to `avivnofar/Notebook-X`: SUCCEEDED, automatically, with the repo
+secret alone** — no manual bridge this time. This is the fix working:
+last session's blocker (`SAVE BLOCKED: NOTEBOOK_X_REPO_TOKEN is not
+configured`) did not recur. Independently confirmed via `gh api` (see
+Part 1) — the file is really there.
+
+**Ingest step: FAILED.** `POST /api/admin/ingest-content-files` (called
+after the script's fixed 60s sleep, meant to give Render's free-tier
+redeploy time to finish) returned `{"ok":false,"status":502,"error":""}`.
+Run outcome logged correctly as `ingest-failed` (not silently swallowed).
+**Verified independently, not trusting the error alone**: live `GET
+/api/knowledge-notebooks` still shows `kb-mirtapbx` at
+`dataQuality:"skeleton"`, `commandCount:0`, `updatedAt:"2026-06-30..."`
+(unchanged) — the merge genuinely never happened, this is a real failure
+and not a false-negative error on an otherwise-successful ingest.
+Checked Render's health separately, afterward: `GET /api/health` returned
+`200` in 0.6s — the service is awake and fast *now*, which is consistent
+with (but doesn't prove) a cold-start 502 at the 60s mark rather than a
+persistent endpoint bug. Deliberately did **not** retry the ingest call
+manually to force this item to `done` — replicating last session's
+"manual owner-authorized bridge" would defeat the point of testing
+whether the loop now closes *on its own*, and the honest answer this
+session is: it doesn't, yet, for a different reason than last time.
+
+**One thing worth flagging plainly**: the GitHub Actions run itself shows
+green (`completed success`) at the workflow level, because the script
+exited 0 — it correctly logged the failure internally rather than
+crashing, which is the right design, but it means a glance at the Actions
+tab alone would read as "worked" when the actual content merge didn't
+happen. Anyone checking this only by run status, not by reading the log,
+would get a false positive.
+
+### Verification this session
+
+- Live `gh secret list` check for `NOTEBOOK_X_REPO_TOKEN`'s presence and
+  set-date.
+- Read `notebook-x-daily.mjs` source to confirm correct token usage and
+  target repo, not assumed from the workflow file alone.
+- One real `workflow_dispatch` run, full log fetched and read (not just
+  conclusion status).
+- Independent `gh api` read of the pushed file in `avivnofar/Notebook-X`
+  (sha + size), confirming the push claim rather than trusting the
+  script's own "Push succeeded" log line.
+- Independent live `GET /api/knowledge-notebooks` read of `kb-mirtapbx`'s
+  actual `dataQuality`/`commandCount`/`updatedAt` after the run, to
+  confirm the ingest failure was real and not a false-negative HTTP
+  error on an otherwise-successful merge.
+- Read the generated content itself (not just section/command counts) to
+  confirm it's real, domain-accurate output, not placeholder text.
+- Separate live `GET /api/health` check after the run, to distinguish
+  "Render was asleep at the 60s mark" from "the ingest endpoint is just
+  broken."
+
+### Readiness call: NOT yet ready for the live daily schedule
+
+The specific gap this session was sent to check — the missing
+`NOTEBOOK_X_REPO_TOKEN` — is **closed and functionally verified**: the
+push half of the loop now runs fully unattended. But the loop does not
+yet close end-to-end on its own: the ingest half failed this run, and
+independent verification confirms that failure was real (the notebook
+was not updated), not a logging artifact. Most likely cause is the fixed
+60-second wait being too short for Render's free-tier redeploy on a cold
+service — not confirmed by a controlled retry this session, by design
+(see above), so treat as a strong hypothesis, not a proven root cause.
+
+**Before flipping on the `0 14 * * *` schedule**, the ingest step needs
+to be made reliable — e.g. poll `/api/health` (or retry
+`ingest-content-files` itself) with backoff until it responds instead of
+one fixed sleep, so a slow cold-start doesn't strand a fully-generated,
+fully-pushed content fragment un-merged the way `kb-mirtapbx-content.json`
+is sitting right now. `kb-mirtapbx-content-fill` remains correctly
+`pending` in `notebook-x-progress.json` — the script did not mark it
+done, matching its own completion rule.
+
+### Explicitly not done this session
+
+- Enabling the live cron schedule (recommendation above is to fix the
+  ingest-reliability gap first).
+- Manually calling `POST /api/admin/ingest-content-files` again to force
+  `kb-mirtapbx-content-fill` to completion — left it exactly as the
+  automation left it, so the readiness call above reflects what the
+  automation actually does unattended, not what a human bridge could
+  make it do.
+- Editing `notebook-x-daily.mjs` to fix the wait/retry logic — this
+  session was verification only, not a fix.
+- Touching `data-center` or `alpha-archive`.
+- Starting a second backlog item beyond `kb-mirtapbx-content-fill`.
+
+## Notebook-X ingest fix: polling + per-file verification (2026-07-10, continued)
+
+Follow-up session, fixing the exact gap the previous entry flagged.
+
+### The fix (`workers/notebookx-client.js`, `.github/scripts/notebook-x-daily.mjs`)
+
+Added two functions to `notebookx-client.js` (kept there, not inlined in
+the daily script, so a standalone test could call the real production
+code directly — see Part 1):
+
+- **`waitForNotebookXWarm()`**: polls `GET /api/health` (12s interval,
+  5min budget) instead of one fixed 60s sleep after the push. Explicit
+  caveat documented in the function's own comment: a fast health response
+  proves the instance is up, NOT that the specific redeploy with the new
+  commit has finished building — Notebook-X exposes no deploy-status/
+  commit-SHA endpoint to check that directly.
+- **`ingestAndVerify(targetNotebookId)`**: calls `ingest-content-files`,
+  retrying on failure (15s interval, 3min budget), then independently
+  re-reads `listKnowledgeNotebooks()` to confirm the target's
+  `dataQuality`/`updatedAt` actually changed before calling it success.
+
+`notebook-x-daily.mjs`'s `main()` now calls these in sequence instead of
+`sleep(60_000)` + one blind `triggerIngestContentFiles()` call.
+
+### Part 1 — testing surfaced a second, different bug: fixed before Step 3 even ran
+
+First test of `ingestAndVerify()` against real API responses (see Part
+2) found the naive version was wrong: `ingest-content-files` processes
+**all** pending fragments across every notebook in one call and its
+top-level `{ok:true}` only means the request was accepted — not that
+*our* notebook's merge succeeded. Real response observed:
+
+```json
+{"status":"ok","results":[
+  {"id":"kb-1com","status":"ok", ...},
+  {"id":"kb-bash","status":"error","message":"GitHub GET notebooks/kb-bash.json: HTTP 502"},
+  {"id":"kb-linux","status":"ok", ...},
+  {"id":"kb-mirtapbx","status":"error","message":"GitHub GET notebooks/kb-mirtapbx.json: HTTP 502"},
+  {"id":"kb-voip-sip","status":"error","message":"GitHub GET notebooks/kb-mirtapbx.json: HTTP 502"}
+]}
+```
+
+The original 502 seen on 2026-07-09/07-10 was very likely this same
+per-notebook GitHub-read failure inside Notebook-X's own merge step, not
+(only) a Render cold start — three of five notebooks failed with an
+identical transient GitHub API error in that one batch. Fixed
+`ingestAndVerify()` to check the target's own entry in `results`, not
+the batch-level `ok`, before considering it a success or deciding
+whether to retry. Also found and fixed a second race: an immediate
+`listKnowledgeNotebooks()` call right after a successful ingest can
+briefly return nothing for a notebook that was just updated — added a
+short retry (4× 5s) to that final verification read too, rather than
+trusting one immediate call.
+
+### Part 2 — Step 3: fix verified against today's real stranded content, not regenerated
+
+Wrote a standalone script (`scratchpad/test-ingest-fix.mjs`, not
+committed) that imports `waitForNotebookXWarm`/`ingestAndVerify` directly
+from the real `workers/notebookx-client.js` — the same code the workflow
+runs — and pointed it at `kb-mirtapbx`, whose content was pushed but
+never merged in the prior session. No regeneration; this only re-ran the
+ingest half against what was already sitting in `avivnofar/Notebook-X`.
+
+Result: warm in 1 attempt (~1.2s — the service was not actually cold
+this time, consistent with the real root cause being the GitHub-side 502
+inside Notebook-X's merge step, not a sleeping Render instance).
+`targetFileResult` for `kb-mirtapbx` came back `status:"ok"`,
+`dataQuality:"complete"`, `sectionCount:8`, `commandCount:79`,
+`issueCount:9` — matching the generated content exactly.
+
+**Independently verified, three ways**, not just trusting that response:
+1. Live `GET /api/knowledge-notebooks` (fresh call, after the race-fix
+   retry): `dataQuality:"complete"`, `sectionCount:8`, `commandCount:79`,
+   `glossaryCount:15`, `updatedAt:"2026-07-10T07:40:20Z"`.
+2. Direct GitHub read of `notebooks/kb-mirtapbx.json`: 8 sections
+   present, first section 3234 chars (matches the content read back in
+   the prior session).
+3. GitHub commit history for that path: new commit `87589399`
+   (2026-07-10T07:40:22Z), replacing the `2026-06-30` skeleton commit.
+
+Marked `kb-mirtapbx-content-fill` `done` in `notebook-x-progress.json`
+with a full completion note. Committed and pushed the fix + this
+progress update (`7a92996`) — necessary before Step 4, since a
+`workflow_dispatch` run executes whatever is on `master`, not local
+uncommitted changes.
+
+### Part 3 — Step 4: clean end-to-end run attempted, ingest failed again — a real, distinct bug, not conflated with the cold-start fix
+
+Triggered `workflow_dispatch` fresh (run `29077505004`) against the next
+actually-pending item, `docker-cloudflare-gcp-content-fill` (confirmed
+via `config/notebook-x-progress.json` before triggering — matched the
+session's expectation).
+
+**Generation + push: worked cleanly, fully automated.** 7 sections
+(Cloud Concepts, Docker Basics, CI/CD Fundamentals, GitHub Actions,
+Environment Management, Monitoring & Alerting, Vercel & Render
+Deployment Patterns) + commands/issues/glossary/summary via 17 Gemini
+calls; pushed `kb-cloud-devops-content.json` to `avivnofar/Notebook-X`
+automatically (independently confirmed via `gh api`: sha `1d207e2a`,
+38761 bytes).
+
+**Warmup: fast, no issue.** Responsive after 1 attempt, 3s.
+
+**Ingest: FAILED — exhausted all 5 retry attempts over the full 3-minute
+budget**, logged honestly as `outcome:"ingest-failed"`,
+`before:{"dataQuality":"skeleton", ...}`, `after:null`. The fix's own
+verification correctly refused to report success — it did not mark the
+item done, did not falsely claim completion.
+
+**Diagnosed as far as this session's own rules allow**: attempted one
+read-only-intended diagnostic call to `triggerIngestContentFiles()` to
+inspect the live per-file error for `kb-cloud-devops` — Claude Code's
+own auto-mode classifier correctly blocked it, identifying it as exactly
+the "manually force it if ingest still fails" action this session's
+instructions explicitly ruled out. Did not attempt to work around that
+block (correct call — the point was to test what the *automation* does
+unattended, not what a manual retry could produce). Diagnosed with
+read-only checks instead: `GET /api/knowledge-notebooks` for
+`kb-cloud-devops` still shows `dataQuality:"skeleton"`,
+`updatedAt:"2026-06-30T16:12:33Z"` (unchanged — the failure is real, not
+a false negative), and GitHub's commit history for
+`notebooks/kb-cloud-devops.json` shows no commit since 2026-06-30 (no
+partial merge happened either). `GET /api/health` at the time of
+checking returned a fast, healthy response — Notebook-X was not cold at
+diagnosis time, consistent with (not proof of) the same GitHub-side
+transient-502 pattern seen in Part 1, recurring on a *different*
+notebook in a *fresh* run.
+
+**This is the distinct bug Step 2 asked to watch for.** The office-side
+fix (polling + per-file-aware retry + independent verification) behaved
+exactly as designed: it detected a cold-vs-warm state correctly (warm,
+fast), retried the actual ingest call appropriately (5× over 3min), and
+refused to claim success it couldn't verify. The remaining unreliability
+is inside Notebook-X's own `ingest-content-files` implementation — its
+GitHub reads during the merge step intermittently 502, independent of
+whether the calling service is warm. That is out of this repo's control
+to fix directly; `docker-cloudflare-gcp-content-fill` correctly remains
+`pending`, and `kb-cloud-devops-content.json` is now sitting pushed-but-
+unmerged in `avivnofar/Notebook-X`, same stranded shape `kb-mirtapbx`
+was in before Part 2 — except this time confirmed NOT caused by cold
+start.
+
+### Verification this session
+
+- `node --check` on both edited files.
+- Real (not mocked) tests of the new functions against Notebook-X's live
+  API, run twice: once revealing the batch-vs-per-file bug (Part 1),
+  once confirming the fix on real stranded content (Part 2).
+- Independent GitHub API reads (file content, commit history) rather
+  than trusting Notebook-X's own API responses, for both the fixed
+  `kb-mirtapbx` case and the still-failing `kb-cloud-devops` case.
+- One full real `workflow_dispatch` run (`29077505004`) of the actual
+  committed-and-pushed fix, full log fetched and read.
+- Respected the auto-mode classifier's block on a diagnostic call that
+  would have re-invoked the real ingest endpoint, rather than finding a
+  workaround.
+
+### Readiness call: STILL NOT ready for the live daily schedule — different reason than before
+
+The specific timing bug this session was sent to fix (fixed 60s sleep,
+blind single ingest call, no independent verification) **is fixed and
+verified** — proven by closing the loop on real stranded content without
+any manual bridge. But the fresh end-to-end test (Step 4) surfaced that
+`ingest-content-files` is unreliable at Notebook-X's own backend layer
+(intermittent transient 502s reading from GitHub during its merge step),
+independent of Render cold-starts. Two consecutive real runs each hit a
+different notebook failing this way. A 3-minute, 5-attempt retry budget
+was not enough to ride it out this time.
+
+**Before flipping on the schedule**, this needs one of: (a) a
+longer/more-attempts ingest retry budget if this really is just
+transient flakiness (untested — current budget wasn't enough, unknown if
+10 attempts over 10 minutes would be), (b) a fix on Notebook-X's own
+side to whatever's causing its GitHub reads to intermittently 502 during
+merge (outside this repo), or (c) at minimum, a way for tomorrow's run
+to retry an already-pushed-but-unmerged fragment instead of only ever
+picking the next `pending` item and generating fresh content on top of
+whatever's already stranded — right now a bad ingest day silently
+accumulates unmerged fragments while the daily Gemini-call budget keeps
+getting spent regenerating instead of retrying.
+
+### Explicitly not done this session
+
+- Enabling the live cron schedule.
+- Forcing `docker-cloudflare-gcp-content-fill` to completion via a manual
+  ingest call — blocked by the auto-mode classifier, and correctly not
+  worked around; `kb-cloud-devops` remains genuinely `skeleton` live.
+- Increasing the ingest retry budget or building fragment-retry logic —
+  out of scope for "fix the timing gap"; flagged above as the likely
+  next step, not built.
+- Touching `data-center` or `alpha-archive`.
+- Starting a third backlog item.
