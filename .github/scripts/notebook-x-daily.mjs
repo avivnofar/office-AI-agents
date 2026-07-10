@@ -62,6 +62,7 @@ const NOTEBOOK_X_REPO = 'avivnofar/Notebook-X';
 const PROGRESS_PATH = 'config/notebook-x-progress.json';
 const STAGING_DIR = 'reports/notebook-x/pending-content';
 const DAILY_LOG_PATH = 'reports/notebook-x/daily-log.md';
+const HOUSEKEEPING_DIR = 'reports/notebook-x/housekeeping';
 const LIVE_NOTEBOOKS_FOR_HEALTH_CHECK = ['kb-linux', 'kb-bash', 'kb-1com'];
 const STALE_AFTER_DAYS = 30;
 const MAX_INGEST_ATTEMPTS = 3; // per-item cap before leaving it flagged for manual review instead of retrying forever
@@ -222,6 +223,172 @@ async function ghPutFile(token, filePath, jsonObj, message) {
   return { ok: res.ok, status: res.status, data };
 }
 
+async function ghListDir(token, dirPath = '') {
+  const res = await fetch(`${GITHUB_API}/repos/${NOTEBOOK_X_REPO}/contents/${dirPath}`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  return Array.isArray(data) ? data : null;
+}
+
+function ghFileText(getFileResult, maxChars = Infinity) {
+  if (!getFileResult?.content) return null;
+  return Buffer.from(getFileResult.content, 'base64').toString('utf-8').slice(0, maxChars);
+}
+
+// --- Housekeeping pass (TODO.md's 4 "house keeping" bullets — explicitly
+// "never check this with V, it's an ongoing task", per TODO.md) ---
+//
+// RECOMMEND-ONLY BY DESIGN: none of these functions ever call ghPutFile,
+// github_delete, or any other mutating call — findings are written to a
+// markdown report for a human to act on, never applied automatically. No
+// destructive-action path has ever been scoped or tested in this project;
+// this is a deliberate, cautious default, not a placeholder for a missing
+// feature. If/when automatic action is wanted, that's a separate, explicit
+// decision — flagged per-section below where relevant.
+
+async function housekeeping_unifyDeleteObsolete(token) {
+  const rootFiles = await ghListDir(token, '');
+  if (!rootFiles) {
+    return { title: 'Unify data files / delete obsolete leftovers', body: '_Could not list avivnofar/Notebook-X repo root (API error) — skipped this run._' };
+  }
+  const fileList = rootFiles.map((f) => `${f.type === 'dir' ? '[dir] ' : ''}${f.name}`).join('\n');
+  const analysis = await generate(
+    `Here is the file listing at the root of a GitHub repo (avivnofar/Notebook-X, a knowledge-base web app backend):\n${fileList}\n\n` +
+    'Identify any files that look like leftover/obsolete one-off artifacts a human should review for deletion or consolidation ' +
+    '(e.g. content fragments already merged into their target notebook, stray diagnostic/session-log files, committed build ' +
+    'artifacts like __pycache__, duplicate or backup-named files). Be conservative and specific -- name the exact file(s) and ' +
+    'the exact reason. Do not recommend touching core application files (api_server.py, notebook_backend.py, github_storage.py, ' +
+    'requirements.txt, index.html), the notebooks/ directory, or GitHub config (.github/, .gitignore).',
+    { temperature: 0.2, maxTokens: 1024 }
+  );
+  return { title: 'Unify data files / delete obsolete leftovers', body: `Recommendation only -- nothing deleted or moved.\n\n${analysis}` };
+}
+
+async function housekeeping_recommendChanges(token) {
+  const contextFile = await ghGetFile(token, 'CLAUDE_CONTEXT.md');
+  const contextText = ghFileText(contextFile, 4000);
+  if (!contextText) {
+    return { title: 'General recommend-changes pass', body: '_Could not fetch CLAUDE_CONTEXT.md from avivnofar/Notebook-X — skipped this run._' };
+  }
+  const analysis = await generate(
+    `Here is the project context/status doc (CLAUDE_CONTEXT.md, truncated to the first 4000 chars) for avivnofar/Notebook-X, ` +
+    `a knowledge-notebook web app:\n\n${contextText}\n\n` +
+    'Based on this, suggest 3-5 concrete, actionable improvements or next steps for this project. Be specific to what you ' +
+    'read here, not generic software advice.',
+    { temperature: 0.3, maxTokens: 1024 }
+  );
+  return { title: 'General recommend-changes pass', body: analysis };
+}
+
+// Scoped honestly: this checks that the API endpoints the UI actually
+// depends on respond correctly — it is NOT browser-driven UI automation
+// (no headless browser is wired into this script). Said explicitly in the
+// report so it isn't mistaken for full end-to-end UI testing.
+async function housekeeping_uiCheck() {
+  const checks = [];
+
+  const health = await getNotebookXHealth();
+  checks.push(`- \`GET /api/health\`: ${health && !health.error ? 'responded' : '**FAILED**'} — \`${JSON.stringify(health)}\``);
+
+  const notebooks = await listKnowledgeNotebooks();
+  checks.push(`- \`GET /api/knowledge-notebooks\`: ${notebooks.length > 0 ? `responded, ${notebooks.length} notebooks listed` : '**FAILED or empty**'}`);
+
+  try {
+    const res = await fetch('https://notebook-x-api.onrender.com/api/knowledge-notebooks/kb-linux/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: 'What is this notebook about?' }),
+    });
+    checks.push(`- \`POST /api/knowledge-notebooks/kb-linux/ask\`: ${res.ok ? 'responded ok' : `**HTTP ${res.status}**`}`);
+  } catch (e) {
+    checks.push(`- \`POST .../ask\`: **request failed** — ${e.message}`);
+  }
+
+  const anyFailed = checks.some((c) => c.includes('FAILED') || c.includes('request failed'));
+  return {
+    title: 'UI functionality check',
+    body:
+      '**Scope note**: this checks the live API endpoints the UI itself calls, not the rendered UI in a real browser — ' +
+      'no headless browser (Playwright/Puppeteer) is wired into this script yet. Not ready to graduate to full browser-driven ' +
+      'UI automation until one is added; this is a proxy check, not a replacement.\n\n' +
+      checks.join('\n') +
+      (anyFailed ? '\n\n**At least one check failed — worth a manual look.**' : '\n\nAll checked endpoints responded normally.'),
+  };
+}
+
+async function housekeeping_codeAssessment(token) {
+  const files = ['notebook_backend.py', 'api_server.py', 'github_storage.py'];
+  const snippets = [];
+  for (const f of files) {
+    const result = await ghGetFile(token, f);
+    const text = ghFileText(result, 2500);
+    if (text) snippets.push(`--- ${f} (first 2500 chars) ---\n${text}`);
+  }
+  if (snippets.length === 0) {
+    return { title: 'Code-file functionality assessment', body: '_Could not fetch any backend files from avivnofar/Notebook-X — skipped this run._' };
+  }
+  const analysis = await generate(
+    `Here are excerpts (first 2500 chars each) from avivnofar/Notebook-X's core backend Python files:\n\n${snippets.join('\n\n')}\n\n` +
+    'Assess overall code health from what is visible here: any obvious bugs, missing error handling, or functionality concerns? ' +
+    'Be specific and concise -- this is a sample of larger files, not the full source, so note if something looks incomplete ' +
+    'rather than assuming it is a real bug.',
+    { temperature: 0.2, maxTokens: 1024 }
+  );
+  return { title: 'Code-file functionality assessment', body: analysis };
+}
+
+// This automation NEVER edits TODO.md or writes its "V" marks — that stays
+// a manual step by design (see TOKEN-BUDGET.md 2026-07-10). This builds the
+// "ready for your review" list so the person doesn't have to cross-reference
+// notebook-x-progress.json by hand to find what's actually done.
+function reviewReadySection(progressItems) {
+  const done = progressItems.filter((i) => i.status === 'done');
+  if (done.length === 0) {
+    return { title: 'Ready for your TODO.md review', body: '_Nothing newly completed — no items with `status:"done"` in `config/notebook-x-progress.json` right now._' };
+  }
+  const lines = done.map((i) => `- **${i.id}** (completed ${i.completed || 'unknown date'}): ${i.label}`);
+  return {
+    title: 'Ready for your TODO.md review',
+    body:
+      'This automation never writes to `TODO.md` — completion tracking lives in `config/notebook-x-progress.json`, ' +
+      'and TODO.md\'s own `V` marks stay a manual step for you after reviewing the real output. Items currently ' +
+      '`status:"done"` there (candidates for marking off in TODO.md, once you\'ve checked them):\n\n' +
+      lines.join('\n'),
+  };
+}
+
+async function runHousekeepingPass(notebookXToken, progressItems) {
+  console.log('\n=== Housekeeping pass (recommend-only — never deletes, merges, or modifies files) ===');
+
+  const sections = [reviewReadySection(progressItems)];
+  if (!notebookXToken) {
+    console.log('NOTEBOOK_X_REPO_TOKEN not set — the 4 housekeeping checks below need read access to avivnofar/Notebook-X, skipping those this run.');
+    sections.push({ title: 'Housekeeping checks', body: '_Skipped this run — NOTEBOOK_X_REPO_TOKEN not set._' });
+  } else {
+    sections.push(await housekeeping_unifyDeleteObsolete(notebookXToken));
+    sections.push(await housekeeping_recommendChanges(notebookXToken));
+    sections.push(await housekeeping_uiCheck());
+    sections.push(await housekeeping_codeAssessment(notebookXToken));
+  }
+
+  const date = new Date().toISOString().slice(0, 10);
+  fs.mkdirSync(HOUSEKEEPING_DIR, { recursive: true });
+  const reportPath = path.join(HOUSEKEEPING_DIR, `${date}.md`);
+  const body = [
+    `# Notebook-X housekeeping pass — ${date}`,
+    '',
+    '**Recommend-only.** This automation never deletes, merges, or modifies files directly — ' +
+    'everything below is a finding or suggestion for a human to review and act on manually.',
+    '',
+    ...sections.flatMap((s) => [`## ${s.title}`, '', s.body, '']),
+  ].join('\n');
+  fs.writeFileSync(reportPath, body);
+  console.log(`Housekeeping report written: ${reportPath}`);
+  return reportPath;
+}
+
 // --- Main ---
 
 async function healthCheckPass() {
@@ -316,6 +483,17 @@ async function main() {
   const progress = JSON.parse(fs.readFileSync(PROGRESS_PATH, 'utf8'));
   const { findings: healthFindings } = await healthCheckPass();
 
+  // Read once, up front — used by both the housekeeping pass (read-only
+  // access to avivnofar/Notebook-X) and later, further down, for the
+  // content-fill item's push.
+  const notebookXToken = process.env.NOTEBOOK_X_REPO_TOKEN;
+
+  // Runs every day as part of this same health-pass slot, independent of
+  // whatever else happens below (a stranded-item retry, a content-fill
+  // item, or nothing pending) — per TODO.md, housekeeping is an ongoing
+  // daily task, not something that competes with the one pending item.
+  await runHousekeepingPass(notebookXToken, progress.items);
+
   // Check for anything stranded (pushed but never merged) before starting
   // fresh work on a new item — see retryStrandedItem() above.
   const stranded = progress.items.find((i) => i.status === 'pushed-unmerged');
@@ -387,7 +565,6 @@ async function main() {
   console.log(`\nStaged locally: ${stagingFile} (${sections.length} sections, ${allCommands.length} commands, ${commonIssues.length} issues, ${glossary.length} glossary terms)`);
 
   let outcome = 'blocked-no-repo-token';
-  const notebookXToken = process.env.NOTEBOOK_X_REPO_TOKEN;
 
   if (!notebookXToken) {
     console.log(
