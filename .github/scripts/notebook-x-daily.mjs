@@ -64,6 +64,7 @@ const STAGING_DIR = 'reports/notebook-x/pending-content';
 const DAILY_LOG_PATH = 'reports/notebook-x/daily-log.md';
 const LIVE_NOTEBOOKS_FOR_HEALTH_CHECK = ['kb-linux', 'kb-bash', 'kb-1com'];
 const STALE_AFTER_DAYS = 30;
+const MAX_INGEST_ATTEMPTS = 3; // per-item cap before leaving it flagged for manual review instead of retrying forever
 const GEMINI_CALL_SPACING_MS = 4000; // stay well under the 15 RPM free-tier ceiling
 
 // Mirrors Notebook-X's own NOTEBOOK_DEFINITIONS (notebook_backend.py),
@@ -248,9 +249,80 @@ async function healthCheckPass() {
   return { notebooks, findings };
 }
 
+function saveProgress(progress) {
+  fs.writeFileSync(PROGRESS_PATH, JSON.stringify(progress, null, 2) + '\n');
+}
+
+function appendDailyLog(healthFindings, entry) {
+  fs.mkdirSync('reports/notebook-x', { recursive: true });
+  const logLine =
+    `\n## ${new Date().toISOString().slice(0, 10)} — ${entry.id}\n\n` +
+    `- Item: ${entry.label}\n` +
+    `- Outcome: ${entry.outcome}\n` +
+    `- General-work findings: ${healthFindings.join('; ')}\n` +
+    `- Gemini calls: ${geminiCallCount}, Claude calls: ${claudeCallCount}, Groq calls: ${groqCallCount}\n`;
+  fs.appendFileSync(DAILY_LOG_PATH, logLine);
+  console.log(`\nAppended daily log entry to ${DAILY_LOG_PATH}`);
+}
+
+// Retries ONLY the poll+ingest+verify half against content already pushed
+// to avivnofar/Notebook-X in a prior run — no regeneration, no Gemini
+// calls, no re-push. Safety net for whatever transient failure mode shows
+// up next (Notebook-X's own ingest reliability was fixed 2026-07-10, but
+// this exists so a bad day doesn't silently keep burning the daily Gemini
+// budget regenerating content on top of something already stranded).
+async function retryStrandedItem(item, progress, healthFindings) {
+  console.log(`\n=== Retrying stranded item: ${item.id} (attempt ${(item.ingest_attempts || 0) + 1}/${MAX_INGEST_ATTEMPTS}) ===`);
+  console.log(item.label);
+  console.log('Not regenerating content — retrying ingest against the fragment already pushed to Notebook-X.');
+
+  const warmup = await waitForNotebookXWarm();
+  let outcome;
+  if (!warmup.warm) {
+    console.log(`Notebook-X did not become responsive within the polling window (${warmup.attempts} attempts, ${Math.round(warmup.elapsedMs / 1000)}s).`);
+    outcome = 'warmup-timeout';
+  } else {
+    console.log(`Notebook-X responsive after ${warmup.attempts} attempt(s), ${Math.round(warmup.elapsedMs / 1000)}s. Calling ingest-content-files and independently verifying the result...`);
+    const ingest = await ingestAndVerify(item.target_notebook_name);
+    console.log(`ingest-content-files verification: ${JSON.stringify({ outcome: ingest.outcome, attempts: ingest.attempts, before: ingest.before && { dataQuality: ingest.before.dataQuality, updatedAt: ingest.before.updatedAt }, after: ingest.after && { dataQuality: ingest.after.dataQuality, updatedAt: ingest.after.updatedAt } })}`);
+    outcome = ingest.outcome;
+  }
+
+  if (outcome === 'ingested-verified') {
+    item.status = 'done';
+    item.completed = new Date().toISOString().slice(0, 10);
+    item.completion_note = `Content was generated and pushed in an earlier run but ingest failed at the time; retried the ingest/verify step only (no regeneration) on ${new Date().toISOString().slice(0, 10)} and it succeeded, independently verified via listKnowledgeNotebooks() dataQuality/updatedAt change.`;
+    delete item.ingest_attempts;
+    delete item.last_ingest_attempt;
+    console.log(`\n${item.id} verified merged — marked done.`);
+  } else {
+    item.ingest_attempts = (item.ingest_attempts || 0) + 1;
+    item.last_ingest_attempt = new Date().toISOString();
+    item.last_ingest_outcome = outcome;
+    if (item.ingest_attempts >= MAX_INGEST_ATTEMPTS) {
+      item.status = 'flagged_for_review';
+      console.log(`\n${item.id} still not merged after ${item.ingest_attempts} attempts — flagging for manual review instead of retrying again tomorrow.`);
+    } else {
+      console.log(`\n${item.id} still not merged (attempt ${item.ingest_attempts}/${MAX_INGEST_ATTEMPTS}) — will retry again on the next run.`);
+    }
+  }
+
+  saveProgress(progress);
+  appendDailyLog(healthFindings, { id: item.id, label: item.label, outcome: `stranded-retry:${outcome}` });
+  console.log(`\n=== Run summary: outcome=stranded-retry:${outcome}, geminiCalls=${geminiCallCount} ===`);
+}
+
 async function main() {
   const progress = JSON.parse(fs.readFileSync(PROGRESS_PATH, 'utf8'));
   const { findings: healthFindings } = await healthCheckPass();
+
+  // Check for anything stranded (pushed but never merged) before starting
+  // fresh work on a new item — see retryStrandedItem() above.
+  const stranded = progress.items.find((i) => i.status === 'pushed-unmerged');
+  if (stranded) {
+    await retryStrandedItem(stranded, progress, healthFindings);
+    return;
+  }
 
   const item = progress.items.find((i) => i.status === 'pending');
   if (!item) {
@@ -345,15 +417,27 @@ async function main() {
     }
   }
 
-  fs.mkdirSync('reports/notebook-x', { recursive: true });
-  const logLine =
-    `\n## ${new Date().toISOString().slice(0, 10)} — ${item.id}\n\n` +
-    `- Item: ${item.label}\n` +
-    `- Outcome: ${outcome}\n` +
-    `- General-work findings: ${healthFindings.join('; ')}\n` +
-    `- Gemini calls: ${geminiCallCount}, Claude calls: ${claudeCallCount}, Groq calls: ${groqCallCount}\n`;
-  fs.appendFileSync(DAILY_LOG_PATH, logLine);
-  console.log(`\nAppended daily log entry to ${DAILY_LOG_PATH}`);
+  // Persist the outcome back into notebook-x-progress.json instead of
+  // leaving every non-success outcome as an unchanged "pending" for the
+  // next run to blindly regenerate on top of. Only "push-failed" (nothing
+  // landed on Notebook-X at all) stays "pending" as-is — everything else
+  // that got a fragment successfully pushed but not merged becomes
+  // "pushed-unmerged" so the next run's stranded-item check (see
+  // retryStrandedItem() above) retries just the ingest half.
+  if (outcome === 'ingested-verified') {
+    item.status = 'done';
+    item.completed = new Date().toISOString().slice(0, 10);
+    item.completion_note = `notebook-x-daily.yml generated and pushed all sections + commands/issues/glossary/summary via ${geminiCallCount} real Gemini (${GEMINI_MODEL}) calls, then ingested and independently verified (dataQuality/updatedAt changed) in the same run — no manual intervention.`;
+  } else if (outcome === 'warmup-timeout' || outcome === 'ingest-failed' || outcome === 'ingest-reported-ok-but-unverified') {
+    item.status = 'pushed-unmerged';
+    item.ingest_attempts = 1;
+    item.last_ingest_attempt = new Date().toISOString();
+    item.last_ingest_outcome = outcome;
+    console.log(`\n${item.id}: content generated and pushed to ${NOTEBOOK_X_REPO}, but not yet merged (${outcome}). Marked "pushed-unmerged" — the next run will retry the ingest step only, not regenerate.`);
+  }
+  saveProgress(progress);
+
+  appendDailyLog(healthFindings, { id: item.id, label: item.label, outcome });
   console.log(`\n=== Run summary: outcome=${outcome}, geminiCalls=${geminiCallCount} ===`);
 }
 
