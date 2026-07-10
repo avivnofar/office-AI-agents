@@ -2435,3 +2435,169 @@ getting spent regenerating instead of retrying.
   next step, not built.
 - Touching `data-center` or `alpha-archive`.
 - Starting a third backlog item.
+
+## Notebook-X ingest root-cause fix (in avivnofar/Notebook-X) + fragment-retry safety net (2026-07-10, continued)
+
+Follow-up session, with explicit one-time authorization to commit/push
+directly to `avivnofar/Notebook-X` for Part 1 (same basis as the earlier
+Gemini model-string fix, `fa618cb`).
+
+### Part 1 — root-caused and fixed in `avivnofar/Notebook-X`, commit `f94b1ab`
+
+Worked from a clean `git worktree` checked out from `origin/main`
+(`Notebook-X-fix`), not the existing local clone — that clone was on an
+unrelated branch (`session-s1`) with unrelated uncommitted changes from
+other in-progress work, and touching it risked bundling those into this
+fix. The worktree kept this session's diff isolated to exactly the two
+files it touched.
+
+**Traced the actual failure**, not guessed: `POST /api/admin/ingest-
+content-files` (`notebook_backend.py`'s `ingest_content_files()`) calls
+`normalize_notebook()` per fragment, which reads the existing skeleton
+via `github_storage.py`'s `github_get('notebooks/{id}.json')`. That
+function had **no retry** and raised immediately on any non-404 HTTP
+error. Working out why the batch degraded gracefully instead of
+crashing on the earlier 502s (confusing at first — nothing in
+`ingest_content_files()`'s loop or `normalize_notebook()`'s own first
+`github_get()` call was try/except-guarded) led to `save_notebook()`
+(called deeper in `normalize_notebook()`, to look up the current SHA
+before the update `PUT`) — it has its own try/except around its own
+`github_get()` call, converting the RuntimeError into a graceful
+`{"status":"error","action":"save failed"}`. That's the exact call site
+that was actually failing (confirmed by the `"action":"save failed"`
+tag present in every observed 502 result) — not `normalize_notebook()`'s
+own earlier read, which remained a real, unrelated latent bug: had *that*
+one hit a 502, it would have had no guard at all and crashed the entire
+batch, losing results for every notebook processed after it.
+
+**Fixed three things**, all in the actual point of failure per the
+session's instructions (not the outer endpoint call):
+- `github_storage.py`'s `github_get()`: retries `502`/`503`/`504` up to 4
+  attempts with exponential backoff (2s/4s/8s). `404`s and other `4xx`
+  errors are not retried (a real answer, or an auth problem retrying
+  won't fix). This alone fixes both call sites (`normalize_notebook()`'s
+  own read and `save_notebook()`'s), since both go through this one
+  function.
+- `normalize_notebook()`'s own previously-unguarded read: now wrapped in
+  try/except (defense-in-depth beyond the retry, for whatever's left
+  after 4 attempts) so a persistent failure there degrades to one
+  notebook's error entry instead of crashing the whole batch.
+- `ingest_content_files()`: wrapped the per-candidate
+  `normalize_notebook()` call in try/except as a final layer, and fixed
+  the top-level `{"status":"ok"}` to actually read `"partial"` when any
+  candidate failed — previously it always read `"ok"` regardless of
+  per-file failures, which is exactly why `office-AI-agents`' automation
+  had to be fixed yesterday to check `results[].status` instead of
+  trusting the batch field.
+
+**Tested against the real stranded case, not regenerated**: pushed
+commit `f94b1ab` to `avivnofar/Notebook-X`'s `main`, waited ~2min for
+Render's redeploy, then ran the actual production `ingestAndVerify()`
+(from `office-AI-agents`) against `kb-cloud-devops` — the notebook
+stranded by yesterday's ingest failure. **Succeeded on the first
+attempt**, all 6 pending fragments in that batch (`kb-1com`, `kb-bash`,
+`kb-cloud-devops`, `kb-linux`, `kb-mirtapbx`, `kb-voip-sip`) reported
+`status:"ok"`. Independently verified `kb-cloud-devops` three ways: the
+listing endpoint (`dataQuality:"complete"`, `sectionCount:7`,
+`commandCount:42`), a direct GitHub content read (7 sections, first
+section 3283 chars, 42 commands), and GitHub commit history (new commit
+`ede518c1` at `2026-07-10T08:17:12Z`, replacing the `2026-06-30` skeleton
+commit).
+
+### Part 2 — fragment-retry safety net in `office-AI-agents`
+
+Added `pushed-unmerged` as a `notebook-x-progress.json` item status
+(documented in `_meta.status_values`). When content is generated and
+pushed but ingest/verify still fails after `ingestAndVerify()`'s own
+retries, the item now gets `status:"pushed-unmerged"`,
+`ingest_attempts`, `last_ingest_attempt`, `last_ingest_outcome` instead
+of silently staying `"pending"` for the next run to regenerate on top of
+(the actual risk flagged yesterday — a bad ingest day burning the daily
+Gemini budget regenerating instead of retrying).
+
+`notebook-x-daily.mjs`'s `main()` now checks for a `pushed-unmerged`
+item **before** picking a new `pending` one. If found, `retryStrandedItem()`
+retries only `waitForNotebookXWarm()` + `ingestAndVerify()` against the
+existing fragment — no Gemini calls, no re-push. Success marks the item
+`done` (auto-verified via the same `dataQuality`/`updatedAt`-change
+standard used throughout); failure increments `ingest_attempts` and
+retries again next run, up to `MAX_INGEST_ATTEMPTS = 3`, after which the
+item becomes `status:"flagged_for_review"` and stops being auto-retried.
+Also wired the existing `ingestAndVerify()`'s verified-success signal
+into automatically marking a freshly-generated item `done` — previously
+a manual step even on full success.
+
+Marked `docker-cloudflare-gcp-content-fill` `done` (Part 1's fix
+resolved its stranded state — see Part 1's verification above; recorded
+in its own `completion_note` in `notebook-x-progress.json`).
+
+### Verification this session
+
+- Real (unmocked) test of Part 1's fix against `kb-cloud-devops`'s
+  genuinely stranded content, via the actual production
+  `ingestAndVerify()` calling the actual deployed (post-fix) endpoint —
+  not a local simulation.
+- Independent verification via 3 separate channels (listing endpoint,
+  direct GitHub content read, GitHub commit history) for the fixed
+  notebook, matching the standard used all week.
+- `python -c "import ast; ast.parse(...)"` syntax check on both edited
+  Python files (via the project's own `.venv` — no system Python
+  available) before committing/pushing to a repo outside this session's
+  normal write scope.
+- `node --check` on the edited JS file.
+- One real `workflow_dispatch` run (`29079486941`) after both fixes were
+  committed and pushed, full log read: confirmed no `pushed-unmerged`
+  item triggered Part 2's retry path (correctly dormant, nothing needs
+  it now that Part 1 is fixed), correctly picked the next real `pending`
+  item (`sidebar-pinning`) and correctly declined it as a non-`
+  existing_notebook_fill` kind — no crash, clean run.
+- Final live sweep of all 6 filled notebooks (`kb-linux`, `kb-bash`,
+  `kb-1com`, `kb-voip-sip`, `kb-mirtapbx`, `kb-cloud-devops`): all
+  `dataQuality:"complete"` with sane section/command counts — no
+  regression from either fix.
+- Confirmed the pre-existing, unrelated `session-s1` work in the
+  original local `Notebook-X` clone was untouched (`git worktree` kept
+  this session's diff isolated to exactly `github_storage.py` and
+  `notebook_backend.py`).
+
+### Readiness call: the specific blockers this session targeted are now resolved — one more full backlog cycle before the schedule should be considered genuinely ready
+
+Both bugs found across this multi-day chain are now fixed and verified
+end-to-end on real data, not simulated: the fixed-sleep/no-verification
+gap (2026-07-10 morning), and Notebook-X's own intermittent-502 ingest
+unreliability (this entry). All 3 `existing_notebook_fill` backlog items
+built so far (`kb-voip-sip`, `kb-mirtapbx`, `kb-cloud-devops`) are
+confirmed genuinely merged and complete. Part 2's safety net is built
+and confirmed dormant when nothing needs it — its actual retry path
+(picking up a `pushed-unmerged` item on a subsequent run) has **not**
+been exercised by a real failure yet, since Part 1 resolved both known
+stranded items directly; it's verified by code reading and the dormancy
+check, not by a live failure-and-recovery cycle.
+
+**Recommendation**: this is close, but hold off enabling the
+`0 14 * * *` schedule for one more cycle. The remaining backlog items
+(`sidebar-pinning`, `cluster-unification`, `smart-search-bar`,
+`data-center-pipeline-research`) are all non-`existing_notebook_fill`
+kinds the script correctly declines rather than mishandles — so the
+daily automation has, in its current form, no more content-fill work to
+do and would run as a no-op health-check every day from here. Before
+flipping on the schedule: either (a) let one more `existing_notebook_fill`-
+kind item exist in the backlog and watch a real unattended day run fully
+clean, or (b) if the remaining items are intentionally left for manual/
+separate sessions, accept that the schedule would just be a daily
+health-check pass — harmless, but worth being a deliberate choice rather
+than an assumption.
+
+### Explicitly not done this session
+
+- Enabling the live cron schedule — per the readiness call above.
+- Touching `data-center` or `alpha-archive`.
+- Building automation for `sidebar-pinning`/`cluster-unification`/
+  `smart-search-bar`/`data-center-pipeline-research` — different `kind`s
+  the script correctly declines, out of scope for this session's two
+  specific fixes.
+- Merging the `Notebook-X-fix` git worktree changes into the original
+  local clone's `session-s1` branch or otherwise touching that clone —
+  the fix went straight to `main` via the worktree, per the explicit
+  authorization, and the pre-existing local clone was left exactly as
+  found.
