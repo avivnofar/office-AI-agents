@@ -2601,3 +2601,175 @@ than an assumption.
   the fix went straight to `main` via the worktree, per the explicit
   authorization, and the pre-existing local clone was left exactly as
   found.
+
+## TODO.md sync, housekeeping automation, live schedule launch (2026-07-10, continued)
+
+Final session in this chain: sync the (already human-edited, still
+uncommitted) `TODO.md` into the automation's tracking, scope housekeeping
+as recommend-only, and flip on the live daily schedule.
+
+### Step 1 — backlog sync: confirmed, one new item added
+
+`sidebar-pinning`, `cluster-unification`, `smart-search-bar` were already
+tracked and untouched (`status:"pending"`, correct `kind`s) — no changes
+needed. `data-center-pipeline-research` confirmed `kind:"research_document"`,
+matching TODO.md bullet 7's own "Research and suggest optimization plan"
+wording — added an explicit note in its `note` field pinning that down so
+it can't drift into being treated as a build task later.
+
+Added `expand-knowledge-base-regularly` as a new item with
+`status:"ongoing"` (new status value, documented in `_meta.status_values`)
+— it has no one-shot completion criterion, so the daily
+`find(i => i.status === 'pending')` picker never selects it; it exists in
+`notebook-x-progress.json` purely for traceability back to TODO.md's
+"greatly expand knowledge base regullarly" bullet. The actual ongoing
+work is whatever future `existing_notebook_fill`/new-notebook items get
+added and completed — this entry doesn't drive its own execution.
+
+### Step 2 — housekeeping: built, recommend-only, wired into the existing daily slot
+
+Added the 4 TODO.md house-keeping bullets to `notebook-x-progress.json`
+as `status:"ongoing"`, `kind:"housekeeping"`, `recommend_only:true` items
+(tracking only), and built their real execution in
+`notebook-x-daily.mjs`'s new `runHousekeepingPass()`:
+
+- **Unify/delete obsolete files**: lists `avivnofar/Notebook-X`'s repo
+  root via the GitHub Contents API, asks Gemini to flag likely-obsolete
+  files with a specific reason each, conservatively (told explicitly not
+  to touch core app files, `notebooks/`, or GitHub config). Verified this
+  has real, non-trivial signal to find on day one — all 6
+  `kb-*-content.json` fragments are still sitting at repo root even
+  though every one has already been merged into its target notebook
+  (confirmed via `gh api` before writing this), plus a committed
+  `__pycache__/` directory.
+- **General recommend-changes pass**: fetches `CLAUDE_CONTEXT.md`
+  (confirmed fetchable, 28157 bytes), asks Gemini for 3-5 concrete
+  next steps grounded in that doc.
+- **UI functionality check**: hits the live endpoints the UI itself
+  depends on (`GET /api/health`, `GET /api/knowledge-notebooks`,
+  `POST .../kb-linux/ask`) and reports pass/fail. **Scoped honestly, not
+  oversold**: this is an API-level proxy check, not browser-driven UI
+  automation — no headless browser is wired in — and every report says
+  so explicitly, flagged as "not ready to graduate to real UI testing
+  until one is added," per the session's own instruction to flag
+  graduation-readiness rather than imply more coverage than exists.
+- **Code-file assessment**: samples `notebook_backend.py`/`api_server.py`/
+  `github_storage.py` (first 2500 chars each, fetched via the GitHub
+  Contents API), asks Gemini for a functionality/health assessment.
+
+**Recommend-only, verified by code inspection**: none of the 4 functions
+call `ghPutFile` or any other mutating endpoint — every one returns a
+`{title, body}` pair that only gets written into a markdown report
+(`reports/notebook-x/housekeeping/<date>.md`), never applied. This is a
+deliberate, stated default (no destructive-action path has ever been
+scoped or tested in this project), not a stub.
+
+**Wired into the existing daily slot, not a new trigger**: `main()` now
+calls `runHousekeepingPass()` unconditionally, first thing after the
+existing health-check pass and before the stranded-item check or the
+pending-item picker — so it runs every day regardless of which of those
+branches follows (including the common case now: no `existing_notebook_fill`
+work left pending, where the old code would `return` early and do
+nothing further). Trade-off noted, not hidden: because it runs before
+that day's own item-completion logic, an item finished *that same day*
+shows up in the *next* day's "ready for review" list, not the same one —
+one day of lag, not a bug, just the ordering needed to guarantee
+housekeeping runs on every branch.
+
+### Step 3 — TODO.md marking convention: automation never writes to TODO.md
+
+Confirmed by code inspection — no function in `notebook-x-daily.mjs`
+opens, reads, or writes `TODO.md` anywhere; the only file this automation
+writes completion state to is `config/notebook-x-progress.json`.
+
+Added a "Ready for your TODO.md review" section, generated fresh in every
+housekeeping report, listing every item currently `status:"done"` in
+`notebook-x-progress.json` with its completion date — so marking TODO.md's
+`V` stays entirely a manual, human step (per TODO.md's own convention),
+but the person doesn't have to cross-reference the progress file by hand
+to find what's actually ready to check off.
+
+### Step 4 — live schedule: launched, verified against GitHub's own API, not just the deploy log
+
+Picked **01:00 Israel time** — inside `config/chore-schedule.json`'s
+00:00-06:00 IL "Night sweep" window, clear of the 06:00-08:00 IL
+case-simulation buffer and the 08:00-16:30 IL office-simulation cron.
+Israel is currently UTC+3 (IDT) — confirmed against
+`ISRAEL_UTC_OFFSET_HOURS` in `workers/agent-runner.js`, the same
+convention this repo already uses elsewhere — so 01:00 IDT = 22:00 UTC
+the previous day: `cron: '0 22 * * *'`.
+
+**Caught and fixed a real bug while doing this**: the original scaffolding's
+commented-out schedule block was written as `# schedule:` positioned
+*before* `on:`, i.e. as a sibling key rather than nested under it — invalid
+GitHub Actions YAML, had it been uncommented literally as written. Fixed
+to match the already-working nesting pattern in `scheduled-claude.yml`
+(`on: \n  schedule: \n    - cron: ...`) before enabling it live.
+
+**Verified against GitHub's own API, not the push succeeding**:
+`gh api repos/avivnofar/office-AI-agents/actions/workflows/310247432`
+returns `"state":"active"`; a direct read of the default-branch copy of
+the file via `gh api .../contents/.github/workflows/notebook-x-daily.yml`
+confirms the live copy on GitHub has the corrected `schedule:` block, not
+just the local commit.
+
+**First live/unattended fire**: `2026-07-10T22:00:00Z` UTC =
+**2026-07-11, 01:00 Israel time**. Per the session's explicit instruction,
+did **not** trigger a `workflow_dispatch` test run of any of tonight's new
+code (housekeeping pass, schedule) — this will be the actual first live,
+unattended run, not another manually-forced test. That also means the
+new `runHousekeepingPass()` code, while syntax-checked and component-
+verified (GitHub Contents API shape, the `/ask` endpoint, `CLAUDE_CONTEXT.md`
+fetchability all independently confirmed live this session), has **not**
+been run end-to-end before going live — the Gemini-calling paths reuse
+the exact same `generate()`/`callGemini()` wrapper already proven all
+week, but the specific new prompts have not been exercised. Worth
+watching tomorrow's first report closely rather than assuming it's clean.
+
+### Verification this session
+
+- Independent `gh api` check of the actual GitHub Contents API shape
+  (repo root listing, `CLAUDE_CONTEXT.md` existence/size) before writing
+  code against assumed shapes.
+- Live confirmation that all 6 `kb-*-content.json` fragments are still
+  sitting at the Notebook-X repo root post-merge — real signal the
+  housekeeping "obsolete files" check has genuine, non-trivial findings
+  waiting on day one, not a check with nothing to ever find.
+- Live `curl` test of the exact `/ask` call `housekeeping_uiCheck()` uses,
+  confirming it returns a real HTTP 200 with a coherent answer today.
+- `node --check` on the edited script; JSON validation on
+  `notebook-x-progress.json`.
+- Code-inspection confirmation (not just claiming it) that no function
+  touches `TODO.md` and that none of the housekeeping functions call a
+  mutating endpoint.
+- `gh api` reads of the live workflow's `state` and the live default-branch
+  file content, not trusting `git push`'s success alone.
+
+### Readiness call: live, launched, first real test is tomorrow morning
+
+Everything requested this session shipped: backlog synced, housekeeping
+built and scoped safely, TODO.md-writing explicitly avoided and confirmed
+by inspection, schedule enabled and independently verified as registered.
+The one honest caveat: tonight's new housekeeping code has real
+component-level verification but no full end-to-end run — deliberately,
+per instruction, so the first scheduled fire (`2026-07-10T22:00Z` UTC =
+`2026-07-11` 01:00 IL) produces the genuine first live proof. Check
+`reports/notebook-x/housekeeping/2026-07-11.md` and
+`reports/notebook-x/daily-log.md` after that run before assuming this is
+fully clean — this project's own standing rule (checked four separate
+silent-false-successes this month) applies to this code too.
+
+### Explicitly not done this session
+
+- Any `workflow_dispatch` test run — per explicit instruction, tonight's
+  code goes live untested end-to-end, first real proof is tomorrow's
+  scheduled fire.
+- Writing to `TODO.md` in any way, by the automation or manually in this
+  session — its already-edited-by-the-person state was committed as-is,
+  V-marking stays entirely a human step going forward.
+- Building real UI browser automation (Playwright/Puppeteer) —
+  `housekeeping_uiCheck()` stays an explicitly-scoped API-level proxy
+  check, flagged as not-yet-graduated in every report it produces.
+- Building a real destructive-action path for any housekeeping finding —
+  recommend-only remains the deliberate default.
+- Touching `data-center` or `alpha-archive`.
