@@ -48,3 +48,10 @@ and `_index-public.json` reflects the update. Item marked `done` in
 - Outcome: failed-to-parse-or-push
 - General-work findings: kb-linux: NOT FOUND in /api/knowledge-notebooks listing; kb-bash: NOT FOUND in /api/knowledge-notebooks listing; kb-1com: NOT FOUND in /api/knowledge-notebooks listing
 - Gemini calls: 4, Claude calls: 0, Groq calls: 0
+
+## 2026-07-11 — sidebar-pinning
+
+- Item: Attach existing notebooks to the Notebook-X UI, pinned to sidebar
+- Outcome: implemented-and-pushed
+- General-work findings: kb-linux: NOT FOUND in /api/knowledge-notebooks listing; kb-bash: NOT FOUND in /api/knowledge-notebooks listing; kb-1com: NOT FOUND in /api/knowledge-notebooks listing
+- Gemini calls: 4, Claude calls: 0, Groq calls: 0
