@@ -2773,3 +2773,222 @@ silent-false-successes this month) applies to this code too.
 - Building a real destructive-action path for any housekeeping finding —
   recommend-only remains the deliberate default.
 - Touching `data-center` or `alpha-archive`.
+
+## Model-scoped code-write permissions, frontend_code_change guard wiring, JSON-parsing bug fix (2026-07-11)
+
+Session goal: restructure code-write permission from project-scoped to
+model-scoped (an explicit, dated owner decision), wire
+`permission-guard.js` into `notebook-x-daily.mjs`'s `frontend_code_change`
+block for real instead of leaving that block unguarded, and fix the JSON-
+parsing bug that was causing it to fail (`failed-to-parse-or-push`) —
+keeping the direct autonomous push (no staging) as intentional and now
+explicitly authorized.
+
+### Step 1 — `config/project-permissions.json`: added a model-scoped `code_write` axis
+
+Added a new top-level `code_write` key (distinct from the existing
+per-project `office-agents.code_write` flag, which is unchanged):
+`{ "gemini": true, "groq": false, "claude": "per-change-only" }`. This is
+additive, not a replacement — the existing per-project `push`/`code_write`
+settings are untouched, and a write must now clear *both* axes (acting
+model's global `code_write` permission, and the target project's own
+push/code_write settings).
+
+`_meta.code_write_policy` (the existing note about `office-agents.code_write:false`
+and "never a standing flag, always per-change") was **appended to, not
+overwritten** — added an `UPDATE 2026-07-11` paragraph making explicit
+that the office-agents-specific flag and reasoning are unchanged; what's
+new is a separate, model-scoped axis. A new
+`_meta.code_write_model_scope_2026-07-11` entry records the dated owner
+decision itself: Gemini is broadly authorized to write and push code
+autonomously, any project — a deliberate, narrow exception to the "never
+a standing flag" principle, for Gemini only (matches TODO.md's own
+Notebook-X section, `*gemini has permissions to write code in notebook-x`,
+and the code-writing already happening in practice via
+`housekeeping_codeAssessment()`/`frontend_code_change`). Groq: never
+writes code, any project, no exceptions. Claude: unchanged — reviewer/
+manager by default, code-write only with explicit per-instance
+authorization at the time of that specific change, never a standing flag.
+
+### Step 2 — `permission-guard.js`: `checkCodeWriteAllowed()` now checks the acting model
+
+Added an optional `model` param. When given, checks
+`code_write.<model>` from `project-permissions.json`: `true` allows
+unconditionally, `"per-change-only"` allows only when `explicitCodeTask`
+is also set for that specific call, anything else (including an
+unrecognized model) blocks — fail closed. When `model` is omitted, falls
+back to the original `explicitCodeTask`-only behavior, so
+`agent-runner.js`'s existing `commitFileToRepo()` call site (which never
+passed a model) is unaffected.
+
+`notebook-x-daily.mjs` can't `import` `permission-guard.js` directly — it's
+a plain-`node`-executed script, and `permission-guard.js` does
+`import projectPermissions from '../config/project-permissions.json'`
+with no import assertion, which esbuild (the Worker's bundler) accepts but
+Node's native ESM loader rejects (`ERR_IMPORT_ASSERTION_TYPE_MISSING`,
+confirmed live: `node -e "import('./workers/permission-guard.js')"` →
+`needs an import attribute of "type: json"`). This is the exact same
+constraint `selectModelForChoreTask()` was already worked around for
+(model-router.js's `token-economy.json` import) — followed the same
+established pattern: a local `checkCodeWriteAllowedForModel()` mirrors
+the real function's model-scoped branch, reading the same JSON file via
+`fs.readFileSync` + `JSON.parse` instead of an ES import (works under both
+esbuild and native Node), with a comment explaining why and a
+keep-in-sync note.
+
+The `frontend_code_change` block now calls this check with
+`model: 'gemini'` before `generate()` ever runs — made explicit and
+checked rather than implicit, per the session's ask — and logs clearly
+and returns (no generation, no push) if the check fails.
+
+### Step 3 — JSON-parsing bug: fixed by switching to a delimiter, not a JSON string value
+
+The original prompt asked Gemini to return
+`{ "fixes": [{"path": ..., "content": "..."}], "summary": "..." }` — the
+entire rewritten file had to be embedded as an escaped JSON string value.
+Any truncation (hitting the token cap mid-file) or an unescaped quote/
+newline broke `JSON.parse()` outright, with no partial-recovery path —
+this was the `failed-to-parse-or-push` outcome logged against
+`sidebar-pinning` in the automatic 2026-07-11 01:00 IL cron run (see
+`reports/notebook-x/daily-log.md`, entry `## 2026-07-11 — sidebar-pinning`,
+`Outcome: failed-to-parse-or-push`).
+
+Fix: the prompt now asks for the full file wrapped in
+`<updated_code>...</updated_code>` (plain text, nothing to escape), plus
+a `SUMMARY: ...` line after the closing tag. Extraction is
+`[...analysisRaw.matchAll(/<updated_code>([\s\S]*?)<\/updated_code>/g)]` —
+if this doesn't find *exactly* one match, the code fails loudly (logs the
+match count and the first 500 chars of the raw response) and does not
+proceed with a partial/wrong result, rather than guessing.
+
+Added a sanity check before push — a correctness guard, not a review
+gate, per the session's explicit instruction that direct autonomous push
+stays intentional and unstaged: non-empty, closing `</html>` present for
+`.html` targets, and extracted length within 50% of the original
+(catches a truncated/garbage response). Extracted content is passed to
+`ghPutRawTextFile()` as raw text, no re-encoding.
+
+**A second, real bug surfaced by testing, fixed before declaring this done**:
+the first live test (see Step 4) showed the new extraction logic working
+exactly as designed — it correctly refused to accept a response with no
+closing `</updated_code>` tag rather than accepting a truncated result.
+Root cause: the flat `maxTokens: 4096` output cap (fine for
+`housekeeping_codeAssessment()`'s small Python excerpts) is far too small
+to round-trip Notebook-X's `index.html` — 105,773 bytes — as a full-file
+rewrite, independent of JSON-vs-delimiter encoding. Fixed by sizing the
+output-token budget to the fetched file's length
+(`Math.max(4096, Math.ceil(text.length / 3) + 512)`) instead of a flat
+default.
+
+### Step 4 — live test against the real `sidebar-pinning` item: mechanics verified, but caught a false completion
+
+Confirmed via `git show b44ff58 -- reports/notebook-x/daily-log.md`
+that `sidebar-pinning` was already the first `pending` item and had
+already failed once today (the automatic 01:00 IL cron run, before any
+of this session's fixes landed) with exactly the bug being fixed —
+a legitimate live target, not a synthetic one.
+
+Committed Steps 1–3 to `master` and triggered `workflow_dispatch` twice
+(`gh workflow run notebook-x-daily.yml`) — once to confirm the delimiter
+fix surfaced the maxTokens problem cleanly (run `29166041026`,
+`Failed to extract code: expected exactly 1 <updated_code> block, found 0`,
+confirmed by reading the run's own logs via `gh run view --log`, not
+assumed), then again after the token-budget fix (run `29166904737`,
+completed successfully after ~27 minutes — consistent with this session's
+own first run's runtime, not a hang, though notably slower than an
+unrelated cron run two hours earlier that finished in 75 seconds; the
+housekeeping pass's per-call Gemini latency appears to vary session to
+session and is worth watching, not yet root-caused).
+
+That second run's log showed permission check passed, extraction found
+exactly one match, sanity check passed (`101770 chars, vs 101771
+original`), and push reported `SUCCESS` — and the automation marked the
+item `done`.
+
+**Independent verification (same standard as every other item this
+month — did not trust the workflow's own log line) caught this as a
+false completion.** `gh api repos/avivnofar/Notebook-X/commits/547d3502`
+(the resulting commit) shows `1 addition, 1 deletion, 2 changes` total;
+the actual patch is only the removal of the trailing newline at
+end-of-file — no functional change. Gemini's own response text was:
+*"The code is already fully functional and integrated with the existing
+backend logic for loading and displaying notebooks, including the
+pinned knowledge notebooks in the sidebar."* — it believed the feature
+already existed and echoed the file back almost verbatim. Every
+mechanical check this session built (permission gate, delimiter
+extraction, sanity check, push) passed correctly, because none of them
+can distinguish "Gemini did the work" from "Gemini declined the work and
+echoed the input back, in-budget and well-formed."
+
+Manually corrected `config/notebook-x-progress.json`: `sidebar-pinning`
+reset from `done` to `flagged_for_review` (not `pending` — retrying with
+the same prompt tomorrow would likely produce the same wrong answer;
+see the item's new `false_completion_2026-07-11` note for full detail
+and two concrete follow-up options: give Gemini more explicit context
+about what "pinned to sidebar" should look like in this app's actual
+markup, or add a diff-size sanity signal so an implausibly-small change
+against a "add a feature" task gets flagged rather than auto-accepted).
+Left the trivial trailing-newline commit on `avivnofar/Notebook-X` as-is
+— harmless, not worth a follow-up commit to revert a no-op.
+
+**What this run actually proved, net of the false completion**: the
+model-scoped permission check genuinely authorizes/blocks by acting
+model now (not just project + `explicitCodeTask`), and the
+delimiter-extraction + sanity-check + direct-push mechanics work
+correctly end-to-end against a real 105KB production file. What it did
+not prove: that this prompt reliably gets Gemini to *do* the requested
+frontend work rather than assert it's unnecessary — that remains open,
+flagged for a follow-up session.
+
+### Step 5 — TODO.md wording flag (not edited, per instruction)
+
+`TODO.md`'s `AI-office-agents` section still reads "The agents are fully
+authorized to write, edit, and push code files to the master branch...
+push their changes autonomously" — this predates and doesn't reflect the
+model-level distinction now encoded in `project-permissions.json`
+(Gemini: yes, standing; Claude: no, per-change only; Groq: never).
+`TODO.md`'s own Notebook-X section already has the correct, narrower
+wording (`*gemini has permissions to write code in notebook-x`) — the
+`AI-office-agents` section is the one that's stale. Flagging for the
+owner to revise in their own words (e.g. "Gemini is authorized to
+write/push code; Claude and Groq are not") rather than editing it
+directly, per this file being a human-maintained document this
+automation doesn't touch.
+
+### Verification this session
+
+- `node --check` on every edited `.js`/`.mjs` file; `JSON.parse()`
+  validation on both edited JSON config files.
+- Live `node -e "import(...)"` reproduction of the Node-ESM import-
+  assertion failure before choosing the mirrored-function workaround,
+  not assumed from the existing code comment alone.
+- Two real `workflow_dispatch` runs against the live GitHub Actions
+  workflow (not local mocking) — `gh run view --log` read directly for
+  both, not inferred from exit status.
+- `gh api repos/avivnofar/Notebook-X/commits/<sha>` read directly for
+  the actual file-level diff stat and patch — the check that caught the
+  false completion the workflow's own success/done status missed.
+- `gh api repos/avivnofar/office-AI-agents/...` reads of live secret
+  names (confirming `NOTEBOOK_X_REPO_TOKEN` exists as an Actions secret
+  even though not available in this local shell) before assuming a live
+  test was possible at all.
+
+### Readiness call: guard + extraction + bug fix are proven live; the underlying content task is not
+
+The permission restructure and the parsing/token-budget fixes are real,
+committed, and verified against a live run, not just reasoned about.
+`sidebar-pinning` itself is correctly back in a not-done state
+(`flagged_for_review`) with an honest paper trail — this session did
+not force a fake win. Next real step is prompt/verification work
+specific to that item, not more guard-wiring.
+
+### Explicitly not done this session
+
+- Editing `TODO.md` — flagged in Step 5 above, left to the owner.
+- Reverting the harmless trailing-newline commit on `avivnofar/Notebook-X`.
+- Adding a diff-size/no-op-detection sanity signal to
+  `frontend_code_change` — noted as a concrete follow-up in
+  `sidebar-pinning`'s progress-file note, not built this session.
+- Root-causing why this session's housekeeping-pass runtime varied
+  ~75s to ~27min across runs a few hours apart — flagged as worth
+  watching, not investigated further.
