@@ -34,3 +34,10 @@ and `_index-public.json` reflects the update. Item marked `done` in
 - Outcome: ingest-failed
 - General-work findings: kb-linux: dataQuality=complete, sections=10, commands=15, issues=10, glossary=12, updatedAt=2026-07-10T07:40:17.023702Z (0d ago); kb-bash: dataQuality=complete, sections=10, commands=10, issues=10, glossary=10, updatedAt=2026-07-10T07:40:13.389915Z (0d ago); kb-1com: dataQuality=complete, sections=9, commands=5, issues=10, glossary=15, updatedAt=2026-07-10T07:40:10.338652Z (0d ago)
 - Gemini calls: 17, Claude calls: 0, Groq calls: 0
+
+## 2026-07-11 — sidebar-pinning
+
+- Item: Attach existing notebooks to the Notebook-X UI, pinned to sidebar
+- Outcome: failed-to-parse-or-push
+- General-work findings: kb-linux: dataQuality=complete, sections=10, commands=15, issues=10, glossary=12, updatedAt=2026-07-10T08:17:14.616101Z (1d ago); kb-bash: dataQuality=complete, sections=10, commands=10, issues=10, glossary=10, updatedAt=2026-07-10T08:17:06.046254Z (1d ago); kb-1com: dataQuality=complete, sections=9, commands=5, issues=10, glossary=15, updatedAt=2026-07-10T08:16:59.179987Z (1d ago)
+- Gemini calls: 4, Claude calls: 0, Groq calls: 0
