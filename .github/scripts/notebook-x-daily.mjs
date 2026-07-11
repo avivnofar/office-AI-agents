@@ -543,6 +543,51 @@ async function main() {
   console.log(`\n=== Picked item: ${item.id} ===`);
   console.log(item.label);
 
+  // --- NEW BLOCK: Handling Frontend Code Changes ---
+  if (item.kind === 'frontend_code_change') {
+     console.log(`\n=== Executing frontend code change: ${item.id} ===`);
+     const targetPath = item.target_notebook_name || 'index.html';
+     const fileContent = await ghGetFile(notebookXToken, targetPath);
+     const text = ghFileText(fileContent);
+
+     if (!text) {
+         console.log(`Could not fetch ${targetPath} from Notebook-X.`);
+         return;
+     }
+
+     const prompt = `You are tasked with the following frontend code change: "${item.label}".\n` +
+       `Here is the current content of ${targetPath}:\n\n---\n${text}\n---\n\n` +
+       `Output ONLY a valid JSON object in this exact format, with no markdown formatting or extra text outside the JSON:\n` +
+       `{ "fixes": [ {"path": "${targetPath}", "content": "the FULL updated raw code for this file"} ], "summary": "what you implemented" }\n`;
+
+     const analysisRaw = await generate(prompt, { temperature: 0.1, maxTokens: 4096 });
+     let outcome = 'failed-to-parse-or-push';
+
+     try {
+         const cleanJson = analysisRaw.replace(/^```json/m, '').replace(/^```/m, '').trim();
+         const analysis = JSON.parse(cleanJson);
+         console.log(`Gemini implementation summary: ${analysis.summary}`);
+
+         for (const fix of analysis.fixes) {
+             const pushRes = await ghPutRawTextFile(notebookXToken, fix.path, fix.content, `gemini-auto-task: ${item.id}`);
+             console.log(`Push to ${fix.path}: ${pushRes.ok ? 'SUCCESS' : 'FAILED'}`);
+             if (pushRes.ok) outcome = 'implemented-and-pushed';
+         }
+     } catch (e) {
+         console.log(`Failed to parse or push frontend code change: ${e.message}`);
+     }
+
+     if (outcome === 'implemented-and-pushed') {
+         item.status = 'done';
+         item.completed = new Date().toISOString().slice(0, 10);
+         item.completion_note = `Autonomously implemented and pushed ${item.id} via Gemini auto-task logic.`;
+     }
+     saveProgress(progress);
+     appendDailyLog(healthFindings, { id: item.id, label: item.label, outcome });
+     return;
+  }
+  // --- END NEW BLOCK ---
+
   if (item.kind !== 'existing_notebook_fill') {
     console.log(`Item kind "${item.kind}" has no automated write path in this script yet (not a content-fill task) — leaving pending, general work only today.`);
     return;
@@ -626,13 +671,6 @@ async function main() {
     }
   }
 
-  // Persist the outcome back into notebook-x-progress.json instead of
-  // leaving every non-success outcome as an unchanged "pending" for the
-  // next run to blindly regenerate on top of. Only "push-failed" (nothing
-  // landed on Notebook-X at all) stays "pending" as-is — everything else
-  // that got a fragment successfully pushed but not merged becomes
-  // "pushed-unmerged" so the next run's stranded-item check (see
-  // retryStrandedItem() above) retries just the ingest half.
   if (outcome === 'ingested-verified') {
     item.status = 'done';
     item.completed = new Date().toISOString().slice(0, 10);
