@@ -598,7 +598,15 @@ async function main() {
        `Then on a new line after the closing tag, write a one-sentence summary prefixed with "SUMMARY: ".\n` +
        `Do not use markdown code fences. Do not truncate — output the entire file.`;
 
-     const analysisRaw = await generate(prompt, { temperature: 0.1, maxTokens: 4096 });
+     // maxTokens sized to the target file, not a flat default: the prior
+     // 4096 ceiling (fine for the housekeeping code-assessment's small
+     // Python excerpts) silently truncated on index.html (105KB — needs
+     // full-file round-trip per this block's design), which is exactly the
+     // truncation failure this fix targets. ~3 output chars/token is a
+     // conservative floor for dense HTML/CSS/JS, plus headroom for the
+     // delimiter tags and summary line.
+     const outputTokenBudget = Math.max(4096, Math.ceil(text.length / 3) + 512);
+     const analysisRaw = await generate(prompt, { temperature: 0.1, maxTokens: outputTokenBudget });
      let outcome = 'failed-to-parse-or-push';
 
      const matches = [...analysisRaw.matchAll(/<updated_code>([\s\S]*?)<\/updated_code>/g)];
