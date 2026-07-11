@@ -55,11 +55,32 @@ function selectModelForChoreTask({ taskType, requiresHighQuality = false, overBu
   return { model: 'gemini', reason: 'Notebook-X override: Gemini is the default writer for content generation.' };
 }
 
+// NOT imported from workers/permission-guard.js: that module does
+// `import projectPermissions from '../config/project-permissions.json'` with
+// no import assertion — same ERR_IMPORT_ASSERTION_TYPE_MISSING failure under
+// plain `node` as workers/model-router.js's token-economy.json import
+// (confirmed live, same as the selectModelForChoreTask() comment above).
+// Reads the same file via fs+JSON.parse instead (works under both esbuild
+// and native Node) and mirrors checkCodeWriteAllowed()'s model-scoped branch
+// exactly, per the 2026-07-11 model-scoped code_write decision (see
+// config/project-permissions.json's _meta.code_write_model_scope_2026-07-11).
+// Keep in sync manually if that function's model-scoped logic ever changes.
+function checkCodeWriteAllowedForModel(filePath, model) {
+  const permissions = JSON.parse(fs.readFileSync(PROJECT_PERMISSIONS_PATH, 'utf8'));
+  const policy = permissions.code_write?.[model];
+  if (policy === true) return { allowed: true };
+  const reason = policy === 'per-change-only'
+    ? `Blocked: model "${model}" is authorized to write "${filePath}" only per-change (config/project-permissions.json code_write.${model} === "per-change-only") — this automated daily run carries no per-change human authorization for this call.`
+    : `Blocked: model "${model}" is not authorized to write code file "${filePath}" (config/project-permissions.json code_write.${model} is ${JSON.stringify(policy) ?? 'undefined — unrecognized model, fail closed'}).`;
+  return { allowed: false, reason };
+}
+
 const GEMINI_MODEL = 'gemini-3.1-flash-lite';
 const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 const GITHUB_API = 'https://api.github.com';
 const NOTEBOOK_X_REPO = 'avivnofar/Notebook-X';
 const PROGRESS_PATH = 'config/notebook-x-progress.json';
+const PROJECT_PERMISSIONS_PATH = 'config/project-permissions.json';
 const STAGING_DIR = 'reports/notebook-x/pending-content';
 const DAILY_LOG_PATH = 'reports/notebook-x/daily-log.md';
 const HOUSEKEEPING_DIR = 'reports/notebook-x/housekeeping';
@@ -543,10 +564,25 @@ async function main() {
   console.log(`\n=== Picked item: ${item.id} ===`);
   console.log(item.label);
 
-  // --- NEW BLOCK: Handling Frontend Code Changes ---
+  // --- Frontend code changes (direct autonomous push, no staging step —
+  // intentional and authorized: Gemini's code_write policy is a standing
+  // "true", per the 2026-07-11 model-scoped decision in
+  // config/project-permissions.json. The sanity check below is a
+  // correctness guard against a truncated/garbage model response, not a
+  // review gate. ---
   if (item.kind === 'frontend_code_change') {
      console.log(`\n=== Executing frontend code change: ${item.id} ===`);
      const targetPath = item.target_notebook_name || 'index.html';
+
+     const actingModel = 'gemini'; // this block only ever calls generate(), which only ever calls Gemini — see the module comment on generate() above
+     const permissionCheck = checkCodeWriteAllowedForModel(targetPath, actingModel);
+     if (!permissionCheck.allowed) {
+         console.log(`PERMISSION DENIED: ${permissionCheck.reason}`);
+         appendDailyLog(healthFindings, { id: item.id, label: item.label, outcome: 'blocked-by-permission-guard' });
+         return;
+     }
+     console.log(`Permission check passed: model "${actingModel}" is authorized to write "${targetPath}" (config/project-permissions.json code_write.${actingModel}).`);
+
      const fileContent = await ghGetFile(notebookXToken, targetPath);
      const text = ghFileText(fileContent);
 
@@ -557,36 +593,55 @@ async function main() {
 
      const prompt = `You are tasked with the following frontend code change: "${item.label}".\n` +
        `Here is the current content of ${targetPath}:\n\n---\n${text}\n---\n\n` +
-       `Output ONLY a valid JSON object in this exact format, with no markdown formatting or extra text outside the JSON:\n` +
-       `{ "fixes": [ {"path": "${targetPath}", "content": "the FULL updated raw code for this file"} ], "summary": "what you implemented" }\n`;
+       `Output the FULL updated raw code for ${targetPath}, wrapped EXACTLY like this, with nothing else before or after:\n` +
+       `<updated_code>\n...the complete updated file content...\n</updated_code>\n\n` +
+       `Then on a new line after the closing tag, write a one-sentence summary prefixed with "SUMMARY: ".\n` +
+       `Do not use markdown code fences. Do not truncate — output the entire file.`;
 
      const analysisRaw = await generate(prompt, { temperature: 0.1, maxTokens: 4096 });
      let outcome = 'failed-to-parse-or-push';
 
-     try {
-         const cleanJson = analysisRaw.replace(/^```json/m, '').replace(/^```/m, '').trim();
-         const analysis = JSON.parse(cleanJson);
-         console.log(`Gemini implementation summary: ${analysis.summary}`);
+     const matches = [...analysisRaw.matchAll(/<updated_code>([\s\S]*?)<\/updated_code>/g)];
+     if (matches.length !== 1) {
+         console.log(`Failed to extract code: expected exactly 1 <updated_code> block, found ${matches.length}. Not proceeding with a partial/wrong result. Raw response (first 500 chars):\n${analysisRaw.slice(0, 500)}`);
+         outcome = 'failed-to-parse-or-push';
+     } else {
+         const newContent = matches[0][1].trim();
+         const summaryMatch = analysisRaw.match(/SUMMARY:\s*(.+)/);
+         const summary = summaryMatch ? summaryMatch[1].trim() : '(no summary provided)';
+         console.log(`Gemini implementation summary: ${summary}`);
 
-         for (const fix of analysis.fixes) {
-             const pushRes = await ghPutRawTextFile(notebookXToken, fix.path, fix.content, `gemini-auto-task: ${item.id}`);
-             console.log(`Push to ${fix.path}: ${pushRes.ok ? 'SUCCESS' : 'FAILED'}`);
-             if (pushRes.ok) outcome = 'implemented-and-pushed';
+         const isHtmlTarget = targetPath.toLowerCase().endsWith('.html');
+         const sanityIssues = [];
+         if (newContent.length === 0) sanityIssues.push('extracted content is empty');
+         if (isHtmlTarget && !/<\/html>\s*$/i.test(newContent)) sanityIssues.push('HTML target but no closing </html> tag found');
+         if (newContent.length < text.length * 0.5) sanityIssues.push(`extracted content (${newContent.length} chars) is less than half the original (${text.length} chars) — looks truncated`);
+
+         if (sanityIssues.length > 0) {
+             console.log(`SANITY CHECK FAILED — not pushing garbage/truncated content: ${sanityIssues.join('; ')}`);
+             outcome = 'failed-sanity-check';
+         } else {
+             console.log(`Sanity check passed (${newContent.length} chars, vs ${text.length} original).`);
+             const pushRes = await ghPutRawTextFile(notebookXToken, targetPath, newContent, `gemini-auto-task: ${item.id}`);
+             console.log(`Push to ${targetPath}: ${pushRes.ok ? 'SUCCESS' : 'FAILED (HTTP ' + pushRes.status + ')'}`);
+             if (pushRes.ok) {
+                 outcome = 'implemented-and-pushed';
+                 item.completion_note = `Autonomously implemented and pushed ${item.id} to ${NOTEBOOK_X_REPO}/${targetPath} via Gemini (${GEMINI_MODEL}), authorized by config/project-permissions.json code_write.gemini:true. Summary: ${summary}. Extracted content ${newContent.length} chars (original ${text.length} chars), passed sanity check (non-empty${isHtmlTarget ? ', closing </html> present' : ''}, length within range).`;
+             } else {
+                 outcome = 'push-failed';
+             }
          }
-     } catch (e) {
-         console.log(`Failed to parse or push frontend code change: ${e.message}`);
      }
 
      if (outcome === 'implemented-and-pushed') {
          item.status = 'done';
          item.completed = new Date().toISOString().slice(0, 10);
-         item.completion_note = `Autonomously implemented and pushed ${item.id} via Gemini auto-task logic.`;
      }
      saveProgress(progress);
      appendDailyLog(healthFindings, { id: item.id, label: item.label, outcome });
      return;
   }
-  // --- END NEW BLOCK ---
+  // --- END frontend code changes ---
 
   if (item.kind !== 'existing_notebook_fill') {
     console.log(`Item kind "${item.kind}" has no automated write path in this script yet (not a content-fill task) — leaving pending, general work only today.`);

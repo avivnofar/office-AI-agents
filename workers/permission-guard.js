@@ -76,12 +76,36 @@ export function isCodeFilePath(filePath) {
 }
 
 /**
- * Blocks code-file writes unless the triggering task was an explicit
- * code-writing instruction. Non-code files (reports, markdown, JSON, etc.)
- * always pass this check untouched.
+ * Blocks code-file writes unless allowed. Non-code files (reports,
+ * markdown, JSON, etc.) always pass this check untouched.
+ *
+ * Two independent checks, per the 2026-07-11 model-scoped code_write
+ * decision (config/project-permissions.json `code_write` — see its _meta
+ * for the full reasoning):
+ *
+ *   - If `model` is given, the acting model's global code_write policy
+ *     (`code_write.<model>`) governs: `true` allows unconditionally,
+ *     `"per-change-only"` allows only when `explicitCodeTask` is also set
+ *     for this specific call, `false` (or an unrecognized model) blocks —
+ *     fail closed.
+ *   - If `model` is omitted (legacy call sites that don't track an acting
+ *     model), falls back to the original explicitCodeTask-only rule.
  */
-export function checkCodeWriteAllowed({ filePath, explicitCodeTask = false }) {
+export function checkCodeWriteAllowed({ filePath, model, explicitCodeTask = false }) {
   if (!isCodeFilePath(filePath)) return { allowed: true };
+
+  if (model) {
+    const policy = projectPermissions.code_write?.[model];
+    if (policy === true) return { allowed: true };
+    if (policy === 'per-change-only' && explicitCodeTask) return { allowed: true };
+
+    const reason = policy === 'per-change-only'
+      ? `Blocked: "${filePath}" is a code file and model "${model}" is authorized for code-write only per-change (config/project-permissions.json code_write.${model} === "per-change-only"), but this call did not carry an explicit per-change authorization (explicitCodeTask).`
+      : `Blocked: "${filePath}" is a code file and model "${model}" is not authorized to write code (config/project-permissions.json code_write.${model} is ${JSON.stringify(policy) ?? 'undefined — unrecognized model, fail closed'}).`;
+    console.warn(`[permission-guard] ${reason}`);
+    return { allowed: false, reason };
+  }
+
   if (explicitCodeTask) return { allowed: true };
   const reason = `Blocked: "${filePath}" is a code file and the triggering task was not an explicit code-writing instruction (General rule: agents research/investigate/recommend/write files but don't write code files unless directly instructed).`;
   console.warn(`[permission-guard] ${reason}`);
