@@ -9,6 +9,7 @@
 
 ## Notebook-X
 *items that are done should be thoroughly check and marked with a V upon completion
+*gemini has permissions to write code in notebook-x
 
 - increase the knowledge base significantly
 - add sip pbx, voip. Micro sip, port sip, (if not existing) forti checkpoint remote connections, teamviewer\rustdeskfree\any desk, network watcher. add notebooks about docker, cloudflare, google cloud +console+developer
