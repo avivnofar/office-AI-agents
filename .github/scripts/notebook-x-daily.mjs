@@ -87,6 +87,7 @@ const HOUSEKEEPING_DIR = 'reports/notebook-x/housekeeping';
 const LIVE_NOTEBOOKS_FOR_HEALTH_CHECK = ['kb-linux', 'kb-bash', 'kb-1com'];
 const STALE_AFTER_DAYS = 30;
 const MAX_INGEST_ATTEMPTS = 3; // per-item cap before leaving it flagged for manual review instead of retrying forever
+const MIN_PLAUSIBLE_DIFF_LINES = 3; // frontend_code_change's diff-size floor — see checkDiffPlausible()
 const GEMINI_CALL_SPACING_MS = 4000; // stay well under the 15 RPM free-tier ceiling
 
 // Mirrors Notebook-X's own NOTEBOOK_DEFINITIONS (notebook_backend.py),
@@ -256,7 +257,83 @@ async function ghPutRawTextFile(token, filePath, textContent, message) {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   });
-  return { ok: res.ok, status: res.status };
+  const data = await res.json().catch(() => null);
+  return { ok: res.ok, status: res.status, data };
+}
+
+// Real per-file diff stats/patch for a commit — the same mechanism used to
+// independently verify the 2026-07-11 sidebar-pinning false completion
+// (`gh api repos/.../commits/<sha>`), now wired into the automation itself
+// rather than only being a manual post-hoc check.
+async function ghGetCommit(token, sha) {
+  const res = await fetch(`${GITHUB_API}/repos/${NOTEBOOK_X_REPO}/commits/${sha}`, {
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+// Rejects a diff that's implausibly small for a frontend_code_change task —
+// the specific gap the 2026-07-11 sidebar-pinning false completion exposed:
+// every existing check (permission gate, extraction, non-empty/closing-tag/
+// length-range sanity check) can pass on a commit whose only real content
+// is a trailing-newline/whitespace no-op, because none of them compare
+// against what actually changed. This is NOT a correctness check on the
+// implementation (it can't know if the code is right) — it's a plausibility
+// floor: is there enough real, non-whitespace change here to be worth
+// trusting as "done" without a human look? Two independent triggers, either
+// one is enough to reject:
+//   1. Zero-signal: the commit's own additions+deletions count for this
+//      file is 0 (shouldn't happen if the push succeeded with new content,
+//      but checked defensively).
+//   2. Content-identical reshuffle: sorted, trimmed added lines exactly
+//      match sorted, trimmed removed lines — the diff touched formatting/
+//      whitespace/EOF-newline only, not actual content (this is exactly
+//      what sidebar-pinning's "-</html>" / "+</html>" diff looked like:
+//      neither line is blank, so a naive whitespace-only check would have
+//      missed it).
+//   3. Below MIN_PLAUSIBLE_DIFF_LINES total changed lines, generically.
+// A failure here is deliberately NOT treated as "the change is wrong" (see
+// existing_notebook_fill's real semantic ingest-and-verify check for what
+// an actual correctness signal looks like) — a genuinely tiny, correct fix
+// (e.g. a one-line CSS change) can trip this floor too. The caller routes
+// a failure to flagged_for_review, never blocked_infeasible, and the note
+// text says so explicitly.
+function checkDiffPlausible(fileDiff) {
+  if (!fileDiff) {
+    return { plausible: false, reason: 'no file entry found in the commit diff (unexpected — push reported success)' };
+  }
+
+  const { additions = 0, deletions = 0, patch = '' } = fileDiff;
+  const changedLines = additions + deletions;
+
+  if (changedLines === 0) {
+    return { plausible: false, reason: 'commit reports 0 additions/deletions for this file' };
+  }
+
+  const patchLines = patch.split('\n');
+  const added = patchLines.filter((l) => l.startsWith('+') && !l.startsWith('+++')).map((l) => l.slice(1).trim());
+  const removed = patchLines.filter((l) => l.startsWith('-') && !l.startsWith('---')).map((l) => l.slice(1).trim());
+  const sortedAdded = [...added].sort();
+  const sortedRemoved = [...removed].sort();
+  const contentIdentical = sortedAdded.length === sortedRemoved.length
+    && sortedAdded.every((v, i) => v === sortedRemoved[i]);
+
+  if (contentIdentical) {
+    return {
+      plausible: false,
+      reason: `${changedLines} line(s) changed (+${additions}/-${deletions}) but the added and removed line content is identical once trimmed — looks like a whitespace/EOF-newline-only diff, not a real content change`,
+    };
+  }
+
+  if (changedLines < MIN_PLAUSIBLE_DIFF_LINES) {
+    return {
+      plausible: false,
+      reason: `only ${changedLines} line(s) changed (+${additions}/-${deletions}) — implausibly small for the described task, though a genuinely tiny correct fix can look like this too`,
+    };
+  }
+
+  return { plausible: true };
 }
 
 async function ghListDir(token, dirPath = '') {
@@ -633,8 +710,33 @@ async function main() {
              const pushRes = await ghPutRawTextFile(notebookXToken, targetPath, newContent, `gemini-auto-task: ${item.id}`);
              console.log(`Push to ${targetPath}: ${pushRes.ok ? 'SUCCESS' : 'FAILED (HTTP ' + pushRes.status + ')'}`);
              if (pushRes.ok) {
-                 outcome = 'implemented-and-pushed';
-                 item.completion_note = `Autonomously implemented and pushed ${item.id} to ${NOTEBOOK_X_REPO}/${targetPath} via Gemini (${GEMINI_MODEL}), authorized by config/project-permissions.json code_write.gemini:true. Summary: ${summary}. Extracted content ${newContent.length} chars (original ${text.length} chars), passed sanity check (non-empty${isHtmlTarget ? ', closing </html> present' : ''}, length within range).`;
+                 // Diff-size plausibility check (2026-07-11, added after this
+                 // exact block marked sidebar-pinning "done" on a commit whose
+                 // only real change was a trailing newline) — a passing push +
+                 // passing sanity check are NOT enough on their own; also look
+                 // at what the commit actually changed before trusting "done".
+                 const commitSha = pushRes.data?.commit?.sha;
+                 let diffCheck = { plausible: true, reason: null };
+                 if (commitSha) {
+                     const commitData = await ghGetCommit(notebookXToken, commitSha);
+                     const fileDiff = commitData?.files?.find((f) => f.filename === targetPath);
+                     diffCheck = checkDiffPlausible(fileDiff);
+                     console.log(
+                         `Diff-size check for commit ${commitSha.slice(0, 8)}: ${diffCheck.plausible ? 'PASSED' : 'FAILED'}` +
+                         (fileDiff ? ` (+${fileDiff.additions}/-${fileDiff.deletions})` : '') +
+                         (diffCheck.reason ? ` — ${diffCheck.reason}` : '')
+                     );
+                 } else {
+                     console.log('Push succeeded but the response carried no commit SHA — cannot run the diff-size check, proceeding on push success alone.');
+                 }
+
+                 if (diffCheck.plausible) {
+                     outcome = 'implemented-and-pushed';
+                     item.completion_note = `Autonomously implemented and pushed ${item.id} to ${NOTEBOOK_X_REPO}/${targetPath} via Gemini (${GEMINI_MODEL}), authorized by config/project-permissions.json code_write.gemini:true. Summary: ${summary}. Extracted content ${newContent.length} chars (original ${text.length} chars), passed sanity check (non-empty${isHtmlTarget ? ', closing </html> present' : ''}, length within range)${commitSha ? ` and diff-size check (commit ${commitSha.slice(0, 8)})` : ' (diff-size check skipped — no commit SHA)'}.`;
+                 } else {
+                     outcome = 'implausible-diff';
+                     item.diff_check_note = `Pushed to ${NOTEBOOK_X_REPO}/${targetPath} (commit ${commitSha}), but the resulting diff looks implausibly small for "${item.label}": ${diffCheck.reason}. This does NOT necessarily mean the change is wrong — a genuinely tiny, correct fix can look like this too — so this is flagged for a human look, not marked done or blocked_infeasible. Gemini's summary of what it did: ${summary}`;
+                 }
              } else {
                  outcome = 'push-failed';
              }
@@ -644,6 +746,8 @@ async function main() {
      if (outcome === 'implemented-and-pushed') {
          item.status = 'done';
          item.completed = new Date().toISOString().slice(0, 10);
+     } else if (outcome === 'implausible-diff') {
+         item.status = 'flagged_for_review';
      }
      saveProgress(progress);
      appendDailyLog(healthFindings, { id: item.id, label: item.label, outcome });

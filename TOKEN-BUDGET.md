@@ -2992,3 +2992,105 @@ specific to that item, not more guard-wiring.
 - Root-causing why this session's housekeeping-pass runtime varied
   ~75s to ~27min across runs a few hours apart — flagged as worth
   watching, not investigated further.
+
+## Diff-size plausibility check for frontend_code_change (2026-07-11, continued)
+
+Closing out the same day's session: added the follow-up flagged above —
+a diff-size sanity check specifically for `frontend_code_change` tasks,
+plus a direct confirmation of what tonight's 01:00 IDT scheduled run
+will actually do.
+
+### Diff-size check: `checkDiffPlausible()`
+
+After a successful push, the block now fetches the actual commit via
+`ghGetCommit()` (`GET /repos/avivnofar/Notebook-X/commits/<sha>` — the
+same API call used manually to catch the sidebar-pinning false
+completion, now wired into the automation itself) and runs
+`checkDiffPlausible()` against the target file's diff entry before
+trusting "done":
+
+- **Zero-signal**: additions+deletions both 0 for the file — reject.
+- **Content-identical reshuffle**: sorted, trimmed added lines exactly
+  equal sorted, trimmed removed lines. This is the specific shape of
+  today's real bug (`-</html>` / `+</html>` / no-newline-at-EOF) — a
+  naive "were any changed lines blank" check would have missed it,
+  since neither line is blank; comparing trimmed *content* sets catches
+  it. Unit-tested locally against the actual sidebar-pinning patch shape
+  before trusting it live — correctly flagged as implausible.
+- **Below `MIN_PLAUSIBLE_DIFF_LINES` (3)** total changed lines, as a
+  generic floor.
+
+A failure routes to `outcome = 'implausible-diff'` →
+`item.status = 'flagged_for_review'` (never `done`, never
+`blocked_infeasible`) with a `diff_check_note` that explicitly says the
+small diff does *not* necessarily mean the change is wrong — a
+genuinely tiny, correct one-line fix would trip the same floor, and
+this is a plausibility check, not a correctness check (unlike
+`existing_notebook_fill`'s real semantic ingest-and-verify, which this
+check doesn't replace or need to — scoped to `frontend_code_change`
+only, the one kind with no structural completion signal like
+`dataQuality` flipping). Verified locally (not just reasoned about)
+against three synthetic cases before trusting it: the real bug's patch
+shape (correctly rejected as whitespace-only), a genuine tiny 1-line CSS
+fix (correctly flagged, not blocked), and a real multi-line feature
+addition (correctly passes).
+
+Not exercised against a second live `workflow_dispatch` run this
+session — the fix is unit-tested and the mechanism (`ghGetCommit` +
+existing `ghPutRawTextFile` now returning `data.commit.sha`) reuses
+already-live-proven API calls, but the next real `frontend_code_change`
+attempt (whenever `sidebar-pinning` or a similar item is retried) will
+be this check's first live exercise. Worth confirming then, the same
+way today's mechanics were confirmed rather than assumed.
+
+### Step 3 — what tonight's 01:00 IDT (22:00 UTC) run will actually do
+
+Checked directly against the live `config/notebook-x-progress.json`
+(not assumed): no item has status `pushed-unmerged` (nothing stranded);
+`sidebar-pinning` is `flagged_for_review` and is correctly skipped by
+the picker (`progress.items.find(i => i.status === 'pending')` only
+matches literal `"pending"`); the first — and only — item the picker
+will select is `cluster-unification` (`kind: structural_review`), which
+falls through to the generic `item.kind !== 'existing_notebook_fill'`
+branch and no-ops with "no automated write path in this script yet."
+`smart-search-bar` and `data-center-pipeline-research` are also pending
+but irrelevant tonight — the picker stops at the first match, never
+reaching them.
+
+**One-line prediction**: tonight's run will do the housekeeping/health-
+check pass as usual, pick `cluster-unification`, log that it has no
+automated write path, and stop — no push, no commit beyond the
+housekeeping-report/daily-log write, nothing to be surprised by
+tomorrow morning.
+
+### Verification this session
+
+- Unit-tested `checkDiffPlausible()` locally against 5 cases (the real
+  bug's exact patch shape, a genuine tiny fix, a real multi-line
+  feature, a missing file entry, and zero reported changes) before
+  trusting the logic, rather than reasoning about it in the abstract.
+- Read `config/notebook-x-progress.json`'s live item statuses directly
+  and ran the actual picker predicate
+  (`items.find(i => i.status === 'pending')`) against them in a small
+  script, rather than inferring the outcome from the file by eye.
+- `node --check` on the edited script.
+
+### Readiness call: ready for tonight's run; the diff-size check's first live proof is still pending
+
+Tonight's run is a known, confirmed no-op beyond housekeeping — not a
+guess. The diff-size check is unit-verified but not yet live-fired;
+next time a `frontend_code_change` item is actually attempted (a future
+retry of `sidebar-pinning`, most likely), check that run's log for the
+new "Diff-size check for commit ..." line before assuming it behaves
+in production the same way it did in the unit tests.
+
+### Explicitly not done this session
+
+- A second live `workflow_dispatch` test specifically exercising the new
+  diff-size check end-to-end — deferred to the next real
+  `frontend_code_change` attempt rather than spending another Gemini
+  budget/~25min run tonight, given the mechanism reuses already-proven
+  API calls and is unit-tested.
+- Retrying `sidebar-pinning` itself (still `flagged_for_review`, still
+  needs the prompt/context follow-up noted earlier today, not attempted
+  again this session).
