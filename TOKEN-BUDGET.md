@@ -259,7 +259,7 @@ code path — `runWorkDayCycle()` — had never run end-to-end before). Result:
 current quota, please check your plan and billing details"`.
 
 - **Root cause**: `GEMINI_API_KEY`'s Google AI Studio project hit a 429
-  quota/billing limit on `gemini-2.5-flash-lite` partway through day 1's
+  quota/billing limit on `gemini-2.5-flash` partway through day 1's
   case loop (47 of 50 cases processed). `gemini-client.js` has no
   retry/backoff, so the first 429 became a 500. CLAUDE.md assumes a "paid"
   Gemini tier — this key appears to be on free-tier limits, or the daily
@@ -597,9 +597,9 @@ recurring Gemini 429 problem and wired up scheduled automation.
   root-level escalations as a single `claude-action` + `architect-task`
   GitHub Issue for human/Claude-Code review.
   - **Note on `token-economy.json` `report_model`**: set to
-    `"google/gemini-2.5-flash-lite"`, not the originally-specified
+    `"google/gemini-2.5-flash"`, not the originally-specified
     `"google/gemini-1.5-flash"` — CLAUDE.md's "Launch Decisions" pins
-    `gemini-2.5-flash-lite` project-wide and `gemini-1.5-flash` does not
+    `gemini-2.5-flash` project-wide and `gemini-1.5-flash` does not
     appear anywhere else in the codebase.
   - `agents/database/schema.sql`: `interactions` table gained an additive
     `model_source TEXT` column (`agent-base.js` `logInteraction()` now
@@ -1970,10 +1970,10 @@ on redeploy) — `GET /api/knowledge-notebooks` is the real signal.
 ### Part 2 — Gemini model retirement: found, tested, fixed
 
 `POST /api/knowledge-notebooks/kb-linux/ask` was 500ing:
-`models/gemini-2.5-flash-lite is no longer available`. Isolated live
+`models/gemini-2.5-flash is no longer available`. Isolated live
 tests against the real `GEMINI_API_KEY` (via disposable one-off GitHub
 Actions workflows, deleted immediately after each use) showed BOTH
-`gemini-2.5-flash-lite` and `gemini-2.5-flash` retired (404). `GET
+`gemini-2.5-flash` and `gemini-2.5-flash` retired (404). `GET
 /v1beta/models` listed `gemini-3.1-flash-lite` as the stable (non-preview),
 cheapest/fastest-tier replacement — tested live, HTTP 200.
 

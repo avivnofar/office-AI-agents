@@ -1224,7 +1224,7 @@ See \`suggestions\` rows, grouped by \`permission_level\`.
 
 ## Cost & Token Usage Estimate
 
-Gemini (gemini-2.5-flash-lite, office simulation): tracking toward the
+Gemini (gemini-2.5-flash, office simulation): tracking toward the
 ~$2-3/quarter target. Claude (claude-sonnet-4-6, data-center-api): tracking
 toward the $5-15/mo ceiling. See CLAUDE.md "Launch Decisions" cost model.
 

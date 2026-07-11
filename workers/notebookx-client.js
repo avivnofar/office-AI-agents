@@ -18,7 +18,7 @@
  * /api/knowledge-notebooks and the write endpoints below are the real
  * signal. Separately, `POST /api/knowledge-notebooks/{id}/ask` was 500ing
  * because Notebook-X's own backend called a deprecated Gemini model
- * (`gemini-2.5-flash-lite`, retired by Google) — fixed same day in
+ * (`gemini-2.5-flash`, retired by Google) — fixed same day in
  * Notebook-X's `notebook_backend.py` (`GEMINI_MODEL` constant switched to
  * `gemini-3.1-flash-lite`, confirmed live end-to-end with a real kb-linux
  * ask returning a real answer). This repo's own Gemini calls

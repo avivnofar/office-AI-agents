@@ -47,7 +47,7 @@ Friday and Saturday are intentionally skipped (Israeli weekend).
 |-------|----------|------|------|
 | `llama3-8b-8192` | **Groq** | Primary model for all routine per-case agent work | Free ~14,400 req/day |
 | `llama-3.1-8b-instruct-fp8` | **Cloudflare Workers AI** | Case routing/classification + automatic fallback when Groq is unavailable | Free ~10,000 req/day |
-| `gemini-2.5-flash-lite` | **Google AI Studio** | Report synthesis only — monthly, quarterly, semi-yearly, yearly meetings | Free tier |
+| `gemini-2.5-flash` | **Google AI Studio** | Report synthesis only — monthly, quarterly, semi-yearly, yearly meetings | Free tier |
 | `claude-sonnet-4-6` | **Anthropic** | App AI Search bar + hard-case escalations. **Hard cap: 30 calls/day across all agents** | Paid ~$6/month |
 | `human + Claude Code` | n/a | Agent 10 (Architect) — never calls an AI; cases are filed as GitHub Issues for human review | n/a |
 

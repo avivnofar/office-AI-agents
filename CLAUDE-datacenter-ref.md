@@ -49,7 +49,7 @@ Decisions from the 2026-06-11 launch-planning session for the AI Agent
 Office Simulation. These supersede any conflicting framing in
 `agents/README.md`, `agents/AGENTS.md`, or `TOKEN-BUDGET.md`.
 
-- **Cost model**: `gemini-2.5-flash-lite` (paid) runs the entire office
+- **Cost model**: `gemini-2.5-flash` (paid) runs the entire office
   simulation (~$2-3/quarter at target volume). The Anthropic/Claude API
   (`data-center-api`) is reserved for the app's AI Search bar, senior-agent
   "hard case" escalations, and Architect/sudo-tier fixes only. Monthly
@@ -73,7 +73,7 @@ Office Simulation. These supersede any conflicting framing in
   unfixable or a cost cap is hit. Narrative "story events" (an agent
   quitting, a rivalry escalating, etc.) are logged as normal output and
   never halt the run.
-- **Models**: `gemini-2.5-flash-lite` for the office simulation
+- **Models**: `gemini-2.5-flash` for the office simulation
   (`gemini-2.0-flash` is deprecated — do not reintroduce it),
   `claude-sonnet-4-6` for `data-center-api`.
 - **Architecture (3 Workers)**: `data-center-api` (Claude proxy — AI
