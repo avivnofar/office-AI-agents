@@ -223,6 +223,21 @@ async function ghPutFile(token, filePath, jsonObj, message) {
   return { ok: res.ok, status: res.status, data };
 }
 
+async function ghPutRawTextFile(token, filePath, textContent, message) {
+  const existing = await ghGetFile(token, filePath);
+  const body = {
+    message,
+    content: Buffer.from(textContent).toString('base64'),
+    ...(existing?.sha ? { sha: existing.sha } : {}),
+  };
+  const res = await fetch(`${GITHUB_API}/repos/${NOTEBOOK_X_REPO}/contents/${filePath}`, {
+    method: 'PUT',
+    headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return { ok: res.ok, status: res.status };
+}
+
 async function ghListDir(token, dirPath = '') {
   const res = await fetch(`${GITHUB_API}/repos/${NOTEBOOK_X_REPO}/contents/${dirPath}`, {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
@@ -324,19 +339,36 @@ async function housekeeping_codeAssessment(token) {
   for (const f of files) {
     const result = await ghGetFile(token, f);
     const text = ghFileText(result, 2500);
-    if (text) snippets.push(`--- ${f} (first 2500 chars) ---\n${text}`);
+    if (text) snippets.push(`--- ${f} ---\n${text}`);
   }
   if (snippets.length === 0) {
     return { title: 'Code-file functionality assessment', body: '_Could not fetch any backend files from avivnofar/Notebook-X — skipped this run._' };
   }
-  const analysis = await generate(
-    `Here are excerpts (first 2500 chars each) from avivnofar/Notebook-X's core backend Python files:\n\n${snippets.join('\n\n')}\n\n` +
-    'Assess overall code health from what is visible here: any obvious bugs, missing error handling, or functionality concerns? ' +
-    'Be specific and concise -- this is a sample of larger files, not the full source, so note if something looks incomplete ' +
-    'rather than assuming it is a real bug.',
-    { temperature: 0.2, maxTokens: 1024 }
-  );
-  return { title: 'Code-file functionality assessment', body: analysis };
+
+  const prompt = `Here are excerpts from Notebook-X's backend:\n\n${snippets.join('\n\n')}\n\n` +
+    `You are authorized to fix any obvious bugs, logic gaps, or missing error handling directly. ` +
+    `Output ONLY a valid JSON object in this exact format, with no markdown formatting or extra text outside the JSON:\n` +
+    `{ "fixes": [ {"path": "file_name.py", "content": "the FULL updated raw code for this file"} ], "summary": "what you fixed" }\n` +
+    `If no fixes are needed, output: { "fixes": [], "summary": "All code looks good, no fixes required." }`;
+
+  const analysisRaw = await generate(prompt, { temperature: 0.1, maxTokens: 4096 });
+  let bodyText = "";
+
+  try {
+    const cleanJson = analysisRaw.replace(/^```json/m, '').replace(/^```/m, '').trim();
+    const analysis = JSON.parse(cleanJson);
+    bodyText = `**Gemini Code Fixes:** ${analysis.summary}\n\n`;
+
+    for (const fix of analysis.fixes) {
+       // שימוש בפונקציה שהוספת כדי לדחוף את קוד הפייתון النקי
+       const pushRes = await ghPutRawTextFile(token, fix.path, fix.content, `gemini-auto-fix: autonomously updated ${fix.path}`);
+       bodyText += `- Pushed code update to \`${fix.path}\`: ${pushRes.ok ? 'SUCCESS' : 'FAILED (HTTP ' + pushRes.status + ')'}\n`;
+    }
+  } catch (e) {
+    bodyText = `Failed to parse Gemini code output or push files. Raw output:\n\n${analysisRaw}\nError: ${e.message}`;
+  }
+
+  return { title: 'Code-file functionality assessment (AUTO-FIX)', body: bodyText };
 }
 
 // This automation NEVER edits TODO.md or writes its "V" marks — that stays

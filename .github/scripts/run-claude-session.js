@@ -23,7 +23,8 @@ const CODE_FILE_EXTENSIONS = new Set([
   '.c', '.cpp', '.h', '.hpp', '.cs', '.php',
   '.sh', '.ps1', '.psm1', '.sql',
 ]);
-const EXPLICIT_CODE_TASK = true; // Overridden: agents are now authorized to write code autonomously.
+
+const EXPLICIT_CODE_TASK = process.env.EXPLICIT_CODE_TASK === 'true';
 
 function isCodeFilePath(filePath) {
   const dot = filePath.lastIndexOf('.');
@@ -99,6 +100,11 @@ const req = https.request({
       const result = JSON.parse(text.slice(start, end));
       const blocked = [];
       result.files.forEach(f => {
+        if (isCodeFilePath(f.path) && !EXPLICIT_CODE_TASK) {
+          console.warn(`Blocked (code-write-guard): ${f.path} — code file, EXPLICIT_CODE_TASK not set for this run.`);
+          blocked.push(f.path);
+          return;
+        }
 
         const dir = f.path.split('/').slice(0, -1).join('/');
         if (dir) fs.mkdirSync(dir, { recursive: true });
