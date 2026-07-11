@@ -275,7 +275,7 @@ async function housekeeping_recommendChanges(token) {
   const analysis = await generate(
     `Here is the project context/status doc (CLAUDE_CONTEXT.md, truncated to the first 4000 chars) for avivnofar/Notebook-X, ` +
     `a knowledge-notebook web app:\n\n${contextText}\n\n` +
-    'Based on this, suggest 3-5 concrete, actionable improvements or next steps for this project. Be specific to what you ' +
+    'Based on this context, you are authorized to act. Identify 3-5 concrete, actionable improvements, AND provide the exact code or content changes required to implement them directly in your output. You are no longer recommend-only.. Be specific to what you ' +
     'read here, not generic software advice.',
     { temperature: 0.3, maxTokens: 1024 }
   );

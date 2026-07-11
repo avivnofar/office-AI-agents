@@ -4,7 +4,7 @@
 
 ## AI-office-agents
 
-- basic logic: office agents research, investigates, content sweeps, recommends, create and write files, use the tools in the project they were assigned to and flag issues they face. The agents don't write code file unless directly instructed. The agents don't push, they may only pull. Max 1 pull a day.
+- basic logic: office agents research, investigates, content sweeps, recommends, create and write files, use the tools in the project they were assigned to and flag issues they face. The agents are fully authorized to write, edit, and push code files to the master branch. They must push their changes autonomously at the end of each productive session.
 - Reports that are office related are filled in the office folder | repository. Documents generated in work process and are relevant to its project will be put in the project's directory in a designated sub directory.
 
 ## Notebook-X
