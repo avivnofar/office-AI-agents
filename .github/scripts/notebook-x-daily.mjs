@@ -414,6 +414,15 @@ async function housekeeping_unifyDeleteObsolete(token) {
   return { title: 'Unify data files / delete obsolete leftovers', body: `Recommendation only -- nothing deleted or moved.\n\n${analysis}` };
 }
 
+// PROMPT FIXED 2026-07-12 (MEDIUM finding from the safety-claim audit): this
+// used to tell Gemini "you are authorized to act ... you are no longer
+// recommend-only" — directly contradicting the RECOMMEND-ONLY BY DESIGN
+// comment above housekeeping_unifyDeleteObsolete() that this function also
+// falls under. Nothing ever consumed that instruction (the return value only
+// ever lands in the housekeeping report, same as the other three checks in
+// this pass), so it wasn't a live write-path bug, but it was priming Gemini
+// to hand back ready-to-apply code as if authorized, which is exactly the
+// wrong thing to have lying around next to a comment claiming the opposite.
 async function housekeeping_recommendChanges(token) {
   const contextFile = await ghGetFile(token, 'CLAUDE_CONTEXT.md');
   const contextText = ghFileText(contextFile, 4000);
@@ -423,11 +432,12 @@ async function housekeeping_recommendChanges(token) {
   const analysis = await generate(
     `Here is the project context/status doc (CLAUDE_CONTEXT.md, truncated to the first 4000 chars) for avivnofar/Notebook-X, ` +
     `a knowledge-notebook web app:\n\n${contextText}\n\n` +
-    'Based on this context, you are authorized to act. Identify 3-5 concrete, actionable improvements, AND provide the exact code or content changes required to implement them directly in your output. You are no longer recommend-only.. Be specific to what you ' +
-    'read here, not generic software advice.',
+    'Identify 3-5 concrete, actionable improvements. For each, describe the change precisely enough for a human to ' +
+    'implement it, but this is a recommendation only — do not write out full file contents or claim to have made the ' +
+    'change yourself. Be specific to what you read here, not generic software advice.',
     { temperature: 0.3, maxTokens: 1024 }
   );
-  return { title: 'General recommend-changes pass', body: analysis };
+  return { title: 'General recommend-changes pass', body: `Recommendation only -- nothing changed.\n\n${analysis}` };
 }
 
 // Scoped honestly: this checks that the API endpoints the UI actually
