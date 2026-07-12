@@ -1,19 +1,27 @@
 #!/usr/bin/env node
 // Manual dry-run verification (Step 7, 2026-07-08 session) for the
 // push/pull permission model. Does NOT push, pull, or call any model —
-// it only exercises the same decision logic workers/permission-guard.js
-// applies at every GitHub write call site (commitFileToRepo()), reading
-// config/project-permissions.json directly since this is a plain Node
-// script (permission-guard.js's `import x from '*.json'` needs Cloudflare
-// Workers/esbuild's JSON loader, which plain `node` doesn't provide
-// without an import attribute Node requires but esbuild doesn't need —
-// see the 2026-07-08 TOKEN-BUDGET.md entry for why these stay separate).
+// it exercises the ACTUAL decision logic in workers/permission-guard.js
+// (resolveWriteTarget()/resolveIssueTarget()), imported directly rather
+// than mirrored.
+//
+// Until 2026-07-12 this file carried its own hand-copied mirror of that
+// logic, because permission-guard.js's own `import x from '*.json'` needed
+// an import assertion plain `node` rejects
+// (ERR_IMPORT_ASSERTION_TYPE_MISSING) that esbuild/Workers doesn't need —
+// see the 2026-07-08 TOKEN-BUDGET.md entry. permission-guard.js no longer
+// imports the JSON itself (its functions take `permissions` as a
+// parameter instead — see its own file header), so it has no JSON import
+// left to trip that error, and this script can import the real functions.
+// This script still loads config/project-permissions.json itself, the
+// same way it always did — that half was never the problem.
 //
 // Run: node scripts/verify-permissions.js
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { resolveWriteTarget as resolveWriteTargetReal, resolveIssueTarget as resolveIssueTargetReal } from '../workers/permission-guard.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, '..');
@@ -23,35 +31,14 @@ const permissions = JSON.parse(
   fs.readFileSync(path.join(REPO_ROOT, 'config', 'project-permissions.json'), 'utf8')
 );
 
-// Mirrors workers/permission-guard.js canPushToProject()/resolveWriteTarget().
-function canPushToProject(projectKey) {
-  return permissions[projectKey]?.push === true;
-}
+// Thin adapters: this script's scenario objects only carry the fields the
+// tests below care about (no `body` for issues, etc.) — these just supply
+// ownRepoName and forward everything else to the real functions.
 function resolveWriteTarget({ projectKey, targetRepoName, path: filePath }) {
-  if (canPushToProject(projectKey)) {
-    return { repoName: targetRepoName, path: filePath, redirected: false };
-  }
-  return {
-    repoName: REPO_NAME,
-    path: `agent-output/${projectKey}/${filePath}`,
-    redirected: true,
-    reason: `push:false for project "${projectKey}"`,
-  };
+  return resolveWriteTargetReal(permissions, { projectKey, ownRepoName: REPO_NAME, targetRepoName, path: filePath });
 }
-
-// Mirrors workers/permission-guard.js resolveIssueTarget() (2026-07-08
-// session: extended the guard to cover Issue creation, not just file
-// commits — see TOKEN-BUDGET.md).
 function resolveIssueTarget({ projectKey, targetRepoName, title }) {
-  if (canPushToProject(projectKey)) {
-    return { repoName: targetRepoName, title, redirected: false };
-  }
-  return {
-    repoName: REPO_NAME,
-    title: `[redirected from ${projectKey}] ${title}`,
-    redirected: true,
-    reason: `push:false for project "${projectKey}"`,
-  };
+  return resolveIssueTargetReal(permissions, { projectKey, ownRepoName: REPO_NAME, targetRepoName, title, body: '' });
 }
 
 const writeScenarios = [
