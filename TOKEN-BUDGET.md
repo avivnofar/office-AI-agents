@@ -3094,3 +3094,170 @@ in production the same way it did in the unit tests.
 - Retrying `sidebar-pinning` itself (still `flagged_for_review`, still
   needs the prompt/context follow-up noted earlier today, not attempted
   again this session).
+
+
+## Safety-claim audit: hunting for other `housekeeping_codeAssessment`-shaped gaps (2026-07-12, continued)
+
+Targeted audit, prompted by the 2026-07-11/12 incident: grepped both
+`office-AI-agents` and `avivnofar/Notebook-X` for the same class of language
+`housekeeping_codeAssessment()` used to carry ("never deletes",
+"recommend-only", "never modifies", "read-only", "does not push", "no-op",
+etc.), then traced each hit's actual code against the claim — not trusting
+the docstring the way the incident showed a docstring can't be trusted.
+Report-only, per this session's scope; nothing below has been fixed.
+
+### Findings, ranked by how dangerous the gap is
+
+**1. [HIGH — production-write-capable, currently live] `save_notebook()` in
+`avivnofar/Notebook-X`'s `notebook_backend.py:1042` never calls
+`validate_write()`.**
+
+`data_safety.py`'s own header comment states the invariant plainly:
+*"validate_write() must be called before every github_put() on a
+notebook."* `CROSS_PROJECT_SAFETY.md`'s Rule 2 (*"Every GitHub write must
+pass validate_write() ... Does not reduce files/entries count to 0 when
+existing count > 0"*) is marked **✅ session 4+5** for Notebook-X in that
+doc's status table. In reality there are two parallel notebook-save paths:
+
+- `_push_to_github()` (`notebook_backend.py:595`) — **guarded**, calls
+  `_validate_write()` at line 604 before `github_put()`. 7 call sites.
+- `save_notebook()` (`notebook_backend.py:1042`, the **v2** notebook save
+  path, per its own comment) — **unguarded**, no `validate_write()` call
+  anywhere in it. 5 call sites: `notebook_backend.py:1399` (skeleton fill),
+  `:1736`, `:1808` (content ingestion), `:1855` (skeleton creation), `:1918`
+  (sync-from-github restore).
+
+`save_notebook()` is the active, currently-used write path for v2 content
+(fill/ingest/restore flows) — not legacy or dead code. Any bad or truncated
+payload reaching it (a bad Gemini fill response, a malformed pasted-file
+ingest, a bug in a caller) can silently overwrite or erase a notebook's
+content on GitHub with none of Rule 2's protections — the exact failure
+shape as the 2026-07-11/12 incident, just reachable from inside Notebook-X's
+own code instead of an external automation. `CROSS_PROJECT_SAFETY.md`'s
+unqualified ✅ overstates what Rule 2 actually covers today.
+
+**2. [MEDIUM — no write-capable exploit path identified, but no safety net
+either] Several other `github_put()` call sites in `notebook_backend.py`
+also skip `validate_write()`, though the risk is narrower (index/metadata
+files, not raw notebook content):**
+
+- `_update_github_index()` (`:763`) — rewrites the whole `_index.json` list
+  on every add/remove, no floor-check that the result isn't drastically
+  smaller than before.
+- `setup_archive_structure()` (`:732`) — one-time archive-doc creation,
+  lower risk (not user content).
+- `_knowledge-bus.json` creation (`:1349`) — likely dead code; the Knowledge
+  Bus feature itself was disabled in session R
+  (`push_to_knowledge_bus_for_notebook()` is now a documented permanent
+  no-op), but the creation function and its unguarded `github_put()` are
+  still present.
+- `_index-public.json` writers, three call sites (`:1438`, `:1598`,
+  `:1670`/`rebuild_public_index()`) — `rebuild_public_index()`'s own
+  docstring claims *"Safe to run at any time — never deletes notebook
+  content."* True for the underlying `kb-*.json` files (each per-notebook
+  read failure is individually caught and skipped, not fatal to the whole
+  run) — but there's no check comparing the rebuilt entry count against the
+  existing public index before overwriting. If the initial directory
+  listing succeeds but every subsequent per-notebook read then fails (a
+  plausible transient-GitHub-API pattern), this function will still
+  unconditionally push an **empty** `_index-public.json` — the file
+  `CLAUDE.md`'s own comment says "Data Center and other projects" read —
+  with nothing to catch it.
+
+**3. [MEDIUM — not a live write-path bug today, but the same
+documentation/reality mismatch shape as the incident] `office-AI-agents`'s
+`housekeeping_recommendChanges()` (`.github/scripts/notebook-x-daily.mjs`).**
+
+It sits directly under the comment block: *"RECOMMEND-ONLY BY DESIGN: none
+of these functions ever call ghPutFile, github_delete, or any other
+mutating call — findings are written to a markdown report for a human to
+act on, never applied automatically."* That's true for what the function
+actually *does* today — its return value only ever lands in the
+housekeeping report (`fs.writeFileSync`), nothing pushes it anywhere. But
+the prompt text it sends to Gemini says the opposite of the comment above
+it: *"Based on this context, you are authorized to act. ... AND provide the
+exact code or content changes required to implement them directly in your
+output. You are no longer recommend-only.."* Nothing currently consumes
+that output except the report file, so this isn't exploitable today — but
+it's a loaded landmine: the prompt already primes Gemini to hand back
+ready-to-apply code as if authorized, and the surrounding "RECOMMEND-ONLY"
+claim would silently stop being true the moment anyone wires this
+function's output into a push path without noticing the mismatch. Same
+failure shape as the incident, just not triggered yet.
+
+**4. [LOW — structural risk, not a claim violation today] The
+push/code-write permission decision logic is manually duplicated in three
+places with no shared source of truth:** `workers/permission-guard.js`
+(canonical: `canPushToProject()`, `resolveWriteTarget()`,
+`checkCodeWriteAllowed()`), `scripts/verify-permissions.js` (a test mirror
+of the same logic, explicitly commented "Mirrors
+workers/permission-guard.js"), and `.github/scripts/notebook-x-daily.mjs`'s
+own `checkCodeWriteAllowedForModel()` (also explicitly commented "mirrors
+checkCodeWriteAllowed()'s model-scoped branch exactly... keep in sync
+manually"). All three agree today (verified by reading each one directly,
+not assumed) — flagging this because "three hand-synced copies, drift is
+invisible until something breaks" is the same underlying shape that let
+`housekeeping_codeAssessment`'s problem go unnoticed, even though this
+particular case isn't broken yet.
+
+**5. [INFORMATIONAL] `CROSS_PROJECT_SAFETY.md`'s status table needs a
+caveat, not a rewrite** — see finding #1. Rule 2's Notebook-X ✅ should note
+it only covers the `_push_to_github()` path, not `save_notebook()`.
+
+### Confirmed clean — scrutinized, not just trusted (Step 2 of this audit)
+
+The other three `housekeeping_*` functions in `notebook-x-daily.mjs`,
+checked line-by-line the same way `housekeeping_codeAssessment()` should
+have been checked before today:
+
+- **`housekeeping_unifyDeleteObsolete()`** — `ghListDir()` (GET) +
+  `generate()` (text-only Gemini call) only. No `ghPutFile`/
+  `ghPutRawTextFile`/`ghDelete` anywhere in it. Its prompt correctly tells
+  Gemini not to touch core files. Matches its claim.
+- **`housekeeping_uiCheck()`** — only GETs plus one POST to the live
+  `/api/knowledge-notebooks/kb-linux/ask` endpoint, which is a read-style
+  Q&A query, not a mutation. Its "not full browser-driven UI automation"
+  scope note is accurate. Matches its claim.
+- **`housekeeping_codeAssessment()`** — already fixed this session (the
+  incident's own root cause); now genuinely gated by
+  `checkFullFileRewritePlausible()` + `checkCodeWriteAllowedForModel()`.
+
+Also checked, not flagged in this repo's grep hits but adjacent to the
+incident and worth confirming directly rather than assuming:
+
+- **`scripts/cross-project-health-check.mjs`** — read fully top to bottom.
+  Every branch is a `gh api ... -X GET` or a plain `curl`/`fetch` GET; zero
+  write calls in the file. Its workflow
+  (`.github/workflows/cross-project-health-check.yml`) genuinely has no
+  `schedule:` trigger, `workflow_dispatch` only, `permissions: contents:
+  read` at the job level too. Matches its claim on every axis checked.
+- **`.github/workflows/archive-architect.yml` +
+  `agents/architect_agent.py`** — checks out `local-archive-galil-elion`
+  read-only via a token scoped to that repo, and `architect_agent.py`
+  writes only into `reports/architect-suggestions/` inside the
+  `office-AI-agents` checkout it commits — never into the `archive/`
+  checkout path. It also runs its own runtime self-check
+  (`assert_no_push_to_archive()`) that logs a loud warning if
+  `project-permissions.json`'s `archive-galil-elion.push` were ever
+  flipped to `true` without the script being revisited. Matches its claim,
+  and the self-check is a genuinely good pattern worth reusing elsewhere.
+- **`workers/chore-runner.js`'s `runChoreRotationSlot()`** — claims
+  "wiring-only... never actually calls Gemini/Groq/Claude." Confirmed: it
+  only resolves and logs which model *would* handle the task, always
+  returns `ranTask: false`, and calls no model client.
+- **`.github/scripts/commit-and-log.sh`** — makes no "doesn't write"
+  claim (it commits/pushes unconditionally by design); its actual claim is
+  narrower — "honest about outcome" logging — and it is: it distinguishes
+  `completed` / `failed: auth_error` / `failed: api_error` /
+  `completed (no changes)` correctly based on which output file actually
+  exists, never claims success for a no-op run.
+
+### Not done this session
+
+No fixes applied — this was scoped as report-only, given the incident
+already used this session's fix budget. Findings #1 and #2 (Notebook-X's
+`save_notebook()` and the other unguarded `github_put()` call sites) are
+the ones worth prioritizing first if a follow-up fix session happens —
+they're the only ones with an identified path to actually losing live
+notebook content, the same consequence as the incident this audit started
+from.
