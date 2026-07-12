@@ -3261,3 +3261,108 @@ the ones worth prioritizing first if a follow-up fix session happens —
 they're the only ones with an identified path to actually losing live
 notebook content, the same consequence as the incident this audit started
 from.
+
+
+## HIGH-severity audit finding fixed: save_notebook() now calls validate_write() (2026-07-12, continued)
+
+Follow-up to the safety-claim audit above — fixed the one HIGH-severity gap
+found (`save_notebook()` in `avivnofar/Notebook-X/notebook_backend.py` never
+called `validate_write()`), verified it against the actual incident shape,
+then corrected `CROSS_PROJECT_SAFETY.md`'s checkmark last, not first. The
+other MEDIUM/LOW findings from the audit are still open, deliberately not
+touched this session.
+
+### The fix
+
+Two changes, both in `avivnofar/Notebook-X`:
+
+1. **`notebook_backend.py`'s `save_notebook()`** — added a `_validate_write(notebook_id, notebook_data)` call
+   immediately before the existing-content fetch + `github_put()`, at the
+   same point `_push_to_github()` already calls it (mirrors that function's
+   placement exactly, per this session's instruction).
+
+2. **`data_safety.py`'s `validate_write()`** — extended, not just wired in
+   as-is. The existing files/messages shrinkage rule was checked against
+   all 5 of `save_notebook()`'s call sites (skeleton creation, the nightly
+   fill flow, both branches of pasted-file ingestion in `normalize_notebook()`,
+   and `sync_local_notebooks()`'s local-disk sync) — all 5 write v2
+   notebooks, and v2 notebooks always carry empty top-level `files`/
+   `messages` arrays (`create_notebook_v2()`'s skeleton literally sets
+   `"files": [], "messages": []`; real content lives in
+   `knowledgeBase.sections/commands/commonIssues/glossary`). Wiring the
+   existing check in unchanged would have been a no-op for every v2 write —
+   `len(ef) > 0` is never true when `ef` is always `[]`. Added a second,
+   proportional check (`KB_SHRINK_FLOOR = 0.6`) over
+   `knowledgeBase.sections` content length plus `commands`/`commonIssues`/
+   `glossary` counts, deliberately modeled on the *drastic-but-nonzero*
+   shape of the incident (2002→79 lines) rather than only catching a total
+   wipeout to zero — a hard-zero check would have missed a v2 equivalent of
+   what actually happened. Values below `MIN_MEANINGFUL_CHARS`/`_COUNT`
+   skip the floor so a still-mostly-empty skeleton doesn't trip false
+   positives.
+
+No call site needed different handling beyond what the shared floor +
+minimum-meaningful-size thresholds already cover — see test results below,
+including the fill flow's skeleton→filled growth (the specific "runs
+nightly" case flagged as most urgent), which correctly passes because
+`existing_vol` sits under the minimum-meaningful thresholds for a skeleton.
+
+### Test results
+
+Two levels, both run against the actual pushed files (confirmed byte-
+identical to what was tested — pulled the content back down from GitHub
+and diffed before trusting it, not just assumed the push landed the tested
+version):
+
+**Level 1 — `validate_write()` directly** (5 cases, `github_get` mocked to
+return a controlled "existing" notebook):
+
+| Case | Existing | New | Expected | Result |
+|---|---|---|---|---|
+| Incident replay | 10 sections, ~7650 content chars, 15 commands, 8 issues, 12 glossary | 1 section, 40 chars, 0 commands, 0 issues, 1 glossary | **blocked** | ✅ blocked — `knowledgeBase.content_chars would shrink from 7650 to 40 (99% drop, below the 60% floor)` |
+| Legitimate small edit | same rich notebook | same + ~20 chars in one section + 1 new command | **allowed** | ✅ allowed |
+| Fill-flow growth (the nightly flow) | empty skeleton (0 chars, 0/0/0) | freshly filled (4 sections ~2330 chars, 10 commands, 6 issues, 9 glossary) | **allowed** | ✅ allowed |
+| Brand-new notebook | none (no prior GitHub state) | fresh skeleton | **allowed** | ✅ allowed |
+| Total wipeout | same rich notebook | 0 sections, 0/0/0 | **blocked** | ✅ blocked — `content_chars would shrink from 7650 to 0 (100% drop...)` |
+
+All 5 passed.
+
+**Level 2 — through `save_notebook()` itself** (`_gh.is_configured`,
+`_gh.github_get`, `_gh.github_put` all mocked, to prove the actual
+integration point, not just the standalone function):
+
+- Incident-shaped payload → `save_notebook()` returned
+  `{'status': 'error', 'message': '[SAFETY] Blocked: knowledgeBase.content_chars would shrink from 8000 to 40 (100% drop, below the 60% floor)'}`,
+  and `github_put` was **never called** — confirmed the block happens
+  before any GitHub write, not just that an exception is raised somewhere.
+- Legitimate payload → `save_notebook()` returned `{'status': 'ok'}`, and
+  `github_put` **was** called — confirmed the guard doesn't just block
+  everything.
+
+### Verified, not assumed
+
+- `py -m py_compile` on both edited files before pushing.
+- Pulled the pushed `data_safety.py` and `notebook_backend.py` back down
+  from `avivnofar/Notebook-X`'s `main` via the GitHub API after pushing and
+  diffed them against the locally tested versions — byte-identical, and
+  `py -m py_compile` re-run against the pulled copies.
+- Ad-hoc test script deleted after use — not left in the repo.
+
+### `CROSS_PROJECT_SAFETY.md` — corrected after, not before
+
+Rule 2's Notebook-X cell now reads: `✅ session 4+5 (`_push_to_github`, v1)
++ 2026-07-12 fix (`save_notebook`, v2 — see below)`, with a footnote
+explaining the correction and explicitly noting the sequencing: code fix
+and verification happened first this session, the checkmark was updated
+last — the same discipline this finding itself was about, and the second
+time this month a doc claimed a safety property that wasn't actually true
+(the first being `housekeeping_codeAssessment`'s "recommend-only" claim).
+
+### Explicitly not done this session (per instruction)
+
+The other three findings from the audit above — the other unguarded
+`github_put()` call sites in `notebook_backend.py` (`_update_github_index`,
+`setup_archive_structure`, the `_knowledge-bus.json`/`_index-public.json`
+writers), `housekeeping_recommendChanges()`'s stale "recommend-only"
+framing vs. its own prompt, and the triplicated permission-check logic —
+all still open, queued for a separate follow-up.
