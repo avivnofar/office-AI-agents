@@ -3366,3 +3366,146 @@ The other three findings from the audit above — the other unguarded
 writers), `housekeeping_recommendChanges()`'s stale "recommend-only"
 framing vs. its own prompt, and the triplicated permission-check logic —
 all still open, queued for a separate follow-up.
+
+
+## Follow-up session: MEDIUM + LOW audit findings closed (2026-07-12, continued)
+
+All three deferred findings from the safety-claim audit fixed and verified
+this session — the unguarded `github_put()` index/archive writes in
+Notebook-X, `housekeeping_recommendChanges()`'s stale prompt, and the
+triplicated permission-check logic in this repo.
+
+### 1. MEDIUM — remaining unguarded `github_put()` sites (`avivnofar/Notebook-X`)
+
+Not a blind copy-paste of `validate_write()` — each site got a fix sized to
+what it actually writes:
+
+- **`setup_archive_structure()`** — checked, not changed: already
+  create-only-if-missing (`if existing is not None: skipped.append(path);
+  continue`), so it never overwrites. Confirmed safe by construction.
+- **`_update_github_index()`** — two fixes: (a) previously, if
+  `_index.json` existed but its content didn't parse as a list (a read
+  anomaly), the code silently treated it as `[]` and could push a 1-entry
+  index over a real one; now it fails closed with an explicit error
+  instead. (b) added the new shrinkage floor (below) as a second,
+  independent guard.
+- **Knowledge-bus creation** (inside `create_all_knowledge_notebooks()`) —
+  was unconditionally overwriting `_knowledge-bus.json` with an
+  empty-topics skeleton every run; now create-only, matching
+  `setup_archive_structure()`'s pattern. (Low practical risk today since
+  `push_to_knowledge_bus_for_notebook()` has been a no-op since session R,
+  but the function's own job is "create," not "reset.")
+- **The three `_index-public.json` writers** (`create_all_knowledge_notebooks()`'s
+  public-index block, `_update_public_index_entry()`, `rebuild_public_index()`) —
+  all three now run through a new `validate_index_write()` guard in
+  `data_safety.py` (proportional 60% floor over entry count, same
+  philosophy as `KB_SHRINK_FLOOR`, skips below `MIN_MEANINGFUL_INDEX_ENTRIES=2`).
+  `_update_public_index_entry()` additionally got the same "existing but
+  malformed" fail-closed fix as `_update_github_index()` — it was falling
+  into its bootstrap-empty branch for both "truly missing" and "exists but
+  not a dict," now only the true-missing case bootstraps.
+
+**Tests** (10 cases, `_gh`/`data_safety.github_get` mocked, run against the
+actual pushed files — pulled back from GitHub and diffed, byte-identical
+before trusting them):
+`validate_index_write()` unit cases (12→1 blocked, 12→11 single-remove
+allowed, 1→2 below-floor allowed); `_update_github_index()` malformed-read
+refused + legitimate add/remove allowed; knowledge-bus creation confirmed
+NOT overwriting an existing bus with real `keyFacts`;
+`rebuild_public_index()` confirmed blocked when a transient-read-failure
+shape would otherwise wipe a 5-entry public index to empty;
+`_update_public_index_entry()` malformed-content refused + legitimate
+single-entry update still works. All 10 passed.
+
+Pushed: `data_safety.py` (commit `c6ac4ba`), `notebook_backend.py` (commit
+`d8230bb`) to `avivnofar/Notebook-X` main.
+
+### 2. MEDIUM — `housekeeping_recommendChanges()`'s prompt/comment mismatch
+
+Removed *"you are authorized to act... you are no longer recommend-only"*
+from the prompt (it contradicted the RECOMMEND-ONLY BY DESIGN comment this
+function falls under) and replaced it with an explicit instruction not to
+write full file contents or claim to have made the change. Added a
+`Recommendation only -- nothing changed.` banner to the returned body,
+matching `housekeeping_unifyDeleteObsolete()`'s existing pattern. Not a
+live write-path bug (nothing ever consumed the old prompt's instruction
+except the report file) — this closes the same *class* of gap the incident
+exposed, before it became one.
+
+Tested with mocked `generate()`/`ghGetFile()`: confirmed the captured
+prompt no longer contains either contradictory phrase, still asks for
+concrete improvements, and the returned body carries the recommend-only
+banner. 7/7 assertions passed.
+
+Pushed: `.github/scripts/notebook-x-daily.mjs` (commit `3447797`).
+
+### 3. LOW — triplicated permission-check logic, consolidated
+
+`workers/permission-guard.js`'s exported functions
+(`canPushToProject`/`resolveWriteTarget`/`resolveIssueTarget`/`checkCodeWriteAllowed`)
+now take `permissions` as an explicit parameter instead of importing
+`config/project-permissions.json` at module scope. That import was the
+entire reason `scripts/verify-permissions.js` and `notebook-x-daily.mjs`
+each carried a hand-copied mirror instead of importing the real thing (the
+import needed an assertion plain `node` rejects but esbuild/Workers
+doesn't). With no JSON import left in the module, both scripts now import
+and call the actual functions:
+
+- `scripts/verify-permissions.js` — its own `canPushToProject`/
+  `resolveWriteTarget`/`resolveIssueTarget` mirrors deleted; now thin
+  adapters that load `project-permissions.json` themselves (as before) and
+  call the real functions.
+- `notebook-x-daily.mjs`'s `checkCodeWriteAllowedForModel()` — reduced from
+  a full mirror to a 3-line wrapper calling the real `checkCodeWriteAllowed()`.
+- `workers/agent-runner.js` (the Worker, the one caller that can't switch
+  to fs-based loading) — now imports `project-permissions.json` itself
+  (same pattern as its five other JSON config imports already there) and
+  passes it into all three call sites.
+
+**Found a real gap while consolidating, not just moving code around:**
+`isCodeFilePath()`'s `CODE_FILE_EXTENSIONS` set had no `.html`/`.htm`/`.css`
+in it. `frontend_code_change`'s actual target is `index.html`
+(`targetPath = item.target_notebook_name || 'index.html'`) — so
+`checkCodeWriteAllowed()` was returning `{allowed: true}` immediately for
+that file, skipping the model-scoped `code_write` check entirely,
+regardless of policy. `notebook-x-daily.mjs`'s old hand-copied mirror
+didn't have this exemption (it always checked the model policy), so
+switching to the real function unchanged would have silently reintroduced
+a gap in the exact guard the 2026-07-11 session built for
+`frontend_code_change`. Added `.html`/`.htm`/`.css` to the extension set.
+Checked the blast radius before assuming it was safe: grepped the whole
+repo for other `commitFileToRepo`/`fileGitHubIssue` calls writing
+`.html`/`.css` — none found, so this only tightens the one call site it
+needed to.
+
+**Tests:**
+- `verify-permissions.js`'s existing 6 dry-run scenarios re-run against the
+  real (now-imported) functions from a fresh clone of the pushed state —
+  all 6 still pass, proving the refactor didn't change any decision for
+  the cases already covered.
+- New targeted test: confirmed `isCodeFilePath('index.html')` is now
+  `true` (was `false`); confirmed gemini writing `index.html` is still
+  `allowed` under the current live policy (`code_write.gemini: true` —
+  no behavior change today); confirmed that under a *hypothetical*
+  tightened policy (`per-change-only`), `index.html` would now actually be
+  blocked (proving the gate is live, not just present); confirmed non-code
+  files (`.md`, `.json`) remain completely unaffected by the model check.
+  6/6 assertions passed.
+- Running `notebook-x-daily.mjs` directly (imports resolving, no crash)
+  incidentally executed the script's real read-only flow against live
+  Notebook-X (health check, notebook listing, housekeeping pass) — useful
+  unplanned confirmation that the new import chain works end-to-end, not
+  just in isolation. No writes attempted (`NOTEBOOK_X_REPO_TOKEN` unset in
+  this environment).
+- `node --check` on all four files, both before pushing and again from a
+  completely fresh clone of the pushed state.
+
+Pushed: `workers/permission-guard.js` (commit `81ec988`),
+`scripts/verify-permissions.js` (commit `f313d76`),
+`workers/agent-runner.js` (commit `17e9e0d`),
+`.github/scripts/notebook-x-daily.mjs` (commit `45e6da1`).
+
+### Net effect
+
+Every finding from the 2026-07-12 safety-claim audit (HIGH, both MEDIUMs,
+the LOW) is now closed. Nothing left open from that audit.
