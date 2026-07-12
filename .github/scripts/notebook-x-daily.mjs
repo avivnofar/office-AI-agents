@@ -31,6 +31,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { callGemini } from '../../workers/gemini-client.js';
 import { listKnowledgeNotebooks, getNotebookXHealth, waitForNotebookXWarm, ingestAndVerify } from '../../workers/notebookx-client.js';
+import { checkCodeWriteAllowed } from '../../workers/permission-guard.js';
 
 // NOT imported from workers/model-router.js: that module does
 // `import tokenEconomy from '../config/token-economy.json'` with no import
@@ -55,24 +56,20 @@ function selectModelForChoreTask({ taskType, requiresHighQuality = false, overBu
   return { model: 'gemini', reason: 'Notebook-X override: Gemini is the default writer for content generation.' };
 }
 
-// NOT imported from workers/permission-guard.js: that module does
-// `import projectPermissions from '../config/project-permissions.json'` with
-// no import assertion — same ERR_IMPORT_ASSERTION_TYPE_MISSING failure under
-// plain `node` as workers/model-router.js's token-economy.json import
-// (confirmed live, same as the selectModelForChoreTask() comment above).
-// Reads the same file via fs+JSON.parse instead (works under both esbuild
-// and native Node) and mirrors checkCodeWriteAllowed()'s model-scoped branch
-// exactly, per the 2026-07-11 model-scoped code_write decision (see
-// config/project-permissions.json's _meta.code_write_model_scope_2026-07-11).
-// Keep in sync manually if that function's model-scoped logic ever changes.
+// UPDATED 2026-07-12 (LOW finding from the safety-claim audit): this used to
+// be a full hand-copied mirror of checkCodeWriteAllowed()'s model-scoped
+// branch, because permission-guard.js's own top-level `import
+// projectPermissions from '../config/project-permissions.json'` needed an
+// import assertion plain `node` rejects (ERR_IMPORT_ASSERTION_TYPE_MISSING)
+// that esbuild/Workers doesn't need — same failure as
+// selectModelForChoreTask()'s model-router.js comment above.
+// permission-guard.js no longer imports the JSON itself (its functions take
+// `permissions` as a parameter instead), so it has no JSON import left to
+// trip that error and this script can import checkCodeWriteAllowed()
+// directly — this is now a thin wrapper, not a second copy of the logic.
 function checkCodeWriteAllowedForModel(filePath, model) {
   const permissions = JSON.parse(fs.readFileSync(PROJECT_PERMISSIONS_PATH, 'utf8'));
-  const policy = permissions.code_write?.[model];
-  if (policy === true) return { allowed: true };
-  const reason = policy === 'per-change-only'
-    ? `Blocked: model "${model}" is authorized to write "${filePath}" only per-change (config/project-permissions.json code_write.${model} === "per-change-only") — this automated daily run carries no per-change human authorization for this call.`
-    : `Blocked: model "${model}" is not authorized to write code file "${filePath}" (config/project-permissions.json code_write.${model} is ${JSON.stringify(policy) ?? 'undefined — unrecognized model, fail closed'}).`;
-  return { allowed: false, reason };
+  return checkCodeWriteAllowed(permissions, { filePath, model });
 }
 
 const GEMINI_MODEL = 'gemini-3.1-flash-lite';
