@@ -90,6 +90,17 @@ const MAX_INGEST_ATTEMPTS = 3; // per-item cap before leaving it flagged for man
 const MIN_PLAUSIBLE_DIFF_LINES = 3; // frontend_code_change's diff-size floor — see checkDiffPlausible()
 const GEMINI_CALL_SPACING_MS = 4000; // stay well under the 15 RPM free-tier ceiling
 
+// housekeeping_codeAssessment's full-file-rewrite safety floor (added
+// 2026-07-12, after this function gutted notebook_backend.py from ~2000
+// lines to 79 and took Notebook-X production down). A model with a
+// realistic ~8K output-token ceiling cannot safely emit a verbatim
+// full-file rewrite of anything much bigger than this. Files over this
+// size still get reviewed, but only as a text recommendation for a human
+// to apply — never an auto-push. See checkFullFileRewritePlausible() and
+// housekeeping_codeAssessment() below for the rest of the fix.
+const MAX_SAFE_FULL_REWRITE_CHARS = 9000;
+const FULL_REWRITE_SHRINK_FLOOR = 0.6; // reject a proposed rewrite under 60% of the original's line count
+
 // Mirrors Notebook-X's own NOTEBOOK_DEFINITIONS (notebook_backend.py),
 // confirmed by reading that file directly on 2026-07-09. Duplicated here
 // (not fetched live) because reading Notebook-X's GitHub repo requires a
@@ -336,6 +347,30 @@ function checkDiffPlausible(fileDiff) {
   return { plausible: true };
 }
 
+// Rejects a proposed full-file rewrite that shrank implausibly versus the
+// real (untruncated) original — the specific failure mode of the
+// 2026-07-11/12 incident (notebook_backend.py: 2002 lines -> 79 in one
+// push, api_server.py and github_storage.py similarly gutted). A genuine
+// bug fix essentially never removes the majority of a file's content, so
+// a floor here is a cheap, high-value guard. Like checkDiffPlausible, this
+// judges plausibility, not correctness — it exists to catch "the model
+// silently threw most of the file away," not to review the fix itself.
+function checkFullFileRewritePlausible(originalText, proposedText, filePath) {
+  if (!proposedText || !proposedText.trim()) {
+    return { plausible: false, reason: `proposed content for ${filePath} is empty` };
+  }
+  const originalLines = originalText.split('\n').length;
+  const proposedLines = proposedText.trim().split('\n').length;
+  if (proposedLines < originalLines * FULL_REWRITE_SHRINK_FLOOR) {
+    const shrinkPct = Math.round((1 - proposedLines / originalLines) * 100);
+    return {
+      plausible: false,
+      reason: `${filePath}: proposed rewrite is ${proposedLines} line(s) vs the original's ${originalLines} (a ${shrinkPct}% shrink, below the ${Math.round(FULL_REWRITE_SHRINK_FLOOR * 100)}% floor) — refusing to push; flagged for human review instead`,
+    };
+  }
+  return { plausible: true };
+}
+
 async function ghListDir(token, dirPath = '') {
   const res = await fetch(`${GITHUB_API}/repos/${NOTEBOOK_X_REPO}/contents/${dirPath}`, {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
@@ -431,42 +466,105 @@ async function housekeeping_uiCheck() {
   };
 }
 
+// SAFETY (rewritten 2026-07-12 after this function gutted notebook_backend.py
+// from ~2000 lines to 79 and took Notebook-X production down for most of a
+// day). The previous version (a) sent only the first 2500 chars of each file
+// to Gemini while (b) asking for "the FULL updated raw code", with maxTokens
+// capped at 4096, and (c) pushed whatever came back straight to main with no
+// check at all. For a file that's actually ~2000 lines, Gemini could only
+// ever see a sliver of it and could never emit the whole thing back within
+// that token budget either — the "full rewrite" it returned was structurally
+// guaranteed to be a drastic truncation, and nothing caught that before the
+// push landed. Three fixes, all required, none sufficient alone:
+//   1. Never truncate the file sent to Gemini for a full-rewrite request. If
+//      a file is too large to safely round-trip in one completion (see
+//      MAX_SAFE_FULL_REWRITE_CHARS), it's excluded from the auto-push path
+//      entirely and instead gets a plain-text recommendation for a human to
+//      apply by hand — same shape as this pass's other three checks.
+//   2. Size the output token budget to what was actually sent, not a fixed
+//      constant that happened to be too small for anything but tiny files.
+//   3. Before pushing, run checkFullFileRewritePlausible() and route the
+//      push through the same checkCodeWriteAllowedForModel() gate
+//      frontend_code_change uses, so there's one consistent, auditable
+//      code-write path instead of two with different guarantees.
 async function housekeeping_codeAssessment(token) {
+  const actingModel = 'gemini'; // generate() always calls GEMINI_MODEL directly — see its definition above
   const files = ['notebook_backend.py', 'api_server.py', 'github_storage.py'];
-  const snippets = [];
+  const rewriteCandidates = [];   // small enough to safely see + emit in full
+  const reviewOnlyCandidates = []; // too large — recommendation only, never auto-pushed
+
   for (const f of files) {
     const result = await ghGetFile(token, f);
-    const text = ghFileText(result, 2500);
-    if (text) snippets.push(`--- ${f} ---\n${text}`);
+    const text = ghFileText(result);
+    if (!text) continue;
+    if (text.length <= MAX_SAFE_FULL_REWRITE_CHARS) {
+      rewriteCandidates.push({ path: f, text });
+    } else {
+      reviewOnlyCandidates.push({ path: f, text });
+    }
   }
-  if (snippets.length === 0) {
+
+  if (rewriteCandidates.length === 0 && reviewOnlyCandidates.length === 0) {
     return { title: 'Code-file functionality assessment', body: '_Could not fetch any backend files from avivnofar/Notebook-X — skipped this run._' };
   }
 
-  const prompt = `Here are excerpts from Notebook-X's backend:\n\n${snippets.join('\n\n')}\n\n` +
-    `You are authorized to fix any obvious bugs, logic gaps, or missing error handling directly. ` +
-    `Output ONLY a valid JSON object in this exact format, with no markdown formatting or extra text outside the JSON:\n` +
-    `{ "fixes": [ {"path": "file_name.py", "content": "the FULL updated raw code for this file"} ], "summary": "what you fixed" }\n` +
-    `If no fixes are needed, output: { "fixes": [], "summary": "All code looks good, no fixes required." }`;
+  let bodyText = '';
 
-  const analysisRaw = await generate(prompt, { temperature: 0.1, maxTokens: 4096 });
-  let bodyText = "";
+  if (rewriteCandidates.length > 0) {
+    const snippets = rewriteCandidates.map((f) => `--- ${f.path} ---\n${f.text}`).join('\n\n');
+    const inputChars = rewriteCandidates.reduce((sum, f) => sum + f.text.length, 0);
+    const outputBudget = Math.min(8192, Math.ceil(inputChars / 3) + 512); // ~3 chars/token plus headroom for JSON wrapper + summary
+    const prompt = `Here is the FULL current content of these Notebook-X backend files:\n\n${snippets}\n\n` +
+      `You are authorized to fix any obvious bugs, logic gaps, or missing error handling directly. ` +
+      `Output ONLY a valid JSON object in this exact format, with no markdown formatting or extra text outside the JSON:\n` +
+      `{ "fixes": [ {"path": "file_name.py", "content": "the FULL updated raw code for this file"} ], "summary": "what you fixed" }\n` +
+      `If no fixes are needed, output: { "fixes": [], "summary": "All code looks good, no fixes required." }`;
 
-  try {
-    const cleanJson = analysisRaw.replace(/^```json/m, '').replace(/^```/m, '').trim();
-    const analysis = JSON.parse(cleanJson);
-    bodyText = `**Gemini Code Fixes:** ${analysis.summary}\n\n`;
+    const analysisRaw = await generate(prompt, { temperature: 0.1, maxTokens: outputBudget });
 
-    for (const fix of analysis.fixes) {
-       // שימוש בפונקציה שהוספת כדי לדחוף את קוד הפייתון النקי
-       const pushRes = await ghPutRawTextFile(token, fix.path, fix.content, `gemini-auto-fix: autonomously updated ${fix.path}`);
-       bodyText += `- Pushed code update to \`${fix.path}\`: ${pushRes.ok ? 'SUCCESS' : 'FAILED (HTTP ' + pushRes.status + ')'}\n`;
+    try {
+      const cleanJson = analysisRaw.replace(/^```json/m, '').replace(/^```/m, '').trim();
+      const analysis = JSON.parse(cleanJson);
+      bodyText += `**Gemini Code Fixes:** ${analysis.summary}\n\n`;
+
+      for (const fix of analysis.fixes) {
+        const original = rewriteCandidates.find((f) => f.path === fix.path)?.text;
+
+        const permissionCheck = checkCodeWriteAllowedForModel(fix.path, actingModel);
+        if (!permissionCheck.allowed) {
+          bodyText += `- ${fix.path}: **NOT pushed** — ${permissionCheck.reason}\n`;
+          continue;
+        }
+
+        const plausibility = original
+          ? checkFullFileRewritePlausible(original, fix.content, fix.path)
+          : { plausible: false, reason: `${fix.path} was not one of the files sent to Gemini this run — refusing to push an unsolicited file` };
+        if (!plausibility.plausible) {
+          bodyText += `- ${fix.path}: **NOT pushed** — ${plausibility.reason}\n`;
+          continue;
+        }
+
+        const pushRes = await ghPutRawTextFile(token, fix.path, fix.content, `gemini-auto-fix: autonomously updated ${fix.path}`);
+        bodyText += `- Pushed code update to \`${fix.path}\`: ${pushRes.ok ? 'SUCCESS' : 'FAILED (HTTP ' + pushRes.status + ')'}\n`;
+      }
+    } catch (e) {
+      bodyText += `Failed to parse Gemini code output for ${rewriteCandidates.map((f) => f.path).join(', ')}. Raw output:\n\n${analysisRaw}\nError: ${e.message}\n`;
     }
-  } catch (e) {
-    bodyText = `Failed to parse Gemini code output or push files. Raw output:\n\n${analysisRaw}\nError: ${e.message}`;
   }
 
-  return { title: 'Code-file functionality assessment (AUTO-FIX)', body: bodyText };
+  if (reviewOnlyCandidates.length > 0) {
+    const snippets = reviewOnlyCandidates.map((f) => `--- ${f.path} (${f.text.length} chars — over the ${MAX_SAFE_FULL_REWRITE_CHARS}-char safe-rewrite cap, excerpt only) ---\n${f.text.slice(0, 6000)}`).join('\n\n');
+    const analysis = await generate(
+      `Here are excerpts from Notebook-X backend files (truncated — too large to safely auto-rewrite in full):\n\n${snippets}\n\n` +
+      'Identify obvious bugs, logic gaps, or missing error handling and describe the fix in plain text. ' +
+      'Do NOT attempt to reproduce the full file — you are only seeing a partial excerpt, so a full-file rewrite from this ' +
+      'view would be unsafe. Describe the change precisely enough for a human to apply it by hand instead.',
+      { temperature: 0.1, maxTokens: 1024 }
+    );
+    bodyText += `\n**Review-only findings — too large for a safe auto-rewrite (${reviewOnlyCandidates.map((f) => f.path).join(', ')}), nothing pushed for these:**\n\n${analysis}\n`;
+  }
+
+  return { title: 'Code-file functionality assessment (AUTO-FIX where safe, review-only above the size cap)', body: bodyText };
 }
 
 // This automation NEVER edits TODO.md or writes its "V" marks — that stays
@@ -490,7 +588,7 @@ function reviewReadySection(progressItems) {
 }
 
 async function runHousekeepingPass(notebookXToken, progressItems) {
-  console.log('\n=== Housekeeping pass (recommend-only — never deletes, merges, or modifies files) ===');
+  console.log('\n=== Housekeeping pass (recommend-only, except housekeeping_codeAssessment\'s gated auto-fix — see report banner) ===');
 
   const sections = [reviewReadySection(progressItems)];
   if (!notebookXToken) {
@@ -509,8 +607,14 @@ async function runHousekeepingPass(notebookXToken, progressItems) {
   const body = [
     `# Notebook-X housekeeping pass — ${date}`,
     '',
-    '**Recommend-only.** This automation never deletes, merges, or modifies files directly — ' +
-    'everything below is a finding or suggestion for a human to review and act on manually.',
+    '**Mostly recommend-only.** Three of these four checks never write anywhere — everything they produce is a ' +
+    'finding or suggestion for a human to review and act on manually. The exception is "Code-file functionality ' +
+    'assessment": it MAY push a direct commit to a core backend file, gated by (1) the file being small enough to ' +
+    'send to Gemini in full — see MAX_SAFE_FULL_REWRITE_CHARS in notebook-x-daily.mjs, (2) the code_write permission ' +
+    'check every autonomous code write in this repo goes through, and (3) a size-plausibility floor that refuses to ' +
+    'push a rewrite that shrank implausibly versus the original. Files too large for that path get a text-only ' +
+    'recommendation instead, same as the other three checks. See the incident note at the top of ' +
+    'housekeeping_codeAssessment() in notebook-x-daily.mjs for why this changed on 2026-07-12.',
     '',
     ...sections.flatMap((s) => [`## ${s.title}`, '', s.body, '']),
   ].join('\n');
