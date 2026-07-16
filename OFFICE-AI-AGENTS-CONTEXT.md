@@ -93,7 +93,7 @@ same single-engine, config-driven approach as agents 1–4).
 |---|---|---|---|
 | `llama3-8b-8192` | Groq | Primary — all routine per-case agent reasoning | Free, ~14,400 req/day |
 | `llama-3.1-8b-instruct-fp8` | Cloudflare Workers AI | Case routing/classification + same-session fallback when Groq is down | Free, ~10,000 req/day |
-| `gemini-2.5-flash` | Google AI Studio | Report synthesis only — monthly/quarterly (+) meetings | Free tier |
+| `gemini-3.5-flash` | Google AI Studio | Report synthesis only — monthly/quarterly (+) meetings | Free tier |
 | **Claude Sonnet 5** | Anthropic | App AI Search bar + hard-case escalations | **Capped 30 calls/day total across all agents**, ~$6/month |
 | human + Claude Code | n/a | Agent 10 (Architect) — never calls an AI; cases filed as GitHub Issues (`claude-action`, `architect-task`) for human/Claude Code review | n/a |
 
@@ -113,7 +113,7 @@ Per-agent share of the 30-call/day Claude budget (tuned to sum to ~30):
 | Architect | 0% (files GitHub Issues instead) |
 | CEO | 10% |
 
-`gemini-2.0-flash` is deprecated — never reintroduce it.
+`gemini-3.5-flash` is deprecated — never reintroduce it.
 `GOOGLE_AI_API_KEY` is optional/reserved for human-in-the-loop creative
 tool sessions (Agents 9/10 building design assets) — never called
 programmatically by the Worker.

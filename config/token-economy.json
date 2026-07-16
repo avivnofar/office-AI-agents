@@ -2,12 +2,12 @@
   "_meta": {
     "version": "0.2.0",
     "status": "specified",
-    "description": "Distributed-AI model map for the office simulation (replaces the single-Gemini-engine v0.1.0). Routine per-case agent work (agents 1-4, 5-9, 11) runs on Groq's free tier (agents/workers/groq-client.js callGroq(), agent-base.js queryGemini()) — this is the fix for the recurring Gemini 429s documented in TOKEN-BUDGET.md. Cloudflare Workers AI handles lightweight case routing/classification (callCFRouter()) and is the same-session fallback when Groq is unavailable or Gemini returns 429 (callCloudflareFallback()), via the Worker's native AI binding (wrangler.toml [ai] binding = \"AI\") — no extra credentials. Gemini 2.5 Flash-Lite (per CLAUDE.md 'Launch Decisions' — gemini-2.0-flash is deprecated, do not reintroduce it) is reserved for monthly/quarterly/semi-yearly/yearly report synthesis (meeting-engine.js). The app's AI Search bar always uses Claude (data-center-api). Agent 10 (Architect) never calls an AI for routine cases — see agent-runner.js processCaseBatch()'s Agent-10 special case."
+    "description": "Distributed-AI model map for the office simulation (replaces the single-Gemini-engine v0.1.0). Routine per-case agent work (agents 1-4, 5-9, 11) runs on Groq's free tier (agents/workers/groq-client.js callGroq(), agent-base.js queryGemini()) — this is the fix for the recurring Gemini 429s documented in TOKEN-BUDGET.md. Cloudflare Workers AI handles lightweight case routing/classification (callCFRouter()) and is the same-session fallback when Groq is unavailable or Gemini returns 429 (callCloudflareFallback()), via the Worker's native AI binding (wrangler.toml [ai] binding = \"AI\") — no extra credentials. Gemini 2.5 Flash-Lite (per CLAUDE.md 'Launch Decisions' — gemini-3.5-flash is deprecated, do not reintroduce it) is reserved for monthly/quarterly/semi-yearly/yearly report synthesis (meeting-engine.js). The app's AI Search bar always uses Claude (data-center-api). Agent 10 (Architect) never calls an AI for routine cases — see agent-runner.js processCaseBatch()'s Agent-10 special case."
   },
 
   "primary_case_model": "groq/llama3-8b-8192",
   "routing_model": "cloudflare/@cf/meta/llama-3.1-8b-instruct-fp8",
-  "report_model": "google/gemini-3.1-flash-lite",
+  "report_model": "google/gemini-3.5-flash",
   "app_search_model": "anthropic/claude-sonnet-4-6",
   "architect_model": "human+claude-code",
 

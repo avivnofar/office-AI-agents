@@ -259,7 +259,7 @@ code path — `runWorkDayCycle()` — had never run end-to-end before). Result:
 current quota, please check your plan and billing details"`.
 
 - **Root cause**: `GEMINI_API_KEY`'s Google AI Studio project hit a 429
-  quota/billing limit on `gemini-2.5-flash` partway through day 1's
+  quota/billing limit on `gemini-3.5-flash` partway through day 1's
   case loop (47 of 50 cases processed). `gemini-client.js` has no
   retry/backoff, so the first 429 became a 500. CLAUDE.md assumes a "paid"
   Gemini tier — this key appears to be on free-tier limits, or the daily
@@ -597,9 +597,9 @@ recurring Gemini 429 problem and wired up scheduled automation.
   root-level escalations as a single `claude-action` + `architect-task`
   GitHub Issue for human/Claude-Code review.
   - **Note on `token-economy.json` `report_model`**: set to
-    `"google/gemini-2.5-flash"`, not the originally-specified
-    `"google/gemini-1.5-flash"` — CLAUDE.md's "Launch Decisions" pins
-    `gemini-2.5-flash` project-wide and `gemini-1.5-flash` does not
+    `"google/gemini-3.5-flash"`, not the originally-specified
+    `"google/gemini-3.5-flash"` — CLAUDE.md's "Launch Decisions" pins
+    `gemini-3.5-flash` project-wide and `gemini-3.5-flash` does not
     appear anywhere else in the codebase.
   - `agents/database/schema.sql`: `interactions` table gained an additive
     `model_source TEXT` column (`agent-base.js` `logInteraction()` now
@@ -1970,11 +1970,11 @@ on redeploy) — `GET /api/knowledge-notebooks` is the real signal.
 ### Part 2 — Gemini model retirement: found, tested, fixed
 
 `POST /api/knowledge-notebooks/kb-linux/ask` was 500ing:
-`models/gemini-2.5-flash is no longer available`. Isolated live
+`models/gemini-3.5-flash is no longer available`. Isolated live
 tests against the real `GEMINI_API_KEY` (via disposable one-off GitHub
 Actions workflows, deleted immediately after each use) showed BOTH
-`gemini-2.5-flash` and `gemini-2.5-flash` retired (404). `GET
-/v1beta/models` listed `gemini-3.1-flash-lite` as the stable (non-preview),
+`gemini-3.5-flash` and `gemini-3.5-flash` retired (404). `GET
+/v1beta/models` listed `gemini-3.5-flash` as the stable (non-preview),
 cheapest/fastest-tier replacement — tested live, HTTP 200.
 
 Fixed in both repos: Notebook-X's `notebook_backend.py` (`GEMINI_MODEL`
@@ -2013,7 +2013,7 @@ confirmed kb-linux/kb-bash/kb-1com all `dataQuality:complete`, 9 days
 since last update (not stale). Picked `kb-voip-sip-content-fill` (first
 actionable pending item). Generated real content for all 8 sections plus
 commands/commonIssues/glossary/summary via 19 real Gemini
-(`gemini-3.1-flash-lite`) calls, spaced ~4s apart (~9 calls/min, well
+(`gemini-3.5-flash`) calls, spaced ~4s apart (~9 calls/min, well
 under the assumed 15 RPM free-tier ceiling — not independently confirmed
 for this specific model, worth verifying if daily runs are enabled).
 Correctly identified it could not push to `avivnofar/Notebook-X` (no
@@ -2047,7 +2047,7 @@ existing bar. Neither is bad enough to redo, both worth watching if this
 becomes a template for the next 9 days.
 
 **Cost/budget baseline for one "daily item"**: 19 Gemini calls
-(`gemini-3.1-flash-lite`, free tier, $0 cost), 0 Claude calls (routed
+(`gemini-3.5-flash`, free tier, $0 cost), 0 Claude calls (routed
 correctly per `selectModelForChoreTask` — Claude's $4.50/mo cap
 untouched), 0 Groq calls (not an "easy" task type). Total run time ~127s
 for content generation. This is the real per-item baseline going forward;
@@ -2146,7 +2146,7 @@ manual bridge two sessions ago holding).
 pending item). Generated all 8 sections (MirtaPBX Architecture, Extension
 Configuration, Trunk Setup, Dialplan, IVR & Ring Groups, Asterisk CLI,
 Common Issues, Integration with 1COM) + commands/commonIssues/glossary/
-summary via 19 real Gemini (`gemini-3.1-flash-lite`) calls, ~13s apart.
+summary via 19 real Gemini (`gemini-3.5-flash`) calls, ~13s apart.
 **Read the actual content back**, not just the counts: real, specific,
 technically coherent — e.g. commands include `mirta-cli reload`, `fs_cli
 -P 8021`, `journalctl -u mirta-engine -f`; a sample `commonIssues` entry

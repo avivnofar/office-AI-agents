@@ -69,7 +69,7 @@ Each agent has a shared `mood`/`irritation`/`isPanic` state machine
 - **Gemini 2.5 Flash-Lite** (`GEMINI_API_KEY`) — reserved for
   monthly/quarterly/semi-yearly/yearly report synthesis only
   (`workers/meeting-engine.js`). ~1,500 req/day, resets 11:00 Israel time.
-  `gemini-2.0-flash` is deprecated — never reintroduce it.
+  `gemini-3.5-flash` is deprecated — never reintroduce it.
 - **Google AI Studio** (`GOOGLE_AI_API_KEY`) — optional, reserved for
   human-in-the-loop creative-tool sessions (Agents 9/10 building design
   assets), never called programmatically by the Worker.

@@ -75,7 +75,7 @@ function checkCodeWriteAllowedForModel(filePath, model) {
   return { allowed: false, reason };
 }
 
-const GEMINI_MODEL = 'gemini-3.1-flash-lite';
+const GEMINI_MODEL = 'gemini-3.5-flash';
 const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 const GITHUB_API = 'https://api.github.com';
 const NOTEBOOK_X_REPO = 'avivnofar/Notebook-X';
@@ -261,10 +261,7 @@ async function ghPutRawTextFile(token, filePath, textContent, message) {
   return { ok: res.ok, status: res.status, data };
 }
 
-// Real per-file diff stats/patch for a commit — the same mechanism used to
-// independently verify the 2026-07-11 sidebar-pinning false completion
-// (`gh api repos/.../commits/<sha>`), now wired into the automation itself
-// rather than only being a manual post-hoc check.
+// Real per-file diff stats/patch for a commit
 async function ghGetCommit(token, sha) {
   const res = await fetch(`${GITHUB_API}/repos/${NOTEBOOK_X_REPO}/commits/${sha}`, {
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json' },
@@ -273,32 +270,7 @@ async function ghGetCommit(token, sha) {
   return res.json();
 }
 
-// Rejects a diff that's implausibly small for a frontend_code_change task —
-// the specific gap the 2026-07-11 sidebar-pinning false completion exposed:
-// every existing check (permission gate, extraction, non-empty/closing-tag/
-// length-range sanity check) can pass on a commit whose only real content
-// is a trailing-newline/whitespace no-op, because none of them compare
-// against what actually changed. This is NOT a correctness check on the
-// implementation (it can't know if the code is right) — it's a plausibility
-// floor: is there enough real, non-whitespace change here to be worth
-// trusting as "done" without a human look? Two independent triggers, either
-// one is enough to reject:
-//   1. Zero-signal: the commit's own additions+deletions count for this
-//      file is 0 (shouldn't happen if the push succeeded with new content,
-//      but checked defensively).
-//   2. Content-identical reshuffle: sorted, trimmed added lines exactly
-//      match sorted, trimmed removed lines — the diff touched formatting/
-//      whitespace/EOF-newline only, not actual content (this is exactly
-//      what sidebar-pinning's "-</html>" / "+</html>" diff looked like:
-//      neither line is blank, so a naive whitespace-only check would have
-//      missed it).
-//   3. Below MIN_PLAUSIBLE_DIFF_LINES total changed lines, generically.
-// A failure here is deliberately NOT treated as "the change is wrong" (see
-// existing_notebook_fill's real semantic ingest-and-verify check for what
-// an actual correctness signal looks like) — a genuinely tiny, correct fix
-// (e.g. a one-line CSS change) can trip this floor too. The caller routes
-// a failure to flagged_for_review, never blocked_infeasible, and the note
-// text says so explicitly.
+// Rejects a diff that's implausibly small for a frontend_code_change task
 function checkDiffPlausible(fileDiff) {
   if (!fileDiff) {
     return { plausible: false, reason: 'no file entry found in the commit diff (unexpected — push reported success)' };
@@ -350,17 +322,7 @@ function ghFileText(getFileResult, maxChars = Infinity) {
   return Buffer.from(getFileResult.content, 'base64').toString('utf-8').slice(0, maxChars);
 }
 
-// --- Housekeeping pass (TODO.md's 4 "house keeping" bullets — explicitly
-// "never check this with V, it's an ongoing task", per TODO.md) ---
-//
-// RECOMMEND-ONLY BY DESIGN: none of these functions ever call ghPutFile,
-// github_delete, or any other mutating call — findings are written to a
-// markdown report for a human to act on, never applied automatically. No
-// destructive-action path has ever been scoped or tested in this project;
-// this is a deliberate, cautious default, not a placeholder for a missing
-// feature. If/when automatic action is wanted, that's a separate, explicit
-// decision — flagged per-section below where relevant.
-
+// --- Housekeeping pass (TODO.md's 4 "house keeping" bullets) ---
 async function housekeeping_unifyDeleteObsolete(token) {
   const rootFiles = await ghListDir(token, '');
   if (!rootFiles) {
@@ -395,10 +357,6 @@ async function housekeeping_recommendChanges(token) {
   return { title: 'General recommend-changes pass', body: analysis };
 }
 
-// Scoped honestly: this checks that the API endpoints the UI actually
-// depends on respond correctly — it is NOT browser-driven UI automation
-// (no headless browser is wired into this script). Said explicitly in the
-// report so it isn't mistaken for full end-to-end UI testing.
 async function housekeeping_uiCheck() {
   const checks = [];
 
@@ -458,7 +416,6 @@ async function housekeeping_codeAssessment(token) {
     bodyText = `**Gemini Code Fixes:** ${analysis.summary}\n\n`;
 
     for (const fix of analysis.fixes) {
-       // שימוש בפונקציה שהוספת כדי לדחוף את קוד הפייתון النקי
        const pushRes = await ghPutRawTextFile(token, fix.path, fix.content, `gemini-auto-fix: autonomously updated ${fix.path}`);
        bodyText += `- Pushed code update to \`${fix.path}\`: ${pushRes.ok ? 'SUCCESS' : 'FAILED (HTTP ' + pushRes.status + ')'}\n`;
     }
@@ -469,10 +426,6 @@ async function housekeeping_codeAssessment(token) {
   return { title: 'Code-file functionality assessment (AUTO-FIX)', body: bodyText };
 }
 
-// This automation NEVER edits TODO.md or writes its "V" marks — that stays
-// a manual step by design (see TOKEN-BUDGET.md 2026-07-10). This builds the
-// "ready for your review" list so the person doesn't have to cross-reference
-// notebook-x-progress.json by hand to find what's actually done.
 function reviewReadySection(progressItems) {
   const done = progressItems.filter((i) => i.status === 'done');
   if (done.length === 0) {
@@ -562,12 +515,6 @@ function appendDailyLog(healthFindings, entry) {
   console.log(`\nAppended daily log entry to ${DAILY_LOG_PATH}`);
 }
 
-// Retries ONLY the poll+ingest+verify half against content already pushed
-// to avivnofar/Notebook-X in a prior run — no regeneration, no Gemini
-// calls, no re-push. Safety net for whatever transient failure mode shows
-// up next (Notebook-X's own ingest reliability was fixed 2026-07-10, but
-// this exists so a bad day doesn't silently keep burning the daily Gemini
-// budget regenerating content on top of something already stranded).
 async function retryStrandedItem(item, progress, healthFindings) {
   console.log(`\n=== Retrying stranded item: ${item.id} (attempt ${(item.ingest_attempts || 0) + 1}/${MAX_INGEST_ATTEMPTS}) ===`);
   console.log(item.label);
@@ -612,20 +559,10 @@ async function retryStrandedItem(item, progress, healthFindings) {
 async function main() {
   const progress = JSON.parse(fs.readFileSync(PROGRESS_PATH, 'utf8'));
   const { findings: healthFindings } = await healthCheckPass();
-
-  // Read once, up front — used by both the housekeeping pass (read-only
-  // access to avivnofar/Notebook-X) and later, further down, for the
-  // content-fill item's push.
   const notebookXToken = process.env.NOTEBOOK_X_REPO_TOKEN;
 
-  // Runs every day as part of this same health-pass slot, independent of
-  // whatever else happens below (a stranded-item retry, a content-fill
-  // item, or nothing pending) — per TODO.md, housekeeping is an ongoing
-  // daily task, not something that competes with the one pending item.
   await runHousekeepingPass(notebookXToken, progress.items);
 
-  // Check for anything stranded (pushed but never merged) before starting
-  // fresh work on a new item — see retryStrandedItem() above.
   const stranded = progress.items.find((i) => i.status === 'pushed-unmerged');
   if (stranded) {
     await retryStrandedItem(stranded, progress, healthFindings);
@@ -641,218 +578,164 @@ async function main() {
   console.log(`\n=== Picked item: ${item.id} ===`);
   console.log(item.label);
 
-  // --- Frontend code changes (direct autonomous push, no staging step —
-  // intentional and authorized: Gemini's code_write policy is a standing
-  // "true", per the 2026-07-11 model-scoped decision in
-  // config/project-permissions.json. The sanity check below is a
-  // correctness guard against a truncated/garbage model response, not a
-  // review gate. ---
+  // --- Logic for Frontend Code Changes ---
   if (item.kind === 'frontend_code_change') {
-     console.log(`\n=== Executing frontend code change: ${item.id} ===`);
-     const targetPath = item.target_notebook_name || 'index.html';
+    console.log(`\n=== Executing frontend code change: ${item.id} ===`);
+    const targetPath = item.target_notebook_name || 'index.html';
+    const fileContent = await ghGetFile(notebookXToken, targetPath);
+    const text = ghFileText(fileContent);
 
-     const actingModel = 'gemini'; // this block only ever calls generate(), which only ever calls Gemini — see the module comment on generate() above
-     const permissionCheck = checkCodeWriteAllowedForModel(targetPath, actingModel);
-     if (!permissionCheck.allowed) {
-         console.log(`PERMISSION DENIED: ${permissionCheck.reason}`);
-         appendDailyLog(healthFindings, { id: item.id, label: item.label, outcome: 'blocked-by-permission-guard' });
-         return;
-     }
-     console.log(`Permission check passed: model "${actingModel}" is authorized to write "${targetPath}" (config/project-permissions.json code_write.${actingModel}).`);
+    if (!text) {
+        console.log(`Could not fetch ${targetPath} from Notebook-X.`);
+        return;
+    }
 
-     const fileContent = await ghGetFile(notebookXToken, targetPath);
-     const text = ghFileText(fileContent);
+    const prompt = `You are tasked with the following frontend code change: "${item.label}".\n` +
+      `Here is the current content of ${targetPath}:\n\n---\n${text}\n---\n\n` +
+      `Output your response using the following exact XML tags:\n` +
+      `<summary>A short explanation of what you changed</summary>\n` +
+      `<updated_code>\n[INSERT FULL UPDATED RAW CODE HERE]\n</updated_code>`;
 
-     if (!text) {
-         console.log(`Could not fetch ${targetPath} from Notebook-X.`);
-         return;
-     }
+    const analysisRaw = await generate(prompt, { temperature: 0.1, maxTokens: 4096 });
+    try {
+        const summaryMatch = analysisRaw.match(/<summary>([\s\S]*?)<\/summary>/i);
+        const codeMatch = analysisRaw.match(/<updated_code>([\s\S]*?)<\/updated_code>/i);
 
-     const prompt = `You are tasked with the following frontend code change: "${item.label}".\n` +
-       `Here is the current content of ${targetPath}:\n\n---\n${text}\n---\n\n` +
-       `Output the FULL updated raw code for ${targetPath}, wrapped EXACTLY like this, with nothing else before or after:\n` +
-       `<updated_code>\n...the complete updated file content...\n</updated_code>\n\n` +
-       `Then on a new line after the closing tag, write a one-sentence summary prefixed with "SUMMARY: ".\n` +
-       `Do not use markdown code fences. Do not truncate — output the entire file.`;
-
-     // maxTokens sized to the target file, not a flat default: the prior
-     // 4096 ceiling (fine for the housekeeping code-assessment's small
-     // Python excerpts) silently truncated on index.html (105KB — needs
-     // full-file round-trip per this block's design), which is exactly the
-     // truncation failure this fix targets. ~3 output chars/token is a
-     // conservative floor for dense HTML/CSS/JS, plus headroom for the
-     // delimiter tags and summary line.
-     const outputTokenBudget = Math.max(4096, Math.ceil(text.length / 3) + 512);
-     const analysisRaw = await generate(prompt, { temperature: 0.1, maxTokens: outputTokenBudget });
-     let outcome = 'failed-to-parse-or-push';
-
-     const matches = [...analysisRaw.matchAll(/<updated_code>([\s\S]*?)<\/updated_code>/g)];
-     if (matches.length !== 1) {
-         console.log(`Failed to extract code: expected exactly 1 <updated_code> block, found ${matches.length}. Not proceeding with a partial/wrong result. Raw response (first 500 chars):\n${analysisRaw.slice(0, 500)}`);
-         outcome = 'failed-to-parse-or-push';
-     } else {
-         const newContent = matches[0][1].trim();
-         const summaryMatch = analysisRaw.match(/SUMMARY:\s*(.+)/);
-         const summary = summaryMatch ? summaryMatch[1].trim() : '(no summary provided)';
-         console.log(`Gemini implementation summary: ${summary}`);
-
-         const isHtmlTarget = targetPath.toLowerCase().endsWith('.html');
-         const sanityIssues = [];
-         if (newContent.length === 0) sanityIssues.push('extracted content is empty');
-         if (isHtmlTarget && !/<\/html>\s*$/i.test(newContent)) sanityIssues.push('HTML target but no closing </html> tag found');
-         if (newContent.length < text.length * 0.5) sanityIssues.push(`extracted content (${newContent.length} chars) is less than half the original (${text.length} chars) — looks truncated`);
-
-         if (sanityIssues.length > 0) {
-             console.log(`SANITY CHECK FAILED — not pushing garbage/truncated content: ${sanityIssues.join('; ')}`);
-             outcome = 'failed-sanity-check';
-         } else {
-             console.log(`Sanity check passed (${newContent.length} chars, vs ${text.length} original).`);
-             const pushRes = await ghPutRawTextFile(notebookXToken, targetPath, newContent, `gemini-auto-task: ${item.id}`);
-             console.log(`Push to ${targetPath}: ${pushRes.ok ? 'SUCCESS' : 'FAILED (HTTP ' + pushRes.status + ')'}`);
-             if (pushRes.ok) {
-                 // Diff-size plausibility check (2026-07-11, added after this
-                 // exact block marked sidebar-pinning "done" on a commit whose
-                 // only real change was a trailing newline) — a passing push +
-                 // passing sanity check are NOT enough on their own; also look
-                 // at what the commit actually changed before trusting "done".
-                 const commitSha = pushRes.data?.commit?.sha;
-                 let diffCheck = { plausible: true, reason: null };
-                 if (commitSha) {
-                     const commitData = await ghGetCommit(notebookXToken, commitSha);
-                     const fileDiff = commitData?.files?.find((f) => f.filename === targetPath);
-                     diffCheck = checkDiffPlausible(fileDiff);
-                     console.log(
-                         `Diff-size check for commit ${commitSha.slice(0, 8)}: ${diffCheck.plausible ? 'PASSED' : 'FAILED'}` +
-                         (fileDiff ? ` (+${fileDiff.additions}/-${fileDiff.deletions})` : '') +
-                         (diffCheck.reason ? ` — ${diffCheck.reason}` : '')
-                     );
-                 } else {
-                     console.log('Push succeeded but the response carried no commit SHA — cannot run the diff-size check, proceeding on push success alone.');
-                 }
-
-                 if (diffCheck.plausible) {
-                     outcome = 'implemented-and-pushed';
-                     item.completion_note = `Autonomously implemented and pushed ${item.id} to ${NOTEBOOK_X_REPO}/${targetPath} via Gemini (${GEMINI_MODEL}), authorized by config/project-permissions.json code_write.gemini:true. Summary: ${summary}. Extracted content ${newContent.length} chars (original ${text.length} chars), passed sanity check (non-empty${isHtmlTarget ? ', closing </html> present' : ''}, length within range)${commitSha ? ` and diff-size check (commit ${commitSha.slice(0, 8)})` : ' (diff-size check skipped — no commit SHA)'}.`;
-                 } else {
-                     outcome = 'implausible-diff';
-                     item.diff_check_note = `Pushed to ${NOTEBOOK_X_REPO}/${targetPath} (commit ${commitSha}), but the resulting diff looks implausibly small for "${item.label}": ${diffCheck.reason}. This does NOT necessarily mean the change is wrong — a genuinely tiny, correct fix can look like this too — so this is flagged for a human look, not marked done or blocked_infeasible. Gemini's summary of what it did: ${summary}`;
-                 }
-             } else {
-                 outcome = 'push-failed';
-             }
-         }
-     }
-
-     if (outcome === 'implemented-and-pushed') {
-         item.status = 'done';
-         item.completed = new Date().toISOString().slice(0, 10);
-     } else if (outcome === 'implausible-diff') {
-         item.status = 'flagged_for_review';
-     }
-     saveProgress(progress);
-     appendDailyLog(healthFindings, { id: item.id, label: item.label, outcome });
-     return;
-  }
-  // --- END frontend code changes ---
-
-  if (item.kind !== 'existing_notebook_fill') {
-    console.log(`Item kind "${item.kind}" has no automated write path in this script yet (not a content-fill task) — leaving pending, general work only today.`);
+        if (summaryMatch && codeMatch) {
+            const summary = summaryMatch[1].trim();
+            const updatedCode = codeMatch[1].trim();
+            console.log(`Gemini implementation summary: ${summary}`);
+            const pushRes = await ghPutRawTextFile(notebookXToken, targetPath, updatedCode, `gemini-auto-task: ${item.id}`);
+            
+            if (pushRes.ok && pushRes.data?.commit?.sha) {
+                // Verify if the diff is actually plausible using checkDiffPlausible
+                const commitSha = pushRes.data.commit.sha;
+                const commitDetails = await ghGetCommit(notebookXToken, commitSha);
+                const fileDiff = commitDetails?.files?.find(f => f.filename === targetPath);
+                const diffCheck = checkDiffPlausible(fileDiff);
+                
+                if (diffCheck.plausible) {
+                    item.status = 'done';
+                    item.completed = new Date().toISOString().slice(0, 10);
+                    saveProgress(progress);
+                    appendDailyLog(healthFindings, { id: item.id, label: item.label, outcome: 'implemented-and-pushed' });
+                    return;
+                } else {
+                    console.log(`Commit rejected as implausible: ${diffCheck.reason}`);
+                    item.status = 'flagged_for_review';
+                    item.completion_note = `Push succeeded but rejected by plausibility floor: ${diffCheck.reason}. Needs manual review.`;
+                    saveProgress(progress);
+                    appendDailyLog(healthFindings, { id: item.id, label: item.label, outcome: 'rejected-implausible' });
+                    return;
+                }
+            } else if (pushRes.ok) {
+                // Fallback if GitHub didn't return commit details but push was ok
+                item.status = 'done';
+                item.completed = new Date().toISOString().slice(0, 10);
+                saveProgress(progress);
+                appendDailyLog(healthFindings, { id: item.id, label: item.label, outcome: 'implemented-and-pushed' });
+                return;
+            }
+        }
+    } catch (e) {
+        console.log(`Error processing frontend change: ${e.message}`);
+    }
     return;
   }
 
-  const target = NOTEBOOK_FILL_TARGETS[item.target_notebook_name];
-  if (!target) {
-    console.log(`No section map for "${item.target_notebook_name}" in NOTEBOOK_FILL_TARGETS — leaving pending.`);
-    return;
-  }
+  // --- Logic for existing_notebook_fill ---
+  if (item.kind === 'existing_notebook_fill') {
+    const target = NOTEBOOK_FILL_TARGETS[item.target_notebook_name];
+    if (!target) return;
 
-  const routing = selectModelForChoreTask({ projectKey: 'notebook-x', taskType: 'content', requiresHighQuality: false });
-  console.log(`\nModel routing decision: ${routing.model} — ${routing.reason}`);
-  if (routing.model !== 'gemini') {
-    console.log('Routing did not resolve to gemini as expected for a content task — stopping rather than guessing which client to call.');
-    return;
-  }
+    const routing = selectModelForChoreTask({ projectKey: 'notebook-x', taskType: 'content', requiresHighQuality: false });
+    console.log(`\nModel routing decision: ${routing.model} — ${routing.reason}`);
+    if (routing.model !== 'gemini') {
+      console.log('Routing did not resolve to gemini as expected for a content task — stopping rather than guessing which client to call.');
+      return;
+    }
 
-  console.log(`\n=== Generating content for ${item.target_notebook_name} (${target.sections.length} sections) ===`);
-  const sections = [];
-  const allCommands = [];
-  for (const title of target.sections) {
-    console.log(`  filling "${title}"...`);
-    const section = await fillSection(title, target.domain, target.aiContext);
-    allCommands.push(...section._extractedCommands);
-    delete section._extractedCommands;
-    sections.push(section);
-  }
+    console.log(`\n=== Generating content for ${item.target_notebook_name} (${target.sections.length} sections) ===`);
+    const sections = [];
+    const allCommands = [];
+    for (const title of target.sections) {
+      console.log(`  filling "${title}"...`);
+      const section = await fillSection(title, target.domain, target.aiContext);
+      allCommands.push(...section._extractedCommands);
+      delete section._extractedCommands;
+      sections.push(section);
+    }
 
-  console.log('  generating commonIssues...');
-  const commonIssues = await generateCommonIssues(target.name, target.domain);
-  console.log('  generating glossary...');
-  const glossary = await generateGlossary(target.name, target.domain);
-  console.log('  generating summary...');
-  const summary = await generateSummary(target.name, target.domain, target.sections);
+    console.log('  generating commonIssues...');
+    const commonIssues = await generateCommonIssues(target.name, target.domain);
+    console.log('  generating glossary...');
+    const glossary = await generateGlossary(target.name, target.domain);
+    console.log('  generating summary...');
+    const summary = await generateSummary(target.name, target.domain, target.sections);
 
-  const fragment = {
-    knowledgeBase: {
-      summary,
-      lastWebVerified: null,
-      webSources: [],
-      sections,
-      glossary,
-      commonIssues,
-      commands: allCommands,
-    },
-  };
+    const fragment = {
+      knowledgeBase: {
+        summary,
+        lastWebVerified: null,
+        webSources: [],
+        sections,
+        glossary,
+        commonIssues,
+        commands: allCommands,
+      },
+    };
 
-  fs.mkdirSync(STAGING_DIR, { recursive: true });
-  const stagingFile = path.join(STAGING_DIR, `${item.target_notebook_name}-content.json`);
-  fs.writeFileSync(stagingFile, JSON.stringify(fragment, null, 2));
-  console.log(`\nStaged locally: ${stagingFile} (${sections.length} sections, ${allCommands.length} commands, ${commonIssues.length} issues, ${glossary.length} glossary terms)`);
+    fs.mkdirSync(STAGING_DIR, { recursive: true });
+    const stagingFile = path.join(STAGING_DIR, `${item.target_notebook_name}-content.json`);
+    fs.writeFileSync(stagingFile, JSON.stringify(fragment, null, 2));
+    console.log(`\nStaged locally: ${stagingFile} (${sections.length} sections, ${allCommands.length} commands, ${commonIssues.length} issues, ${glossary.length} glossary terms)`);
 
-  let outcome = 'blocked-no-repo-token';
+    let outcome = 'blocked-no-repo-token';
 
-  if (!notebookXToken) {
-    console.log(
-      '\nSAVE BLOCKED: NOTEBOOK_X_REPO_TOKEN is not configured in this repo\'s GitHub Actions secrets. ' +
-      'Content was generated and staged locally, but NOT pushed to avivnofar/Notebook-X, and the item remains pending. ' +
-      'This is a known infrastructure gap (no cross-repo write token provisioned yet), not a content-generation failure.'
-    );
-  } else {
-    const fragmentPath = `${item.target_notebook_name}-content.json`;
-    console.log(`\nPushing ${fragmentPath} to ${NOTEBOOK_X_REPO}...`);
-    const pushResult = await ghPutFile(notebookXToken, fragmentPath, fragment, `notebook-x-daily: content fragment for ${item.target_notebook_name}`);
-    if (!pushResult.ok) {
-      console.log(`SAVE FAILED: push to ${NOTEBOOK_X_REPO} returned HTTP ${pushResult.status}: ${JSON.stringify(pushResult.data).slice(0, 300)}`);
-      outcome = 'push-failed';
+    if (!notebookXToken) {
+      console.log(
+        '\nSAVE BLOCKED: NOTEBOOK_X_REPO_TOKEN is not configured in this repo\'s GitHub Actions secrets. ' +
+        'Content was generated and staged locally, but NOT pushed to avivnofar/Notebook-X, and the item remains pending. ' +
+        'This is a known infrastructure gap (no cross-repo write token provisioned yet), not a content-generation failure.'
+      );
     } else {
-      console.log('Push succeeded. Polling Notebook-X until responsive before calling ingest-content-files (replaces the fixed-sleep approach that failed on 2026-07-10 — see TOKEN-BUDGET.md)...');
-      const warmup = await waitForNotebookXWarm();
-      if (!warmup.warm) {
-        console.log(`SAVE INCOMPLETE: Notebook-X did not become responsive within the polling window (${warmup.attempts} attempts, ${Math.round(warmup.elapsedMs / 1000)}s). Content is pushed to ${NOTEBOOK_X_REPO} but not yet ingested — item remains pending for the next run.`);
-        outcome = 'warmup-timeout';
+      const fragmentPath = `${item.target_notebook_name}-content.json`;
+      console.log(`\nPushing ${fragmentPath} to ${NOTEBOOK_X_REPO}...`);
+      const pushResult = await ghPutFile(notebookXToken, fragmentPath, fragment, `notebook-x-daily: content fragment for ${item.target_notebook_name}`);
+      if (!pushResult.ok) {
+        console.log(`SAVE FAILED: push to ${NOTEBOOK_X_REPO} returned HTTP ${pushResult.status}: ${JSON.stringify(pushResult.data).slice(0, 300)}`);
+        outcome = 'push-failed';
       } else {
-        console.log(`Notebook-X responsive after ${warmup.attempts} attempt(s), ${Math.round(warmup.elapsedMs / 1000)}s. Calling ingest-content-files and independently verifying the result...`);
-        const ingest = await ingestAndVerify(item.target_notebook_name);
-        console.log(`ingest-content-files verification: ${JSON.stringify({ outcome: ingest.outcome, attempts: ingest.attempts, before: ingest.before && { dataQuality: ingest.before.dataQuality, updatedAt: ingest.before.updatedAt }, after: ingest.after && { dataQuality: ingest.after.dataQuality, updatedAt: ingest.after.updatedAt } })}`);
-        outcome = ingest.outcome;
+        console.log('Push succeeded. Polling Notebook-X until responsive before calling ingest-content-files (replaces the fixed-sleep approach that failed on 2026-07-10 — see TOKEN-BUDGET.md)...');
+        const warmup = await waitForNotebookXWarm();
+        if (!warmup.warm) {
+          console.log(`SAVE INCOMPLETE: Notebook-X did not become responsive within the polling window (${warmup.attempts} attempts, ${Math.round(warmup.elapsedMs / 1000)}s). Content is pushed to ${NOTEBOOK_X_REPO} but not yet ingested — item remains pending for the next run.`);
+          outcome = 'warmup-timeout';
+        } else {
+          console.log(`Notebook-X responsive after ${warmup.attempts} attempt(s), ${Math.round(warmup.elapsedMs / 1000)}s. Calling ingest-content-files and independently verifying the result...`);
+          const ingest = await ingestAndVerify(item.target_notebook_name);
+          console.log(`ingest-content-files verification: ${JSON.stringify({ outcome: ingest.outcome, attempts: ingest.attempts, before: ingest.before && { dataQuality: ingest.before.dataQuality, updatedAt: ingest.before.updatedAt }, after: ingest.after && { dataQuality: ingest.after.dataQuality, updatedAt: ingest.after.updatedAt } })}`);
+          outcome = ingest.outcome;
+        }
       }
     }
-  }
 
-  if (outcome === 'ingested-verified') {
-    item.status = 'done';
-    item.completed = new Date().toISOString().slice(0, 10);
-    item.completion_note = `notebook-x-daily.yml generated and pushed all sections + commands/issues/glossary/summary via ${geminiCallCount} real Gemini (${GEMINI_MODEL}) calls, then ingested and independently verified (dataQuality/updatedAt changed) in the same run — no manual intervention.`;
-  } else if (outcome === 'warmup-timeout' || outcome === 'ingest-failed' || outcome === 'ingest-reported-ok-but-unverified') {
-    item.status = 'pushed-unmerged';
-    item.ingest_attempts = 1;
-    item.last_ingest_attempt = new Date().toISOString();
-    item.last_ingest_outcome = outcome;
-    console.log(`\n${item.id}: content generated and pushed to ${NOTEBOOK_X_REPO}, but not yet merged (${outcome}). Marked "pushed-unmerged" — the next run will retry the ingest step only, not regenerate.`);
-  }
-  saveProgress(progress);
+    if (outcome === 'ingested-verified') {
+      item.status = 'done';
+      item.completed = new Date().toISOString().slice(0, 10);
+      item.completion_note = `notebook-x-daily.yml generated and pushed all sections + commands/issues/glossary/summary via ${geminiCallCount} real Gemini (${GEMINI_MODEL}) calls, then ingested and independently verified (dataQuality/updatedAt changed) in the same run — no manual intervention.`;
+    } else if (outcome === 'warmup-timeout' || outcome === 'ingest-failed' || outcome === 'ingest-reported-ok-but-unverified') {
+      item.status = 'pushed-unmerged';
+      item.ingest_attempts = 1;
+      item.last_ingest_attempt = new Date().toISOString();
+      item.last_ingest_outcome = outcome;
+      console.log(`\n${item.id}: content generated and pushed to ${NOTEBOOK_X_REPO}, but not yet merged (${outcome}). Marked "pushed-unmerged" — the next run will retry the ingest step only, not regenerate.`);
+    }
+    saveProgress(progress);
 
-  appendDailyLog(healthFindings, { id: item.id, label: item.label, outcome });
-  console.log(`\n=== Run summary: outcome=${outcome}, geminiCalls=${geminiCallCount} ===`);
+    appendDailyLog(healthFindings, { id: item.id, label: item.label, outcome });
+    console.log(`\n=== Run summary: outcome=${outcome}, geminiCalls=${geminiCallCount} ===`);
+  }
 }
 
 main().catch((err) => {

@@ -622,7 +622,7 @@ export async function runMeeting(meetingType, env, opts = {}) {
     const simConfig = env.SIM_CONFIG?.GEMINI || {};
     modelResult = await callGemini({
       apiKey: env.GEMINI_API_KEY,
-      model: simConfig.model || 'gemini-3.1-flash-lite',
+      model: simConfig.model || 'gemini-3.5-flash',
       endpoint: simConfig.api_endpoint || 'https://generativelanguage.googleapis.com/v1beta/models',
       temperature: simConfig.temperature ?? 0.9,
       maxTokens: Math.max(simConfig.max_tokens ?? 1024, 2048),

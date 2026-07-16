@@ -50,7 +50,7 @@ the code wins and the discrepancy is called out below.
 |---|---|---|---|---|
 | `groq/llama3-8b-8192` | Groq | **Primary** model for routine per-case work, all agents (`agent-base.js queryGemini()` → `groq-client.js callGroq()`) | Free | ~14,400 req/day, resets 00:00 UTC |
 | `@cf/meta/llama-3.1-8b-instruct-fp8` | Cloudflare Workers AI | Case routing/classification (`callCFRouter()`, runs before every case is dispatched) AND same-session fallback when Groq is down or Gemini 429s (`callCloudflareFallback()`) | Free, account-scoped `AI` binding, no extra credentials | ~10,000 req/day, resets 00:00 UTC |
-| `gemini-2.5-flash` | Google AI Studio | Report synthesis ONLY — monthly/quarterly/semi-yearly/yearly meetings (`meeting-engine.js`) | Paid free-tier | ~1,500 req/day, resets 11:00 IL |
+| `gemini-3.5-flash` | Google AI Studio | Report synthesis ONLY — monthly/quarterly/semi-yearly/yearly meetings (`meeting-engine.js`) | Paid free-tier | ~1,500 req/day, resets 11:00 IL |
 | `claude-sonnet-4-6` | Anthropic | App's AI Search bar (`data-center-api`) + hard-case escalations + Agent 10's root-level GitHub Issue review | Paid | **Hard cap: 5 calls/day across ALL agents combined** |
 | `human+claude-code` | n/a | Agent 10 (Architect)'s "model" for routine cases — never calls an AI; cases are logged for mood bookkeeping only and filed as a single GitHub Issue (`claude-action`, `architect-task`) for human/Claude-Code review | n/a | n/a |
 

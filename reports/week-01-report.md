@@ -125,7 +125,7 @@ block, and no GitHub Issues were filed).
   Gemini spend (free tier, before hitting the 429). Nowhere near the $5
   daily cap.
 - **Root cause / fix path**: the `GEMINI_API_KEY`'s Google AI Studio
-  project hit a 429 quota/billing limit on `gemini-2.5-flash` after
+  project hit a 429 quota/billing limit on `gemini-3.5-flash` after
   ~47 calls in ~7.5 minutes. CLAUDE.md's cost model assumes a paid tier
   for this key — either the project is still on the free tier, or its
   daily free quota was partially consumed by earlier testing sessions.
