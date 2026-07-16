@@ -36,6 +36,7 @@ import sidePlotsConfig from '../config/side-plots.json';
 import yearTrackerSeed from '../config/year-tracker.json';
 import dailyScheduleConfig from '../config/daily-schedule.json';
 import aiToolsConfig from '../config/ai-tools.json';
+import projectPermissions from '../config/project-permissions.json';
 
 import { PerfectionistAgent } from '../agents/agent-1-perfectionist.js';
 import { ProductiveAgent } from '../agents/agent-2-productive.js';
@@ -372,14 +373,14 @@ function updateYearStats(prevStats, { summary, standup, sidePlotStarted, sidePlo
  * See workers/permission-guard.js.
  */
 async function commitFileToRepo(env, repoName, path, content, message, opts = {}) {
-  const codeCheck = checkCodeWriteAllowed({ filePath: path, explicitCodeTask: opts.explicitCodeTask });
+  const codeCheck = checkCodeWriteAllowed(projectPermissions, { filePath: path, explicitCodeTask: opts.explicitCodeTask });
   if (!codeCheck.allowed) {
     return { committed: false, reason: codeCheck.reason, blocked: 'code-write-guard' };
   }
 
   const projectKey = REPO_TO_PROJECT_KEY[repoName];
   if (projectKey) {
-    const target = resolveWriteTarget({ projectKey, ownRepoName: REPO_NAME, targetRepoName: repoName, path });
+    const target = resolveWriteTarget(projectPermissions, { projectKey, ownRepoName: REPO_NAME, targetRepoName: repoName, path });
     repoName = target.repoName;
     path = target.path;
     if (target.redirected) message = `${message} [redirected: push disabled for "${target.projectKey}"]`;
@@ -422,7 +423,7 @@ async function commitFileToRepo(env, repoName, path, content, message, opts = {}
 async function fileGitHubIssue(env, repoName, { title, body, labels }) {
   const projectKey = REPO_TO_PROJECT_KEY[repoName];
   if (projectKey) {
-    const target = resolveIssueTarget({ projectKey, ownRepoName: REPO_NAME, targetRepoName: repoName, title, body });
+    const target = resolveIssueTarget(projectPermissions, { projectKey, ownRepoName: REPO_NAME, targetRepoName: repoName, title, body });
     repoName = target.repoName;
     title = target.title;
     body = target.body;
@@ -1224,7 +1225,7 @@ See \`suggestions\` rows, grouped by \`permission_level\`.
 
 ## Cost & Token Usage Estimate
 
-Gemini (gemini-3.5-flash, office simulation): tracking toward the
+Gemini (gemini-2.5-flash, office simulation): tracking toward the
 ~$2-3/quarter target. Claude (claude-sonnet-4-6, data-center-api): tracking
 toward the $5-15/mo ceiling. See CLAUDE.md "Launch Decisions" cost model.
 

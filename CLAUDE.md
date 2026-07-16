@@ -28,6 +28,10 @@ agents currently work on.
   nightly direct-Anthropic-API session (`.github/scripts/run-claude-session.js`
   + `commit-and-log.sh`) — a separate automation path from the Worker's own
   cron, used for autonomous maintenance tasks against this repo.
+  `.github/workflows/notebook-x-daily.yml` is a third, independent
+  automation path — it targets a different project entirely
+  (`avivnofar/Notebook-X`, not `data-center`). See "Connection to
+  `Notebook-X`" below before touching it.
 
 ## The 11 agents (`config/agents-config.json`, `AGENTS.md`)
 
@@ -123,6 +127,57 @@ project. The Worker writes reports/issues back to **this** repo
 it); `CLAUDE-datacenter-ref.md` is a point-in-time copy of
 `data-center/CLAUDE.md` kept here for context — it will drift, so cross-check
 the live file in `data-center` for anything load-bearing.
+
+## Connection to `Notebook-X`
+
+[`avivnofar/Notebook-X`](https://github.com/avivnofar/Notebook-X) is a
+**second, separate** target project this repo automates against — not part
+of the 11-agent office simulation above, and not documented anywhere else in
+this file until now. `.github/workflows/notebook-x-daily.yml` runs
+`.github/scripts/notebook-x-daily.mjs` daily (22:00 UTC = 01:00 IDT) and on
+`workflow_dispatch`, using `NOTEBOOK_X_REPO_TOKEN` to read/write directly
+into Notebook-X's repo. It does two distinct things:
+
+1. **`frontend_code_change`** (`config/notebook-x-progress.json` backlog
+   items) — small, targeted edits to `index.html`, gated by
+   `checkCodeWriteAllowedForModel()` (mirrors `workers/permission-guard.js`)
+   and `checkDiffPlausible()` (rejects implausibly small/no-op diffs).
+2. **`housekeeping_codeAssessment()`** — a nightly Gemini review of
+   Notebook-X's core backend files (`notebook_backend.py`, `api_server.py`,
+   `github_storage.py`), which may push a full-file rewrite directly to
+   `main` if it decides a fix is needed.
+
+### Incident: 2026-07-11/12 — `housekeeping_codeAssessment` gutted `notebook_backend.py`
+
+The pre-2026-07-12 version of `housekeeping_codeAssessment()` sent Gemini
+only the first 2500 characters of each core file while asking it to return
+"the FULL updated raw code," with `maxTokens: 4096` — structurally
+impossible for a ~2000-line file, and nothing checked the result before
+pushing. Two runs (15:46 and 18:10 UTC on 2026-07-11) shrank
+`notebook_backend.py` from 2002 lines to 79, deleting `verify_github_connection()`
+and dozens of other functions `api_server.py` still called — production
+crashed with `AttributeError` and stayed down until the 2026-07-12 fix.
+Fixed in `notebook-x-daily.mjs` (2026-07-12): no truncation on input, output
+token budget sized to input, a `checkFullFileRewritePlausible()` size-floor
+guard (rejects a proposed rewrite that shrank >40% vs. the original) before
+any push, files over `MAX_SAFE_FULL_REWRITE_CHARS` get a text-only
+recommendation instead of an auto-push, and the push now goes through the
+same `checkCodeWriteAllowedForModel()` gate `frontend_code_change` uses. See
+the comment block above `housekeeping_codeAssessment()` in
+`notebook-x-daily.mjs` for the full writeup.
+
+**Rule for any future change to this script (human or agent):** an
+autonomous full-file rewrite of a real source file is only safe if the model
+saw the *entire* file (never a truncated excerpt) and the result passes an
+automated plausibility check *before* it is pushed — a large, confident-looking
+diff is not evidence of correctness. If a file is too large to safely
+round-trip in one completion, do not truncate-and-push; fall back to a
+text-only recommendation for a human to apply, the same way
+`housekeeping_unifyDeleteObsolete()` and `housekeeping_recommendChanges()`
+already do. This applies regardless of which model's `code_write` permission
+in `config/project-permissions.json` is currently `true` — a standing
+write permission is not a substitute for input completeness and an output
+plausibility check.
 
 ## Key files
 

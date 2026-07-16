@@ -6,23 +6,53 @@
  * Pure decision logic only — no fetch/GitHub API calls live here, so this
  * stays importable by both the Worker (agent-runner.js, bundled by
  * wrangler/esbuild) and Node tooling.
+ *
+ * REFACTORED 2026-07-12 (LOW finding from the safety-claim audit): this
+ * file used to `import projectPermissions from '../config/project-
+ * permissions.json'` at module scope. That needs an import assertion
+ * esbuild/Workers accepts but plain `node` rejects
+ * (ERR_IMPORT_ASSERTION_TYPE_MISSING), so scripts/verify-permissions.js and
+ * notebook-x-daily.mjs (both plain-Node scripts) couldn't import this file
+ * directly — each carried its own hand-written mirror of
+ * canPushToProject()/resolveWriteTarget()/checkCodeWriteAllowed() instead,
+ * three manually-synced copies of the same decision logic with a "keep in
+ * sync manually" comment as the only thing holding them together. Every
+ * exported function below now takes `permissions` as an explicit first
+ * argument instead of reading a module-level import, so this file has NO
+ * JSON import of its own and is safe to import from plain Node. Each
+ * caller still loads config/project-permissions.json its own way
+ * (agent-runner.js via its own esbuild-compatible `import`, the Node
+ * scripts via fs.readFileSync + JSON.parse — that split is unavoidable,
+ * Workers have no filesystem at runtime) but the actual branching logic —
+ * the part that was actually drifting silently — now lives in exactly one
+ * place.
  */
 
-import projectPermissions from '../config/project-permissions.json';
-
+// .html/.htm/.css added 2026-07-12, found while consolidating
+// notebook-x-daily.mjs's checkCodeWriteAllowedForModel() mirror into a
+// direct call to checkCodeWriteAllowed() below: frontend_code_change's
+// actual target is index.html (see notebook-x-daily.mjs's targetPath
+// default), and this set previously had no markup/style extensions at
+// all. Without this, isCodeFilePath('index.html') was false, so
+// checkCodeWriteAllowed() would return {allowed: true} immediately and
+// skip the model-scoped code_write check entirely for the one file
+// frontend_code_change's 2026-07-11 permission-guard wiring was built to
+// gate — consolidating onto this function unchanged would have silently
+// reintroduced the gap that work closed.
 const CODE_FILE_EXTENSIONS = new Set([
   '.js', '.jsx', '.ts', '.tsx', '.mjs', '.cjs',
   '.py', '.rb', '.go', '.rs', '.java', '.kt', '.swift',
   '.c', '.cpp', '.h', '.hpp', '.cs', '.php',
   '.sh', '.ps1', '.psm1', '.sql',
+  '.html', '.htm', '.css',
 ]);
 
 /**
  * True if `push` is enabled for `projectKey` in project-permissions.json.
  * Unknown keys default to false (deny) — fail closed.
  */
-export function canPushToProject(projectKey) {
-  return projectPermissions[projectKey]?.push === true;
+export function canPushToProject(permissions, projectKey) {
+  return permissions[projectKey]?.push === true;
 }
 
 /**
@@ -32,8 +62,8 @@ export function canPushToProject(projectKey) {
  * per the General rule, push:false means "recommend/write-to-own-repo
  * only", not "do nothing".
  */
-export function resolveWriteTarget({ projectKey, ownRepoName, targetRepoName, path }) {
-  if (canPushToProject(projectKey)) {
+export function resolveWriteTarget(permissions, { projectKey, ownRepoName, targetRepoName, path }) {
+  if (canPushToProject(permissions, projectKey)) {
     return { repoName: targetRepoName, path, projectKey, redirected: false };
   }
   const redirectedPath = `agent-output/${projectKey}/${path}`;
@@ -52,8 +82,8 @@ export function resolveWriteTarget({ projectKey, ownRepoName, targetRepoName, pa
  * before touching the GitHub API, the same way commitFileToRepo() already
  * runs every non-self file write through resolveWriteTarget().
  */
-export function resolveIssueTarget({ projectKey, ownRepoName, targetRepoName, title, body }) {
-  if (canPushToProject(projectKey)) {
+export function resolveIssueTarget(permissions, { projectKey, ownRepoName, targetRepoName, title, body }) {
+  if (canPushToProject(permissions, projectKey)) {
     return { repoName: targetRepoName, title, body, projectKey, redirected: false };
   }
   const reason = `push:false for project "${projectKey}" in config/project-permissions.json — blocked Issue creation in ${targetRepoName}, redirected into ${ownRepoName}`;
@@ -91,11 +121,11 @@ export function isCodeFilePath(filePath) {
  *   - If `model` is omitted (legacy call sites that don't track an acting
  *     model), falls back to the original explicitCodeTask-only rule.
  */
-export function checkCodeWriteAllowed({ filePath, model, explicitCodeTask = false }) {
+export function checkCodeWriteAllowed(permissions, { filePath, model, explicitCodeTask = false }) {
   if (!isCodeFilePath(filePath)) return { allowed: true };
 
   if (model) {
-    const policy = projectPermissions.code_write?.[model];
+    const policy = permissions.code_write?.[model];
     if (policy === true) return { allowed: true };
     if (policy === 'per-change-only' && explicitCodeTask) return { allowed: true };
 
