@@ -23,13 +23,41 @@ Every agent (1-11) carries:
 
 ### Session lifecycle
 
+**UPDATED 2026-07-18 (Q&A-engine rebuild)** — step 2 below used to always
+hit `data-center-api`'s `/api/chat`; it now dispatches to whichever ONE
+production AI system the question targets. See CLAUDE.md's "The Q&A engine"
+for the full flow (topic pool, dynamic volume, gap-flagging).
+
 1. `startSession(caseData, mode)` — opens an `agent_sessions` row.
-2. Per case: `interactWithApp(query, mode)` → `data-center-api`'s `/api/chat`
-   → `evaluateResponseQuality()` (placeholder heuristic) → possible
-   `triggerHappy()` / `addIrritiation()` → `logInteraction()`.
+2. Per question: `askAssignedProject(query, mode, {project, kbSlug})` →
+   Claude (`data-center-api`'s `/api/chat`, project `'data-center'`) OR
+   Gemini via a specific Notebook-X notebook (project `'notebook-x'`,
+   paced by `workers/gemini-pacer.js`) → `evaluateResponseQuality()`
+   (placeholder heuristic, unchanged) → mood updates PRIMARILY from that
+   score (`triggerHappy()` / `addIrritiation()`) → up to `followup_depth`
+   sharper follow-ups if the answer was unclear → possible
+   `flagCapabilityGap()` (Hebrew report, see below) → `logInteraction()`.
 3. `extendSession()` — applies `session_extension_multiplier` when an
    agent's `extended_session_chance` roll succeeds (typically after `HAPPY`).
 4. `endSession()` — closes the `agent_sessions` row with final mood/counters.
+
+### Q&A-engine fields (2026-07-18, all 10 active agents — not Agent 10/Architect)
+
+- `topic_affinity` (string[]) — topics this persona's questions are biased
+  toward (`workers/qa-engine.js selectTopicForAgent()` doubles a matching
+  topic's selection weight; not exclusive — an agent still occasionally
+  asks outside its affinity).
+- `escalation_threshold` (0-1) — the quality cutoff below which a SOFT
+  gap candidate (a real but weak answer) gets flagged as a capability gap
+  for THIS persona. Higher = more sensitive (QA 0.45, Lead QA 0.45,
+  Perfectionist 0.40) = flags more borderline cases. Lower = more tolerant
+  (Trainee 0.10, Productive 0.15, Standard 0.15) = flags only clear
+  misses. HARD gaps (no Notebook-X answer at all, or the Claude request
+  failed outright) always flag regardless of this value.
+- `followup_depth` (0-2) — how many sharper follow-up questions this
+  persona asks on an unclear answer (quality 0.3-0.65) before moving on.
+  0 = never chases (CEO, Productive — speed/delegation-oriented). 2 = digs
+  twice (Perfectionist, Trainee, IT Chief, QA, Lead QA).
 
 ### Weekly reset (`resetWeeklyState()`)
 
@@ -122,9 +150,10 @@ Triggered when `panicLevel >= 80`:
 All `status: "specified"` in `config/agents-config.json` (v0.2.0) — full
 `character`, `purpose`, `case_focus`, and `states` blocks exist for each, but
 they currently run via the generic `agent-stub.js` (extends `AgentBase` with
-no behavioral overrides), not a dedicated `agent-N-*.js` class. All seven
-have `can_generate_assets: true` (see `config/asset-platforms.json` and
-`year-tracker.json`'s `asset_pipeline`).
+no behavioral overrides), not a dedicated `agent-N-*.js` class — except
+Agent 10, which never runs via `agent-stub.js` at all (see below). All
+seven have `can_generate_assets: true` (see `config/asset-platforms.json`
+and `year-tracker.json`'s `asset_pipeline`).
 
 | # | Name | Role | Clearance | Purpose |
 |---|------|------|-----------|---------|
@@ -133,7 +162,7 @@ have `can_generate_assets: true` (see `config/asset-platforms.json` and
 | 7 | The Team Lead | Agent Coach & Team Manager | sudo | Agent productivity/development; PIP authority over agents 1-4; organizes the mandatory weekly meeting. |
 | 8 | The Lead QA | Chief Quality Officer | sudo | Project-wide audits (agents, models, workflows, technologies); `mood_sensitivity: 0.5` (slow-moving mood). |
 | 9 | The Designer | UI/UX Specialist | specialist | Design audits of the repo + Claude app; 2 reports/week; 4 `quarterly_updates` (first due day 30). |
-| 10 | The Architect | Project Mastermind | root | Root-level changes, hard escalations, versioned release packages; rivalry with agent 8. |
+| 10 | The Architect | Project Mastermind | root | **Dormant** (2026-07-18) — reserved for owner-directed special tasks only, excluded from `workers/qa-engine.js getActiveQaAgents()`. Character/clearance preserved for reactivation. |
 | 11 | The CEO | Founder & Chief Executive | root | Leads every meeting (`vote_weight: 2`, `veto_rights`); final decision authority. |
 
 When a dedicated state machine is built for one of these agents, follow the

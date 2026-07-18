@@ -15,23 +15,21 @@ export class StandardAgent extends AgentBase {
   async handleCase(caseData) {
     await this.startSession(caseData, 'search');
 
-    // Recalculate model_usage_rate = mood / 100 at the start of the session.
-    const usageRate = this.mood / 100;
-    let result = null;
+    // 2026-07-18 Q&A-engine rebuild: every assigned question is always
+    // asked now (Step 3 — same core action for all 11 personas). mood/100
+    // no longer gates WHETHER to ask (that alternative doesn't exist for a
+    // question), but stays this agent's defining trait elsewhere (HAPPY
+    // threshold at mood > 50, balanced status-report tone).
+    const query = await this.formulateQuery(caseData);
+    const result = await this.askAssignedProject(query, 'search', { project: caseData.project, kbSlug: caseData.kb_slug, caseId: caseData.id });
 
-    if (Math.random() < usageRate) {
-      const query = await this.formulateQuery(caseData);
-      result = await this.interactWithApp(query, 'search', { platform: caseData.platform });
-
-      if (!result.ok) {
-        // Critical error detected -> 100% irritation trigger.
-        await this.addIrritiation();
-        if (this.session) this.session.irritation_events += 1;
-      }
+    if (!result.ok) {
+      // Critical error detected -> 100% irritation trigger.
+      await this.addIrritiation();
+      if (this.session) this.session.irritation_events += 1;
     }
 
-    const uiOk = !result || result.ok;
-    if (uiOk) {
+    if (result.ok) {
       await this.fileSessionStatusReport(caseData, result);
     }
 

@@ -1,5 +1,5 @@
 /**
- * Data Center — AI Agent Simulation — Gemini 2.5 Flash-Lite client (reports
+ * Data Center — AI Agent Simulation — Gemini 3.1 Flash-Lite client (reports
  * only) + Cloudflare Workers AI helpers (routing + fallback).
  *
  * `callGemini()` is a thin wrapper around the Google AI Studio
@@ -30,7 +30,7 @@ const CF_WORKERS_AI_MODEL = '@cf/meta/llama-3.1-8b-instruct-fp8';
 /**
  * @param {object} opts
  * @param {string} opts.apiKey - GEMINI_API_KEY (Worker secret)
- * @param {string} opts.model - e.g. "gemini-3.5-flash"
+ * @param {string} opts.model - e.g. "gemini-3.1-flash-lite" (gemini-3.5-flash is deprecated — never reintroduce it)
  * @param {string} opts.endpoint - base endpoint, e.g. simulation-config.json GEMINI.api_endpoint
  * @param {string} opts.prompt - the user-turn prompt
  * @param {string} [opts.systemPrompt] - system instruction (agent personality + state)

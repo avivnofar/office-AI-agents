@@ -27,6 +27,13 @@ CREATE TABLE IF NOT EXISTS agent_sessions (
   FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 
+-- "cases" keeps its original table/column name for backward compatibility
+-- (avoids a table rename against a live D1 instance) but as of the 2026-07-18
+-- Q&A-engine rebuild holds QUESTIONS, not Netvill-CRM support tickets — see
+-- workers/qa-engine.js. client_name/severity/is_unique_client/requires_it_chief
+-- are retired Netvill-CRM columns: left in place (NOT dropped, to avoid a
+-- destructive migration) but no longer populated by any code path. project/
+-- kb_slug are the new columns the Q&A engine actually writes.
 CREATE TABLE IF NOT EXISTS cases (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
@@ -43,6 +50,8 @@ CREATE TABLE IF NOT EXISTS cases (
   severity TEXT,
   is_unique_client BOOLEAN DEFAULT FALSE,
   requires_it_chief BOOLEAN DEFAULT FALSE,
+  project TEXT,
+  kb_slug TEXT,
   FOREIGN KEY (assigned_to) REFERENCES agents(id)
 );
 
@@ -63,6 +72,10 @@ CREATE TABLE IF NOT EXISTS interactions (
   FOREIGN KEY (session_id) REFERENCES agent_sessions(id)
 );
 
+-- `project` added 2026-07-18 (Q&A-engine rebuild) so gap-flagging reports
+-- (type='gap_hebrew', see workers/gap-reports.js) can be grouped into the
+-- right reports/gaps/<project>/<date>.md file without parsing `title`.
+-- NULL for every report type that predates this and doesn't need it.
 CREATE TABLE IF NOT EXISTS reports (
   id TEXT PRIMARY KEY,
   agent_id INTEGER NOT NULL,
@@ -72,6 +85,7 @@ CREATE TABLE IF NOT EXISTS reports (
   severity TEXT DEFAULT 'info',
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   acknowledged BOOLEAN DEFAULT FALSE,
+  project TEXT,
   FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 
@@ -167,6 +181,26 @@ CREATE TABLE IF NOT EXISTS pull_log (
   count INTEGER DEFAULT 0,
   last_pulled_at TIMESTAMP
 );
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- MANUAL MIGRATION — 2026-07-18 Q&A-engine rebuild.
+-- `CREATE TABLE IF NOT EXISTS` above only affects a FRESH database — it will
+-- NOT retrofit these columns onto the live production D1 instance, which
+-- already has `cases`/`reports` tables from before this rebuild. Whoever
+-- deploys this change must run the two ALTER TABLE statements below once,
+-- by hand, against the live `data-center-db` D1 database (e.g. via
+-- `wrangler d1 execute data-center-db --command "..."` — see DEPLOY.md).
+-- Not run automatically by this repo: a schema change against a shared
+-- production database is exactly the kind of action that needs an explicit,
+-- deliberate step, not a silent side effect of a code deploy.
+-- SQLite/D1 has no "ADD COLUMN IF NOT EXISTS" — if a column already exists
+-- (e.g. this migration already ran), the ALTER will error; that's expected
+-- and safe to ignore.
+--
+-- ALTER TABLE cases ADD COLUMN project TEXT;
+-- ALTER TABLE cases ADD COLUMN kb_slug TEXT;
+-- ALTER TABLE reports ADD COLUMN project TEXT;
+-- ─────────────────────────────────────────────────────────────────────────
 
 CREATE INDEX IF NOT EXISTS idx_sessions_agent ON agent_sessions(agent_id);
 CREATE INDEX IF NOT EXISTS idx_cases_assigned ON cases(assigned_to);

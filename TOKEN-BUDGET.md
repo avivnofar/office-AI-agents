@@ -2,8 +2,9 @@
 
 Tracks the next planned Claude Code sessions for this project and their
 rough scope, so each session can pick up the next item without re-deriving
-priorities. See `CLAUDE.md`'s "Current Strategy (authoritative)" section and
-`agents/STRATEGY.md` for the framing behind this order.
+priorities. See `CLAUDE.md` for the current architecture and framing
+(`STRATEGY.md`, referenced here in older entries, was deleted in the
+2026-07-16 repo-cleanup session — superseded by CLAUDE.md).
 
 ## ⏳ Next
 
@@ -12,9 +13,15 @@ priorities. See `CLAUDE.md`'s "Current Strategy (authoritative)" section and
   local-archive-galil-elion, once the workflow has actually produced one
   (none exist yet — the redirect is wired but no live run has fired since
   the 2026-07-08 change; see "TODO/permission/schedule wiring session"
-  below). Also confirm the `scripts/sync-todo.js` workflow (hand-edit the
-  .docx, re-run the script, commit TODO.md) makes sense as a recurring
-  habit before relying on it further.
+  below).
+- SUPERSEDED 2026-07-18: the `scripts/sync-todo.js` habit-confirmation item
+  that used to sit here is moot — `TODO.md` and `TO DO LIST.docx` were both
+  deleted from this repo in the 2026-07-18 repo-cleanup session (confirmed
+  intentional by the owner), so `sync-todo.js` has nothing to read from or
+  write to. `workers/chore-runner.js`'s `fetchTodoSection()` (a different
+  consumer of `TODO.md`, via a raw GitHub URL fetch) now degrades to a
+  permanent no-op rather than crashing — see CLAUDE.md's "Connection to
+  Notebook-X" section.
 - Once Notebook-X (notebook-x-api.onrender.com) reconnects its GitHub
   storage and kb-linux/kb-bash/kb-1com are actually reachable, trigger a
   full simulated day and confirm in D1 that `interactions.tool_used =
@@ -3509,3 +3516,100 @@ Pushed: `workers/permission-guard.js` (commit `81ec988`),
 
 Every finding from the 2026-07-12 safety-claim audit (HIGH, both MEDIUMs,
 the LOW) is now closed. Nothing left open from that audit.
+
+## 2026-07-18 — Q&A-engine rebuild (Netvill-CRM retirement)
+
+Full rebuild of the 11-agent office simulation's core daily case logic
+around a new purpose: agents ask real questions directly to Claude
+(data-center) or Gemini (a specific Notebook-X notebook), evaluate answer
+quality, update mood primarily from that signal, and flag genuine
+capability gaps in short Hebrew reports — no GitHub Issues. Replaces the
+Netvill-support-ticket case model entirely.
+
+**New files:** `workers/qa-topics.js` (topic pool — de-Netvill'd, weighted
+toward cloud/AI/networking/Linux/Windows/firewalls, VoIP/PBX kept at lower
+weight), `workers/qa-engine.js` (question generation/assignment, replaces
+`crm-engine.js`), `workers/gap-reports.js` (hard/soft gap classification +
+Hebrew digest rendering), `workers/gemini-pacer.js` (Notebook-X call
+pacing — skip-if-too-soon via KV, not a blocking sleep, because Gemini's
+free-tier quota is shared with two consumers this repo can't observe:
+Notebook-X's own traffic and its weekly gap-analysis job), `scripts/verify-qa-engine.js`
+(dry-run verification, 56/56 checks passing — see that file for what it
+does and doesn't cover, notably that `agents/agent-base.js` itself can't be
+plain-Node-imported due to a transitive unassisted-JSON-import chain
+through `workers/model-router.js`, same pre-existing class of issue
+`notebook-x-daily.mjs`'s header comment already documents for that file —
+verified via careful manual review instead for that one file).
+
+**Deleted:** `workers/crm-engine.js`, `workers/case-generator.js` (Netvill
+CLIENT_POOL, severity/is_unique_client/requires_it_chief escalation
+routing, "compare alternatives" external-source-check mechanic — all
+retired outright, not adapted).
+
+**Rewired:** `agents/agent-base.js`'s `interactWithApp()` (dual-path
+escalation: check notebook-x, fall through to Claude) replaced by
+`askAssignedProject()` (single-project ask, no escalation — every question
+already targets exactly one project at generation time). Added
+`_askDataCenter()`/`_askNotebookX()`, `_applyQualityMood()` (quality-primary
+mood update, the original design vision), `flagCapabilityGap()` +
+`fileGapReport()` (Hebrew, D1 `reports.type='gap_hebrew'`). All 5
+agent-class files (`agent-1..4-*.js`, `agent-stub.js`) had their
+probabilistic "whether to use the app at all" gates removed — every
+assigned question is now always asked (Step 3: same core action for all 11
+personas, differentiation lives in topic affinity / escalation threshold /
+follow-up depth / report tone, not in whether the agent acts).
+
+**Token economy:** `config/token-economy.json`'s old per-day CALL-COUNT
+Claude cap (`claude_daily_cap: 30`) removed, replaced by
+`shared_claude_budget` — a $5/month DOLLAR cap tracked via
+`workers/model-router.js`'s `getClaudeBudgetStatus()`/`recordClaudeSpend()`
+against D1's `claude_budget_usage` table. Genuinely shared per explicit
+instruction: `chore_automation.claude_budget_usd_per_month` bumped 4.50 ->
+5.00 to match, and both the office Q&A engine and the TODO.md-driven chore
+automation now draw from the SAME month row, not two separate budgets.
+
+**Also fixed while in the neighborhood:** the `gemini-3.5-flash` deprecated-
+model-string bug (CLAUDE.md has said "never reintroduce it" since an
+earlier incident) was still live in `config/agents-config.json` (11x),
+`config/simulation-config.json`, `agents/agent-base.js`, `workers/meeting-engine.js`,
+and `.github/scripts/notebook-x-daily.mjs` — all switched to
+`gemini-2.5-flash-lite`.
+
+**CORRECTION (same day, follow-up session):** the fix above was itself
+wrong. This session didn't check this file's own 2026-07-09 entry
+("Notebook-X token verification + Gemini model retirement fix") before
+picking a replacement string — that entry documents that `gemini-2.5-flash`
+was ALSO retired (live-tested, HTTP 404, confirmed via `GET
+/v1beta/models`) and that `gemini-3.1-flash-lite` is the actual current,
+live-verified standard this project uses. Re-fixed all the files listed
+above to `gemini-3.1-flash-lite`, plus `config/token-economy.json`,
+`workers/gemini-client.js` (also missed the first pass), and
+`agents/architect_agent.py` (still had the original `gemini-3.5-flash` bug,
+never caught in the first pass at all — the file sweep only checked
+`*.js`/`*.mjs`/`*.json`, not `*.py`). Lesson: when "confirm the deprecated-
+model bug is fixed" comes up again, check this file's full history for the
+model name first, not just `CLAUDE.md`'s summary prose.
+
+**housekeeping_* retirement (Notebook-X automation):** `housekeeping_unifyDeleteObsolete`,
+`housekeeping_recommendChanges`, `housekeeping_uiCheck`,
+`housekeeping_codeAssessment` all removed from `notebook-x-daily.mjs` — the
+last one was the real code-writer (pushed full-file AUTO-FIX overwrites to
+`avivnofar/Notebook-X` with NO `checkCodeWriteAllowedForModel()` gate at
+all, a genuine gap between documented intent and actual wiring, found
+during this session's investigation). `frontend_code_change` backlog items
+are now recommendation-only (no auto-push) for the same reason: no agent
+writes or modifies code/files/tools of any kind — reserved for Claude Code
+with the owner, or a future owner-directed Architect task.
+
+**Verification:** `node scripts/verify-qa-engine.js` — 56/56 checks pass
+(topic pool composition/weighting, persona config completeness and
+sensitivity ordering, hard/soft gap classification, digest rendering,
+shared-budget config consistency, Gemini pacing skip/allow/degrade-open
+behavior). All modified/new `.js`/`.mjs` files pass `node --check`. No live
+schedule enabled, no deploy, no workflow YAML touched (explicit scope
+limit) — design-and-build only, same graduated-trust pattern as every
+other change in this repo.
+
+**Not done this session (explicitly out of scope):** enabling the live
+cron/schedule against this rebuild; the Architect's workflow file; the
+job-search automation (separate, later, dedicated chat).

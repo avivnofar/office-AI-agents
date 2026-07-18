@@ -19,10 +19,10 @@
   },
   "cases_per_day_per_agent": 20,
   "cases_per_day_total": 200,
-  "claude_daily_cap": 30,
-  "claude_monthly_budget_usd": 6,
+  "claude_daily_cap_NOTE": "REMOVED 2026-07-18 (Q&A-engine rebuild) — superseded by config/token-economy.json's shared_claude_budget (a $5/month DOLLAR cap, not a per-day call count). See workers/model-router.js getClaudeBudgetStatus().",
+  "claude_monthly_budget_usd": 5,
   "GEMINI": {
-    "model": "gemini-3.5-flash",
+    "model": "gemini-3.1-flash-lite",
     "max_tokens": 1024,
     "temperature": 0.8,
     "api_endpoint": "https://generativelanguage.googleapis.com/v1beta/models"

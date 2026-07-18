@@ -1,28 +1,24 @@
 /**
- * Data Center — AI Agent Simulation — Phase 2 stub agent template.
- *
- * Used by agents 5-11 until each agent's full behavioral spec is
- * finalized (see AGENTS.md). Provides the minimum viable loop:
- * start a session, optionally make one low-rate app query, end the
- * session. No custom mood/irritation/escalation logic beyond AgentBase.
- *
- * Status: STUB — agents-config.json marks each of 5-11 with
- * "status": "stub" and "placeholder_behavior" pointing here.
+ * Data Center — AI Agent Simulation — generic driver for agents 5-9 and 11
+ * (Agent 10/The Architect is dormant, excluded from this flow entirely —
+ * see workers/qa-engine.js getActiveQaAgents()). Each of these agents has a
+ * full character/behavioral spec in config/agents-config.json but shares
+ * this same core loop: start a session, ask its assigned question,
+ * end the session. Per Step 3 of the 2026-07-18 Q&A-engine rebuild — "all
+ * 11 personas do the same core action (ask, evaluate, maybe flag)" — every
+ * assigned question is always asked; there is no probabilistic
+ * "whether to ask" gate anymore (that belonged to the retired Netvill-CRM
+ * case model, where a case could be solved without consulting the app).
  */
 
 import { AgentBase } from './agent-base.js';
-
-const STUB_DEFAULT_USAGE_RATE = 0.10;
 
 export class StubAgent extends AgentBase {
   async handleCase(caseData) {
     await this.startSession(caseData, 'search');
 
-    let result = null;
-    if (Math.random() < (this.config.model_usage_rate ?? STUB_DEFAULT_USAGE_RATE)) {
-      const query = `${caseData.title}. ${caseData.description}`;
-      result = await this.interactWithApp(query, 'search', { platform: caseData.platform });
-    }
+    const query = `${caseData.title}. ${caseData.description}`;
+    const result = await this.askAssignedProject(query, 'search', { project: caseData.project, kbSlug: caseData.kb_slug, caseId: caseData.id });
 
     await this.endSession();
     return result;

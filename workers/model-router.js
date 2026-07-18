@@ -1,11 +1,17 @@
 /**
- * Model selection + Claude budget tracking for the TODO.md-driven chore
- * automation (Notebook-X / data-center / archive-alpha rotation — see
- * config/daily-schedule.json's night sweep and config/token-economy.json's
- * `chore_automation` block). This is a SEPARATE economy from the 11-agent
- * office-simulation's per-day Claude cap (agents/agent-base.js
- * interactWithApp() / tokenEconomy.claude_daily_cap) — the two do not share
- * state or budget.
+ * Model selection + Claude budget tracking, originally built for the
+ * TODO.md-driven chore automation (Notebook-X / data-center / archive-alpha
+ * rotation — see config/daily-schedule.json's night sweep and
+ * config/token-economy.json's `chore_automation` block).
+ *
+ * UPDATED 2026-07-18 (Q&A-engine rebuild): getClaudeBudgetStatus()/
+ * recordClaudeSpend() are now ALSO called directly by agents/agent-base.js's
+ * _askDataCenter() for the 11-agent office simulation's own Claude asks —
+ * this is the SAME shared $5/month budget (config/token-economy.json's
+ * top-level `shared_claude_budget`, claude_budget_usd_per_month below), by
+ * design, not two separate economies anymore. The old 11-agent-only per-day
+ * CALL-COUNT cap (tokenEconomy.claude_daily_cap) this comment used to
+ * contrast against has been removed from config/token-economy.json.
  */
 
 import tokenEconomy from '../config/token-economy.json';
@@ -45,7 +51,7 @@ function currentMonthKey(date = new Date()) {
 
 /**
  * Reads this month's chore-automation Claude spend against the shared
- * $4.50/mo soft cap (config/token-economy.json chore_automation.claude_budget_usd_per_month).
+ * $5/mo soft cap (config/token-economy.json chore_automation.claude_budget_usd_per_month).
  * No-ops (reports $0 spent, allowed) if env.DB isn't available.
  */
 export async function getClaudeBudgetStatus(env, { asOf = new Date() } = {}) {
@@ -93,7 +99,7 @@ export async function recordClaudeSpend(env, { inputTokens, outputTokens, asOf =
  *   genuinely demands Claude (Notebook-X override trigger).
  * @param {boolean} [params.overBudget] - result of getClaudeBudgetStatus().overBudget;
  *   when true, Claude is never selected regardless of taskType/requiresHighQuality —
- *   the $4.50/mo cap is a hard stop for this router (falls back to Gemini).
+ *   the $5/mo cap is a hard stop for this router (falls back to Gemini).
  * @returns {{ model: 'gemini'|'groq'|'claude', reason: string }}
  */
 export function selectModelForChoreTask({ projectKey, taskType, requiresHighQuality = false, overBudget = false }) {
@@ -102,10 +108,10 @@ export function selectModelForChoreTask({ projectKey, taskType, requiresHighQual
       return { model: 'groq', reason: 'Notebook-X override: groq_scope covers easy sub-tasks (simple formatting, short lookups).' };
     }
     if (requiresHighQuality && !overBudget) {
-      return { model: 'claude', reason: 'Notebook-X override: task complexity/quality genuinely demands Claude (drawn from the shared $4.50/mo cap).' };
+      return { model: 'claude', reason: 'Notebook-X override: task complexity/quality genuinely demands Claude (drawn from the shared $5/mo cap).' };
     }
     if (requiresHighQuality && overBudget) {
-      return { model: 'gemini', reason: 'Notebook-X override wanted Claude, but the $4.50/mo chore-automation cap is exhausted this month — falling back to Gemini (default writer).' };
+      return { model: 'gemini', reason: 'Notebook-X override wanted Claude, but the $5/mo chore-automation cap is exhausted this month — falling back to Gemini (default writer).' };
     }
     return { model: 'gemini', reason: 'Notebook-X override: Gemini is the default writer for content generation.' };
   }
@@ -118,7 +124,7 @@ export function selectModelForChoreTask({ projectKey, taskType, requiresHighQual
     return { model: 'claude', reason: 'General economy: Claude is scoped to code-writing tasks and approvals.' };
   }
   if ((taskType === 'code' || taskType === 'approval') && overBudget) {
-    return { model: 'gemini', reason: 'General economy wanted Claude for a code/approval task, but the $4.50/mo chore-automation cap is exhausted this month — falling back to Gemini.' };
+    return { model: 'gemini', reason: 'General economy wanted Claude for a code/approval task, but the $5/mo chore-automation cap is exhausted this month — falling back to Gemini.' };
   }
   return { model: 'gemini', reason: 'General economy: Gemini is the expanded-role default writer for content generation.' };
 }

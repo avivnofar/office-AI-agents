@@ -1,9 +1,12 @@
 /**
- * Data Center — AI Agent Simulation — weekly case batch generator.
+ * Data Center — AI Agent Simulation — weekly question batch generator.
  *
  * Run by .github/workflows/agent-cases.yml every Monday. Generates a
- * 200-300 case batch (2x in inspection mode) for the upcoming simulated
- * work week and writes it to database/cases-<year>-w<week>.json.
+ * 200-300 question batch (2x in inspection mode) as a static preview
+ * artifact and writes it to database/cases-<year>-w<week>.json. Not
+ * consumed by the live daily flow (workers/agent-runner.js generates its
+ * own day-by-day via qa-engine.js/computeDailyQuestionVolume()) — this is
+ * an informational weekly snapshot only.
  *
  * Status: DRAFT (Phase 1 foundation).
  *
@@ -14,13 +17,19 @@
  * been left pointing at the old agents/-prefixed layout ever since,
  * crashing every scheduled run with ERR_MODULE_NOT_FOUND — see
  * TOKEN-BUDGET.md's 2026-07-08 sessions for the diagnosis and this fix.
+ *
+ * 2026-07-18 Q&A-engine rebuild: workers/case-generator.js (Netvill-CRM
+ * CASE_POOL) is deleted — this script now draws from the new
+ * workers/qa-engine.js/qa-topics.js pool instead. Cases previously carried
+ * client_name/severity/etc; questions now carry project/kb_slug (see
+ * database/schema.sql's 2026-07-18 migration note).
  */
 
 import { writeFile, mkdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { generateCaseBatch } from '../../workers/case-generator.js';
+import { generateAssignedDailyBatch } from '../../workers/qa-engine.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(__dirname, '..', '..');
@@ -49,7 +58,7 @@ const max = 300;
 const baseCount = min + Math.floor(Math.random() * (max - min + 1));
 const count = inspection ? baseCount * 2 : baseCount;
 
-const cases = generateCaseBatch(count, { weekNumber: week, year });
+const cases = generateAssignedDailyBatch(1, { maxTotalQuestions: count, weekNumber: week, year });
 
 const outDir = path.join(repoRoot, 'database');
 const outPath = path.join(outDir, `cases-${year}-w${pad(week, 2)}.json`);

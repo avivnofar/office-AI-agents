@@ -515,3 +515,32 @@ commandflow commands.json).
 2. agent-10: start the DB-integration helper layer per the plan above —
    one table at a time, starting with `cases` or `interactions`.
 3. No other Priority 1/2 items remain outstanding from this session.
+
+## Session 2026-07-18 — Q&A-engine rebuild
+
+Full rebuild of the 11-agent office simulation's core daily case logic —
+see `TOKEN-BUDGET.md`'s 2026-07-18 entry for the complete writeup, and
+`CLAUDE.md`'s "The Q&A engine" section for the resulting architecture.
+Short version: replaced the Netvill-CRM case model with agents asking real
+questions directly to Claude or Gemini, evaluating quality, and flagging
+genuine capability gaps as short Hebrew reports (`reports/gaps/<project>/<date>.md`,
+never a GitHub Issue). Also retired the `housekeeping_*` function family and
+`frontend_code_change`'s auto-push in `notebook-x-daily.mjs` (no agent
+writes/modifies code, files, or tools of any kind — reserved for Claude
+Code with the owner, or a future owner-directed Architect task), and fixed
+several live `gemini-3.5-flash` deprecated-model-string bugs found along
+the way.
+
+**Not done this session**: enabling the live cron/schedule against this
+rebuild (design-and-build only), the Architect's workflow file, job-search
+automation.
+
+**For the next automated/human session**:
+1. Run the manual D1 migration noted in `database/schema.sql` (`ALTER
+   TABLE cases ADD COLUMN project TEXT`, etc.) before this rebuild's code
+   can be deployed against the live database.
+2. Decide whether/when to enable the live schedule for the rebuilt Q&A
+   engine — currently sitting built but not deployed.
+3. The older "DB-integration helper layer" / "runbook integration" items
+   above this entry are unrelated to this rebuild and still open as
+   originally scoped.

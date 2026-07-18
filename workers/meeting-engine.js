@@ -39,7 +39,7 @@ import relationships from '../config/relationships.json';
 import { callGemini, callCloudflareFallback } from './gemini-client.js';
 import { callGroq } from './groq-client.js';
 
-/** Meeting types whose transcripts are synthesized by Gemini 2.5 Flash-Lite
+/** Meeting types whose transcripts are synthesized by Gemini 3.1 Flash-Lite
  *  (large-context report writing) — see config/token-economy.json
  *  report_models_by_meeting_type. All other meeting types use Groq
  *  (llama3-8b-8192), falling back to Cloudflare Workers AI. */
@@ -622,7 +622,7 @@ export async function runMeeting(meetingType, env, opts = {}) {
     const simConfig = env.SIM_CONFIG?.GEMINI || {};
     modelResult = await callGemini({
       apiKey: env.GEMINI_API_KEY,
-      model: simConfig.model || 'gemini-3.5-flash',
+      model: simConfig.model || 'gemini-3.1-flash-lite', // gemini-3.5-flash is deprecated — never reintroduce it, see CLAUDE.md
       endpoint: simConfig.api_endpoint || 'https://generativelanguage.googleapis.com/v1beta/models',
       temperature: simConfig.temperature ?? 0.9,
       maxTokens: Math.max(simConfig.max_tokens ?? 1024, 2048),

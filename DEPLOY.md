@@ -13,14 +13,28 @@ code gets onto Cloudflare.
 agent-runner.js
 ├── ../config/agents-config.json
 ├── ../config/simulation-config.json
+├── ../config/daily-schedule.json
+├── ./qa-engine.js, ./qa-topics.js, ./gap-reports.js, ./model-router.js
 ├── ../agents/agent-1-perfectionist.js
 ├── ../agents/agent-2-productive.js
 ├── ../agents/agent-3-standard.js
 ├── ../agents/agent-4-trainee.js
 ├── ../agents/agent-stub.js
 └── ../agents/agent-base.js (imported by the above)
-    └── ./gemini-client.js
+    ├── ./gemini-client.js, ./groq-client.js, ./notebookx-client.js
+    └── ./model-router.js, ./gemini-pacer.js, ./gap-reports.js
 ```
+
+**2026-07-18 Q&A-engine rebuild — one-time manual step before deploying:**
+run the ALTER TABLE migration noted at the bottom of `database/schema.sql`
+(`cases.project`, `cases.kb_slug`, `reports.project`) against the live D1
+database — `CREATE TABLE IF NOT EXISTS` in that file only affects a fresh
+database, it will not retrofit columns onto the existing one. Without this
+migration, the new code will deploy fine but every question-persistence
+(`workers/qa-engine.js persistQuestions()`) and gap-report
+(`agents/agent-base.js fileGapReport()`) insert will fail with a D1 "no such
+column" error, since those inserts bind values to `project`/`kb_slug`
+columns that won't exist yet on the live table.
 
 Cloudflare's dashboard **Quick Edit** only accepts a single file, so pasting
 just `agent-runner.js` into it will fail with module-resolution errors. Use

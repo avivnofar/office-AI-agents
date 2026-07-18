@@ -30,16 +30,15 @@ export class ProductiveAgent extends AgentBase {
 
     await this.startSession(caseData, 'search');
 
-    let result = null;
-    if (Math.random() < (this.config.model_usage_rate ?? 0.40)) {
-      const query = await this.formulateQuery(caseData);
-      result = await this.interactWithApp(query, 'search', { platform: caseData.platform });
+    // 2026-07-18 Q&A-engine rebuild: every assigned question is always
+    // asked now (Step 3 — same core action for all 11 personas).
+    const query = await this.formulateQuery(caseData);
+    const result = await this.askAssignedProject(query, 'search', { project: caseData.project, kbSlug: caseData.kb_slug, caseId: caseData.id });
 
-      if (result.quality < 0.4 && Math.random() < (this.config.irritation_stack?.bad_answer_chance ?? 0.45)) {
-        await this.addIrritiation();
-        if (this.session) this.session.irritation_events += 1;
-        await this.foundOutsidePattern(caseData, result);
-      }
+    if (typeof result.quality === 'number' && result.quality < 0.4 && Math.random() < (this.config.irritation_stack?.bad_answer_chance ?? 0.45)) {
+      await this.addIrritiation();
+      if (this.session) this.session.irritation_events += 1;
+      await this.foundOutsidePattern(caseData, result);
     }
 
     if (this.isAngry) {

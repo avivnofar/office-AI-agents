@@ -3,7 +3,7 @@
  *
  * Primary model for routine per-case agent work (agents 1-4, 5-9, 11 —
  * see agent-base.js queryGemini()). Free tier (~14,400 req/day) — solves
- * the daily Gemini-quota problem for routine cases. Gemini 2.5 Flash-Lite
+ * the daily Gemini-quota problem for routine cases. Gemini 3.1 Flash-Lite
  * stays reserved for monthly/quarterly reports (large-context synthesis).
  * Never called directly by the frontend. See
  * config/token-economy.json for the model-distribution map.

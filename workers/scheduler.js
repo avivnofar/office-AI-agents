@@ -1,6 +1,13 @@
 /**
  * Data Center — AI Agent Simulation — scheduler Worker.
  *
+ * STATUS: not wired to anything — no other file imports this module, and
+ * wrangler.toml's `main` points at agent-runner.js, which has its own
+ * scheduled() handler. Confirmed dead/superseded before the 2026-07-18
+ * Q&A-engine rebuild; left in place (not deleted — out of this session's
+ * explicit scope) but its import updated so it doesn't reference the
+ * deleted workers/case-generator.js.
+ *
  * Drives the simulated time cycle via Cron Triggers (configure in this
  * Worker's wrangler.toml — see README.md):
  *   "0 *\/1 * * *"  -> runWorkDayCycle()   (every hour = 1 simulated work day)
@@ -15,7 +22,7 @@
 
 import simulationConfig from '../config/simulation-config.json';
 import agentsConfig from '../config/agents-config.json';
-import { generateCaseBatch } from './case-generator.js';
+import { generateAssignedDailyBatch } from './qa-engine.js';
 import { instantiateAgent } from './agent-runner.js';
 
 export default {
@@ -95,7 +102,8 @@ async function runWorkDayCycle(env) {
     const target = randomBetween(work.cases_per_day_min, work.cases_per_day_max);
     const count = Math.round(target * multiplier);
 
-    const cases = generateCaseBatch(count, {
+    const cases = generateAssignedDailyBatch(1, {
+      maxTotalQuestions: count,
       weekNumber: isoWeekNumber(new Date()),
       year: new Date().getFullYear(),
     });

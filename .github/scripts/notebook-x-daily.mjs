@@ -75,7 +75,7 @@ function checkCodeWriteAllowedForModel(filePath, model) {
   return { allowed: false, reason };
 }
 
-const GEMINI_MODEL = 'gemini-3.5-flash';
+const GEMINI_MODEL = 'gemini-3.1-flash-lite'; // gemini-3.5-flash is deprecated — never reintroduce it, see CLAUDE.md
 const GEMINI_ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
 const GITHUB_API = 'https://api.github.com';
 const NOTEBOOK_X_REPO = 'avivnofar/Notebook-X';
@@ -322,109 +322,24 @@ function ghFileText(getFileResult, maxChars = Infinity) {
   return Buffer.from(getFileResult.content, 'base64').toString('utf-8').slice(0, maxChars);
 }
 
-// --- Housekeeping pass (TODO.md's 4 "house keeping" bullets) ---
-async function housekeeping_unifyDeleteObsolete(token) {
-  const rootFiles = await ghListDir(token, '');
-  if (!rootFiles) {
-    return { title: 'Unify data files / delete obsolete leftovers', body: '_Could not list avivnofar/Notebook-X repo root (API error) — skipped this run._' };
-  }
-  const fileList = rootFiles.map((f) => `${f.type === 'dir' ? '[dir] ' : ''}${f.name}`).join('\n');
-  const analysis = await generate(
-    `Here is the file listing at the root of a GitHub repo (avivnofar/Notebook-X, a knowledge-base web app backend):\n${fileList}\n\n` +
-    'Identify any files that look like leftover/obsolete one-off artifacts a human should review for deletion or consolidation ' +
-    '(e.g. content fragments already merged into their target notebook, stray diagnostic/session-log files, committed build ' +
-    'artifacts like __pycache__, duplicate or backup-named files). Be conservative and specific -- name the exact file(s) and ' +
-    'the exact reason. Do not recommend touching core application files (api_server.py, notebook_backend.py, github_storage.py, ' +
-    'requirements.txt, index.html), the notebooks/ directory, or GitHub config (.github/, .gitignore).',
-    { temperature: 0.2, maxTokens: 1024 }
-  );
-  return { title: 'Unify data files / delete obsolete leftovers', body: `Recommendation only -- nothing deleted or moved.\n\n${analysis}` };
-}
-
-async function housekeeping_recommendChanges(token) {
-  const contextFile = await ghGetFile(token, 'CLAUDE_CONTEXT.md');
-  const contextText = ghFileText(contextFile, 4000);
-  if (!contextText) {
-    return { title: 'General recommend-changes pass', body: '_Could not fetch CLAUDE_CONTEXT.md from avivnofar/Notebook-X — skipped this run._' };
-  }
-  const analysis = await generate(
-    `Here is the project context/status doc (CLAUDE_CONTEXT.md, truncated to the first 4000 chars) for avivnofar/Notebook-X, ` +
-    `a knowledge-notebook web app:\n\n${contextText}\n\n` +
-    'Based on this context, you are authorized to act. Identify 3-5 concrete, actionable improvements, AND provide the exact code or content changes required to implement them directly in your output. You are no longer recommend-only.. Be specific to what you ' +
-    'read here, not generic software advice.',
-    { temperature: 0.3, maxTokens: 1024 }
-  );
-  return { title: 'General recommend-changes pass', body: analysis };
-}
-
-async function housekeeping_uiCheck() {
-  const checks = [];
-
-  const health = await getNotebookXHealth();
-  checks.push(`- \`GET /api/health\`: ${health && !health.error ? 'responded' : '**FAILED**'} — \`${JSON.stringify(health)}\``);
-
-  const notebooks = await listKnowledgeNotebooks();
-  checks.push(`- \`GET /api/knowledge-notebooks\`: ${notebooks.length > 0 ? `responded, ${notebooks.length} notebooks listed` : '**FAILED or empty**'}`);
-
-  try {
-    const res = await fetch('https://notebook-x-api.onrender.com/api/knowledge-notebooks/kb-linux/ask', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question: 'What is this notebook about?' }),
-    });
-    checks.push(`- \`POST /api/knowledge-notebooks/kb-linux/ask\`: ${res.ok ? 'responded ok' : `**HTTP ${res.status}**`}`);
-  } catch (e) {
-    checks.push(`- \`POST .../ask\`: **request failed** — ${e.message}`);
-  }
-
-  const anyFailed = checks.some((c) => c.includes('FAILED') || c.includes('request failed'));
-  return {
-    title: 'UI functionality check',
-    body:
-      '**Scope note**: this checks the live API endpoints the UI itself calls, not the rendered UI in a real browser — ' +
-      'no headless browser (Playwright/Puppeteer) is wired into this script yet. Not ready to graduate to full browser-driven ' +
-      'UI automation until one is added; this is a proxy check, not a replacement.\n\n' +
-      checks.join('\n') +
-      (anyFailed ? '\n\n**At least one check failed — worth a manual look.**' : '\n\nAll checked endpoints responded normally.'),
-  };
-}
-
-async function housekeeping_codeAssessment(token) {
-  const files = ['notebook_backend.py', 'api_server.py', 'github_storage.py'];
-  const snippets = [];
-  for (const f of files) {
-    const result = await ghGetFile(token, f);
-    const text = ghFileText(result, 2500);
-    if (text) snippets.push(`--- ${f} ---\n${text}`);
-  }
-  if (snippets.length === 0) {
-    return { title: 'Code-file functionality assessment', body: '_Could not fetch any backend files from avivnofar/Notebook-X — skipped this run._' };
-  }
-
-  const prompt = `Here are excerpts from Notebook-X's backend:\n\n${snippets.join('\n\n')}\n\n` +
-    `You are authorized to fix any obvious bugs, logic gaps, or missing error handling directly. ` +
-    `Output ONLY a valid JSON object in this exact format, with no markdown formatting or extra text outside the JSON:\n` +
-    `{ "fixes": [ {"path": "file_name.py", "content": "the FULL updated raw code for this file"} ], "summary": "what you fixed" }\n` +
-    `If no fixes are needed, output: { "fixes": [], "summary": "All code looks good, no fixes required." }`;
-
-  const analysisRaw = await generate(prompt, { temperature: 0.1, maxTokens: 4096 });
-  let bodyText = "";
-
-  try {
-    const cleanJson = analysisRaw.replace(/^```json/m, '').replace(/^```/m, '').trim();
-    const analysis = JSON.parse(cleanJson);
-    bodyText = `**Gemini Code Fixes:** ${analysis.summary}\n\n`;
-
-    for (const fix of analysis.fixes) {
-       const pushRes = await ghPutRawTextFile(token, fix.path, fix.content, `gemini-auto-fix: autonomously updated ${fix.path}`);
-       bodyText += `- Pushed code update to \`${fix.path}\`: ${pushRes.ok ? 'SUCCESS' : 'FAILED (HTTP ' + pushRes.status + ')'}\n`;
-    }
-  } catch (e) {
-    bodyText = `Failed to parse Gemini code output or push files. Raw output:\n\n${analysisRaw}\nError: ${e.message}`;
-  }
-
-  return { title: 'Code-file functionality assessment (AUTO-FIX)', body: bodyText };
-}
+// --- Housekeeping pass ---
+//
+// RETIRED 2026-07-18 (Q&A-engine rebuild), explicit owner instruction: the
+// entire housekeeping_* function family — housekeeping_unifyDeleteObsolete,
+// housekeeping_recommendChanges, housekeeping_uiCheck, housekeeping_codeAssessment
+// — is removed, not just the one that wrote code (housekeeping_codeAssessment,
+// which pushed full-file AUTO-FIX overwrites to avivnofar/Notebook-X with no
+// checkCodeWriteAllowedForModel() gate at all). The general principle behind
+// this rebuild: no agent writes or modifies code, files, or tools of any
+// kind — that's reserved for Claude Code working directly with the owner, or
+// a future owner-directed special task to the dormant Architect persona
+// (agent 10). housekeeping_recommendChanges' own prompt text ("you are
+// authorized to act... no longer recommend-only") already contradicted that
+// principle even though its code path happened to stay inert (no push call);
+// housekeeping_uiCheck was retired too even though it was read-only, per the
+// explicit "all of it, not just the code-writing one" instruction.
+// reviewReadySection() below is unaffected — always was a separate,
+// non-`housekeeping_`-prefixed function, unconditional, no writes.
 
 function reviewReadySection(progressItems) {
   const done = progressItems.filter((i) => i.status === 'done');
@@ -443,18 +358,9 @@ function reviewReadySection(progressItems) {
 }
 
 async function runHousekeepingPass(notebookXToken, progressItems) {
-  console.log('\n=== Housekeeping pass (recommend-only — never deletes, merges, or modifies files) ===');
+  console.log('\n=== Housekeeping pass (housekeeping_* function family retired 2026-07-18 — see comment above reviewReadySection()) ===');
 
   const sections = [reviewReadySection(progressItems)];
-  if (!notebookXToken) {
-    console.log('NOTEBOOK_X_REPO_TOKEN not set — the 4 housekeeping checks below need read access to avivnofar/Notebook-X, skipping those this run.');
-    sections.push({ title: 'Housekeeping checks', body: '_Skipped this run — NOTEBOOK_X_REPO_TOKEN not set._' });
-  } else {
-    sections.push(await housekeeping_unifyDeleteObsolete(notebookXToken));
-    sections.push(await housekeeping_recommendChanges(notebookXToken));
-    sections.push(await housekeeping_uiCheck());
-    sections.push(await housekeeping_codeAssessment(notebookXToken));
-  }
 
   const date = new Date().toISOString().slice(0, 10);
   fs.mkdirSync(HOUSEKEEPING_DIR, { recursive: true });
@@ -463,7 +369,9 @@ async function runHousekeepingPass(notebookXToken, progressItems) {
     `# Notebook-X housekeeping pass — ${date}`,
     '',
     '**Recommend-only.** This automation never deletes, merges, or modifies files directly — ' +
-    'everything below is a finding or suggestion for a human to review and act on manually.',
+    'everything below is a finding or suggestion for a human to review and act on manually. The ' +
+    'housekeeping_* checks (file-listing review, CLAUDE_CONTEXT.md-based recommendations, API health ' +
+    'probe, backend code assessment) were retired 2026-07-18 — see this repo\'s CLAUDE.md.',
     '',
     ...sections.flatMap((s) => [`## ${s.title}`, '', s.body, '']),
   ].join('\n');
@@ -579,8 +487,25 @@ async function main() {
   console.log(item.label);
 
   // --- Logic for Frontend Code Changes ---
+  //
+  // RETIRED (auto-push) 2026-07-18 (Q&A-engine rebuild), same principle as
+  // the housekeeping_* family above: no agent writes or modifies code, files,
+  // or tools of any kind — that's reserved for Claude Code working directly
+  // with the owner, or a future owner-directed special task to the dormant
+  // Architect persona. This used to fetch the target file, ask Gemini for a
+  // full rewrite via <summary>/<updated_code> tags, and push it straight to
+  // avivnofar/Notebook-X (gated only by checkDiffPlausible() AFTER the push
+  // — checkCodeWriteAllowedForModel() existed in this file for exactly this
+  // gate but was never actually wired in, a real gap independently found
+  // during this rebuild's investigation). Now: recommendation-only, same
+  // shape as housekeeping_recommendChanges used to be — fetch the file, ask
+  // Gemini what SHOULD change and why, write that analysis to the daily log,
+  // and leave the item flagged for a human/Claude-Code session to actually
+  // implement. checkDiffPlausible()/ghGetCommit() above are now unused by
+  // this path (kept, not dead — still exported-shaped utilities a future
+  // human-authorized code session could reuse) but no longer called here.
   if (item.kind === 'frontend_code_change') {
-    console.log(`\n=== Executing frontend code change: ${item.id} ===`);
+    console.log(`\n=== Frontend code change (recommendation-only): ${item.id} ===`);
     const targetPath = item.target_notebook_name || 'index.html';
     const fileContent = await ghGetFile(notebookXToken, targetPath);
     const text = ghFileText(fileContent);
@@ -590,56 +515,22 @@ async function main() {
         return;
     }
 
-    const prompt = `You are tasked with the following frontend code change: "${item.label}".\n` +
+    const prompt = `You are analyzing a proposed frontend change: "${item.label}".\n` +
       `Here is the current content of ${targetPath}:\n\n---\n${text}\n---\n\n` +
-      `Output your response using the following exact XML tags:\n` +
-      `<summary>A short explanation of what you changed</summary>\n` +
-      `<updated_code>\n[INSERT FULL UPDATED RAW CODE HERE]\n</updated_code>`;
+      `Do NOT write or output any code. Write a short (3-6 sentence) recommendation for a human developer: ` +
+      `what would need to change, roughly where in the file, and any risk/edge-case worth knowing before they implement it.`;
 
-    const analysisRaw = await generate(prompt, { temperature: 0.1, maxTokens: 4096 });
+    let recommendation;
     try {
-        const summaryMatch = analysisRaw.match(/<summary>([\s\S]*?)<\/summary>/i);
-        const codeMatch = analysisRaw.match(/<updated_code>([\s\S]*?)<\/updated_code>/i);
-
-        if (summaryMatch && codeMatch) {
-            const summary = summaryMatch[1].trim();
-            const updatedCode = codeMatch[1].trim();
-            console.log(`Gemini implementation summary: ${summary}`);
-            const pushRes = await ghPutRawTextFile(notebookXToken, targetPath, updatedCode, `gemini-auto-task: ${item.id}`);
-            
-            if (pushRes.ok && pushRes.data?.commit?.sha) {
-                // Verify if the diff is actually plausible using checkDiffPlausible
-                const commitSha = pushRes.data.commit.sha;
-                const commitDetails = await ghGetCommit(notebookXToken, commitSha);
-                const fileDiff = commitDetails?.files?.find(f => f.filename === targetPath);
-                const diffCheck = checkDiffPlausible(fileDiff);
-                
-                if (diffCheck.plausible) {
-                    item.status = 'done';
-                    item.completed = new Date().toISOString().slice(0, 10);
-                    saveProgress(progress);
-                    appendDailyLog(healthFindings, { id: item.id, label: item.label, outcome: 'implemented-and-pushed' });
-                    return;
-                } else {
-                    console.log(`Commit rejected as implausible: ${diffCheck.reason}`);
-                    item.status = 'flagged_for_review';
-                    item.completion_note = `Push succeeded but rejected by plausibility floor: ${diffCheck.reason}. Needs manual review.`;
-                    saveProgress(progress);
-                    appendDailyLog(healthFindings, { id: item.id, label: item.label, outcome: 'rejected-implausible' });
-                    return;
-                }
-            } else if (pushRes.ok) {
-                // Fallback if GitHub didn't return commit details but push was ok
-                item.status = 'done';
-                item.completed = new Date().toISOString().slice(0, 10);
-                saveProgress(progress);
-                appendDailyLog(healthFindings, { id: item.id, label: item.label, outcome: 'implemented-and-pushed' });
-                return;
-            }
-        }
+      recommendation = await generate(prompt, { temperature: 0.2, maxTokens: 512 });
     } catch (e) {
-        console.log(`Error processing frontend change: ${e.message}`);
+      recommendation = `(recommendation unavailable: ${e.message})`;
     }
+
+    item.status = 'flagged_for_review';
+    item.completion_note = `Recommendation-only pass (2026-07-18 rebuild — no auto-push): ${recommendation}`;
+    saveProgress(progress);
+    appendDailyLog(healthFindings, { id: item.id, label: item.label, outcome: 'recommendation-only, needs human/Claude-Code implementation' });
     return;
   }
 

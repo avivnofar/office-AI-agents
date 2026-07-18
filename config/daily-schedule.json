@@ -14,7 +14,7 @@
       "6": "Friday (short day — weekly summary meeting, reduced case load)",
       "7": "Saturday (off — idle only, no Gemini/Claude calls)"
     },
-    "case_volume_design_note": "agents-config.json's per-agent quotas (cases_per_day_min/max: 30-50, esp. agent_5: 15-30) are CAPACITY CEILINGS, not a mandate to generate 30 x 7 agents/day. The CRM engine's existing daily pool (simulationConfig.WORK_DAY, ~50 cases/day total across the ~7 case-handling agents, as observed on Day 1) remains the cost-driving throughput per the $5/mo guard and Launch Decisions' token discipline. This schedule SPREADS that existing pool across the day via `case_batches` rather than multiplying it."
+    "case_volume_design_note": "SUPERSEDED 2026-07-18 (Q&A-engine rebuild) — volume is no longer a fixed per-agent quota at all. Once per day, at cycle start, agent-runner.js's computeDailyQuestionVolume() checks the remaining shared Claude budget for the month (config/token-economy.json shared_claude_budget) and picks a conservative day total from it (0 if exhausted) — never a fixed number decided in advance. That total is then SPREAD across the day exactly as before, via the existing case_batch case_share proportions below (5 blocks, several hours apart). Non-burstiness for Notebook-X specifically doesn't come from this per-day total at all — it comes from workers/gemini-pacer.js's per-call pacing check at ask time (agent-base.js askAssignedProject()), which is what actually rate-limits Gemini calls regardless of how many questions a block was handed."
   },
 
   "work_hours": { "start": "08:00", "end": "16:00" },
@@ -58,19 +58,18 @@
   },
 
   "model_education_program": {
-    "description": "Educates the app's Claude (data-center-api) — the 'main model' the office exists to train. Runs once per work day at the 'report' block, after that day's case batches.",
+    "description": "Stress-tests Claude (data-center) and Gemini (Notebook-X) — the two production AI systems the office exists to evaluate. Runs once per work day at the 'report' block, after that day's question batches.",
     "daily_ai_experience_report": {
-      "who": "every agent who handled at least one case today (workers 1-4 and any admin agents with case_focus that touched cases)",
-      "what": "a short, casual fileStatusReport()-style note (1-2 paragraphs) on today's AI Search/Diagnose experience: what worked, what didn't, tone matches the agent's personality.",
+      "who": "every agent who asked at least one question today",
+      "what": "a short, casual fileStatusReport()-style note (1-2 paragraphs) on today's experience asking Claude/Gemini real questions: what worked, what didn't, tone matches the agent's personality.",
       "permission_level": "private (staff/agents + owner) per CLAUDE.md report tiering — these are internal mood/experience notes, not business-facing."
     },
-    "model_education_case_study": {
-      "trigger": "any interaction today where evaluateResponseQuality() < quality_threshold (i.e. the model did NOT handle the case flawlessly)",
-      "quality_threshold": 0.6,
-      "max_per_day": 3,
-      "what": "a structured case study: the query, the model's response summary, what was missing/wrong, and a suggested fix — written from the agent's perspective.",
-      "routing": "fileModelEducationCaseStudy() persists a `reports` row (type='model_education') and, if GITHUB_TOKEN is configured, opens a GitHub Issue labeled 'claude-action' + 'model-education'. If GITHUB_TOKEN is absent (current state), it stays queued in D1 `reports` for a human/Claude-Code session to batch-file.",
-      "permission_level": "special (AI staff + owner) — may reference internal scoring/prompts."
+    "capability_gap_reporting": {
+      "_meta": "SUPERSEDED the old 'model_education_case_study' sub-block 2026-07-18 (Q&A-engine rebuild). No longer batched at end of day from 'the worst N interactions' — each ask-and-evaluate call (agents/agent-base.js askAssignedProject()) decides in real time via workers/gap-reports.js detectCapabilityGap() + the agent's own escalation_threshold (config/agents-config.json, see Step 3 persona differentiation).",
+      "trigger": "HARD gaps (no Notebook-X answer at all, or the Claude request itself failed) always flag, any persona. SOFT candidates (a real but weak answer, quality < 0.5) only flag if quality is also below THIS agent's escalation_threshold — sensitive personas (QA, Lead QA) flag more of these than tolerant ones (Standard, Trainee).",
+      "what": "a short (2-4 line) HEBREW internal office note, in the flagging agent's own voice via queryGemini(): what's missing/wrong, where (topic/notebook), what it teaches. Framed as \"the tool I work with isn't good enough here, flagging it for the tool to be fixed\" — internal office logic, not a customer-facing incident.",
+      "routing": "agent.fileGapReport() persists a `reports` row (type='gap_hebrew', project set). Once per day at this 'report' block, agent-runner.js's fileGapDigests() reads today's rows, groups by project, and commits ONE file per project with entries to reports/gaps/<project>/<date>.md. NEVER a GitHub Issue, for either project — an explicit requirement of this rebuild, unlike the old model_education_case_study which did open one.",
+      "permission_level": "special (AI staff + owner) — internal, Hebrew, not business-facing."
     }
   },
 

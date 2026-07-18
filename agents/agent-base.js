@@ -14,8 +14,9 @@
 import { callGemini, callCloudflareFallback } from '../workers/gemini-client.js';
 import { callGroq } from '../workers/groq-client.js';
 import { queryNotebookX } from '../workers/notebookx-client.js';
-import tokenEconomy from '../config/token-economy.json';
-import aiToolsConfig from '../config/ai-tools.json';
+import { getClaudeBudgetStatus, recordClaudeSpend } from '../workers/model-router.js';
+import { checkGeminiPacingSlot } from '../workers/gemini-pacer.js';
+import { detectCapabilityGap } from '../workers/gap-reports.js';
 
 const MOOD_MIN = 0;
 const MOOD_MAX = 100;
@@ -200,7 +201,7 @@ export class AgentBase {
    *
    * Model routing (config/token-economy.json):
    *  - opts.reportType === 'monthly_report'|'quarterly_report'|'semi_yearly_report'|'yearly_report':
-   *    Gemini 2.5 Flash-Lite (callGemini) — large-context report synthesis.
+   *    Gemini 3.1 Flash-Lite (callGemini) — large-context report synthesis.
    *  - opts.forceFallback: skip straight to the Cloudflare Workers AI fallback
    *    (testing only — see /api/agents/test-gemini).
    *  - otherwise (routine case work — the common path for agents 1-4, 5-9, 11):
@@ -240,7 +241,7 @@ export class AgentBase {
       const simConfig = this.env.SIM_CONFIG?.GEMINI || {};
       const result = await callGemini({
         apiKey: this.env.GEMINI_API_KEY,
-        model: simConfig.model || 'gemini-3.5-flash',
+        model: simConfig.model || 'gemini-3.1-flash-lite', // gemini-3.5-flash is deprecated — never reintroduce it, see CLAUDE.md
         endpoint: simConfig.api_endpoint || 'https://generativelanguage.googleapis.com/v1beta/models',
         temperature: simConfig.temperature ?? 0.8,
         maxTokens: Math.max(simConfig.max_tokens ?? 1024, 2048),
@@ -304,13 +305,22 @@ export class AgentBase {
   }
 
   /**
-   * Model-education case study: filed when interactWithApp() returned a
-   * quality score below the daily-schedule.json model_education_case_study
-   * threshold. Queued in `reports` (type='model_education') for batch-filing
-   * as a claude-action/model-education GitHub Issue.
+   * Files a Hebrew capability-gap finding (2026-07-18 Q&A-engine rebuild —
+   * replaces the old English model_education_case_study + GitHub-Issue
+   * digest entirely; see workers/gap-reports.js). Queued in `reports`
+   * (type='gap_hebrew', project set) for the daily digest
+   * (agent-runner.js fileGapDigests()) to batch into
+   * reports/gaps/<project>/<date>.md — never a GitHub Issue.
    */
-  async fileModelEducationCaseStudy(content) {
-    return this._fileReport('model_education', `Model education case study — ${this.name}`, content, 'info');
+  async fileGapReport(project, caseId, hebrewContent) {
+    const id = crypto.randomUUID();
+    if (this.env.DB) {
+      await this.env.DB.prepare(
+        `INSERT INTO reports (id, agent_id, type, title, content, severity, project)
+         VALUES (?, ?, 'gap_hebrew', ?, ?, 'info', ?)`
+      ).bind(id, this.id, caseId || this.name, hebrewContent, project).run();
+    }
+    return id;
   }
 
   /**
@@ -344,105 +354,172 @@ export class AgentBase {
     return id;
   }
 
-  /* ───────────────────── 5. App interaction simulation ──────────────── */
+  /* ───────────────────── 5. Ask-and-evaluate (Q&A engine) ────────────── */
 
   /**
-   * Sends a query to the live Claude API worker and updates mood/irritation
-   * based on a (placeholder) quality score.
+   * Asks this agent's assigned question to whichever ONE production AI
+   * system it targets — Claude via data-center (project: 'data-center') or
+   * Gemini via a specific Notebook-X notebook (project: 'notebook-x',
+   * kbSlug required). Replaces the old interactWithApp() dual-path
+   * escalation logic (check notebook-x, fall through to Claude) — that
+   * behavior belonged to the retired Netvill-CRM case model. Every question
+   * from workers/qa-engine.js already targets exactly one project at
+   * generation time; this method does not choose or escalate between them.
+   *
    * @param {string} query
    * @param {'search'|'diagnose'} [mode]
-   * @param {object} [opts]
-   * @param {string} [opts.platform] - caseData.platform, used to check
-   *   Notebook-X (config/ai-tools.json notebook_x.case_platform_map) for
-   *   relevant reference material BEFORE escalating to Claude. A found
-   *   answer short-circuits this call entirely — no Claude cap consumed.
+   * @param {object} opts
+   * @param {'data-center'|'notebook-x'} opts.project
+   * @param {string} [opts.kbSlug] - required when project is 'notebook-x'
+   * @param {string} [opts.caseId] - for gap-report attribution
    */
-  async interactWithApp(query, mode = 'search', opts = {}) {
-    const kbSlug = aiToolsConfig.notebook_x?.case_platform_map?.[opts.platform];
-    if (kbSlug) {
-      const nbResult = await queryNotebookX({ kbSlug, question: query });
-      if (nbResult) {
-        const moodBefore = this.mood;
-        const quality = Math.min(1, nbResult.text.length / 600);
-        if (this.session) this.session.cases_handled += 1;
-        await this.logInteraction({
-          type: `app_${mode}`,
-          query,
-          response_summary: nbResult.text.slice(0, 500),
-          mood_before: moodBefore,
-          mood_after: this.mood,
-          irritation_change: 0,
-          state_change: null,
-          model_source: null,
-          tool_used: 'notebook-x',
-        });
-        return { ok: true, quality, response: nbResult.text, tool_used: 'notebook-x' };
+  async askAssignedProject(query, mode = 'search', opts = {}) {
+    const ask = (q) => (opts.project === 'notebook-x'
+      ? this._askNotebookX(q, mode, opts.kbSlug, opts.caseId)
+      : this._askDataCenter(q, mode, opts.caseId));
+
+    let result = await ask(query);
+
+    // Step 3 (2026-07-18 rebuild): "how deep their follow-up goes on a
+    // partial/unclear answer" — persona-tunable via `followup_depth`
+    // (config/agents-config.json), applied uniformly here rather than
+    // per-persona-class so all 11 personas get it without bespoke wiring.
+    // Only fires on an UNCLEAR answer band (0.3-0.65) — a clearly bad
+    // answer (< 0.3) is a gap-report candidate, not a follow-up candidate;
+    // a clearly good one (>= 0.65) doesn't need chasing.
+    const followupDepth = typeof this.config.followup_depth === 'number' ? this.config.followup_depth : 0;
+    let depth = 0;
+    let lastQuery = query;
+    while (
+      depth < followupDepth &&
+      !result.skipped &&
+      typeof result.quality === 'number' &&
+      result.quality >= 0.3 && result.quality < 0.65
+    ) {
+      let followUpQuery;
+      try {
+        followUpQuery = await this.queryGemini(
+          `The last answer to "${lastQuery}" was unclear or only partially useful (quality ${result.quality.toFixed(2)}/1.0): """${(result.response || '').slice(0, 300)}""". ` +
+          `Ask ONE short, sharper follow-up question to get a clearer answer on the same topic. Reply with only the follow-up question, nothing else.`
+        );
+      } catch {
+        break;
       }
+      if (!followUpQuery) break;
+      depth += 1;
+      lastQuery = followUpQuery;
+      result = await ask(followUpQuery);
     }
 
-    // Hard daily cap on Claude API calls, distributed fairly across agents
-    // (config/token-economy.json claude_daily_cap: 30, claude_cap_rationale).
-    // Two checks, either of which routes this case to Groq instead (free) so
-    // the simulation keeps running and no single early-running agent can
-    // exhaust the whole day's cap before later agents get a turn:
-    //   1. Global cap: today's claude interaction count across ALL agents.
-    //   2. Per-agent soft cap: floor(this.config.model_usage_rate * CAP) —
-    //      this agent's own share of today's claude interactions.
-    const CLAUDE_DAILY_CAP = tokenEconomy.claude_daily_cap ?? 30;
-    if (this.env.DB) {
-      const globalRow = await this.env.DB.prepare(
-        `SELECT COUNT(*) AS n FROM interactions WHERE model_source = 'claude' AND DATE(timestamp) = DATE('now')`
-      ).first().catch(() => null);
-      const claudeCountGlobal = globalRow?.n ?? 0;
-      const globalCapHit = claudeCountGlobal >= CLAUDE_DAILY_CAP;
+    return result;
+  }
 
-      const usageRate = typeof this.config.model_usage_rate === 'number' ? this.config.model_usage_rate : 0.1;
-      const perAgentCap = Math.floor(usageRate * CLAUDE_DAILY_CAP);
-      let agentCapHit = false;
-      if (!globalCapHit && perAgentCap > 0) {
-        const agentRow = await this.env.DB.prepare(
-          `SELECT COUNT(*) AS n FROM interactions WHERE model_source = 'claude' AND agent_id = ? AND DATE(timestamp) = DATE('now')`
-        ).bind(this.id).first().catch(() => null);
-        agentCapHit = (agentRow?.n ?? 0) >= perAgentCap;
-      } else if (!globalCapHit && perAgentCap === 0) {
-        agentCapHit = true;
-      }
+  /** Back-compat name during the transition — same behavior as askAssignedProject(). */
+  async interactWithApp(query, mode = 'search', opts = {}) {
+    return this.askAssignedProject(query, mode, opts);
+  }
 
-      if (globalCapHit || agentCapHit) {
-        if (globalCapHit) {
-          console.warn(`[agent-${this.id}] Claude daily cap (${CLAUDE_DAILY_CAP}) reached — using Groq for this case`);
-        } else {
-          console.warn(`[agent-${this.id}] Per-agent Claude cap (${perAgentCap}) reached — using Groq for this case`);
-        }
-        const moodBefore = this.mood;
-        const groqResult = await callGroq({
-          apiKey: this.env.GROQ_API_KEY,
-          prompt: `IT support query: ${query}. Provide a brief, helpful answer.`,
-          systemPrompt: 'You are a knowledgeable IT support assistant. Answer concisely.',
-          temperature: 0.7,
-          maxTokens: 300,
-          agentId: this.id,
-        });
-        const responseText = groqResult?.text || '';
-        const quality = Math.min(1, responseText.length / 600);
-        if (this.session) this.session.cases_handled += 1;
-        await this.logInteraction({
-          type: `app_${mode}`,
-          query,
-          response_summary: responseText.slice(0, 500),
-          mood_before: moodBefore,
-          mood_after: this.mood,
-          irritation_change: 0,
-          state_change: null,
-          model_source: 'groq',
-        });
-        return { ok: true, quality, response: responseText };
-      }
+  /**
+   * Applies the ORIGINAL design vision (Step 2, 2026-07-18 rebuild): mood
+   * and irritation update PRIMARILY from the response-quality score, not a
+   * secondary signal alongside others. Shared by both ask paths so Claude
+   * and Gemini answers are judged by the same mood-effect rule.
+   */
+  async _applyQualityMood(quality) {
+    let stateChange = null;
+    if (quality > 0.7 && Math.random() < (this.config.states?.HAPPY?.trigger_chance ?? 0.5)) {
+      await this.triggerHappy();
+      if (this.session) this.session.happy_events += 1;
+      stateChange = 'HAPPY';
+    } else if (quality < 0.4 && Math.random() < (this.config.states?.IRRITATED?.trigger_chance ?? 0.3)) {
+      await this.addIrritiation();
+      if (this.session) this.session.irritation_events += 1;
+      stateChange = 'IRRITATED';
+    }
+    return stateChange;
+  }
+
+  /**
+   * Ask Notebook-X's Gemini backend for a specific kbSlug. Paced by
+   * workers/gemini-pacer.js (shared free-tier quota, see that module's
+   * header comment for why) — a paced-out call is skipped this tick, not
+   * blocked-and-retried, and consumes no mood/gap effect.
+   */
+  async _askNotebookX(query, mode, kbSlug, caseId) {
+    const moodBefore = this.mood;
+
+    const pacing = await checkGeminiPacingSlot(this.env);
+    if (!pacing.allowed) {
+      await this.logInteraction({
+        type: `qa_${mode}`,
+        query,
+        response_summary: '(skipped: Gemini pacing slot not yet available — see workers/gemini-pacer.js)',
+        mood_before: moodBefore,
+        mood_after: this.mood,
+        irritation_change: 0,
+        state_change: null,
+        model_source: null,
+        tool_used: 'notebook-x-paced-skip',
+      });
+      return { ok: false, skipped: true, reason: 'gemini_pacing', quality: undefined };
+    }
+
+    const nbResult = kbSlug ? await queryNotebookX({ kbSlug, question: query }) : null;
+    const notebookAnswerFound = !!nbResult;
+    const responseText = nbResult?.text || '';
+    const quality = notebookAnswerFound ? Math.min(1, responseText.length / 600) : 0;
+
+    if (this.session) this.session.cases_handled += 1;
+    const stateChange = await this._applyQualityMood(quality);
+
+    await this.logInteraction({
+      type: `qa_${mode}`,
+      query,
+      response_summary: notebookAnswerFound ? responseText.slice(0, 500) : '(no answer — notebook does not cover this)',
+      mood_before: moodBefore,
+      mood_after: this.mood,
+      irritation_change: stateChange === 'IRRITATED' ? 1 : 0,
+      state_change: stateChange,
+      model_source: null,
+      tool_used: 'notebook-x',
+    });
+
+    const gap = detectCapabilityGap({ project: 'notebook-x', quality, notebookAnswerFound });
+    await this.flagCapabilityGap({ project: 'notebook-x', gap, quality, query, responseText, kbSlug, caseId });
+
+    return { ok: notebookAnswerFound, quality, response: responseText, tool_used: 'notebook-x' };
+  }
+
+  /**
+   * Ask Claude via data-center-api's /api/chat. Draws from the SAME shared
+   * $5/month Claude budget as the chore-automation economy (config/
+   * token-economy.json shared_claude_budget, workers/model-router.js
+   * claude_budget_usage D1 table) — not a separate cap. If the shared
+   * budget is exhausted for this month, the ask is skipped (no fallback
+   * model substitutes for Claude here — asking Groq a Claude-bound question
+   * would misattribute the answer to the wrong system this office is meant
+   * to be stress-testing).
+   */
+  async _askDataCenter(query, mode, caseId) {
+    const moodBefore = this.mood;
+
+    const budget = await getClaudeBudgetStatus(this.env);
+    if (budget.overBudget) {
+      await this.logInteraction({
+        type: `qa_${mode}`,
+        query,
+        response_summary: `(skipped: shared Claude budget exhausted — $${budget.spentUsd.toFixed(2)}/$${budget.capUsd}/mo)`,
+        mood_before: moodBefore,
+        mood_after: this.mood,
+        irritation_change: 0,
+        state_change: null,
+        model_source: null,
+        tool_used: 'claude-budget-skip',
+      });
+      return { ok: false, skipped: true, reason: 'claude_budget_exhausted', quality: undefined };
     }
 
     const base = this.env.APP_API_BASE || 'https://data-center-api.avivnofar.workers.dev';
-    const moodBefore = this.mood;
-
     const requestInit = {
       method: 'POST',
       headers: {
@@ -473,42 +550,92 @@ export class AgentBase {
       responseText = String(err);
     }
 
+    // Estimated cost recorded against the SHARED budget regardless of
+    // outcome (a failed call still consumed request tokens on Claude's
+    // side) — rough ~4-chars/token estimate, matching this repo's existing
+    // token-estimation convention elsewhere.
+    await recordClaudeSpend(this.env, {
+      inputTokens: Math.ceil(query.length / 4),
+      outputTokens: Math.ceil(responseText.length / 4),
+    });
+
     const quality = await this.evaluateResponseQuality(query, responseText, ok);
-
     if (this.session) this.session.cases_handled += 1;
-
-    let stateChange = null;
-    if (quality > 0.7 && Math.random() < (this.config.states?.HAPPY?.trigger_chance ?? 0.5)) {
-      await this.triggerHappy();
-      if (this.session) this.session.happy_events += 1;
-      stateChange = 'HAPPY';
-    } else if (quality < 0.4 && Math.random() < (this.config.states?.IRRITATED?.trigger_chance ?? 0.3)) {
-      await this.addIrritiation();
-      if (this.session) this.session.irritation_events += 1;
-      stateChange = 'IRRITATED';
-    }
+    const stateChange = await this._applyQualityMood(quality);
 
     await this.logInteraction({
-      type: `app_${mode}`,
+      type: `qa_${mode}`,
       query,
       response_summary: responseText.slice(0, 500),
       mood_before: moodBefore,
       mood_after: this.mood,
-      irritation_change: this.session?.irritation_events ? 1 : 0,
+      irritation_change: stateChange === 'IRRITATED' ? 1 : 0,
       state_change: stateChange,
       model_source: 'claude',
     });
+
+    const gap = detectCapabilityGap({ project: 'data-center', ok, quality });
+    await this.flagCapabilityGap({ project: 'data-center', gap, quality, query, responseText, caseId });
 
     return { ok, quality, response: responseText };
   }
 
   /**
-   * Placeholder quality heuristic (0.0-1.0). Phase 2: replace with a
-   * Gemini-as-judge call comparing the response against the case.
+   * Placeholder quality heuristic (0.0-1.0), UNCHANGED by the 2026-07-18
+   * rebuild — explicitly reused rather than rebuilt, per that session's
+   * Step 2 instruction ("reuse the EXISTING model-education quality-scoring
+   * logic"). Phase 2: replace with a Gemini-as-judge call comparing the
+   * response against the question.
    */
   async evaluateResponseQuality(_query, responseText, ok) {
     if (!ok || !responseText) return 0;
     return Math.min(1, responseText.length / 800);
+  }
+
+  /**
+   * Step 3/4 (2026-07-18 rebuild): decides whether to file a Hebrew
+   * capability-gap report, and if so, has the agent compose it in its own
+   * voice via the existing queryGemini() model-call path (reused, not
+   * rebuilt). HARD gaps (kind:'hard' — no notebook coverage, or the Claude
+   * request itself failed) are always flagged, regardless of persona. SOFT
+   * candidates (kind:'soft' — a real but weak answer) are only flagged if
+   * this agent's own `escalation_threshold` (config/agents-config.json)
+   * says it's worth it — QA/Lead QA run higher thresholds (flag more
+   * borderline cases), Standard runs a lower one (flag only clear misses).
+   * Report tone (CEO one-liner, Designer notes presentation/delivery) comes
+   * from this.config.system_prompt_additions, already threaded through
+   * queryGemini() the same way every other in-character call in this class
+   * gets it — no separate tone mechanism needed.
+   */
+  async flagCapabilityGap({ project, gap, quality, query, responseText, kbSlug, caseId }) {
+    if (!gap || !gap.kind) return null;
+
+    if (gap.kind === 'soft') {
+      const threshold = typeof this.config.escalation_threshold === 'number' ? this.config.escalation_threshold : 0.2;
+      if (quality >= threshold) return null;
+    }
+    // kind === 'hard' always proceeds.
+
+    const whatHappened = gap.reason === 'no_notebook_coverage'
+      ? `Notebook-X's ${kbSlug || 'assigned'} notebook returned no answer at all for this question.`
+      : gap.reason === 'request_failed'
+        ? `The request to data-center's Claude-powered AI Search failed outright.`
+        : `The answer came back but scored ${quality.toFixed(2)}/1.0 — weak, not just imperfect.`;
+
+    let hebrewText;
+    try {
+      hebrewText = await this.queryGemini(
+        `בעברית בלבד, 2-4 שורות קצרות, בגוף ראשון ובסגנון האופי שלך: תעד פער יכולת אמיתי שגילית עכשיו ` +
+        `בכלי שאתה עובד איתו (${project === 'notebook-x' ? 'Notebook-X' : 'Claude ב-data-center'}). ` +
+        `זו הערה פנימית של המשרד, לא דוח תקרית ללקוח — הטון הוא "הכלי שאני עובד איתו לא מספיק טוב פה, מסמן את זה לתיקון", ` +
+        `לא תלונה כלפי חוץ. השאלה שנשאלה: "${query}". מה קרה: ${whatHappened} ` +
+        `כלול: מה חסר/שגוי, איפה (הנושא/ה-notebook), ומה זה מלמד. קצר ולעניין, בלי כותרות.`
+      );
+    } catch (err) {
+      hebrewText = `[שגיאה בניסוח הדוח: ${err.message}] ${whatHappened} שאלה: ${query}`;
+    }
+
+    return this.fileGapReport(project, caseId, hebrewText);
   }
 
   async logInteraction({ type, query, response_summary, mood_before, mood_after, irritation_change, state_change, model_source, tool_used }) {

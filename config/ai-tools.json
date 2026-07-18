@@ -9,22 +9,37 @@
   "notebook_x": {
     "display_name": "Notebook-X",
     "kind": "unattended_api",
-    "description": "Live, per-case reference lookup queried directly by the assigned agent (workers/notebookx-client.js) before deciding whether to escalate a case to Claude — the goal is fewer Claude escalations for cases Notebook-X already answers well. Unlike the four tools below, this is NOT a human-in-the-loop tool-task: no board row, no asset-task issue, no weekly_rotation slot.",
+    "description": "As of the 2026-07-18 Q&A-engine rebuild (see CLAUDE.md): agents ask real questions directly to a specific Notebook-X notebook (workers/notebookx-client.js) as ONE of the two production AI systems this office stress-tests — NOT a pre-Claude-escalation reference check anymore (that dual-path 'check notebook-x, fall through to Claude' behavior was retired along with the Netvill CRM case model; see workers/qa-topics.js/qa-engine.js). Each generated question targets exactly one project (data-center/Claude OR notebook-x/Gemini), chosen at generation time. Unlike the four tools below, this is NOT a human-in-the-loop tool-task: no board row, no asset-task issue, no weekly_rotation slot.",
     "base_url": "https://notebook-x-api.onrender.com",
     "auth": "none — confirmed via GET /openapi.json: no securitySchemes defined on any endpoint. No NOTEBOOK_X_API_KEY secret needed.",
     "endpoint_used": "POST /api/knowledge-notebooks/{notebook_id}/ask",
-    "scope_this_integration": "Only cases whose platform has a seeded notebook are wired: platform 'linux' -> kb-linux, platform '1com' -> kb-1com. kb-bash covers the same cases as kb-linux (same seeded content) so it is not queried separately this session — querying kb-linux once per linux case is treated as covering kb-bash too, to avoid a duplicate API call with no added signal. Other case platforms (windows, network, cross-platform, mirtapbx) are out of scope — not seeded yet.",
+    "scope_this_integration": "Extended 2026-07-18 to cover all 6 notebooks the owner named plus 4 more discovered live in config/notebook-x-progress.json (kb-cybersecurity, kb-firewall, kb-networking, kb-vpn — all dataQuality:'skeleton' as of 2026-07-09, which makes them GOOD targets for real questions, not a reason to skip them: a skeleton notebook failing a real question is exactly the kind of genuine capability gap this office exists to surface). kb-bash still mirrors kb-linux's trigger (same seeded content, not queried separately) per the original scoping note.",
     "case_platform_map": {
       "linux": "kb-linux",
-      "1com": "kb-1com"
+      "bash": "kb-linux",
+      "1com": "kb-1com",
+      "mirtapbx": "kb-mirtapbx",
+      "voip-sip": "kb-voip-sip",
+      "cloud-devops": "kb-cloud-devops",
+      "cybersecurity": "kb-cybersecurity",
+      "firewall": "kb-firewall",
+      "networking": "kb-networking",
+      "vpn": "kb-vpn"
     },
     "kb_slugs": {
-      "kb-linux": "fully seeded per project spec",
-      "kb-bash": "fully seeded per project spec — mirrors kb-linux's trigger, not queried separately (see scope_this_integration)",
-      "kb-1com": "fully seeded per project spec"
+      "kb-linux": "dataQuality: complete",
+      "kb-bash": "dataQuality: complete — mirrors kb-linux's trigger, not queried separately (see scope_this_integration)",
+      "kb-1com": "dataQuality: complete",
+      "kb-voip-sip": "dataQuality: complete (filled 2026-07-09)",
+      "kb-mirtapbx": "dataQuality: complete (filled 2026-07-10)",
+      "kb-cloud-devops": "dataQuality: complete (filled 2026-07-10)",
+      "kb-cybersecurity": "dataQuality: skeleton as of 2026-07-09 — a real target for gap-flagging, not out of scope",
+      "kb-firewall": "dataQuality: skeleton as of 2026-07-09 — a real target for gap-flagging, not out of scope",
+      "kb-networking": "dataQuality: skeleton as of 2026-07-09 — a real target for gap-flagging, not out of scope",
+      "kb-vpn": "dataQuality: skeleton as of 2026-07-09 — a real target for gap-flagging, not out of scope"
     },
     "known_issues": [
-      "2026-07-01 verification call: GET /api/knowledge-notebooks and GET /api/notebooks both returned {\"notebooks\":[]}, and GET /api/health reported {\"status\":\"degraded\",\"notebookCount\":0,\"githubConnected\":false}. Asking kb-linux directly returned {\"detail\":\"GitHub GET notebooks/kb-linux.json: HTTP 401\"}. So as of that check, none of kb-linux/kb-bash/kb-1com were actually reachable despite being 'fully seeded per spec' — Notebook-X's own GitHub-backed storage connection needs to be restored on its side before this integration can return real answers. The client/wiring degrade gracefully (return null, fall through to normal Claude-cap logic) when this happens — see workers/notebookx-client.js."
+      "2026-07-01 verification call: GET /api/knowledge-notebooks and GET /api/notebooks both returned {\"notebooks\":[]}, and GET /api/health reported {\"status\":\"degraded\",\"notebookCount\":0,\"githubConnected\":false}. Asking kb-linux directly returned {\"detail\":\"GitHub GET notebooks/kb-linux.json: HTTP 401\"}. So as of that check, none of kb-linux/kb-bash/kb-1com were actually reachable despite being 'fully seeded per spec' — Notebook-X's own GitHub-backed storage connection needs to be restored on its side before this integration can return real answers. The client/wiring degrade gracefully (return null, treated as a capability-gap signal, not a crash) when this happens — see workers/notebookx-client.js and agent-base.js askNotebookX()."
     ],
     "access_by_clearance": {
       "standard": true,

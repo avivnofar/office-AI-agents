@@ -1,28 +1,39 @@
 {
   "_meta": {
-    "version": "0.2.0",
+    "version": "0.3.0",
     "status": "specified",
-    "description": "Distributed-AI model map for the office simulation (replaces the single-Gemini-engine v0.1.0). Routine per-case agent work (agents 1-4, 5-9, 11) runs on Groq's free tier (agents/workers/groq-client.js callGroq(), agent-base.js queryGemini()) — this is the fix for the recurring Gemini 429s documented in TOKEN-BUDGET.md. Cloudflare Workers AI handles lightweight case routing/classification (callCFRouter()) and is the same-session fallback when Groq is unavailable or Gemini returns 429 (callCloudflareFallback()), via the Worker's native AI binding (wrangler.toml [ai] binding = \"AI\") — no extra credentials. Gemini 2.5 Flash-Lite (per CLAUDE.md 'Launch Decisions' — gemini-3.5-flash is deprecated, do not reintroduce it) is reserved for monthly/quarterly/semi-yearly/yearly report synthesis (meeting-engine.js). The app's AI Search bar always uses Claude (data-center-api). Agent 10 (Architect) never calls an AI for routine cases — see agent-runner.js processCaseBatch()'s Agent-10 special case."
+    "description": "2026-07-18 Q&A-engine rebuild: agents now ask real questions directly to Claude (data-center) or Gemini (a specific Notebook-X notebook) — see CLAUDE.md and workers/qa-engine.js. The old per-day CALL-COUNT Claude cap (claude_daily_cap, removed below) is retired in favor of a single shared DOLLAR budget (shared_claude_budget below) tracked in D1's claude_budget_usage table (workers/model-router.js) — the SAME table the chore-automation economy already used, not a new separate one. Routine Gemini calls elsewhere in the office simulation (report synthesis, coworker chat, gap-report composition) still run through Groq/Cloudflare-fallback first per queryGemini()'s existing routing; only Notebook-X asks go direct to Gemini, paced by workers/gemini-pacer.js. Agent 10 (Architect) is dormant — excluded from this flow entirely, not just from routine cases."
   },
 
   "primary_case_model": "groq/llama3-8b-8192",
   "routing_model": "cloudflare/@cf/meta/llama-3.1-8b-instruct-fp8",
-  "report_model": "google/gemini-3.5-flash",
+  "report_model": "google/gemini-3.1-flash-lite",
   "app_search_model": "anthropic/claude-sonnet-4-6",
   "architect_model": "human+claude-code",
 
-  "claude_daily_cap": 30,
-  "claude_cap_rationale": "30 calls/day = ~$6/month. Distributed across 10 active agents by model_usage_rate. Primary purpose: model training through realistic IT interactions.",
+  "shared_claude_budget": {
+    "_meta": "Added 2026-07-18, replaces the retired claude_daily_cap (a per-day CALL COUNT, checked against `interactions` rows). This is a per-MONTH DOLLAR cap, checked/recorded via workers/model-router.js's getClaudeBudgetStatus()/recordClaudeSpend() — the exact same D1 claude_budget_usage table and functions the chore-automation economy already used (see chore_automation.claude_budget_usd_per_month below, now the single source of truth for this cap, bumped 4.50 -> 5.00). 'Shared' is not aspirational — office-agent Q&A Claude calls (agents/agent-base.js _askDataCenter()) and chore-automation Claude calls (workers/chore-runner.js) draw from and record against the SAME month row, by design, per this session's explicit instruction not to create a second budget.",
+    "cap_usd_per_month": 5.00,
+    "tracked_via": "workers/model-router.js getClaudeBudgetStatus() / recordClaudeSpend() -> D1 claude_budget_usage",
+    "consumers": ["office_qa_engine (agent-base.js _askDataCenter)", "chore_automation (chore-runner.js, wiring-only as of 2026-07-08)"]
+  },
+
+  "notebook_x_gemini_pacing": {
+    "_meta": "Added 2026-07-18. See workers/gemini-pacer.js's header comment for the full reasoning — summary here for anyone reading this config without the code.",
+    "min_spacing_ms_between_calls": 20000,
+    "why_not_a_precise_quota_split": "Gemini's free-tier per-minute quota is shared across THREE consumers this repo cannot fully observe: Notebook-X's own backend (live /ask traffic + its weekly gap-analysis job), this office Q&A automation, and other existing Gemini usage in office-AI-agents itself (report synthesis, coworker chat, gap-report composition). With two of the three consumers invisible to this repo, computing an exact 'fair share' would be false precision — the only safe posture is conservative, wide spacing from THIS automation, leaving deliberate headroom rather than trying to use a computed maximum.",
+    "mechanism": "skip-if-too-soon via a KV-tracked last-call timestamp, not an in-Worker blocking sleep — see checkGeminiPacingSlot()."
+  },
+
   "groq_primary": true,
   "cf_ai_fallback": true,
   "run_until_quota_exhausted": true,
-  "description": "Groq and CF AI are free — run agents hard. Claude API is paid — cap at 30 calls/day maximum across ALL agents combined, distributed per-agent by model_usage_rate so the model gets meaningful, spread-out training exposure rather than being front-run by whichever agent runs first.",
+  "description": "Groq and CF AI are free — run agents hard. Claude is paid — capped by shared_claude_budget above ($5/month total, shared with chore-automation), not a per-day call count. Primary purpose: real usage of both production AI systems (Claude, Gemini) surfaces genuine capability gaps.",
 
   "daily_limits": {
     "groq": 14400,
     "cloudflare_ai": 10000,
-    "gemini": 1500,
-    "claude_api": 30
+    "gemini": 1500
   },
 
   "gemini_reset_israel": "11:00",
@@ -51,10 +62,10 @@
   "chore_automation": {
     "_meta": {
       "added": "2026-07-08",
-      "description": "SEPARATE budget/routing from the office-simulation economy above (primary_case_model/claude_daily_cap etc., which governs the 11-agent case simulation and is untouched by this block). This governs the TODO.md-driven chore/content-generation automation (see config/daily-schedule.json's 00:00-06:00 night sweep and the Notebook-X/data-center/archive-alpha rotation) — see workers/model-router.js for the selection logic that reads this config.",
-      "relationship_to_case_sim_cap": "Independent budgets. The 30-calls/day case-simulation cap and this $4.50/month chore-automation cap are tracked separately (different D1 tables: interactions.model_source counts vs. claude_budget_usage) and do not share or offset each other."
+      "description": "Routing for the TODO.md-driven chore/content-generation automation (config/daily-schedule.json's chore_rotation block, workers/chore-runner.js/model-router.js) — a real feature, separate from the 11-agent Q&A office simulation's own daily flow (workers/qa-engine.js). NOTE: TODO.md itself was deleted from this repo's root in the 2026-07-18 repo-cleanup session; workers/chore-runner.js's fetchTodoSection() fetches it via a raw GitHub URL and degrades to a permanent no-op (ranTask:false, 'no tasks configured') now that it 404s — not a crash, but effectively dormant until TODO.md exists again or this is rewired to read something else.",
+      "relationship_to_case_sim_cap": "UPDATED 2026-07-18 — this is now the SAME budget as shared_claude_budget above (top-level), not a separate one. claude_budget_usd_per_month below is the single source of truth both blocks point to; office-agent Q&A Claude calls (agent-base.js) and chore-automation Claude calls both read/write the same D1 claude_budget_usage month row via workers/model-router.js's getClaudeBudgetStatus()/recordClaudeSpend(). The old 11-agent-only per-day CALL-COUNT cap (claude_daily_cap) this note used to contrast against no longer exists."
     },
-    "claude_budget_usd_per_month": 4.50,
+    "claude_budget_usd_per_month": 5.00,
     "claude_scope": "code-writing tasks and approval/review decisions only, by default. Notebook-X overrides this scope — see notebook_x_override below.",
     "claude_pricing_note": "Estimated at current Sonnet 5 intro pricing: $2/M input tokens, $10/M output tokens (workers/model-router.js CLAUDE_PRICING). This changes to $3/M input / $15/M output after 2026-08-31 — model-router.js already branches on that date, but double check the real published price at that time before trusting the estimate.",
     "gemini_role": "expanded — default writer for routine content generation across chore-automation tasks (previously reserved for report synthesis only in the office-simulation economy above).",

@@ -28,11 +28,12 @@ export class TraineeAgent extends AgentBase {
       await this.triggerHappy();
     }
 
-    let result = null;
-    if (Math.random() < (this.config.model_usage_rate ?? 0.55)) {
-      const questions = await this.formulateQuestions(caseData);
-      result = await this.interactWithApp(questions, 'diagnose', { platform: caseData.platform });
-    }
+    // 2026-07-18 Q&A-engine rebuild: every assigned question is always
+    // asked now (Step 3 — same core action for all 11 personas). Fits The
+    // Trainee especially well — "asks multiple clarifying questions" is
+    // her defining trait, not a probabilistic behavior.
+    const questions = await this.formulateQuestions(caseData);
+    const result = await this.askAssignedProject(questions, 'diagnose', { project: caseData.project, kbSlug: caseData.kb_slug, caseId: caseData.id });
 
     await this.updatePanic(guide, result);
 
