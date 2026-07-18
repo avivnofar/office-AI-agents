@@ -10,17 +10,6 @@
 
   "checks": [
     {
-      "id": "office-agents-weekly-case-batch",
-      "project": "office-agents",
-      "label": "Weekly Case Batch produced this week's case file",
-      "gatingWorkflow": { "repo": "avivnofar/office-AI-agents", "name": "Agent Simulation — Weekly Case Batch" },
-      "type": "github_file_freshness",
-      "repo": "avivnofar/office-AI-agents",
-      "pathTemplate": "database/cases-{{isoYear}}-w{{isoWeekPadded}}.json",
-      "maxAgeHours": 192,
-      "extra": "Also parses the file's own `count` field — a file that exists but has count:0 should still FAIL, not PASS, since an empty batch is exactly the 'exit-code-green-but-nothing-real-happened' failure mode this check exists to catch."
-    },
-    {
       "id": "office-agents-weekly-report",
       "project": "office-agents",
       "label": "Weekly Report committed this week's summary",
@@ -123,7 +112,8 @@
   ],
 
   "not_included": {
-    "archive-architect": "Deliberately excluded per explicit 2026-07-08 instruction — no further work on archive-architect.yml this session or any future session until told otherwise. Its email-delivery question (Step 5 of the prior session) is also unresolved, so a freshness check here would need a delivery signal this project doesn't have access to anyway.",
+    "office-agents-weekly-case-batch": "Check removed 2026-07-18 — the 'Agent Simulation — Weekly Case Batch' workflow (agent-cases.yml + generate-agent-cases.mjs) was deleted that day. Its output was an informational weekly snapshot only; the live daily flow generates its own question batches inline (workers/qa-engine.js generateAssignedDailyBatch(), called per-run from agent-runner.js), so there is no weekly database/cases-*.json artifact to freshness-check anymore.",
+    "archive-architect":"Deliberately excluded per explicit 2026-07-08 instruction — no further work on archive-architect.yml this session or any future session until told otherwise. Its email-delivery question (Step 5 of the prior session) is also unresolved, so a freshness check here would need a delivery signal this project doesn't have access to anyway.",
     "local-archive-galil-elion": "No GitHub Actions workflows exist in this repo at all (confirmed via gh workflow list — empty). Nothing to check yet."
   }
 }

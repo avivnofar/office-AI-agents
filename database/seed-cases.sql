@@ -2,9 +2,11 @@
 -- Status: DRAFT. Seeds the 11 agent rows (Phase 1 active agents 1-4 +
 -- Phase 2 stub agents 5-11) and a small sample batch of IT cases covering
 -- categories already present in data/linux.json, data/cmd.json, and
--- data/network.json. The full weekly batch (200-300 cases) is generated
--- by .github/workflows/agent-cases.yml — this file is just enough to
--- exercise the schema locally.
+-- data/network.json. Daily question batches are generated inline by the
+-- live Worker (workers/qa-engine.js generateAssignedDailyBatch(), called
+-- per-run from agent-runner.js — the standalone Weekly Case Batch workflow
+-- was retired 2026-07-18). This file is just enough to exercise the
+-- schema locally.
 
 INSERT INTO agents (id, key, name, tier, clearance) VALUES
   (1,  'agent-1-perfectionist', 'The Perfectionist',       'worker',     'standard'),
