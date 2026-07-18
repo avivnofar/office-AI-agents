@@ -3613,3 +3613,60 @@ other change in this repo.
 **Not done this session (explicitly out of scope):** enabling the live
 cron/schedule against this rebuild; the Architect's workflow file; the
 job-search automation (separate, later, dedicated chat).
+
+## 2026-07-18 — Q&A-engine rebuild: merged, deployed, everything dormant confirmed
+
+Closes out the 2026-07-18 rebuild (see the earlier same-day entry above
+for the full build writeup).
+
+**Merged**: `b9d4b88` (origin-only commit, `notebook-x-daily.yml`'s
+2026-07-16 scheduled run — a normal housekeeping-pass report, confirmed
+unrelated to the Worker's own cron) rebased under the rebuild commit via
+`git pull --rebase`. No conflicts. Post-rebase: confirmed zero
+`housekeeping_*` function definitions remain, `scripts/verify-qa-engine.js`
+56/56, pushed as `8760a2a` — independently confirmed against GitHub's own
+API (`GET .../git/refs/heads/master`), not just the push command's exit
+status.
+
+**Deployed**: `npx wrangler deploy` — Version ID
+`ffda7c23-1264-4985-b882-dd47243dbc8f`, created `2026-07-18T16:17:17.704Z`.
+Verified via `wrangler deployments list` + `versions view` (both real
+Cloudflare API reads) and a live `curl` to the public `/api/simulation`
+endpoint (200, well-formed response). Could NOT fetch the raw deployed
+script bundle for a byte-level content diff — Cloudflare's script-content
+API returned `405 Method not allowed for this authentication scheme` under
+wrangler's OAuth token, the same class of blocker this project has hit
+before. Noting this as a real, disclosed gap rather than papering over it:
+the deployment checks above confirm a new version is live and serving, not
+a line-by-line diff against the old bundle.
+
+**Cron trigger confirmed off via live API** (not just `wrangler.toml`):
+`GET /accounts/.../workers/scripts/data-center-agents/schedules` ->
+`{"schedules": []}`. This is the check this project wanted all month and
+got blocked on before by the OAuth issue — it worked this time (that
+specific endpoint isn't restricted the way raw script-content is).
+
+**Correction to this session's own working assumption**: checked
+`notebook-x-daily.yml`'s actual state via `gh api` rather than trust the
+prior turn's framing — it is `disabled_manually` as of
+`2026-07-17T13:48:44+03:00` (the day after its last successful scheduled
+run, 2026-07-16). It will NOT run tonight or any night until manually
+re-enabled. The retired `housekeeping_*` code is on `master` and would run
+correctly if this workflow were re-enabled, but nothing currently executes
+it automatically. Flagging this rather than repeating the unverified
+assumption that it was "live and now running the fixed code."
+
+**Full current state, everything else dormant/untouched as scoped**:
+- Cloudflare Worker: code deployed, cron trigger off (confirmed live).
+- GitHub Actions: `Agent Simulation — Weekly Case Batch`,
+  `Agent Simulation — Weekly Report`, `Archive Architect`,
+  `Scheduled Claude Automation`, `Notebook-X Daily Automation` — all
+  `disabled_manually`. `Cross-Project Health Check` — `active` but
+  `workflow_dispatch`-only, no schedule trigger.
+- Agent 10 (The Architect): dormant, its workflow file untouched this
+  session (explicit scope limit, again).
+- Job-search automation: not built (explicit scope limit, again).
+
+Nothing in this project is currently running on any automatic schedule.
+Re-enabling any of the above (Worker cron, Notebook-X daily, the others)
+is a separate, deliberate decision for later — not part of this session.
