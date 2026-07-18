@@ -3734,3 +3734,58 @@ sweep, not deleted files. Nothing deleted in this step.
 **Verification**: final push confirmed against GitHub's own API
 (`GET /repos/avivnofar/office-AI-agents/git/refs/heads/master` matches
 local HEAD), not just exit status — same standard as last session.
+
+## 2026-07-18 — Weekly Report path fix + approved legacy-file deletions
+
+Third session today. Zero model calls — repo surgery and a local dry run.
+
+**Step 1 — Weekly Report fixed and actually tested** (`4cae508`). The
+stale pre-split paths in `generate-weekly-report.mjs` (the bug class
+known since 2026-07-08, deferred until now): import
+`agents/config/agents-config.json` → `config/agents-config.json`,
+template `agents/reports/templates/` →
+`reports/templates/weekly-report-template.md`, output `agents/reports/`
+→ `reports/weekly/`. `agent-reports.yml`'s `git add` glob and
+`health-check-manifest.json`'s pathTemplate updated to match. Tested
+end-to-end locally with fixture JSON dumps standing in for the four
+admin-API curl outputs — first run exposed a REAL second bug: the
+`{{#each}}` template regexes anchor on `{{/each}}\n` and silently no-op
+on a CRLF checkout (the git index stores the template as LF, so Linux CI
+would have been fine — but the script now normalizes CRLF→LF anyway,
+and the fixture run renders every section correctly; test artifact
+deleted, not committed). **Layer answer, stated explicitly: this is a
+GitHub-Actions-layer fix only — the script runs on a fresh runner
+checkout, so it takes effect on push alone. No Worker deploy needed for
+any of today's changes** (nothing under `workers/` changed behavior;
+qa-topics.js got a comment-only edit). The workflow itself stays
+`disabled_manually` + config-gated (`AGENTS_API_BASE`/`ADMIN_TOKEN`) —
+NOT enabled this session, per explicit instruction; re-enabling is the
+owner's separate decision.
+
+**Step 2 — four owner-approved deletions** (`72ac174`):
+`database/cases-2026-w25.json`, `database/seed-cases.sql`,
+`scripts/sync-todo.js`, `config/notebook-x-progress.json`. Grep-verified
+no live code references any of them; live docs/comments that mentioned
+them updated (CLAUDE.md, `workers/qa-topics.js` header,
+`config/ai-tools.json` scope note, `project-permissions.json` _meta's
+sync-todo.js mention → historical note). History-log mentions
+(TOKEN-BUDGET.md, old reports) left untouched. Post-deletion:
+`verify-permissions.js` all-PASS, `verify-qa-engine.js` 56/56.
+
+**Step 3 — sweep-candidate audit (report-only, no fixes)**. Checked each
+config carrying pre-split `agents/...` path strings against actual code
+consumption: `daily-schedule.json`, `ai-tools.json`, `side-plots.json`,
+`year-tracker.json` are live imports in `agent-runner.js` and
+`relationships.json` in `meeting-engine.js` — but in every case the
+stale strings sit in prose/description fields the code never reads; the
+Worker hardcodes the CORRECT paths (`reports/weekly/`,
+`reports/asset-pipeline/board.json`, `reports/promotion-results-year-N.md`).
+`promotion-config.json` is imported by NO code at all — it's a design
+spec in config form. Verdict: all cosmetic, none urgent; single
+low-priority text sweep some future session. The only two functionally
+broken pre-split paths were Weekly Report (fixed today) and
+generate-agent-cases.mjs (deleted yesterday's session).
+
+**Verification**: push confirmed against GitHub's own API (master ref
+sha == local HEAD). No live schedule enabled; Worker not deployed —
+nothing needed it.
