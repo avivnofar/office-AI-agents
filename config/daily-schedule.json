@@ -3,7 +3,7 @@
     "version": "0.1.0",
     "status": "specified",
     "description": "Tactical 24h schedule the Phase-2 office simulation reads each simulated work day. agent-runner.js's runWorkDayCycle() iterates `blocks` in order within a single invocation (no per-block cron yet — see 'cron_status'). Each block represents a point in the simulated day where a specific activity fires, so the day's ~50-case CRM pool, meetings, AI-experience reports, and spare time are spread out instead of all happening at once.",
-    "cron_status": "WIRED (2026-06-12). agents/wrangler.toml has a single Cloudflare Cron Trigger ('*/30 5-13 * * *', every 30 min 05:00-13:30 UTC = 08:00-16:30 IDT). Each tick, agent-runner.js's scheduled() converts event.scheduledTime to Israel local time (israelTimeParts()) and calls runScheduledBlock(env, time, dayOfWeek), which is a no-op unless a block below has that exact `time` for that day-of-week. Day-in-progress state lives in SIM_KV under 'daily-cycle-state' between blocks. Per-block errors (e.g. Gemini 429) are logged to `reports` (logScheduledError) and do not abort the day.",
+    "cron_status": "LIVE (re-enabled 2026-07-18 for the Q&A engine's first activation, after the 2026-07-08 pause). wrangler.toml has a single Cloudflare Cron Trigger ('*/30 0-13,23 * * *', every 30 min 23:00-23:30 + 00:00-13:30 UTC = 02:00-16:30 IDT), matching the owner's 02:00-17:00 Israel activity window. Each tick, agent-runner.js's scheduled() converts event.scheduledTime to Israel local time (israelTimeParts()) and calls runScheduledBlock(env, time, dayOfWeek), which is a no-op unless a block below has that exact `time` for that day-of-week (note: the 02:00-Israel blocks therefore fire at 23:00 UTC the PREVIOUS calendar day — israelTimeParts() handles the day-of-week rollover). Day-in-progress state lives in SIM_KV under 'daily-cycle-state' between blocks. Per-block errors (e.g. Gemini 429) are logged to `reports` (logScheduledError) and do not abort the day.",
     "week_mapping": {
       "description": "dayOfWeek = ((current_day - 1) % 7) + 1, as already computed by runWorkDayCycle(). This schedule maps it to an Israeli Sun-Thu work week per the Launch Decisions ('work days Sunday-Thursday'), with Friday as a short summary day and Saturday off.",
       "1": "Sunday (full work day)",
@@ -23,16 +23,17 @@
   "full_day_schedule": {
     "applies_to_day_of_week": [1, 2, 3, 4, 5],
     "blocks": [
-      { "time": "08:00", "type": "case_batch", "label": "Morning batch", "case_share": 0.30 },
-      { "time": "09:30", "type": "case_batch", "label": "Mid-morning batch", "case_share": 0.20 },
-      { "time": "11:00", "type": "case_batch", "label": "Late-morning batch", "case_share": 0.20 },
+      { "time": "02:00", "type": "case_batch", "label": "Early-morning batch", "case_share": 0.20 },
+      { "time": "04:30", "type": "case_batch", "label": "Dawn batch", "case_share": 0.15 },
+      { "time": "07:00", "type": "case_batch", "label": "Morning batch", "case_share": 0.15 },
+      { "time": "09:30", "type": "case_batch", "label": "Late-morning batch", "case_share": 0.15 },
       { "time": "11:30", "type": "tool_task_window", "label": "Asset/tool-task window (Sun-Thu only, see ai-tools.json)", "ref": "ai-tools.json scheduling_rules" },
+      { "time": "12:00", "type": "case_batch", "label": "Midday batch", "case_share": 0.15 },
       { "time": "12:30", "type": "chore_rotation", "label": "Cross-project chore rotation (Notebook-X/data-center/archive-alpha, Gemini-routed, wiring-only)", "ref": "chore-schedule.json" },
-      { "time": "13:00", "type": "case_batch", "label": "Early-afternoon batch", "case_share": 0.20 },
-      { "time": "14:30", "type": "case_batch", "label": "Late-afternoon batch", "case_share": 0.10 },
-      { "time": "15:30", "type": "report", "label": "Daily AI-experience reports + model-education case studies", "ref": "model_education_program" },
-      { "time": "16:00", "type": "meeting", "meeting_type": "daily_standup", "label": "Daily standup (existing meeting-engine.js type)" },
-      { "time": "16:00", "type": "spare_time", "label": "Spare time: coworker interaction or idle (token-saving)", "ref": "spare_time_program" }
+      { "time": "15:00", "type": "case_batch", "label": "Afternoon batch", "case_share": 0.20 },
+      { "time": "16:00", "type": "report", "label": "Daily AI-experience reports + model-education case studies", "ref": "model_education_program" },
+      { "time": "16:30", "type": "meeting", "meeting_type": "daily_standup", "label": "Daily standup (existing meeting-engine.js type)" },
+      { "time": "16:30", "type": "spare_time", "label": "Spare time: coworker interaction or idle (token-saving)", "ref": "spare_time_program" }
     ]
   },
 
@@ -40,8 +41,9 @@
     "applies_to_day_of_week": [6],
     "label": "Short day: reduced case load, weekly executive summary at 12:00",
     "blocks": [
-      { "time": "08:00", "type": "case_batch", "label": "Friday morning batch", "case_share": 0.60 },
-      { "time": "10:00", "type": "case_batch", "label": "Friday late-morning batch", "case_share": 0.40 },
+      { "time": "02:00", "type": "case_batch", "label": "Friday early batch", "case_share": 0.40 },
+      { "time": "05:30", "type": "case_batch", "label": "Friday mid batch", "case_share": 0.30 },
+      { "time": "09:00", "type": "case_batch", "label": "Friday late-morning batch", "case_share": 0.30 },
       { "time": "10:30", "type": "report", "label": "Daily AI-experience reports + model-education case studies", "ref": "model_education_program" },
       { "time": "12:00", "type": "weekly_summary", "label": "Weekly executive summary meeting + PDF/Excel generation", "ref": "weekly_summary_program" },
       { "time": "12:00", "type": "meeting", "meeting_type": "daily_standup", "label": "Daily standup (existing meeting-engine.js type)" },

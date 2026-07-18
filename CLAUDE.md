@@ -29,14 +29,17 @@ reader with no prior context.
   (service binding to `data-center-api`, since Workers can't `fetch()`
   another Worker's `*.workers.dev` URL directly — error 1042), `AI`
   (Cloudflare Workers AI, account-scoped, no extra credentials).
-- **Cron**: `*/30 5-13 * * *` UTC (= 08:00-16:30 IDT), drives
+- **Cron**: `*/30 0-13,23 * * *` UTC (= 02:00-16:30 IDT), drives
   `scheduled()` -> `runScheduledBlock()`, a no-op unless
   `config/daily-schedule.json` has a block at that exact time/day. State
   for an in-progress simulated day persists in `SIM_KV` (`daily-cycle-state`)
-  between ticks. **Not currently enabled to run against the 2026-07-18
-  rebuild** — this session was design-and-build only, same graduated-trust
-  pattern as every other automation change in this repo; nothing here was
-  deployed or scheduled live as part of it.
+  between ticks. **LIVE since 2026-07-18** (first activation of the Q&A
+  engine — later session than the rebuild itself, which was design-and-build
+  only): first run Sunday 2026-07-19 starting 02:00 Israel, volume ramped by
+  `config/token-economy.json`'s TEMPORARY `graduated_rollout_throttle`
+  (12 → 40 → 100 questions for the first three days, then automatic
+  step-up to normal budget-driven volume). See TOKEN-BUDGET.md's
+  2026-07-18 activation entry.
 - **GitHub Actions**: `.github/workflows/scheduled-claude.yml` runs a
   nightly direct-Anthropic-API session (`.github/scripts/run-claude-session.js`
   + `commit-and-log.sh`) — a separate automation path from the Worker's own

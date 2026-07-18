@@ -38,6 +38,7 @@ import yearTrackerSeed from '../config/year-tracker.json';
 import dailyScheduleConfig from '../config/daily-schedule.json';
 import aiToolsConfig from '../config/ai-tools.json';
 import projectPermissions from '../config/project-permissions.json';
+import tokenEconomy from '../config/token-economy.json';
 
 import { PerfectionistAgent } from '../agents/agent-1-perfectionist.js';
 import { ProductiveAgent } from '../agents/agent-2-productive.js';
@@ -1228,9 +1229,34 @@ async function computeDailyQuestionVolume(env, sim) {
     // even data-center-targeted questions generated now will simply be
     // skipped at ask time (logged, not silently dropped) rather than
     // wasting the whole day's Notebook-X coverage too.
-    return Math.round(BASE_DAILY_QUESTIONS * 0.3 * multiplier);
+    return applyGraduatedRolloutCap(Math.round(BASE_DAILY_QUESTIONS * 0.3 * multiplier));
   }
-  return Math.round(BASE_DAILY_QUESTIONS * multiplier);
+  return applyGraduatedRolloutCap(Math.round(BASE_DAILY_QUESTIONS * multiplier));
+}
+
+/**
+ * TEMPORARY graduated-rollout throttle for the first live activation of the
+ * Q&A engine (config/token-economy.json `graduated_rollout_throttle`) — NOT
+ * a permanent volume limit. For the first few calendar days after
+ * `activation_date_israel` (Israel time, day 0 = the activation date), the
+ * day's total is capped at `ramp_daily_caps[daysSinceActivation]`; once the
+ * ramp array is exhausted this returns `volume` untouched, i.e. the step-up
+ * back to normal budget-driven volume is automatic, no manual change needed.
+ * Delete the config block (and, optionally, this function) once the ramp
+ * window has passed — a missing/malformed config block means no throttle.
+ */
+function applyGraduatedRolloutCap(volume, now = new Date()) {
+  const rollout = tokenEconomy.graduated_rollout_throttle;
+  if (!rollout?.activation_date_israel || !Array.isArray(rollout.ramp_daily_caps) || !rollout.ramp_daily_caps.length) {
+    return volume;
+  }
+  const israelToday = new Date(now.getTime() + ISRAEL_UTC_OFFSET_HOURS * 60 * 60 * 1000).toISOString().slice(0, 10);
+  const daysSince = Math.floor((Date.parse(israelToday) - Date.parse(rollout.activation_date_israel)) / 86_400_000);
+  if (daysSince >= rollout.ramp_daily_caps.length) return volume; // ramp complete — throttle inert
+  // A tick somehow firing BEFORE the activation date (daysSince < 0) gets the
+  // most conservative cap rather than an uncapped day.
+  const cap = rollout.ramp_daily_caps[Math.max(0, daysSince)];
+  return Math.min(volume, cap);
 }
 
 /**

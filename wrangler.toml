@@ -47,20 +47,17 @@ binding = "AI"
 #   ADMIN_TOKEN       - required, validates X-Admin-Token on /api/agents/*
 #   GITHUB_TOKEN      - optional, gates report/guide commits + claude-action issues to GitHub
 
-# Per-block office-simulation cron (2026-06-12 launch). Fires every 30 min,
-# 05:00-13:30 UTC = 08:00-16:30 IDT (Israel Daylight Time, UTC+3). Each tick,
-# scheduled() converts to Israel local time and calls runScheduledBlock(),
-# which is a no-op unless config/daily-schedule.json has a block at
-# that exact time for that day-of-week. DST CAVEAT: when Israel switches to
-# IST (UTC+2, late Oct) or back to IDT (late Mar), update BOTH this cron
-# window and ISRAEL_UTC_OFFSET_HOURS in agent-runner.js — see CLAUDE.md.
+# Per-block office-simulation cron. Fires every 30 min across 23:00-23:30 +
+# 00:00-13:30 UTC = 02:00-16:30 IDT (Israel Daylight Time, UTC+3) — the
+# owner's 02:00-17:00 Israel activity window. Each tick, scheduled()
+# converts to Israel local time and calls runScheduledBlock(), which is a
+# no-op unless config/daily-schedule.json has a block at that exact time
+# for that day-of-week. RE-ENABLED 2026-07-18 (first live activation of the
+# Q&A engine, after the 2026-07-08 pause) with the widened window above —
+# first-days volume is capped by config/token-economy.json's
+# graduated_rollout_throttle, see TOKEN-BUDGET.md's 2026-07-18 activation
+# entry. DST CAVEAT: when Israel switches to IST (UTC+2, late Oct) or back
+# to IDT (late Mar), update BOTH this cron window and
+# ISRAEL_UTC_OFFSET_HOURS in agent-runner.js — see CLAUDE.md.
 [triggers]
-# PAUSED 2026-07-08 — every GitHub Actions workflow across all 4 project
-# repos has been disabled_manually all month (gh workflow disable never
-# touches this Worker-native Cloudflare Cron Trigger, which is why this
-# kept firing unpaused the whole time despite that). To restore: delete
-# the "crons = []" line below, uncomment the original line right above
-# it, and run `npx wrangler triggers deploy` (no code changes needed —
-# see TOKEN-BUDGET.md's 2026-07-08 session entry).
-# crons = ["*/30 5-13 * * *"]
-crons = []
+crons = ["*/30 0-13,23 * * *"]

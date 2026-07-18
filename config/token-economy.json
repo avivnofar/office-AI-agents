@@ -18,6 +18,12 @@
     "consumers": ["office_qa_engine (agent-base.js _askDataCenter)", "chore_automation (chore-runner.js, wiring-only as of 2026-07-08)"]
   },
 
+  "graduated_rollout_throttle": {
+    "_meta": "Added 2026-07-18 for the FIRST LIVE ACTIVATION of the Q&A engine (cron re-enabled the same day, first run 2026-07-19). This is a TEMPORARY graduated-rollout throttle, NOT a permanent volume limit: workers/agent-runner.js's computeDailyQuestionVolume() caps the day's generated question total at ramp_daily_caps[N], where N = calendar days elapsed in Israel time since activation_date_israel (N=0 on the activation day itself). Once N >= ramp_daily_caps.length the throttle is automatically inert — volume returns to the normal budget-driven computation with NO manual step-up needed. The per-call $-budget check (_askDataCenter) and Gemini pacing (gemini-pacer.js) remain the real backstops throughout. Safe to delete this whole block once the ramp window has passed; applyGraduatedRolloutCap() treats a missing block as 'no throttle'.",
+    "activation_date_israel": "2026-07-19",
+    "ramp_daily_caps": [12, 40, 100]
+  },
+
   "notebook_x_gemini_pacing": {
     "_meta": "Added 2026-07-18. See workers/gemini-pacer.js's header comment for the full reasoning — summary here for anyone reading this config without the code.",
     "min_spacing_ms_between_calls": 20000,

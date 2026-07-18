@@ -3789,3 +3789,67 @@ generate-agent-cases.mjs (deleted yesterday's session).
 **Verification**: push confirmed against GitHub's own API (master ref
 sha == local HEAD). No live schedule enabled; Worker not deployed —
 nothing needed it.
+
+## 2026-07-18 — FIRST LIVE ACTIVATION of the Q&A engine (cron re-enabled, graduated-rollout throttle)
+
+Fourth session today. Zero model calls — activation wiring only. This is
+the first time the 2026-07-18 Q&A-engine rebuild is scheduled to run
+live, starting tomorrow (Sunday 2026-07-19) at 02:00 Israel.
+
+**Step 1 — D1 migration state: already applied, NOT re-run.** Verified
+directly against live D1 (`PRAGMA table_info`): `cases.project`,
+`cases.kb_slug`, and `reports.project` all present. One genuinely
+missing piece found and fixed: the `claude_budget_usage` table did not
+exist in live D1 (model-router.js self-creates it per call via
+`CREATE TABLE IF NOT EXISTS`, so it would have self-healed, but it was
+created explicitly now and verified via `sqlite_master`).
+
+**Step 2 — graduated-rollout throttle** (the "small first day"):
+`config/token-economy.json` `graduated_rollout_throttle` block +
+`applyGraduatedRolloutCap()` in `workers/agent-runner.js`, applied
+inside `computeDailyQuestionVolume()`. Date-keyed on
+`activation_date_israel: 2026-07-19` with `ramp_daily_caps: [12, 40,
+100]` — day 0 (tomorrow) caps the whole day at **12 questions** (2 per
+case_batch block), day 1 at 40, day 2 at 100, and from day 3 the ramp
+array is exhausted and the function returns the normal budget-driven
+volume untouched — **the step-up is automatic, no manual change
+needed**. Explicitly labeled TEMPORARY in both the config `_meta` and
+the function docstring; deleting the config block disables it cleanly.
+The per-call $5/mo budget check and gemini-pacer.js remain the real
+backstops throughout.
+
+**Step 3 — schedule mechanism confirmed + widened to the 02:00–17:00
+Israel window.** The Q&A engine is driven by the **Cloudflare Worker
+Cron Trigger** (`scheduled()` → `runScheduledBlock()`), NOT GitHub
+Actions (scheduled-claude.yml is a separate maintenance path; the old
+notebook-x-daily.yml third path is deleted). `daily-schedule.json`
+full-day blocks re-spread: case batches at 02:00 / 04:30 / 07:00 /
+09:30 / 12:00 / 15:00 (shares .20/.15/.15/.15/.15/.20), report 16:00,
+standup + spare time 16:30; Friday batches 02:00/05:30/09:00, weekly
+summary still 12:00; Saturday unchanged (idle). wrangler.toml cron:
+`*/30 0-13,23 * * *` UTC = 02:00–16:30 IDT (the 02:00-Israel block
+fires at 23:00 UTC the *previous* calendar day; israelTimeParts()
+handles the rollover). Same DST caveat as before (late Oct: cron window
++ ISRAEL_UTC_OFFSET_HOURS both need updating).
+
+**Step 4 — deployed + independently verified.** `npx wrangler deploy`
+→ version `2531054f` 2026-07-18T19:29:24Z, confirmed via
+`wrangler deployments list` (record matches) and a live endpoint hit
+(`GET /api/simulation` → `paused:false`). Cron registration verified
+against the **Cloudflare API itself** (`GET .../workers/scripts/
+data-center-agents/schedules` → exactly one schedule,
+`*/30 0-13,23 * * *`, created 19:29:35Z) — not just deploy stdout.
+Also cleaned: stale 191KB pre-rebuild `daily-cycle-state` KV blob (old
+Netvill CRM day-22 cases) deleted so activation starts from a clean
+cycle. `verify-qa-engine.js` 56/56 after all changes.
+
+**What happens tomorrow**: first tick with a due block at 23:00 UTC
+tonight = 02:00 Israel Sunday → day cycle starts, generates 12
+questions, runs the first 2; remaining batches of 2 at 04:30, 07:00,
+09:30, 12:00, 15:00 Israel; report 16:00, standup 16:30, day finalized.
+Spread, not bursty, per the pacing design.
+
+**Observation flagged, not fixed (out of scope)**: `POST
+/api/simulation` (pause/inspection toggles) sits OUTSIDE the
+`/api/agents/*` admin-token check — unauthenticated state writes.
+Worth closing in a future session.
