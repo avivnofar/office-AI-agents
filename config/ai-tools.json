@@ -13,7 +13,7 @@
     "base_url": "https://notebook-x-api.onrender.com",
     "auth": "none — confirmed via GET /openapi.json: no securitySchemes defined on any endpoint. No NOTEBOOK_X_API_KEY secret needed.",
     "endpoint_used": "POST /api/knowledge-notebooks/{notebook_id}/ask",
-    "scope_this_integration": "Extended 2026-07-18 to cover all 6 notebooks the owner named plus 4 more discovered live in config/notebook-x-progress.json (kb-cybersecurity, kb-firewall, kb-networking, kb-vpn — all dataQuality:'skeleton' as of 2026-07-09, which makes them GOOD targets for real questions, not a reason to skip them: a skeleton notebook failing a real question is exactly the kind of genuine capability gap this office exists to surface). kb-bash still mirrors kb-linux's trigger (same seeded content, not queried separately) per the original scoping note.",
+    "scope_this_integration": "Extended 2026-07-18 to cover all 6 notebooks the owner named plus 4 more discovered live in the then-live config/notebook-x-progress.json (deleted 2026-07-18) (kb-cybersecurity, kb-firewall, kb-networking, kb-vpn — all dataQuality:'skeleton' as of 2026-07-09, which makes them GOOD targets for real questions, not a reason to skip them: a skeleton notebook failing a real question is exactly the kind of genuine capability gap this office exists to surface). kb-bash still mirrors kb-linux's trigger (same seeded content, not queried separately) per the original scoping note.",
     "case_platform_map": {
       "linux": "kb-linux",
       "bash": "kb-linux",

@@ -17,7 +17,9 @@
  * Linux/Windows, firewalls) are weighted highest — they're both the owner's stated
  * priority and, for the notebook-x-targeted core entries, the ones most likely to
  * surface a genuine skeleton-notebook gap (kb-cybersecurity/kb-firewall/kb-networking/
- * kb-vpn are dataQuality:'skeleton' as of 2026-07-09 per config/notebook-x-progress.json
+ * kb-vpn are dataQuality:'skeleton' as of 2026-07-09 per the then-live
+ * config/notebook-x-progress.json (deleted 2026-07-18 — the skeleton status
+ * was a point-in-time observation; re-check Notebook-X live if it matters)
  * — asking them real questions is exactly how a skeleton gets caught, not a bug in
  * the weighting). VoIP/PBX topics (kb-voip-sip, kb-mirtapbx, kb-1com) stay in the pool
  * per "no deletions" but at lower weight — they're real, useful coverage, just not the

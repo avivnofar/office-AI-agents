@@ -102,7 +102,8 @@ differs):
    'notebook-x'`, `kbSlug` set — covers `kb-linux`, `kb-1com`,
    `kb-voip-sip`, `kb-mirtapbx`, `kb-cloud-devops` at core weight, plus
    `kb-cybersecurity`/`kb-firewall`/`kb-networking`/`kb-vpn`, discovered live
-   in `config/notebook-x-progress.json` as skeleton-quality notebooks —
+   in `config/notebook-x-progress.json` (since deleted; see "Connection to
+   `Notebook-X`") as skeleton-quality notebooks —
    good gap-flagging targets, not out of scope). VoIP/PBX-specific topics
    stay in the pool at lower weight (no deletions, per instruction).
    `workers/qa-engine.js`'s `generateAssignedDailyBatch()` assigns each
@@ -285,15 +286,15 @@ dormant Architect persona. Two things changed to satisfy it:
    the daily log, and leaves the backlog item `flagged_for_review` for a
    human/Claude-Code session to actually implement.
 
-### `config/notebook-x-progress.json`
+### `config/notebook-x-progress.json` (deleted 2026-07-18)
 
-Manually maintained completed/pending list mirroring TODO.md's Notebook-X
-section, formerly consumed one item per day in list order by
-`.github/scripts/notebook-x-daily.mjs`. **With that script deleted
-(2026-07-18), nothing reads this file at runtime anymore** — it survives as
-a historical record of what the Notebook-X backlog automation completed
-(item statuses, completion notes, the `pushed-unmerged` incident trail),
-pending an owner decision on whether to keep or archive it.
+Was a manually maintained completed/pending list mirroring TODO.md's
+Notebook-X section, consumed one item per day in list order by
+`.github/scripts/notebook-x-daily.mjs`. When that script was deleted
+(2026-07-18), this file became dead data with no runtime reader; the owner
+approved deleting it the same day. Its history (item statuses, completion
+notes, the `pushed-unmerged` incident trail) lives on in git history and
+TOKEN-BUDGET.md's 2026-07-09..07-16 entries.
 **`TODO.md` was deleted from this
 repo's root** in the 2026-07-18 repo-cleanup session (confirmed
 intentional). `workers/chore-runner.js`'s `fetchTodoSection()` fetches it
