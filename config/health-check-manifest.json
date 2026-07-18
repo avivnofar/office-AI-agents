@@ -16,9 +16,9 @@
       "gatingWorkflow": { "repo": "avivnofar/office-AI-agents", "name": "Agent Simulation — Weekly Report" },
       "type": "github_file_freshness",
       "repo": "avivnofar/office-AI-agents",
-      "pathTemplate": "agents/reports/{{isoYear}}-w{{isoWeekPadded}}-weekly-summary.md",
+      "pathTemplate": "reports/weekly/{{isoYear}}-w{{isoWeekPadded}}-weekly-summary.md",
       "maxAgeHours": 192,
-      "extra": "NOTE: as of 2026-07-08 this path is itself unverified — generate-weekly-report.mjs has the same stale agents/config/ import pattern already fixed in generate-agent-cases.mjs, but fixing it was explicitly out of scope this session (Weekly Report's blocker is deferred, ADMIN_TOKEN-gated). This check will need its pathTemplate re-confirmed once that script is fixed."
+      "extra": "Path re-confirmed 2026-07-18: generate-weekly-report.mjs's stale pre-split agents/config/ import and agents/reports/ template/output paths were fixed that day (verified by a local fixture-driven dry run) — output now lands in reports/weekly/, matching this pathTemplate and agent-reports.yml's git add glob. The workflow itself remains disabled_manually; this check stays SKIPPED until it's deliberately re-enabled."
     },
     {
       "id": "office-agents-night-office-session",
