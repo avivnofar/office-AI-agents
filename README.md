@@ -47,14 +47,14 @@ office day end-to-end via a direct Anthropic API session and commits a
 daily report to this repo. Friday and Saturday are skipped (Israeli
 weekend).
 
-### 3. GitHub Actions — Notebook-X daily (`notebook-x-daily.yml`)
-Fires at **01:00 Israel time, daily**, against the separate
-[Notebook-X](https://github.com/avivnofar/Notebook-X) project — filling in
-skeleton knowledge-notebook content where a `NOTEBOOK_X_REPO_TOKEN` is
-available. As of 2026-07-18 this path never writes or modifies code: a
-backlog item asking for a frontend change gets a written recommendation for
-a human to implement, not an auto-push. See `CLAUDE.md`'s "Connection to
-Notebook-X" for why (a real production incident, and the fix).
+### 3. ~~GitHub Actions — Notebook-X daily~~ (retired 2026-07-18)
+The former nightly Notebook-X content-fill automation
+(`notebook-x-daily.yml` + `notebook-x-daily.mjs`) was deleted 2026-07-18 —
+superseded by the Q&A engine, which now covers
+[Notebook-X](https://github.com/avivnofar/Notebook-X) through the personas'
+own read-only question path. See `CLAUDE.md`'s "Connection to Notebook-X"
+for the history (including the production incident that shaped the standing
+no-automated-writes rule).
 
 ---
 
@@ -223,7 +223,7 @@ whether an answer was actually good enough.
 | Report synthesis + direct Notebook-X asks | Google Gemini 3.1 Flash-Lite |
 | Data Center AI Search | Claude Sonnet 4.6 — $5/month shared budget, dollar-tracked not call-counted |
 | Nightly office automation | GitHub Actions → direct Anthropic API session |
-| Nightly Notebook-X automation | GitHub Actions → `notebook-x-daily.mjs` |
+| Notebook-X coverage | Q&A engine (`_askNotebookX()`, read-only, Gemini-paced) — the nightly `notebook-x-daily.mjs` automation was retired 2026-07-18 |
 
 ---
 
@@ -251,7 +251,7 @@ office-AI-agents/
 ├── reports/              # Generated daily/weekly/meeting reports
 ├── dashboard/            # Standalone admin UI
 ├── .github/
-│   ├── workflows/            # scheduled-claude.yml, notebook-x-daily.yml, ...
+│   ├── workflows/            # scheduled-claude.yml, ...
 │   └── scripts/              # Session runner scripts
 └── wrangler.toml         # Cloudflare Worker configuration
 ```
@@ -265,9 +265,9 @@ office-AI-agents/
   primary target; its 🔐 Admin tab is a read-only dashboard onto this
   repo's live simulation data.
 - **[Notebook-X](https://github.com/avivnofar/Notebook-X)** — a second,
-  separate target project, automated directly via GitHub Actions rather
-  than through the persona simulation. Gemini-powered; reviewed and
-  lightly patched nightly.
+  separate target project, covered since 2026-07-18 through the persona
+  simulation's own Q&A path (read-only Gemini questions against its
+  notebooks; the former nightly GitHub Actions automation is retired).
 
 Both are deliberately separate repos from this one: this repo is
 project-agnostic simulation/testing infrastructure, not either product

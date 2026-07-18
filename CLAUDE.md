@@ -41,10 +41,10 @@ reader with no prior context.
   nightly direct-Anthropic-API session (`.github/scripts/run-claude-session.js`
   + `commit-and-log.sh`) — a separate automation path from the Worker's own
   cron, used for autonomous maintenance tasks against this repo.
-  `.github/workflows/notebook-x-daily.yml` is a third, independent
-  automation path — it targets a different project entirely
-  (`avivnofar/Notebook-X`, not `data-center`). See "Connection to
-  `Notebook-X`" below before touching it.
+  `.github/workflows/notebook-x-daily.yml` — formerly a third, independent
+  automation path targeting `avivnofar/Notebook-X` — was **deleted
+  2026-07-18** along with its script, superseded by the Q&A engine's
+  Notebook-X question path. See "Connection to `Notebook-X`" below.
 
 ## The 11 agents (`config/agents-config.json`, `AGENTS.md`)
 
@@ -244,17 +244,23 @@ the live file in `data-center` for anything load-bearing.
 ## Connection to `Notebook-X`
 
 [`avivnofar/Notebook-X`](https://github.com/avivnofar/Notebook-X) is a
-**second, separate** target project this repo automates against —
-`.github/workflows/notebook-x-daily.yml` runs
-`.github/scripts/notebook-x-daily.mjs` daily (22:00 UTC = 01:00 IDT) and on
-`workflow_dispatch`, using `NOTEBOOK_X_REPO_TOKEN` to read/write directly
-into Notebook-X's repo.
+**second, separate** target project this repo automates against. Today the
+only automation touching it is the Q&A engine's Notebook-X question path
+(`agent-base.js _askNotebookX()` → `workers/notebookx-client.js`, read-only
+asks, paced by `workers/gemini-pacer.js`).
 
-**As of 2026-07-18, this script never writes or modifies code, files, or
-tools of any kind.** That's the explicit rule this rebuild session
-introduced — reserved for Claude Code working directly with the owner, or a
-future owner-directed special task to the dormant Architect persona. Two
-things changed to satisfy it:
+**`.github/workflows/notebook-x-daily.yml` and
+`.github/scripts/notebook-x-daily.mjs` were deleted 2026-07-18** (same day
+as, but a later session than, the Q&A-engine rebuild) — the nightly
+content-fill/backlog automation they ran is superseded by the Q&A engine.
+The history below is preserved because it explains the standing
+no-automated-writes rule, which outlives the deleted script.
+
+**As of 2026-07-18 (rebuild session, earlier that day), that script never
+wrote or modified code, files, or tools of any kind.** That's the explicit
+rule the rebuild session introduced — reserved for Claude Code working
+directly with the owner, or a future owner-directed special task to the
+dormant Architect persona. Two things changed to satisfy it:
 
 1. **The `housekeeping_*` function family is retired entirely** —
    `housekeeping_unifyDeleteObsolete`, `housekeeping_recommendChanges`,
@@ -282,8 +288,13 @@ things changed to satisfy it:
 ### `config/notebook-x-progress.json`
 
 Manually maintained completed/pending list mirroring TODO.md's Notebook-X
-section, one item per day picked in list order by
-`.github/scripts/notebook-x-daily.mjs`. **`TODO.md` was deleted from this
+section, formerly consumed one item per day in list order by
+`.github/scripts/notebook-x-daily.mjs`. **With that script deleted
+(2026-07-18), nothing reads this file at runtime anymore** — it survives as
+a historical record of what the Notebook-X backlog automation completed
+(item statuses, completion notes, the `pushed-unmerged` incident trail),
+pending an owner decision on whether to keep or archive it.
+**`TODO.md` was deleted from this
 repo's root** in the 2026-07-18 repo-cleanup session (confirmed
 intentional). `workers/chore-runner.js`'s `fetchTodoSection()` fetches it
 via a raw GitHub URL and now degrades to a permanent no-op (`ranTask:

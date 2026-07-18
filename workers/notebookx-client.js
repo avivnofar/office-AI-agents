@@ -92,7 +92,9 @@ export async function listKnowledgeNotebooks() {
  * write -> public-index update). Requires the fragment file to already
  * be present on Notebook-X's deployed filesystem — i.e. pushed to
  * avivnofar/Notebook-X's repo root *and* Render redeployed — before
- * calling this; see notebook-x-daily.mjs for the full sequence.
+ * calling this. The caller that drove this sequence
+ * (.github/scripts/notebook-x-daily.mjs) was deleted 2026-07-18 — kept for
+ * a future owner-directed content-fill task; nothing calls it today.
  */
 export async function triggerIngestContentFiles() {
   try {
