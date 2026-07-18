@@ -3670,3 +3670,67 @@ assumption that it was "live and now running the fixed code."
 Nothing in this project is currently running on any automatic schedule.
 Re-enabling any of the above (Worker cron, Notebook-X daily, the others)
 is a separate, deliberate decision for later — not part of this session.
+
+## 2026-07-18 — Automation retirement session: notebook-x-daily + Weekly Case Batch deleted, permissions flattened
+
+Follow-up session to the same-day Q&A-engine rebuild. Three structural
+retirements plus a legacy-file investigation (report-only, no deletions in
+that step). Zero model calls this session — pure repo surgery.
+
+**Step 1 — `notebook-x-daily` retired entirely** (`d65fbde`): deleted
+`.github/scripts/notebook-x-daily.mjs` and
+`.github/workflows/notebook-x-daily.yml`. Grep-verified first: nothing
+imports the script — every remaining reference is docs, comments, or
+generated reports. The workflow was already `disabled_manually` (confirmed
+last session), so nothing live changed behavior. Updated CLAUDE.md,
+README.md, and a stale pointer comment in `workers/notebookx-client.js`.
+**`config/notebook-x-progress.json` is now dead data** — its only runtime
+reader was the deleted script. Flagged in CLAUDE.md, NOT deleted (owner
+decision pending); it holds the backlog automation's completion-note
+history.
+
+**Step 2 — Weekly Case Batch retired** (`d340784`): deleted
+`.github/workflows/agent-cases.yml` and
+`.github/scripts/generate-agent-cases.mjs`. No adaptation of the Q&A
+engine was needed: the live daily flow already generates its batches
+inline (`agent-runner.js` → `qa-engine.js generateAssignedDailyBatch()`
+per run) and never read the weekly `database/cases-*.json` artifact — the
+script's own header said "informational weekly snapshot only." **Weekly
+Report checked in code before concluding it's unaffected**:
+`generate-weekly-report.mjs` only summarizes Worker admin-API data
+(`week_reset` trigger result + incidents/suggestions/status JSON dumps) —
+nothing case-batch-related. (It remains broken for its own separate,
+known reason: stale pre-split `agents/config/`/`agents/reports/` paths,
+still deferred.) Removed the manifest freshness check for the batch
+artifact (`config/health-check-manifest.json`, documented under
+`not_included`), updated `database/seed-cases.sql`'s comment.
+
+**Step 3 — `project-permissions.json` v2.0.0** (`0dee5b3`): the
+2026-07-11 model-scoped `code_write` map ({gemini: true, groq: false,
+claude: "per-change-only"}) is retired, replaced by blanket
+`automated_code_write: false`. Rationale in the file's own new
+`_meta.code_write_blanket_2026-07-18` note (full history trail preserved,
+2026-07-11 note kept and marked SUPERSEDED, per file convention): the
+map's only consumer was the deleted notebook-x-daily.mjs, leaving a
+standing Gemini grant nobody should exercise. Per-project `push` flags
+unchanged (incl. `notebook-x: push:true` for the dormant owner-directed
+Architect path). `workers/permission-guard.js`'s
+`checkCodeWriteAllowed()` model branch removed to match — only pass left
+is `explicitCodeTask` (per-change human authorization). Verified:
+`node scripts/verify-permissions.js` all-PASS, plus a direct exercise of
+the simplified guard (code file blocked without explicitCodeTask, allowed
+with it, markdown untouched).
+
+**Step 4 — legacy data-center files investigated, report-only** — see the
+session's final report to the owner. Short version: two orphaned data
+artifacts recommended for deletion (`database/cases-2026-w25.json`,
+`database/seed-cases.sql` — plus dead tool `scripts/sync-todo.js`, whose
+source docx AND output TODO.md are both gone); June-era reports/checkpoints
+recommended keep as history; live configs still carry pre-split
+`agents/...` path strings (daily-schedule/ai-tools/side-plots/
+promotion-config/relationships/year-tracker) — a future fix-or-confirm
+sweep, not deleted files. Nothing deleted in this step.
+
+**Verification**: final push confirmed against GitHub's own API
+(`GET /repos/avivnofar/office-AI-agents/git/refs/heads/master` matches
+local HEAD), not just exit status — same standard as last session.
