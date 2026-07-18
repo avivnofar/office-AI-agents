@@ -3895,3 +3895,62 @@ default TASK prompt still carries Netvill-era language ("all 11 agents
 process their cases", "Claude capped at 5 calls" — a retired call-count
 framing). Worth refreshing in a future session that's allowed to touch
 workflow YAML.
+
+## 2026-07-18 — Claude soft-stop restored to $4.50 + remaining doc-drift fixes
+
+Sixth session today. Zero model calls. One real behavior change, the
+rest prose.
+
+**Budget headroom restored (behavior change, deliberate owner
+decision)**: `config/token-economy.json`'s enforced cap — BOTH
+`shared_claude_budget.cap_usd_per_month` AND
+`chore_automation.claude_budget_usd_per_month` (the field
+`model-router.js`'s `spentUsd >= capUsd` check actually reads; the
+verify script asserts the two stay equal) — changed 5.00 → **4.50**.
+This reintroduces real headroom under the account's own $5/month spend
+ceiling: two distinct mechanisms (software soft-stop vs account hard
+limit), which the morning unification's 4.50 → 5.00 bump had collapsed
+to zero headroom. Every place updated this morning to say "$5.00" now
+says $4.50-under-$5-ceiling: README.md (model table, architecture
+table, repo-structure comment), CLAUDE.md (token-economy section, key
+files), token-economy.json's `_meta`/`description`/`notebook_x_override`
+prose, schema.sql's `claude_budget_usage` comment,
+verify-chore-rotation.js's reason string, model-router.js's six
+comment/reason mentions, and verify-qa-engine.js's budget check
+(updated to expect 4.5 — passes, 56/56). The final sweep caught three
+more: simulation-config.json's claude_daily_cap_NOTE (also documents
+that its unread claude_monthly_budget_usd:5 field records the ACCOUNT
+ceiling, not the soft-stop), run-claude-session.js's system-prompt cost
+guard ("$5 Claude API cap" → soft-stop + ceiling), and
+verify-chore-rotation.js's summary line (still claimed the budget was
+"separate from" a per-day call cap that no longer exists).
+
+**02:00–17:00 → 02:00–16:30 precision fix**: the schedule's real end is
+16:30 (`daily-schedule.json` cron_status / last cron tick 13:30 UTC).
+Fixed README.md's "activity window" sentence and daily-schedule.json's
+own cron_status prose (CLAUDE.md already said 16:30 everywhere;
+wrangler.toml's comment still says "02:00-17:00 activity window" —
+left untouched per this session's do-not-touch-the-trigger scope).
+
+**daily-schedule.json `case_volume_design_note`**: said "5 blocks,
+several hours apart" — reality is 6 case_batch blocks (02:00–15:00)
+and 11 full_day_schedule blocks total (+ tool_task_window,
+chore_rotation, report, standup, spare_time). Fixed. Confirmed
+docs-only: `case_volume_design_note` is referenced nowhere in code
+except comments — `computeDailyQuestionVolume()` /
+`generateAssignedDailyBatch()` read the real `blocks` array and its
+`case_share` values, never this prose. No behavior change.
+
+**scheduled-claude.yml default TASK refreshed** (content only): retired
+Netvill/call-count language ("all 11 agents... Claude capped at 5
+calls") replaced with current reality (10 active Q&A personas, Architect
+dormant, $4.50/month budget soft-stop gating per-call). Workflow state
+confirmed `disabled_manually` via GitHub's Actions API both before and
+after the push — this is a content fix, NOT a re-enable. Also surfaced
+by that check: README/CLAUDE.md were presenting this path as live;
+both now note it's currently disabled.
+
+**Saturday path reminder (no change)**: `saturday_schedule`
+(`force_idle: true`, zero Gemini/Claude calls) has never been exercised
+live. Verify it actually holds — zero model calls logged — on the first
+live Saturday, **2026-07-25** (day-1 = Sunday 2026-07-19 mapping).

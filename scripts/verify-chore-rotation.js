@@ -28,7 +28,7 @@ function getRotatedProject(date) {
 function selectModelForChoreTask({ projectKey, taskType, requiresHighQuality = false, overBudget = false }) {
   if (projectKey === 'notebook-x') {
     if (taskType === 'easy') return { model: 'groq', reason: 'Notebook-X override: easy sub-task.' };
-    if (requiresHighQuality && !overBudget) return { model: 'claude', reason: 'Notebook-X override: quality demands Claude (shared $5/mo cap).' };
+    if (requiresHighQuality && !overBudget) return { model: 'claude', reason: 'Notebook-X override: quality demands Claude (shared $4.50/mo cap).' };
     if (requiresHighQuality && overBudget) return { model: 'gemini', reason: 'Notebook-X override wanted Claude but cap exhausted — Gemini fallback.' };
     return { model: 'gemini', reason: 'Notebook-X override: Gemini is default writer.' };
   }
@@ -76,6 +76,6 @@ for (const s of genScenarios) {
   console.log(`  [${ok ? 'PASS' : 'FAIL'}] ${s.projectKey} taskType=${s.taskType}${s.overBudget ? ' overBudget' : ''} -> ${model} (${reason})`);
 }
 
-console.log(`\nClaude chore-automation cap: $${tokenEconomy.chore_automation.claude_budget_usd_per_month}/mo (separate from the office-simulation's ${tokenEconomy.claude_daily_cap}-calls/day cap).`);
+console.log(`\nClaude chore-automation cap: $${tokenEconomy.chore_automation.claude_budget_usd_per_month}/mo (the SAME shared pool as the office Q&A engine — the old per-day call-count cap is retired).`);
 console.log(`\n${pass ? 'All scenarios matched expectations.' : 'MISMATCH — see FAIL lines above.'}`);
 process.exit(pass ? 0 : 1);

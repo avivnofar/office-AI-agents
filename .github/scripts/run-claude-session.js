@@ -38,7 +38,7 @@ Work completely autonomously.
 ALWAYS start by reading: CLAUDE.md, TOKEN-BUDGET.md.
 ALWAYS run Hebrew/English RTL audit on index.html.
 Respect all rules in CLAUDE.md "Launch Decisions".
-Cost guards: $5 Claude API cap, use Groq for agents,
+Cost guards: $4.50/mo Claude budget soft-stop ($5 account ceiling), use Groq for agents,
 Gemini for reports only. Output ONLY file changes as JSON:
 {"files":[{"path":"...","content":"..."}],
  "commit_message":"...","summary":"..."}`;

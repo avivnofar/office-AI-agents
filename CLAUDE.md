@@ -46,7 +46,9 @@ reader with no prior context.
 - **GitHub Actions**: `.github/workflows/scheduled-claude.yml` runs a
   nightly direct-Anthropic-API session (`.github/scripts/run-claude-session.js`
   + `commit-and-log.sh`) — a separate automation path from the Worker's own
-  cron, used for autonomous maintenance tasks against this repo.
+  cron, used for autonomous maintenance tasks against this repo (workflow
+  currently `disabled_manually` in GitHub Actions; the definition is kept
+  current for when it's re-enabled).
   `.github/workflows/notebook-x-daily.yml` — formerly a third, independent
   automation path targeting `avivnofar/Notebook-X` — was **deleted
   2026-07-18** along with its script, superseded by the Q&A engine's
@@ -185,7 +187,10 @@ day via the existing `case_batch` blocks in `config/daily-schedule.json`.
   weekly gap-analysis job. See that file's header comment for the full
   reasoning; a paced-out call is skipped, not blocked-and-retried.
 - **Shared Claude budget** (`shared_claude_budget` in token-economy.json):
-  **$5/month total**, tracked via `workers/model-router.js`'s
+  **$4.50/month soft-stop** — deliberate headroom under the account's own
+  $5/month spend ceiling, which is the hard backstop (two distinct
+  mechanisms; the soft-stop was briefly 5.00 on 2026-07-18 and restored to
+  4.50 the same day) — tracked via `workers/model-router.js`'s
   `getClaudeBudgetStatus()`/`recordClaudeSpend()` against a single D1
   `claude_budget_usage` table. As of 2026-07-18 this is genuinely shared —
   both the 11-agent Q&A engine's Claude asks (`agent-base.js
@@ -357,7 +362,7 @@ site, not merely defined nearby.
 - `workers/gap-reports.js` — capability-gap classification + Hebrew digest
   rendering (2026-07-18, new)
 - `workers/gemini-pacer.js` — Notebook-X Gemini call pacing (2026-07-18, new)
-- `workers/model-router.js` — shared $5/mo Claude budget tracking (D1
+- `workers/model-router.js` — shared $4.50/mo Claude budget tracking (D1
   `claude_budget_usage`) + chore-automation model routing
 - `workers/scheduler.js` — dead/unwired (confirmed 2026-07-18 — nothing
   imports it, `wrangler.toml`'s `main` points at `agent-runner.js`); kept,

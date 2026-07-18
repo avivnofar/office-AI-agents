@@ -165,8 +165,10 @@ CREATE TABLE IF NOT EXISTS year_stats (
 
 -- Shared Claude budget (config/token-economy.json shared_claude_budget /
 -- chore_automation, workers/model-router.js) — since 2026-07-18 a single
--- $5/month soft cap shared by the office Q&A engine and the chore
--- automation (the old separate per-day case-escalation call cap is retired).
+-- $4.50/month software soft-stop shared by the office Q&A engine and the
+-- chore automation, deliberately below the account's own $5/month spend
+-- ceiling (the hard backstop — two distinct mechanisms). The old separate
+-- per-day case-escalation call cap is retired.
 CREATE TABLE IF NOT EXISTS claude_budget_usage (
   month TEXT PRIMARY KEY,
   spent_usd REAL DEFAULT 0,

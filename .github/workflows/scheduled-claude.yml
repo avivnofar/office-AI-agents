@@ -31,7 +31,7 @@ jobs:
       issues: write
     env:
       SESSION_TYPE: office_day_night
-      TASK: "${{ github.event.inputs.task_override || 'Run one full simulated work day: all 11 agents process their cases using Groq as primary model, Claude capped at 5 calls. Generate and commit a daily report from D1 results.' }}"
+      TASK: "${{ github.event.inputs.task_override || 'Run one full simulated work day: the 10 active Q&A personas (Agent 10, the Architect, is dormant) ask their assigned questions using Groq as the primary model; Claude asks are gated per-call by the shared $4.50/month budget soft-stop, not a fixed call count. Generate and commit a daily report from D1 results.' }}"
     steps:
       - name: Checkout
         uses: actions/checkout@v4

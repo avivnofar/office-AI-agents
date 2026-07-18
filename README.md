@@ -32,12 +32,13 @@ varied interaction patterns — nothing more.
 
 ## ⚙️ How it runs
 
-Two live automation paths (a third was retired 2026-07-18), each
-targeting a different surface:
+Two automation paths (a third was retired 2026-07-18), each targeting a
+different surface — the Worker cron is live, the nightly Action is
+currently manually disabled:
 
 ### 1. Cloudflare Worker cron (live — the Q&A engine's schedule)
 Fires every 30 minutes, **02:00–16:30 Israel time** (`*/30 0-13,23 * * *`
-UTC), every day — covering the owner's 02:00–17:00 activity window. Each
+UTC), every day — covering the owner's 02:00–16:30 activity window. Each
 tick checks `config/daily-schedule.json` and runs whatever block is due —
 question batches (spread across six slots through the day so asks trickle
 out rather than burst, with Notebook-X calls additionally paced ~20s apart
@@ -51,8 +52,8 @@ first three days ramp volume through a self-expiring graduated-rollout
 throttle: 12 questions on day 0, 40 on day 1, 100 on day 2, then automatic
 step-up to normal budget-driven volume with no manual change needed.
 
-### 2. GitHub Actions — nightly maintenance session (`scheduled-claude.yml`)
-Fires at **02:30 Israel time, Sunday–Thursday**. Runs a single direct
+### 2. GitHub Actions — nightly maintenance session (`scheduled-claude.yml`, currently disabled)
+When enabled, fires at **02:30 Israel time, Sunday–Thursday**. Runs a single direct
 Anthropic API session that reviews the repo's own state and commits its
 output (reports and doc updates — code-file writes are blocked by default)
 back to this repo. A separate path from the Worker cron above: this one
@@ -78,7 +79,7 @@ no-automated-writes rule).
 | `llama-3.1-8b-instruct-fp8` | **Cloudflare Workers AI** | Question routing/classification + same-session fallback when Groq or Gemini is unavailable | Free, account-scoped |
 | **Gemini 3.1 Flash-Lite** | Google AI Studio | Report synthesis (monthly/quarterly/yearly meetings) **and** direct Notebook-X question-asking (paced ~1 call/20s from this automation — Gemini's free-tier quota is shared with Notebook-X's own traffic) | Free tier, ~1,500 req/day |
 | **Google AI Studio** (interactive) | Google | Reserved for human-in-the-loop creative-tool sessions (Agents 9/10 building design assets) — never called programmatically | n/a |
-| `claude-sonnet-4-6` | **Anthropic** | Data Center's AI Search bar. **Shared $5/month budget** across the Q&A engine (10 active personas) and the chore-automation economy — a per-month dollar cap tracked in D1 and checked in software before every call (a soft-stop, with the account's own $5/month spend ceiling as the hard backstop), not a per-day call count | Paid, low volume |
+| `claude-sonnet-4-6` | **Anthropic** | Data Center's AI Search bar. **Shared $4.50/month soft-stop budget** across the Q&A engine (10 active personas) and the chore-automation economy — a per-month dollar cap tracked in D1 and checked in software before every call, deliberately below the account's own $5/month spend ceiling (the hard backstop) — not a per-day call count | Paid, low volume |
 
 ---
 
@@ -233,7 +234,7 @@ whether an answer was actually good enough.
 | Primary agent model | Groq `llama3-8b-8192` |
 | Routing + fallback | Cloudflare Workers AI |
 | Report synthesis + direct Notebook-X asks | Google Gemini 3.1 Flash-Lite |
-| Data Center AI Search | Claude Sonnet 4.6 — $5/month shared budget, dollar-tracked not call-counted |
+| Data Center AI Search | Claude Sonnet 4.6 — $4.50/month shared soft-stop (under the account's $5/month ceiling), dollar-tracked not call-counted |
 | Nightly office automation | GitHub Actions → direct Anthropic API session |
 | Notebook-X coverage | Q&A engine (`_askNotebookX()`, read-only, Gemini-paced) — the nightly `notebook-x-daily.mjs` automation was retired 2026-07-18 |
 
@@ -250,7 +251,7 @@ office-AI-agents/
 │   ├── qa-topics.js        # Question topic pool (Claude + Notebook-X)
 │   ├── gap-reports.js      # Capability-gap detection + Hebrew digests
 │   ├── gemini-pacer.js     # Notebook-X Gemini call pacing
-│   ├── model-router.js     # Shared $5/mo Claude budget tracking
+│   ├── model-router.js     # Shared $4.50/mo Claude budget tracking
 │   ├── groq-client.js      # Primary model client
 │   ├── gemini-client.js    # Report-synthesis model client
 │   └── state-manager.js    # AgentStateDO Durable Object

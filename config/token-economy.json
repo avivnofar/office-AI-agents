@@ -12,8 +12,8 @@
   "architect_model": "human+claude-code",
 
   "shared_claude_budget": {
-    "_meta": "Added 2026-07-18, replaces the retired claude_daily_cap (a per-day CALL COUNT, checked against `interactions` rows). This is a per-MONTH DOLLAR cap, checked/recorded via workers/model-router.js's getClaudeBudgetStatus()/recordClaudeSpend() — the exact same D1 claude_budget_usage table and functions the chore-automation economy already used (see chore_automation.claude_budget_usd_per_month below, now the single source of truth for this cap, bumped 4.50 -> 5.00). 'Shared' is not aspirational — office-agent Q&A Claude calls (agents/agent-base.js _askDataCenter()) and chore-automation Claude calls (workers/chore-runner.js) draw from and record against the SAME month row, by design, per this session's explicit instruction not to create a second budget.",
-    "cap_usd_per_month": 5.00,
+    "_meta": "Added 2026-07-18, replaces the retired claude_daily_cap (a per-day CALL COUNT, checked against `interactions` rows). This is a per-MONTH DOLLAR cap, checked/recorded via workers/model-router.js's getClaudeBudgetStatus()/recordClaudeSpend() — the exact same D1 claude_budget_usage table and functions the chore-automation economy already used (see chore_automation.claude_budget_usd_per_month below, now the single source of truth for this cap; briefly bumped 4.50 -> 5.00 on 2026-07-18 when the budgets were unified, then restored to 4.50 later that day as a deliberate soft-stop leaving real headroom under the account's own $5/month spend ceiling — the two numbers are distinct mechanisms, software soft-stop vs account hard limit). 'Shared' is not aspirational — office-agent Q&A Claude calls (agents/agent-base.js _askDataCenter()) and chore-automation Claude calls (workers/chore-runner.js) draw from and record against the SAME month row, by design, per this session's explicit instruction not to create a second budget.",
+    "cap_usd_per_month": 4.50,
     "tracked_via": "workers/model-router.js getClaudeBudgetStatus() / recordClaudeSpend() -> D1 claude_budget_usage",
     "consumers": ["office_qa_engine (agent-base.js _askDataCenter)", "chore_automation (chore-runner.js, wiring-only as of 2026-07-08)"]
   },
@@ -34,7 +34,7 @@
   "groq_primary": true,
   "cf_ai_fallback": true,
   "run_until_quota_exhausted": true,
-  "description": "Groq and CF AI are free — run agents hard. Claude is paid — capped by shared_claude_budget above ($5/month total, shared with chore-automation), not a per-day call count. Primary purpose: real usage of both production AI systems (Claude, Gemini) surfaces genuine capability gaps.",
+  "description": "Groq and CF AI are free — run agents hard. Claude is paid — capped by shared_claude_budget above ($4.50/month soft-stop shared with chore-automation, under the account's own $5/month spend ceiling), not a per-day call count. Primary purpose: real usage of both production AI systems (Claude, Gemini) surfaces genuine capability gaps.",
 
   "daily_limits": {
     "groq": 14400,
@@ -71,7 +71,7 @@
       "description": "Routing for the TODO.md-driven chore/content-generation automation (config/daily-schedule.json's chore_rotation block, workers/chore-runner.js/model-router.js) — a real feature, separate from the 11-agent Q&A office simulation's own daily flow (workers/qa-engine.js). NOTE: TODO.md itself was deleted from this repo's root in the 2026-07-18 repo-cleanup session; workers/chore-runner.js's fetchTodoSection() fetches it via a raw GitHub URL and degrades to a permanent no-op (ranTask:false, 'no tasks configured') now that it 404s — not a crash, but effectively dormant until TODO.md exists again or this is rewired to read something else.",
       "relationship_to_case_sim_cap": "UPDATED 2026-07-18 — this is now the SAME budget as shared_claude_budget above (top-level), not a separate one. claude_budget_usd_per_month below is the single source of truth both blocks point to; office-agent Q&A Claude calls (agent-base.js) and chore-automation Claude calls both read/write the same D1 claude_budget_usage month row via workers/model-router.js's getClaudeBudgetStatus()/recordClaudeSpend(). The old 11-agent-only per-day CALL-COUNT cap (claude_daily_cap) this note used to contrast against no longer exists."
     },
-    "claude_budget_usd_per_month": 5.00,
+    "claude_budget_usd_per_month": 4.50,
     "claude_scope": "code-writing tasks and approval/review decisions only, by default. Notebook-X overrides this scope — see notebook_x_override below.",
     "claude_pricing_note": "Estimated at current Sonnet 5 intro pricing: $2/M input tokens, $10/M output tokens (workers/model-router.js CLAUDE_PRICING). This changes to $3/M input / $15/M output after 2026-08-31 — model-router.js already branches on that date, but double check the real published price at that time before trusting the estimate.",
     "gemini_role": "expanded — default writer for routine content generation across chore-automation tasks (previously reserved for report synthesis only in the office-simulation economy above).",
@@ -79,7 +79,7 @@
     "notebook_x_override": {
       "applies_to": "notebook-x project only — other projects (data-center, archive-alpha) use the general chore_automation economy above, unchanged.",
       "default_writer": "gemini",
-      "claude_when": "task complexity/quality genuinely demands it. Still drawn from the SAME $5/mo claude_budget_usd_per_month cap above (bumped 4.50 -> 5.00 on 2026-07-18) — this override does not add a second budget.",
+      "claude_when": "task complexity/quality genuinely demands it. Still drawn from the SAME $4.50/mo claude_budget_usd_per_month cap above — this override does not add a second budget.",
       "groq_scope": "clearly 'easy' sub-tasks only within Notebook-X work (e.g. simple formatting, short lookups) — never content generation itself."
     }
   }

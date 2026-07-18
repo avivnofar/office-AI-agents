@@ -123,7 +123,7 @@ check('gap digest contains no GitHub Issue URL/reference (no-GitHub-Issue requir
 /* ── Step 5a: shared Claude budget (same tracked pool, not a new one) ──── */
 console.log('\n--- Step 5: token economy ---');
 
-check('shared_claude_budget.cap_usd_per_month is $5', tokenEconomy.shared_claude_budget?.cap_usd_per_month === 5);
+check('shared_claude_budget.cap_usd_per_month is $4.50 (soft-stop under the $5 account ceiling)', tokenEconomy.shared_claude_budget?.cap_usd_per_month === 4.5);
 check('chore_automation.claude_budget_usd_per_month matches (SAME pool, not a second one)',
   tokenEconomy.chore_automation?.claude_budget_usd_per_month === tokenEconomy.shared_claude_budget?.cap_usd_per_month);
 check('old per-day call-count claude_daily_cap is gone (superseded)', tokenEconomy.claude_daily_cap === undefined);

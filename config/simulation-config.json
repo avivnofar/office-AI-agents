@@ -19,7 +19,7 @@
   },
   "cases_per_day_per_agent": 20,
   "cases_per_day_total": 200,
-  "claude_daily_cap_NOTE": "REMOVED 2026-07-18 (Q&A-engine rebuild) — superseded by config/token-economy.json's shared_claude_budget (a $5/month DOLLAR cap, not a per-day call count). See workers/model-router.js getClaudeBudgetStatus().",
+  "claude_daily_cap_NOTE": "REMOVED 2026-07-18 (Q&A-engine rebuild) — superseded by config/token-economy.json's shared_claude_budget (a $4.50/month DOLLAR soft-stop under the account's own $5/month spend ceiling, not a per-day call count). See workers/model-router.js getClaudeBudgetStatus(). claude_monthly_budget_usd below is read by no code — it records the $5 account ceiling, not the enforced soft-stop.",
   "claude_monthly_budget_usd": 5,
   "GEMINI": {
     "model": "gemini-3.1-flash-lite",
