@@ -39,7 +39,10 @@ reader with no prior context.
   `config/token-economy.json`'s TEMPORARY `graduated_rollout_throttle`
   (12 → 40 → 100 questions for the first three days, then automatic
   step-up to normal budget-driven volume). See TOKEN-BUDGET.md's
-  2026-07-18 activation entry.
+  2026-07-18 activation entry. **DST caveat**: the cron window is written
+  for IDT (UTC+3); when Israel switches to IST (UTC+2, late Oct) or back
+  (late Mar), update BOTH `wrangler.toml`'s cron expression and
+  `ISRAEL_UTC_OFFSET_HOURS` in `workers/agent-runner.js` together.
 - **GitHub Actions**: `.github/workflows/scheduled-claude.yml` runs a
   nightly direct-Anthropic-API session (`.github/scripts/run-claude-session.js`
   + `commit-and-log.sh`) — a separate automation path from the Worker's own

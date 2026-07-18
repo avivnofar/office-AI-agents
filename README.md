@@ -32,20 +32,32 @@ varied interaction patterns — nothing more.
 
 ## ⚙️ How it runs
 
-Three independent automation paths, each targeting a different surface:
+Two live automation paths (a third was retired 2026-07-18), each
+targeting a different surface:
 
-### 1. Cloudflare Worker cron (live, during the day)
-Fires every 30 minutes, **08:00–16:30 Israel time**, every day. Each tick
-checks `config/daily-schedule.json` and runs whatever block is due — case
-batches, tool-task windows, standup meetings, spare time — against
-[Data Center](https://avivnofar.github.io/data-center/). State persists
-between ticks in Cloudflare KV.
+### 1. Cloudflare Worker cron (live — the Q&A engine's schedule)
+Fires every 30 minutes, **02:00–16:30 Israel time** (`*/30 0-13,23 * * *`
+UTC), every day — covering the owner's 02:00–17:00 activity window. Each
+tick checks `config/daily-schedule.json` and runs whatever block is due —
+question batches (spread across six slots through the day so asks trickle
+out rather than burst, with Notebook-X calls additionally paced ~20s apart
+by `gemini-pacer.js`), a daily report, a standup, spare time — against
+both [Data Center](https://avivnofar.github.io/data-center/) (Claude) and
+[Notebook-X](https://github.com/avivnofar/Notebook-X) (Gemini). State
+persists between ticks in Cloudflare KV.
 
-### 2. GitHub Actions — nightly office day (`scheduled-claude.yml`)
-Fires at **02:30 Israel time, Sunday–Thursday**. Runs one full simulated
-office day end-to-end via a direct Anthropic API session and commits a
-daily report to this repo. Friday and Saturday are skipped (Israeli
-weekend).
+Live since **2026-07-19** — the first activation of the Q&A engine. The
+first three days ramp volume through a self-expiring graduated-rollout
+throttle: 12 questions on day 0, 40 on day 1, 100 on day 2, then automatic
+step-up to normal budget-driven volume with no manual change needed.
+
+### 2. GitHub Actions — nightly maintenance session (`scheduled-claude.yml`)
+Fires at **02:30 Israel time, Sunday–Thursday**. Runs a single direct
+Anthropic API session that reviews the repo's own state and commits its
+output (reports and doc updates — code-file writes are blocked by default)
+back to this repo. A separate path from the Worker cron above: this one
+maintains the simulation's own repo, while the Worker runs the office day
+itself. Friday and Saturday are skipped (Israeli weekend).
 
 ### 3. ~~GitHub Actions — Notebook-X daily~~ (retired 2026-07-18)
 The former nightly Notebook-X content-fill automation
@@ -62,11 +74,11 @@ no-automated-writes rule).
 
 | Model | Provider | Role | Cost |
 |-------|----------|------|------|
-| `llama3-8b-8192` | **Groq** | Primary model for all routine per-case agent work | Free, ~14,400 req/day |
-| `llama-3.1-8b-instruct-fp8` | **Cloudflare Workers AI** | Case routing/classification + same-session fallback when Groq or Gemini is unavailable | Free, account-scoped |
-| **Gemini 3.1 Flash-Lite** | Google AI Studio | Report synthesis (monthly/quarterly/yearly meetings), Notebook-X content fill, **and** direct Notebook-X question-asking (paced ~1 call/20s from this automation — Gemini's free-tier quota is shared with Notebook-X's own traffic) | Free tier, ~1,500 req/day |
+| `llama3-8b-8192` | **Groq** | Primary model for all routine per-question agent work | Free, ~14,400 req/day |
+| `llama-3.1-8b-instruct-fp8` | **Cloudflare Workers AI** | Question routing/classification + same-session fallback when Groq or Gemini is unavailable | Free, account-scoped |
+| **Gemini 3.1 Flash-Lite** | Google AI Studio | Report synthesis (monthly/quarterly/yearly meetings) **and** direct Notebook-X question-asking (paced ~1 call/20s from this automation — Gemini's free-tier quota is shared with Notebook-X's own traffic) | Free tier, ~1,500 req/day |
 | **Google AI Studio** (interactive) | Google | Reserved for human-in-the-loop creative-tool sessions (Agents 9/10 building design assets) — never called programmatically | n/a |
-| `claude-sonnet-4-6` | **Anthropic** | Data Center's AI Search bar. **Shared $5/month budget** across the 11-agent Q&A engine and the chore-automation economy — a dollar cap, not a per-day call count | Paid, low volume |
+| `claude-sonnet-4-6` | **Anthropic** | Data Center's AI Search bar. **Shared $5/month budget** across the Q&A engine (10 active personas) and the chore-automation economy — a per-month dollar cap tracked in D1 and checked in software before every call (a soft-stop, with the account's own $5/month spend ceiling as the hard backstop), not a per-day call count | Paid, low volume |
 
 ---
 

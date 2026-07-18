@@ -28,7 +28,7 @@ function getRotatedProject(date) {
 function selectModelForChoreTask({ projectKey, taskType, requiresHighQuality = false, overBudget = false }) {
   if (projectKey === 'notebook-x') {
     if (taskType === 'easy') return { model: 'groq', reason: 'Notebook-X override: easy sub-task.' };
-    if (requiresHighQuality && !overBudget) return { model: 'claude', reason: 'Notebook-X override: quality demands Claude (shared $4.50/mo cap).' };
+    if (requiresHighQuality && !overBudget) return { model: 'claude', reason: 'Notebook-X override: quality demands Claude (shared $5/mo cap).' };
     if (requiresHighQuality && overBudget) return { model: 'gemini', reason: 'Notebook-X override wanted Claude but cap exhausted — Gemini fallback.' };
     return { model: 'gemini', reason: 'Notebook-X override: Gemini is default writer.' };
   }

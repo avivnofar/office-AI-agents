@@ -3853,3 +3853,45 @@ Spread, not bursty, per the pacing design.
 /api/simulation` (pause/inspection toggles) sits OUTSIDE the
 `/api/agents/*` admin-token check — unauthenticated state writes.
 Worth closing in a future session.
+
+## 2026-07-18 — docs accuracy pass: README.md + CLAUDE.md current as of tonight's activation
+
+Fifth session today. Zero model calls — public-facing docs only, audited
+against `wrangler.toml` / `config/token-economy.json` /
+`config/project-permissions.json` / the live code (not against each other).
+
+**README.md** (the stale one): Worker-cron section rewritten — was still
+describing the pre-activation **08:00–16:30** window and Netvill-era "case
+batches"; now states the real live schedule (`*/30 0-13,23 * * *` UTC =
+02:00–16:30 Israel ticks covering the 02:00–17:00 activity window),
+question batches against both targets, gemini-pacer spacing, live-since
+2026-07-19, and the self-expiring graduated-rollout throttle (12/40/100
+then automatic step-up). Claude row now describes the budget accurately:
+$5/month shared dollar cap, D1-tracked, checked per-call (software
+soft-stop; the account's own $5/month spend ceiling is the hard backstop)
+— NOT a per-day call count. Nightly `scheduled-claude.yml` description
+corrected from "runs one full simulated office day" (it's one direct API
+call) to what it actually does: a repo-maintenance session, code writes
+blocked by default. "Three automation paths" → two live + one retired.
+
+**CLAUDE.md**: earlier session's cron-section update HAD already landed
+(verified, not assumed) — only real gap was the DST caveat wrangler.toml
+points at CLAUDE.md for; added it (update cron window +
+`ISRAEL_UTC_OFFSET_HOURS` together at IDT↔IST switches).
+
+**Same-wrong-assumption sweep**: the session brief itself said "$4.50/mo
+soft-stop" — that number was bumped 4.50 → 5.00 in this morning's rebuild
+(this file's entry above); config/code are unambiguous ($5.00,
+`spentUsd >= capUsd`). Fixed the three surviving stale $4.50 prose
+references instead: `config/token-economy.json` `notebook_x_override`
+comment, `database/schema.sql`'s `claude_budget_usage` comment (also
+wrongly said "SEPARATE" cap), `scripts/verify-chore-rotation.js` reason
+string. Comments/strings only, zero behavior change —
+`verify-qa-engine.js` still 56/56 and `verify-chore-rotation.js` passes
+`node --check` after the edits.
+
+**Also observed, not fixed (out of scope)**: `scheduled-claude.yml`'s
+default TASK prompt still carries Netvill-era language ("all 11 agents
+process their cases", "Claude capped at 5 calls" — a retired call-count
+framing). Worth refreshing in a future session that's allowed to touch
+workflow YAML.
