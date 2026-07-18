@@ -3954,3 +3954,37 @@ both now note it's currently disabled.
 (`force_idle: true`, zero Gemini/Claude calls) has never been exercised
 live. Verify it actually holds — zero model calls logged — on the first
 live Saturday, **2026-07-25** (day-1 = Sunday 2026-07-19 mapping).
+
+## 2026-07-18 — deploy of the $4.50 soft-stop (610cd3e live before first run)
+
+Seventh session today. Zero model calls — deploy only, ~2.5h before the
+first live tick (deployed 20:27 UTC; first due block 23:00 UTC = 02:00
+Israel Sunday).
+
+**Deployed**: `npx wrangler deploy` → version
+`a070955f-ca16-4877-8bbd-353333e643c5`, created 2026-07-18T20:27:53Z,
+confirmed via `wrangler deployments list` (newest record matches) and a
+live `GET /api/simulation` (200, `paused:false`).
+
+**Cap verified in the bundle, not just the source commit**: no
+status/debug endpoint exposes the cap (`/api/agents/status` is
+admin-token-gated), and the raw-script-content API remains blocked
+under wrangler OAuth (the known 405), so the check used
+`wrangler deploy --dry-run --outdir` on the same clean tree seconds
+after the real deploy: the built `agent-runner.js` bundle contains
+`cap_usd_per_month: 4.5` AND `claude_budget_usd_per_month: 4.5` (the
+field `getClaudeBudgetStatus()`'s `spentUsd >= capUsd` check reads).
+Same disclosed limitation as prior deploys: identical-build evidence,
+not a byte-level diff of the served bundle.
+
+**Cron unaffected**: Cloudflare API schedules list (read via wrangler's
+own OAuth token) → exactly ONE schedule, `*/30 0-13,23 * * *`,
+`created_on` still 2026-07-18T19:29:35Z (the activation deploy);
+`modified_on` bumped to 20:28:06Z by this deploy re-applying the
+identical trigger from wrangler.toml. Not duplicated, not altered.
+
+**No spend under the old 5.00 cap**: live D1
+`SELECT * FROM claude_budget_usage` → zero rows. The zero-headroom
+window (5.00 cap live from 19:29Z to 20:28Z) was never exercised — no
+Claude call has ever been recorded against the budget table. The $4.50
+soft-stop is live before the first unattended run starts.
