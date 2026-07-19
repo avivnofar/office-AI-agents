@@ -4188,3 +4188,15 @@ headers. Deployed `12068e05` (cron intact), live smoke via test-gemini
 passed (persona prompt + routing OK). verify-qa-engine.js 72/72. Zero
 model-spend impact (rename + one deliberate Groq→Gemini move on the rare
 TRAINEE_PANIC guide path, which was documented as Gemini all along).
+
+## 2026-07-19 (follow-up session) — Hebrew gap-note fix: live-verified
+
+Fresh live sample (agent 6, notebook-x hard gap, 18:03 UTC, no Claude
+spend) confirms `queryGeminiDirect()` gap-note composition works — coherent,
+fluent Hebrew. Also found: the already-committed
+`reports/gaps/data-center/2026-07-19.md` (17:01 UTC) actually predates the
+routing fix (`1fe2d03`, 17:31 UTC) by 30 minutes, so it's pre-fix garbled
+debris, not a verification artifact as an earlier memory note claimed.
+Annotated the file in place (original garbled text kept, note added on
+top, nothing removed); memory record `incident-2026-07-19-stale-do-state`
+corrected to match.
