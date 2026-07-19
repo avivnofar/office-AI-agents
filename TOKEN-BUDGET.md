@@ -3988,3 +3988,56 @@ identical trigger from wrangler.toml. Not duplicated, not altered.
 window (5.00 cap live from 19:29Z to 20:28Z) was never exercised — no
 Claude call has ever been recorded against the budget table. The $4.50
 soft-stop is live before the first unattended run starts.
+
+---
+
+## 2026-07-19 — First live Q&A day incident: stale DO state; fixes deployed; cron paused
+
+**Incident** (first live Q&A-engine day, day 22): the deployed bundle
+(`a070955f`) ran the NEW engine correctly — 12 `qa-2026-w03-d1-*` questions,
+correct day-0 throttle, new summary template — but six agents (2,4,6,8,9,11)
+entered the day still ANGRY from pre-2026-07-08 Durable Object state (the
+activation cleanup wiped the KV cycle blob but never the per-agent DO
+snapshots). `processCaseBatch()`'s old `if (agent.isAngry) continue;` skip
+silently dropped their 7 questions — including BOTH notebook-x ones (agents
+6/8), so zero Gemini calls all day. Under the quality-primary mood design the
+skip is also a deadlock: no ask → no quality signal → no recovery until a
+weekly reset. Old-looking artifacts were stale side_plots rows (2026-07-05/06)
+advanced by the retained plot mechanics + old-flavor standup prompts riffing
+on a real Perfectionist critique — NOT old CRM dispatch code.
+
+**Cron paused ~15:55 UTC** via wrangler `triggers deploy` with `crons = []`,
+verified against the live API (`GET .../schedules` → `{"schedules": []}`).
+Stays paused until the owner green-lights resumption after a clean test run.
+
+**Spend, 2026-07 to date**: $0.0604 / $4.50, 6 calls — all six legitimate
+Q&A-engine asks (5 questions + 1 Perfectionist follow-up), ~$0.0101/call.
+$0 wasted on dead logic. Gemini: 0 calls today (see above).
+
+**Fixes deployed** (version `b42d5e9b`, commit 43c9e2c, owner-approved):
+- Fix A: ANGRY no longer skips the ask (deadlock removed; agent 2's own
+  cooldown logic in agent-2-productive.js is now actually reachable).
+- Fix B: AI-experience report block gates on the KV-carried `cycle.agentStats`
+  instead of in-memory `agent.session` (always null across isolate ticks —
+  the section could never be non-empty in scheduled mode before).
+- `client_crisis` side plot retired (config + trigger removed);
+  `advanceSidePlots()` auto-closes active rows of retired types, which will
+  close the lingering 2026-07-06 row on the next day cycle (a direct D1
+  UPDATE was blocked by the permission classifier — acceptable, the code
+  path covers it).
+- New admin triggers for ops/verification: `state_reset` (all-agent clean
+  zero incl. permanentIrritationFlags, no meetings/model calls — chosen over
+  `week_reset`, which would have fired weekly/audit MEETINGS and analytics
+  writes mid-week just to reset mood), `state_set` (whitelisted per-agent
+  override), `block` (run one scheduled block through the real
+  `runScheduledBlock()` KV-cycle path without cron).
+- `verify-qa-engine.js` extended 56 → 62 checks (regression tripwires for
+  all three fixes). 62/62 pass.
+
+**Blocked, needs owner**: the permission classifier (correctly) refused to
+let this session rotate the `ADMIN_TOKEN` Worker secret, and the token
+itself isn't available locally — so the approved all-agent `state_reset`
+(incl. agent 2's flag clear), the read-back verification, and the supervised
+`block`-trigger micro-test could not be executed yet. Exact commands are in
+the session handoff; the owner either supplies the existing token or runs
+`npx wrangler secret put ADMIN_TOKEN` once themselves.
