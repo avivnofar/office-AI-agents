@@ -165,6 +165,30 @@ check(`call allowed again after MIN_SPACING_MS (${MIN_SPACING_MS}ms) elapses`, t
 const noKv = await checkGeminiPacingSlot({});
 check('pacing degrades open (allowed) when SIM_KV is not bound (dev/test)', noKv.allowed === true);
 
+/* ── 2026-07-19 incident fixes (stale-DO-state day) ────────────────────── */
+// workers/agent-runner.js can't be imported under plain node (JSON imports,
+// same ERR_IMPORT_ASSERTION_TYPE_MISSING as qa-engine.js — see this file's
+// header), so these are source-level regression tripwires, not behavioral
+// tests. They pin the three fixes so a revert/regression fails loudly here.
+console.log('\n--- 2026-07-19 fixes: anger deadlock / cross-tick reports / client_crisis ---');
+
+const { readFileSync } = await import('node:fs');
+const runnerSrc = readFileSync(new URL('../workers/agent-runner.js', import.meta.url), 'utf8');
+const sidePlotsJson = require('../config/side-plots.json');
+
+check('Fix A: processCaseBatch has NO "if (agent.isAngry) continue/break" skip left',
+  !/if \(agent\.isAngry\) (continue|break);/.test(runnerSrc));
+check('Fix B: runDailyAiExperienceReports takes agentStats (cross-tick), not only instances',
+  /runDailyAiExperienceReports\(env, agentInstances, agentStats\)/.test(runnerSrc));
+check('Fix B: the always-empty in-memory session gate is gone',
+  !/!agent\.session \|\| !agent\.session\.cases_handled/.test(runnerSrc));
+check('client_crisis: removed from config/side-plots.json side_plot_types',
+  !('client_crisis' in (sidePlotsJson.side_plot_types || {})));
+check('client_crisis: no startSidePlot call for it left in agent-runner.js',
+  !runnerSrc.includes("startSidePlot(env, 'client_crisis'"));
+check('retired-type safety: advanceSidePlots auto-closes rows whose type is no longer configured',
+  runnerSrc.includes('retired — auto-closed'));
+
 /* ── Summary ─────────────────────────────────────────────────────────── */
 console.log(`\n=== ${pass} passed, ${fail} failed ===`);
 if (fail > 0) {

@@ -60,4 +60,6 @@ binding = "AI"
 # to IDT (late Mar), update BOTH this cron window and
 # ISRAEL_UTC_OFFSET_HOURS in agent-runner.js — see CLAUDE.md.
 [triggers]
-crons = ["*/30 0-13,23 * * *"]
+# PAUSED 2026-07-19 (incident: cron ran retired Netvill/CRM logic, not the
+# Q&A engine — see TOKEN-BUDGET.md). Restore "*/30 0-13,23 * * *" after fix.
+crons = []

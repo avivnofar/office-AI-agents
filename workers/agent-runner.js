@@ -199,6 +199,7 @@ async function getAllAgentStatuses(env) {
       isAngry: agent.isAngry,
       isPanic: agent.isPanic,
       panicLevel: agent.panicLevel,
+      permanentIrritationFlags: agent.permanentIrritationFlags,
       session: agent.session,
       quotas: config.quotas || null,
       configOverrides: agent.configOverrides || {},
@@ -599,7 +600,17 @@ async function advanceSidePlots(env, currentDay) {
 
   for (const plot of active) {
     const typeConfig = sidePlotsConfig.side_plot_types[plot.type];
-    if (!typeConfig) continue;
+    if (!typeConfig) {
+      // Plot type no longer defined (e.g. client_crisis, retired 2026-07-19
+      // with the Netvill-CRM vocabulary) — close the row out instead of
+      // leaving it wedged 'active' forever in summaries/max_concurrent.
+      const closedLog = `${plot.log ? `${plot.log}\n` : ''}(plot type '${plot.type}' retired — auto-closed)`;
+      await env.DB.prepare(
+        `UPDATE side_plots SET log = ?, status = 'resolved', resolved_at = ? WHERE id = ?`
+      ).bind(closedLog, new Date().toISOString(), plot.id).run().catch(() => {});
+      updates.push({ id: plot.id, type: plot.type, status: 'resolved', retired: true });
+      continue;
+    }
 
     const dayOffset = currentDay - plot.start_day + 1;
     const stage = typeConfig.stages.find((s) => s.day === dayOffset);
@@ -640,12 +651,11 @@ async function maybeStartSidePlots(env, { day, summary, cases, standup }) {
     if (plot) started.push(plot);
   }
 
-  // client_crisis: a critical, unique-client, IT-Chief-required case today.
-  const crisisCase = (cases || []).find((c) => c.severity === 'critical' && c.is_unique_client && c.requires_it_chief);
-  if (crisisCase) {
-    const plot = await startSidePlot(env, 'client_crisis', [5, crisisCase.assigned_to, 11], day);
-    if (plot) started.push(plot);
-  }
+  // client_crisis: RETIRED 2026-07-19 — Netvill-CRM vocabulary ("clients"
+  // in crisis) with a trigger keyed off retired CRM case fields
+  // (is_unique_client/requires_it_chief) that Q&A-engine questions never
+  // set. Removed with owner approval; advanceSidePlots() auto-closes any
+  // lingering active row of a retired type.
 
   // breakthrough: an agent ended HAPPY after handling an advanced case.
   const breakthroughAgent = summary.agents.find((a) => a.isHappy && a.advancedCases > 0);
@@ -938,8 +948,14 @@ async function processCaseBatch(env, batchCases, agentInstances, agentStats) {
     const stats = agentStats.get(agentId);
     stats.caseCount += agentCases.length;
 
-    if (agent.isAngry) continue;
-
+    // 2026-07-19 fix: no ANGRY skip here. Under the quality-primary mood
+    // design an agent's only path back to CALM/HAPPY is a good answer to a
+    // question it actually asked — skipping angry agents made ANGRY a
+    // dead-end until the weekly reset (and silently dropped their assigned
+    // questions, as on the 2026-07-19 first live day). Anger still colors
+    // the persona (state line in queryGemini prompts, agent-2's own
+    // cooldown logic in agent-2-productive.js handleCase()); it no longer
+    // suppresses the core ask-and-evaluate task.
     for (const c of agentCases) {
       const raw = await agent.handleCase(c, { archiveGuides: [] });
       const outcome = extractOutcome(raw);
@@ -950,8 +966,6 @@ async function processCaseBatch(env, batchCases, agentInstances, agentStats) {
         await handleTraineePanic(env, outcome.escalation);
         stats.escalations += 1;
       }
-
-      if (agent.isAngry) break;
     }
   }
 }
@@ -970,11 +984,18 @@ async function processCaseBatch(env, batchCases, agentInstances, agentStats) {
  * gone — gap detection and Hebrew write-up now happen immediately per
  * interaction, not from a low-quality log accumulated across the day.
  */
-async function runDailyAiExperienceReports(env, agentInstances) {
+async function runDailyAiExperienceReports(env, agentInstances, agentStats) {
   const statusReports = [];
 
   for (const [agentId, agent] of agentInstances) {
-    if (!agent.session || !agent.session.cases_handled) continue;
+    // 2026-07-19 fix: gate on the day's accumulated per-agent stats (carried
+    // across cron ticks in the SIM_KV cycle, same as the rest of the
+    // scheduled path), NOT on in-memory agent.session — sessions never
+    // survive from a case_batch tick's isolate to the 16:00 report tick's
+    // fresh instances, so the old check made this section always empty in
+    // scheduled mode.
+    const handled = agentStats?.get(agentId)?.handled || 0;
+    if (!handled) continue;
     let note;
     try {
       note = await agent.queryGemini(
@@ -1339,7 +1360,7 @@ export async function runWorkDayCycle(env) {
     if (block.type === 'tool_task_window') {
       toolTask = await maybeOpenAssetTask(env, dayOfWeek, nextDay);
     } else if (block.type === 'report') {
-      aiExperience = await runDailyAiExperienceReports(env, agentInstances);
+      aiExperience = await runDailyAiExperienceReports(env, agentInstances, agentStats);
     } else if (block.type === 'spare_time') {
       for (const [, agent] of agentInstances) {
         spareTime.push(await runSpareTimeForAgent(env, agent, { forceIdle: !!block.force_idle }));
@@ -1552,7 +1573,7 @@ export async function runScheduledBlock(env, israelTime, dayOfWeek) {
         cycle.results.toolTask = await maybeOpenAssetTask(env, dayOfWeek, cycle.day);
       } else if (block.type === 'report') {
         await ensureAgentInstances(true);
-        cycle.results.aiExperience = await runDailyAiExperienceReports(env, agentInstances);
+        cycle.results.aiExperience = await runDailyAiExperienceReports(env, agentInstances, agentStats);
       } else if (block.type === 'meeting' && block.meeting_type === 'daily_standup') {
         cycle.results.standup = await runMeeting('daily_standup', env);
       } else if (block.type === 'spare_time') {
@@ -1784,6 +1805,45 @@ export async function runWeeklyResetCycle(env) {
   return { ...summary, weekly, audit, pip };
 }
 
+/**
+ * Owner-triggered clean state reset (2026-07-19, stale-DO-state incident):
+ * zeroes every agent's mood-machine state — INCLUDING
+ * permanentIrritationFlags, which resetWeeklyState() deliberately preserves
+ * — with none of runWeeklyResetCycle()'s side effects (no weekly reports,
+ * no weekly/audit meetings, no model calls, no analytics rows).
+ * configOverrides are preserved (durable config tweaks, not mood state).
+ * Pass agentId to target one agent; omit for all 11. Returns before/after
+ * per agent so the caller can verify, not just trust the call succeeded.
+ */
+export async function runAgentStateReset(env, agentId = null) {
+  const results = [];
+  for (const config of agentsConfig.agents) {
+    if (agentId != null && config.id !== agentId) continue;
+    const agent = instantiateAgent(config.id, env);
+    await agent.loadState();
+    const before = {
+      mood: agent.mood,
+      irritation: agent.irritation,
+      isAngry: agent.isAngry,
+      isHappy: agent.isHappy,
+      isPanic: agent.isPanic,
+      panicLevel: agent.panicLevel,
+      permanentIrritationFlags: [...agent.permanentIrritationFlags],
+    };
+    agent.mood = 50;
+    agent.irritation = 0;
+    agent.isAngry = false;
+    agent.isHappy = false;
+    agent.isPanic = false;
+    agent.panicLevel = 0;
+    agent.permanentIrritationFlags = [];
+    agent.session = null;
+    await agent.saveState();
+    results.push({ agentId: config.id, name: config.name, before });
+  }
+  return { reset: results.length, agents: results };
+}
+
 /* ────────────────────────────────── HTTP API ───────────────────────────── */
 
 export default {
@@ -1852,7 +1912,7 @@ export default {
         return json(result, 200, origin);
       }
       if (request.method === 'POST' && url.pathname === '/api/agents/trigger') {
-        // Unified admin trigger: { type: 'day'|'meeting'|'inspection'|'week_reset', ...opts }
+        // Unified admin trigger: { type: 'day'|'meeting'|'inspection'|'week_reset'|'state_reset'|'state_set'|'block', ...opts }
         const body = await request.json();
         let result;
         switch (body.type) {
@@ -1875,6 +1935,45 @@ export default {
             break;
           case 'week_reset':
             result = await runWeeklyResetCycle(env);
+            break;
+          case 'state_reset':
+            // Clean mood/state zero for all agents (or body.agentId only) —
+            // incl. permanentIrritationFlags; no meetings/model calls.
+            result = await runAgentStateReset(env, body.agentId ?? null);
+            break;
+          case 'state_set': {
+            // Explicit per-agent state override (2026-07-19): supervised
+            // testing/ops only — e.g. forcing an agent ANGRY to verify the
+            // no-skip fix, or clearing a specific flag. Whitelisted fields
+            // only. Body: { agentId, state: { mood?, irritation?, isAngry?,
+            // isHappy?, isPanic?, panicLevel?, permanentIrritationFlags? } }
+            if (!body.agentId || !body.state || typeof body.state !== 'object') {
+              return json({ error: 'state_set_requires_agentId_and_state' }, 400, origin);
+            }
+            const agent = instantiateAgent(body.agentId, env);
+            await agent.loadState();
+            const before = {
+              mood: agent.mood, irritation: agent.irritation, isAngry: agent.isAngry,
+              isHappy: agent.isHappy, isPanic: agent.isPanic, panicLevel: agent.panicLevel,
+              permanentIrritationFlags: [...agent.permanentIrritationFlags],
+            };
+            for (const field of ['mood', 'irritation', 'isAngry', 'isHappy', 'isPanic', 'panicLevel', 'permanentIrritationFlags']) {
+              if (field in body.state) agent[field] = body.state[field];
+            }
+            await agent.saveState();
+            result = { agentId: body.agentId, before, after: body.state };
+            break;
+          }
+          case 'block':
+            // Run ONE daily-schedule block through the REAL scheduled path
+            // (runScheduledBlock: KV cycle persistence, per-block dispatch)
+            // without waiting for cron — supervised fix verification. Body:
+            // { israelTime: "HH:MM", dayOfWeek: 1-7 }. Same no-op semantics
+            // as a cron tick if no block exists at that time/day.
+            if (!body.israelTime || !body.dayOfWeek) {
+              return json({ error: 'block_requires_israelTime_and_dayOfWeek' }, 400, origin);
+            }
+            result = await runScheduledBlock(env, body.israelTime, Number(body.dayOfWeek));
             break;
           default:
             return json({ error: 'invalid_trigger_type' }, 400, origin);
