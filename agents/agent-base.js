@@ -14,7 +14,7 @@
 import { callGemini, callCloudflareFallback } from '../workers/gemini-client.js';
 import { callGroq } from '../workers/groq-client.js';
 import { queryNotebookX } from '../workers/notebookx-client.js';
-import { getClaudeBudgetStatus, recordClaudeSpend } from '../workers/model-router.js';
+import { getClaudeBudgetStatus, recordClaudeSpend, getClaudeCallsToday, CLAUDE_MAX_CALLS_PER_DAY } from '../workers/model-router.js';
 import { checkGeminiPacingSlot } from '../workers/gemini-pacer.js';
 import { detectCapabilityGap } from '../workers/gap-reports.js';
 
@@ -517,6 +517,29 @@ export class AgentBase {
         tool_used: 'claude-budget-skip',
       });
       return { ok: false, skipped: true, reason: 'claude_budget_exhausted', quality: undefined };
+    }
+
+    // 2026-07-19 (owner-approved rebalance): per-day CALL cap backstop under
+    // the monthly dollar cap — counts every model_source='claude'
+    // interactions row today, so follow-up asks count too. The generation
+    // side already limits data-center-targeted QUESTIONS to the same number
+    // (qa-engine.js); this catches follow-ups and any other overflow.
+    if (CLAUDE_MAX_CALLS_PER_DAY > 0) {
+      const callsToday = await getClaudeCallsToday(this.env);
+      if (callsToday >= CLAUDE_MAX_CALLS_PER_DAY) {
+        await this.logInteraction({
+          type: `qa_${mode}`,
+          query,
+          response_summary: `(skipped: daily Claude call cap reached — ${callsToday}/${CLAUDE_MAX_CALLS_PER_DAY} today)`,
+          mood_before: moodBefore,
+          mood_after: this.mood,
+          irritation_change: 0,
+          state_change: null,
+          model_source: null,
+          tool_used: 'claude-daily-cap-skip',
+        });
+        return { ok: false, skipped: true, reason: 'claude_daily_call_cap', quality: undefined };
+      }
     }
 
     const base = this.env.APP_API_BASE || 'https://data-center-api.avivnofar.workers.dev';

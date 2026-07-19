@@ -189,6 +189,23 @@ check('client_crisis: no startSidePlot call for it left in agent-runner.js',
 check('retired-type safety: advanceSidePlots auto-closes rows whose type is no longer configured',
   runnerSrc.includes('retired — auto-closed'));
 
+/* ── 2026-07-19 owner-approved Claude/Gemini rebalance (10 calls/day cap) ── */
+console.log('\n--- 2026-07-19 rebalance: per-day Claude call cap ---');
+
+const qaEngineSrc = readFileSync(new URL('../workers/qa-engine.js', import.meta.url), 'utf8');
+const agentBaseSrc = readFileSync(new URL('../agents/agent-base.js', import.meta.url), 'utf8');
+
+check('config: shared_claude_budget.max_calls_per_day is 10',
+  tokenEconomy.shared_claude_budget?.max_calls_per_day === 10);
+check('layer (a): generateAssignedDailyBatch caps data-center questions and re-picks notebook-x',
+  qaEngineSrc.includes('MAX_DATA_CENTER_QUESTIONS_PER_DAY') &&
+  qaEngineSrc.includes("projectFilter: 'notebook-x'"));
+check('layer (b): _askDataCenter has the ask-time daily-cap skip (follow-ups count)',
+  agentBaseSrc.includes('CLAUDE_MAX_CALLS_PER_DAY') &&
+  agentBaseSrc.includes("tool_used: 'claude-daily-cap-skip'"));
+check('cap worst case stays under the monthly soft-stop (10 x ~$0.01 x 31d < $4.50)',
+  10 * 0.0101 * 31 < tokenEconomy.shared_claude_budget.cap_usd_per_month);
+
 /* ── Summary ─────────────────────────────────────────────────────────── */
 console.log(`\n=== ${pass} passed, ${fail} failed ===`);
 if (fail > 0) {

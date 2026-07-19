@@ -24,6 +24,14 @@
 
 import { TOPIC_POOL } from './qa-topics.js';
 import agentsConfig from '../config/agents-config.json';
+import tokenEconomy from '../config/token-economy.json';
+
+// 2026-07-19 (owner-approved rebalance): generation-time layer of the
+// per-day Claude call cap — at most this many data-center-targeted
+// questions per generation call (one call per simulated day in both live
+// paths); overflow re-picks from the notebook-x pool instead. The ask-time
+// backstop lives in agent-base.js _askDataCenter() (covers follow-ups).
+const MAX_DATA_CENTER_QUESTIONS_PER_DAY = tokenEconomy.shared_claude_budget?.max_calls_per_day ?? 0;
 
 const WEEK_DAYS = 7;
 
@@ -82,15 +90,16 @@ export const getActiveCaseAgents = getActiveQaAgents;
  * filter) so an agent with a topic_affinity still occasionally asks outside
  * it — matching how a real specialist's questions aren't 100% on-topic.
  */
-function selectTopicForAgent(agentId) {
+function selectTopicForAgent(agentId, { projectFilter = null } = {}) {
+  const pool = projectFilter ? TOPIC_POOL.filter((t) => t.project === projectFilter) : TOPIC_POOL;
   const agentConfig = agentsConfig.agents.find((a) => a.id === agentId);
   const affinity = agentConfig?.topic_affinity || [];
 
   if (!affinity.length) {
-    return weightedPick(TOPIC_POOL.map((t) => ({ topic: t, weight: t.poolWeight })), 'weight').topic;
+    return weightedPick(pool.map((t) => ({ topic: t, weight: t.poolWeight })), 'weight').topic;
   }
 
-  const weighted = TOPIC_POOL.map((t) => {
+  const weighted = pool.map((t) => {
     const matches = affinity.includes(t.platform) || affinity.includes(t.category);
     return { topic: t, weight: matches ? t.poolWeight * 2 : t.poolWeight };
   });
@@ -140,9 +149,18 @@ export function generateAssignedDailyBatch(dayIndex, opts = {}) {
 
   const questions = [];
   let idNum = (opts.startIndex ?? 1);
+  let dataCenterCount = 0;
   for (let i = 0; i < maxTotalQuestions; i++) {
     const agent = activeAgents[i % activeAgents.length];
-    const template = selectTopicForAgent(agent.id);
+    let template = selectTopicForAgent(agent.id);
+    if (
+      MAX_DATA_CENTER_QUESTIONS_PER_DAY > 0 &&
+      template.project === 'data-center' &&
+      dataCenterCount >= MAX_DATA_CENTER_QUESTIONS_PER_DAY
+    ) {
+      template = selectTopicForAgent(agent.id, { projectFilter: 'notebook-x' });
+    }
+    if (template.project === 'data-center') dataCenterCount += 1;
     const id = buildQuestionId(year, weekNumber, dayIndex, idNum);
     questions.push(buildQuestion(template, null, id, agent.id));
     idNum += 1;

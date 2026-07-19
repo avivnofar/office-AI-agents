@@ -70,6 +70,26 @@ export async function getClaudeBudgetStatus(env, { asOf = new Date() } = {}) {
   return { month, spentUsd, capUsd, remainingUsd: Math.max(0, capUsd - spentUsd), overBudget: spentUsd >= capUsd };
 }
 
+/**
+ * Counts today's (UTC calendar day, repo DATE('now') convention) Claude
+ * calls — success, failure and all: every _askDataCenter() attempt logs an
+ * interactions row with model_source='claude', including follow-ups, and a
+ * failed call still consumed request tokens. Used by _askDataCenter()'s
+ * per-day call-cap backstop (config/token-economy.json
+ * shared_claude_budget.max_calls_per_day, added 2026-07-19). Degrades open
+ * (0) without env.DB, same posture as the rest of this module.
+ */
+export async function getClaudeCallsToday(env) {
+  if (!env?.DB) return 0;
+  const row = await env.DB.prepare(
+    `SELECT COUNT(*) AS n FROM interactions WHERE model_source = 'claude' AND DATE(timestamp) = DATE('now')`
+  ).first().catch(() => null);
+  return row?.n ?? 0;
+}
+
+/** The per-day Claude call cap (0/undefined = no daily cap, monthly $ cap still applies). */
+export const CLAUDE_MAX_CALLS_PER_DAY = tokenEconomy.shared_claude_budget?.max_calls_per_day ?? 0;
+
 /** Records a chore-automation Claude call's estimated cost against this month's soft cap. No-ops without env.DB. */
 export async function recordClaudeSpend(env, { inputTokens, outputTokens, asOf = new Date() }) {
   if (!env?.DB) return { recorded: false, reason: 'no DB binding' };
