@@ -55,7 +55,7 @@ export class TraineeAgent extends AgentBase {
   }
 
   async formulateQuestions(caseData) {
-    return this.queryGemini(
+    return this.queryGroqRouted(
       `You're a trainee facing this case: "${caseData.title}" — ${caseData.description}. ` +
         `Ask 2-3 clarifying questions and request a detailed step-by-step guide.`
     );
@@ -125,7 +125,13 @@ export class TraineeAgent extends AgentBase {
    * token only — see CLAUDE.md credential rules).
    */
   async generateGuide(caseData) {
-    const markdown = await this.queryGemini(
+    // queryGeminiDirect (2026-07-19 rename audit): this guide is BILINGUAL
+    // (Hebrew + English) and gets committed as a persistent artifact — the
+    // docstring above always said "via Gemini", but the bare old
+    // queryGemini() call actually rode the Groq-first routing (same latent
+    // bug class as that day's Hebrew gap-note fix; Groq's Hebrew is not
+    // usably fluent).
+    const markdown = await this.queryGeminiDirect(
       `Write a bilingual (Hebrew + English) step-by-step troubleshooting guide in Markdown for: ` +
         `"${caseData.title}" (${caseData.platform}/${caseData.category}, ${caseData.difficulty}). ` +
         `Include numbered steps with exact commands in English code blocks.`

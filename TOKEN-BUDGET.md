@@ -4150,3 +4150,41 @@ deployed as version `89395709`; verify-qa-engine.js 70/70; all 11 agents
 state_reset to clean (confirmed via status read-back) before tonight's
 23:00 UTC first batch. Test spend: 3 Notebook-X asks (free) + 0 Claude
 calls — month total unchanged at $0.0918/$4.50, 12 calls.
+
+---
+
+## 2026-07-19 (last) — `queryGemini()` rename audit + split
+
+The misleadingly-named `queryGemini()` router (bare calls → Groq-first) is
+gone. Split into `queryGroqRouted()` (routine English persona flavor;
+Groq-first, Cloudflare fallback, forceFallback preserved) and
+`queryGeminiDirect()` (genuinely Gemini 3.1 Flash-Lite; Hebrew/bilingual
+composition), both sharing `_buildPersonaSystemPrompt()`. Deliberately NO
+back-compat `queryGemini` alias — a stale call site must fail loudly, and
+verify-qa-engine.js now greps that no `.queryGemini(` invocation exists.
+
+**Audit of all 12 call sites** (what each actually wanted):
+- Routine Groq-first (11 English persona-flavor sites, unchanged behavior):
+  agent-1 critique + follow-up, agent-2 mock report + briefing, agent-3
+  status report, agent-4 clarifying questions, agent-base follow-up
+  phrasing, agent-runner runGeminiTest + AI-experience note + coworker
+  chat → all now `queryGroqRouted()`.
+- Genuinely Gemini: agent-base gap note (fixed earlier tonight) AND
+  **agent-4 `generateGuide()` — the audit's real catch**: a BILINGUAL
+  (Hebrew+English) guide committed to data-center-archive whose docstring
+  always said "via Gemini" but whose bare call rode the Groq path — the
+  same latent bug class as the gap note, waiting on the TRAINEE_PANIC
+  escalation. Both now `queryGeminiDirect()`.
+- Dead branch: NOTHING passes `opts.reportType` — meeting-engine calls
+  callGemini() itself; the reportType regex branch was caller-dead.
+  Preserved only as a log label on queryGeminiDirect.
+- `/api/agents/test-gemini` endpoint name kept (dashboard compatibility)
+  with a comment noting it has never tested actual Gemini — it smokes the
+  routed persona path.
+
+Docs updated to the new names: CLAUDE.md (gap-note flow), token-economy
+_meta, daily-schedule gap-note block, side-plots _meta, groq/gemini client
+headers. Deployed `12068e05` (cron intact), live smoke via test-gemini
+passed (persona prompt + routing OK). verify-qa-engine.js 72/72. Zero
+model-spend impact (rename + one deliberate Groq→Gemini move on the rare
+TRAINEE_PANIC guide path, which was documented as Gemini all along).

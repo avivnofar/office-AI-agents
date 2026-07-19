@@ -7,7 +7,7 @@
  * (config/token-economy.json), Gemini is reserved for large-context
  * synthesis — monthly/quarterly/semi-yearly/yearly reports
  * (meeting-engine.js) — and is no longer called for routine per-case agent
- * work (see agent-base.js queryGemini(), which now calls groq-client.js
+ * work (see agent-base.js queryGroqRouted(), which calls groq-client.js
  * callGroq() for that). Never called directly by the frontend.
  *
  * Fallback: if Gemini responds with HTTP 429 (quota exhausted — a recurring

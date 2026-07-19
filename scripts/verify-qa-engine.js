@@ -212,10 +212,22 @@ check('cap worst case stays under the monthly soft-stop (10 x ~$0.01 x 31d < $4.
 console.log('\n--- 2026-07-19 follow-ups: gap-note Gemini routing / agents sync ---');
 
 const agentBaseSrc2 = readFileSync(new URL('../agents/agent-base.js', import.meta.url), 'utf8');
-check('gap notes: flagCapabilityGap composes Hebrew via forceGemini (not the Groq routine path)',
-  /flagCapabilityGap[\s\S]{0,2200}forceGemini: true/.test(agentBaseSrc2));
-check('queryGemini honors opts.forceGemini on the direct-Gemini branch',
-  /isReportCall \|\| opts\.forceGemini/.test(agentBaseSrc2));
+check('gap notes: flagCapabilityGap composes Hebrew via queryGeminiDirect (not the Groq-routed path)',
+  /flagCapabilityGap[\s\S]{0,2200}queryGeminiDirect\(/.test(agentBaseSrc2));
+check('Trainee generateGuide (bilingual, committed artifact) uses queryGeminiDirect',
+  /generateGuide[\s\S]{0,700}queryGeminiDirect\(/.test(readFileSync(new URL('../agents/agent-4-trainee.js', import.meta.url), 'utf8')));
+{
+  // 2026-07-19 rename: the old `queryGemini()` name read as "calls Gemini"
+  // while bare calls went Groq-first — no invocation of it may remain.
+  const srcFiles = ['../agents/agent-base.js', '../agents/agent-1-perfectionist.js', '../agents/agent-2-productive.js',
+    '../agents/agent-3-standard.js', '../agents/agent-4-trainee.js', '../agents/agent-stub.js',
+    '../workers/agent-runner.js', '../workers/meeting-engine.js', '../workers/chore-runner.js'];
+  const stale = srcFiles.filter((f) => /\.queryGemini\(/.test(readFileSync(new URL(f, import.meta.url), 'utf8')));
+  check('rename complete: no `.queryGemini(` invocation remains anywhere', stale.length === 0,
+    `stale call sites in: ${stale.join(', ')}`);
+  check('router split: queryGroqRouted and queryGeminiDirect both defined in agent-base.js',
+    agentBaseSrc2.includes('async queryGroqRouted(') && agentBaseSrc2.includes('async queryGeminiDirect('));
+}
 check('agents-table sync: syncAgentsTable defined and run at day-cycle start',
   runnerSrc.includes('async function syncAgentsTable') &&
   /await syncAgentsTable\(env\);\s*\n\s*const cases = isOffDay/.test(runnerSrc));

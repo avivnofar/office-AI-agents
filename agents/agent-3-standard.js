@@ -47,7 +47,7 @@ export class StandardAgent extends AgentBase {
    * user_friendliness_score, overall happiness, specific observations.
    */
   async fileSessionStatusReport(caseData, result) {
-    const reportText = await this.queryGemini(
+    const reportText = await this.queryGroqRouted(
       `Write a balanced, professional status report for case "${caseData.title}". Cover, each on its own line:\n` +
         `- ui_score (1-10)\n- resource_access_score (1-10)\n- response_quality_score (1-10)\n` +
         `- user_friendliness_score (1-10)\n- overall_happiness_level\n- specific_observations\n` +

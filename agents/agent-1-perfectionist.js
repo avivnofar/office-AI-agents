@@ -65,7 +65,7 @@ export class PerfectionistAgent extends AgentBase {
 
   /** Step 7: critical feedback, demand a corrected response, rate it 1-10. */
   async demandCorrection(caseData, result) {
-    const critique = await this.queryGemini(
+    const critique = await this.queryGroqRouted(
       `As The Perfectionist, critique this response to case "${caseData.title}":\n"""${result?.response || ''}"""\n` +
         `Lecture the assistant on its shortcomings, demand a corrected response, and rate the original 1-10.`
     );
@@ -81,7 +81,7 @@ export class PerfectionistAgent extends AgentBase {
 
   /** Step 9: drift to a related topic and issue a follow-up query. */
   async driftToRelatedTopic(caseData) {
-    const followUp = await this.queryGemini(
+    const followUp = await this.queryGroqRouted(
       `Given the case "${caseData.title}" (${caseData.category}), what's one related topic you'd want to explore next? Reply with a short search query only.`
     );
     if (!followUp) return null;

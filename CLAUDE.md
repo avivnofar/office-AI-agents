@@ -140,7 +140,10 @@ differs):
    SOFT candidates (a real but weak answer) only get flagged if quality is
    below THIS agent's own `escalation_threshold`. A flagged gap gets a
    short (2-4 line) **Hebrew** internal office note, composed by the
-   flagging agent in its own voice via the existing `queryGemini()` path —
+   flagging agent in its own voice via `queryGeminiDirect()` (Gemini
+   composes the Hebrew; the Groq-routed persona path — `queryGroqRouted()`,
+   renamed 2026-07-19 from the misleadingly-named `queryGemini()` — is
+   English-only flavor) —
    framed as "the tool I work with isn't good enough here, flagging it for
    the tool to be fixed," not a customer-facing incident. Once per day,
    `workers/agent-runner.js`'s `fileGapDigests()` batches today's findings

@@ -78,7 +78,7 @@ export class ProductiveAgent extends AgentBase {
    * showing how easy the external answer was and file it as a suggestion.
    */
   async foundOutsidePattern(caseData, result) {
-    const mockReport = await this.queryGemini(
+    const mockReport = await this.queryGroqRouted(
       `You found the answer to "${caseData.title}" via an external search in seconds. The Data Center app gave: """${result?.response || ''}""". ` +
         `Write a short mock report contrasting how easy the external answer was vs. the app's response.`
     );
@@ -87,7 +87,7 @@ export class ProductiveAgent extends AgentBase {
 
   /** HAPPY effect: detailed briefing, resource pinpointing, optimization + PDF suggestions. */
   async briefClaude(caseData, result) {
-    const briefing = await this.queryGemini(
+    const briefing = await this.queryGroqRouted(
       `Give Claude (the Data Center assistant) a detailed briefing on case "${caseData.title}". ` +
         `Pinpoint what was useful in this response: """${result?.response || ''}""". ` +
         `Suggest one concrete optimization and one PDF documentation idea.`

@@ -2,7 +2,7 @@
   "_meta": {
     "version": "0.1.0",
     "status": "specified",
-    "description": "Multi-day work-related side plots that add narrative texture to the simulation. Each active side plot spans 2-5 simulated days, involves 2-4 agents, and is logged to agents/reports/side-plots/. Triggered/advanced by agent-runner.js's scheduled() during the daily work-day cycle, narrated via meeting-engine.js's queryGemini calls when a side plot reaches a meeting-relevant stage.",
+    "description": "Multi-day work-related side plots that add narrative texture to the simulation. Each active side plot spans 2-5 simulated days, involves 2-4 agents, and is logged to agents/reports/side-plots/. Triggered/advanced by agent-runner.js's scheduled() during the daily work-day cycle, narrated via meeting-engine.js's model calls when a side plot reaches a meeting-relevant stage.",
     "output_dir": "reports/side-plots/",
     "filename_template": "{{type}}-{{start_date}}.md"
   },

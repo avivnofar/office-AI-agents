@@ -150,14 +150,16 @@ export async function runAgentSession(agentId, caseData, env, opts = {}) {
 }
 
 /**
- * Direct queryGemini() smoke test for an agent — bypasses handleCase()'s
- * probabilistic app-usage logic so Gemini / the Cloudflare fallback can be
- * exercised deterministically. See POST /api/agents/test-gemini.
+ * Direct queryGroqRouted() smoke test for an agent — bypasses handleCase()'s
+ * probabilistic app-usage logic so the Groq-first routing / the Cloudflare
+ * fallback can be exercised deterministically. See POST
+ * /api/agents/test-gemini (endpoint name kept for dashboard compatibility —
+ * it has never tested actual Gemini; it tests the routed persona path).
  */
 export async function runGeminiTest(agentId, prompt, env, opts = {}) {
   const agent = instantiateAgent(agentId, env);
   await agent.loadState();
-  const text = await agent.queryGemini(prompt, undefined, { forceFallback: !!opts.forceFallback });
+  const text = await agent.queryGroqRouted(prompt, undefined, { forceFallback: !!opts.forceFallback });
   return { agentId, prompt, text, source: agent.lastModelSource };
 }
 
@@ -977,7 +979,7 @@ async function processCaseBatch(env, batchCases, agentInstances, agentStats) {
     // question it actually asked — skipping angry agents made ANGRY a
     // dead-end until the weekly reset (and silently dropped their assigned
     // questions, as on the 2026-07-19 first live day). Anger still colors
-    // the persona (state line in queryGemini prompts, agent-2's own
+    // the persona (state line in the persona system prompt, agent-2's own
     // cooldown logic in agent-2-productive.js handleCase()); it no longer
     // suppresses the core ask-and-evaluate task.
     for (const c of agentCases) {
@@ -1022,7 +1024,7 @@ async function runDailyAiExperienceReports(env, agentInstances, agentStats) {
     if (!handled) continue;
     let note;
     try {
-      note = await agent.queryGemini(
+      note = await agent.queryGroqRouted(
         "In 1-2 short, casual sentences (in character), describe today's experience asking Claude/Gemini your questions — what worked, what didn't."
       );
     } catch (err) {
@@ -1063,7 +1065,7 @@ async function runSpareTimeForAgent(env, agent, { forceIdle }) {
   const partner = others[Math.floor(Math.random() * others.length)];
   let text;
   try {
-    text = await agent.queryGemini(
+    text = await agent.queryGroqRouted(
       `Write one short, in-character line of casual chat you'd say to your coworker ${partner.name} during a quiet moment at the office. Keep it to 1-2 sentences.`
     );
   } catch (err) {
@@ -1934,7 +1936,7 @@ export default {
         return json(result, 200, origin);
       }
       if (request.method === 'POST' && url.pathname === '/api/agents/test-gemini') {
-        // Direct queryGemini() smoke test: { agentId, prompt, opts: { forceFallback } }
+        // Direct queryGroqRouted() smoke test (endpoint name is historical): { agentId, prompt, opts: { forceFallback } }
         const body = await request.json();
         const result = await runGeminiTest(body.agentId, body.prompt, env, body.opts || {});
         return json(result, 200, origin);

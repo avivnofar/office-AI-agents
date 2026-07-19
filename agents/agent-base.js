@@ -193,29 +193,38 @@ export class AgentBase {
     return true;
   }
 
-  /* ──────────────────────── 3. Gemini integration ───────────────────── */
-
-  /**
-   * Asks this agent's AI brain, with its personality + current state +
-   * behavioral rules + (placeholder) DB context prepended to systemPrompt.
+  /* ─────────────── 3. Model calls (persona-prompted LLM access) ────────
    *
-   * Model routing (config/token-economy.json):
-   *  - opts.reportType === 'monthly_report'|'quarterly_report'|'semi_yearly_report'|'yearly_report':
-   *    Gemini 3.1 Flash-Lite (callGemini) — large-context report synthesis.
-   *  - opts.forceFallback: skip straight to the Cloudflare Workers AI fallback
-   *    (testing only — see /api/agents/test-gemini).
-   *  - otherwise (routine case work — the common path for agents 1-4, 5-9, 11):
-   *    Groq llama3-8b-8192 (callGroq), falling back to Cloudflare Workers AI
-   *    if Groq is unavailable (no key / 429 / error).
+   * RENAMED 2026-07-19 (was one `queryGemini()` router): the old name read
+   * as "this calls Gemini" while bare calls actually went to Groq first —
+   * exactly the misreading behind that day's Hebrew gap-note bug (and the
+   * latent Trainee bilingual-guide one found in the rename audit). Two
+   * methods now, named for what a bare call actually hits:
+   *
+   *   queryGroqRouted()   — routine persona flavor (English): Groq
+   *                         llama3-8b-8192 first, Cloudflare Workers AI
+   *                         fallback if Groq is unavailable (no key / 429 /
+   *                         error). opts.forceFallback skips straight to
+   *                         the fallback (testing — /api/agents/test-gemini).
+   *   queryGeminiDirect() — genuinely Gemini (gemini-3.1-flash-lite):
+   *                         Hebrew/bilingual composition and any future
+   *                         large-context report call. Degrades to the
+   *                         Cloudflare fallback only if Gemini itself 429s.
+   *
+   * Both prepend the same persona context via _buildPersonaSystemPrompt().
+   * There is deliberately NO `queryGemini` alias — a stale call site should
+   * fail loudly, not silently pick a model.
    */
-  async queryGemini(prompt, systemPrompt, opts = {}) {
+
+  /** Persona context shared by both model paths: personality + current state + behavioral rules + (placeholder) DB context. */
+  async _buildPersonaSystemPrompt(prompt, systemPrompt) {
     const dbContext = await this.getDbContext(prompt);
 
     const stateLine = this.isPanic
       ? `Current state: mood=${this.mood}, panic=${this.panicLevel}/100.`
       : `Current state: mood=${this.mood}, irritation=${this.irritation}/5, angry=${this.isAngry}.`;
 
-    const fullSystemPrompt = [
+    return [
       systemPrompt || this.config.system_prompt_additions || '',
       stateLine,
       (this.config.behavioral_rules || []).length
@@ -223,6 +232,11 @@ export class AgentBase {
         : '',
       dbContext ? `Relevant Data Center entries:\n${dbContext}` : '',
     ].filter(Boolean).join('\n\n');
+  }
+
+  /** Routine persona-flavor calls: Groq first, Cloudflare Workers AI fallback. NOT Gemini — see section comment. */
+  async queryGroqRouted(prompt, systemPrompt, opts = {}) {
+    const fullSystemPrompt = await this._buildPersonaSystemPrompt(prompt, systemPrompt);
 
     if (opts.forceFallback) {
       const result = await callCloudflareFallback({
@@ -236,32 +250,6 @@ export class AgentBase {
       return result.text;
     }
 
-    // opts.forceGemini (2026-07-19): route THIS call to Gemini directly even
-    // though it isn't a report call — used for Hebrew gap-note composition,
-    // where Groq's llama3-8b produced garbled Hebrew (routing bug: the
-    // documented design always said Gemini composes these; the routine-path
-    // routing below silently sent them to Groq instead).
-    const isReportCall = /^(monthly|quarterly|semi_yearly|yearly)_report$/.test(opts.reportType || '');
-    if (isReportCall || opts.forceGemini) {
-      const simConfig = this.env.SIM_CONFIG?.GEMINI || {};
-      const result = await callGemini({
-        apiKey: this.env.GEMINI_API_KEY,
-        model: simConfig.model || 'gemini-3.1-flash-lite', // gemini-3.5-flash is deprecated — never reintroduce it, see CLAUDE.md
-        endpoint: simConfig.api_endpoint || 'https://generativelanguage.googleapis.com/v1beta/models',
-        temperature: simConfig.temperature ?? 0.8,
-        maxTokens: Math.max(simConfig.max_tokens ?? 1024, 2048),
-        prompt,
-        systemPrompt: fullSystemPrompt,
-        ai: this.env.AI,
-      });
-      this.lastModelSource = result.source;
-      if (result.source === 'cloudflare-fallback') {
-        console.warn(`[agent-${this.id}] Gemini quota exhausted (${opts.reportType}) — used cloudflare-fallback (@cf/meta/llama-3.1-8b-instruct-fp8)`);
-      }
-      return result.text;
-    }
-
-    // Routine case work: Groq first, Cloudflare Workers AI fallback.
     const groqResult = await callGroq({
       apiKey: this.env.GROQ_API_KEY,
       prompt,
@@ -285,6 +273,33 @@ export class AgentBase {
     });
     this.lastModelSource = cfResult.source;
     return cfResult.text;
+  }
+
+  /**
+   * Genuinely-Gemini calls (gemini-3.1-flash-lite): Hebrew/bilingual
+   * composition (gap notes, Trainee guides) and any future large-context
+   * report synthesis (opts.reportType is only a log label now — no caller
+   * currently passes it; meeting-engine.js calls callGemini() itself).
+   */
+  async queryGeminiDirect(prompt, systemPrompt, opts = {}) {
+    const fullSystemPrompt = await this._buildPersonaSystemPrompt(prompt, systemPrompt);
+
+    const simConfig = this.env.SIM_CONFIG?.GEMINI || {};
+    const result = await callGemini({
+      apiKey: this.env.GEMINI_API_KEY,
+      model: simConfig.model || 'gemini-3.1-flash-lite', // gemini-3.5-flash is deprecated — never reintroduce it, see CLAUDE.md
+      endpoint: simConfig.api_endpoint || 'https://generativelanguage.googleapis.com/v1beta/models',
+      temperature: simConfig.temperature ?? 0.8,
+      maxTokens: Math.max(simConfig.max_tokens ?? 1024, 2048),
+      prompt,
+      systemPrompt: fullSystemPrompt,
+      ai: this.env.AI,
+    });
+    this.lastModelSource = result.source;
+    if (result.source === 'cloudflare-fallback') {
+      console.warn(`[agent-${this.id}] Gemini quota exhausted${opts.reportType ? ` (${opts.reportType})` : ''} — used cloudflare-fallback (@cf/meta/llama-3.1-8b-instruct-fp8)`);
+    }
+    return result.text;
   }
 
   /**
@@ -403,7 +418,7 @@ export class AgentBase {
     ) {
       let followUpQuery;
       try {
-        followUpQuery = await this.queryGemini(
+        followUpQuery = await this.queryGroqRouted(
           `The last answer to "${lastQuery}" was unclear or only partially useful (quality ${result.quality.toFixed(2)}/1.0): """${(result.response || '').slice(0, 300)}""". ` +
           `Ask ONE short, sharper follow-up question to get a clearer answer on the same topic. Reply with only the follow-up question, nothing else.`
         );
@@ -641,7 +656,7 @@ export class AgentBase {
   /**
    * Step 3/4 (2026-07-18 rebuild): decides whether to file a Hebrew
    * capability-gap report, and if so, has the agent compose it in its own
-   * voice via the existing queryGemini() model-call path (reused, not
+   * voice via queryGeminiDirect() (Gemini composes the Hebrew — not the
    * rebuilt). HARD gaps (kind:'hard' — no notebook coverage, or the Claude
    * request itself failed) are always flagged, regardless of persona. SOFT
    * candidates (kind:'soft' — a real but weak answer) are only flagged if
@@ -650,7 +665,7 @@ export class AgentBase {
    * borderline cases), Standard runs a lower one (flag only clear misses).
    * Report tone (CEO one-liner, Designer notes presentation/delivery) comes
    * from this.config.system_prompt_additions, already threaded through
-   * queryGemini() the same way every other in-character call in this class
+   * the model call the same way every other in-character call in this class
    * gets it — no separate tone mechanism needed.
    */
   async flagCapabilityGap({ project, gap, quality, query, responseText, kbSlug, caseId }) {
@@ -670,17 +685,14 @@ export class AgentBase {
 
     let hebrewText;
     try {
-      // forceGemini: Hebrew composition goes to Gemini directly (2026-07-19
-      // routing fix) — the plain queryGemini() routine path routes to Groq,
-      // whose Hebrew output is not usably fluent.
-      hebrewText = await this.queryGemini(
+      // queryGeminiDirect: Hebrew composition goes to Gemini (2026-07-19
+      // routing fix) — the Groq-routed path's Hebrew is not usably fluent.
+      hebrewText = await this.queryGeminiDirect(
         `בעברית בלבד, 2-4 שורות קצרות, בגוף ראשון ובסגנון האופי שלך: תעד פער יכולת אמיתי שגילית עכשיו ` +
         `בכלי שאתה עובד איתו (${project === 'notebook-x' ? 'Notebook-X' : 'Claude ב-data-center'}). ` +
         `זו הערה פנימית של המשרד, לא דוח תקרית ללקוח — הטון הוא "הכלי שאני עובד איתו לא מספיק טוב פה, מסמן את זה לתיקון", ` +
         `לא תלונה כלפי חוץ. השאלה שנשאלה: "${query}". מה קרה: ${whatHappened} ` +
-        `כלול: מה חסר/שגוי, איפה (הנושא/ה-notebook), ומה זה מלמד. קצר ולעניין, בלי כותרות.`,
-        null,
-        { forceGemini: true }
+        `כלול: מה חסר/שגוי, איפה (הנושא/ה-notebook), ומה זה מלמד. קצר ולעניין, בלי כותרות.`
       );
     } catch (err) {
       hebrewText = `[שגיאה בניסוח הדוח: ${err.message}] ${whatHappened} שאלה: ${query}`;

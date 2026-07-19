@@ -2,7 +2,7 @@
  * Data Center — AI Agent Simulation — Groq client (llama3-8b-8192).
  *
  * Primary model for routine per-case agent work (agents 1-4, 5-9, 11 —
- * see agent-base.js queryGemini()). Free tier (~14,400 req/day) — solves
+ * see agent-base.js queryGroqRouted()). Free tier (~14,400 req/day) — solves
  * the daily Gemini-quota problem for routine cases. Gemini 3.1 Flash-Lite
  * stays reserved for monthly/quarterly reports (large-context synthesis).
  * Never called directly by the frontend. See
