@@ -119,12 +119,8 @@ Run by `scheduler.js`'s `runWeeklyResetCycle()`:
 
 - `model_usage_rate: 0.55`, `patience_meter: 30`.
 - Asks multiple clarifying questions per case, favors `'diagnose'` mode.
-- **Guide detection** (before each case): checks
-  `data-center-archive/guides/` for a relevant guide.
-  - Found → `triggerHappy()` immediately.
-  - Not found → higher chance of `panicLevel` accumulation.
-- `HAPPY` (45% @ quality > 0.7 OR guide found): productivity increases
-  significantly, `panicLevel` decreases.
+- `HAPPY` (45% @ quality > 0.7): productivity increases significantly,
+  `panicLevel` decreases.
 
 #### Escalation Protocol (`TRAINEE_PANIC`)
 
@@ -136,12 +132,16 @@ Triggered when `panicLevel >= 80`:
 3. Fire `TRAINEE_PANIC` event `{ traineeId, selectedAgent, caseData }`.
 4. `scheduler.js`'s `handleTraineePanic()` runs a joint session: the helper
    agent + the live app collaborate on the trainee's case.
-5. Check `data-center-archive/guides/` for an existing guide for this case
-   type.
-6. If none exists, generate one via Gemini and save as markdown.
-7. Commit the new guide to `data-center-archive/guides/` (Phase 2 —
-   `commitGuideToArchive()`, requires `GITHUB_TOKEN`; no-ops without it).
-8. Reset `panicLevel` to 0; mood improves.
+5. Reset `panicLevel` to 0; mood improves.
+
+Guide generation/detection (checking or committing to
+`data-center-archive/guides/`) was removed from this protocol and from
+`handleCase()` entirely (2026-07-19) — old-framework logic that never
+actually worked: `data-center-archive` was never added to
+`config/project-permissions.json`'s known project keys, so any real commit
+attempt would have been redirected via the `data-center` key's `push:false`
+rule, never actually reaching that repo. `generateGuide()` and
+`commitGuideToArchive()` no longer exist anywhere in this repo.
 
 ---
 

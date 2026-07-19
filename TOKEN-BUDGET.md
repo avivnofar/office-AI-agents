@@ -4200,3 +4200,16 @@ debris, not a verification artifact as an earlier memory note claimed.
 Annotated the file in place (original garbled text kept, note added on
 top, nothing removed); memory record `incident-2026-07-19-stale-do-state`
 corrected to match.
+
+## 2026-07-19 (follow-up session) — Guide generation retired
+
+Owner decision: `generateGuide()`/`commitGuideToArchive()` and the
+already-dead `findGuide()` detection (every caller passed
+`archiveGuides: []`) removed entirely, not redirected —
+`data-center-archive` was never a real, wired-up target (never in
+project-permissions.json's known keys; a write attempt would've redirected
+via `data-center`'s push:false anyway). Updated agent-4-trainee.js,
+agent-runner.js, scheduler.js, AGENTS.md, agents-config.json,
+relationships.json, side-plots.json, and both verifiers
+(verify-qa-engine.js 74/74, verify-permissions.js clean). No runtime
+behavior change — the removed paths were unreachable already.

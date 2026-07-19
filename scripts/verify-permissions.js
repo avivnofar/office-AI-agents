@@ -44,7 +44,7 @@ function resolveIssueTarget({ projectKey, targetRepoName, title }) {
 const writeScenarios = [
   { projectKey: 'archive-galil-elion', targetRepoName: 'local-archive-galil-elion', path: 'docs/architect-suggestions/2026-07-08.md', expectRedirected: true },
   { projectKey: 'notebook-x', targetRepoName: 'notebook-x', path: 'notebooks/kb-docker.json', expectRedirected: false },
-  { projectKey: 'data-center', targetRepoName: 'data-center-archive', path: 'guides/ssh-troubleshoot.md', expectRedirected: true },
+  { projectKey: 'data-center', targetRepoName: 'data-center', path: 'reports/example.md', expectRedirected: true },
   { projectKey: 'archive-alpha', targetRepoName: 'archive-alpha', path: 'reports/2026-07-08.md', expectRedirected: true },
   // Self-write via the config path (2026-07-08 config-driven-self-write
   // session): office-AI-agents' own repo is no longer hardcode-exempt in

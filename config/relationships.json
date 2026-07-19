@@ -54,19 +54,19 @@
       "id": "trainee-escalation-qa",
       "agents": [4, 6],
       "type": "escalation_path",
-      "description": "When the Trainee (4) hits panicLevel >= 80, there is a 40% chance the QA (6) is pulled into a joint session to troubleshoot the case with Claude and co-author a guide.",
+      "description": "When the Trainee (4) hits panicLevel >= 80, there is a 40% chance the QA (6) is pulled into a joint session to troubleshoot the case with Claude.",
       "trigger": "agent_4.panicLevel >= 80",
       "probability": 0.40,
-      "joint_session_outcome": "If no guide exists for the case type in data-center-archive/guides/, generate one via Gemini and commit it; resets agent_4.panicLevel to 0 and improves agent_4.mood."
+      "joint_session_outcome": "Joint troubleshooting with Claude; resets agent_4.panicLevel to 0 and improves agent_4.mood."
     },
     {
       "id": "trainee-escalation-perfectionist",
       "agents": [4, 1],
       "type": "escalation_path",
-      "description": "When the Trainee (4) hits panicLevel >= 80, there is a 30% chance the Perfectionist (1) is pulled into a joint session — leveraging his deep documentation habits to produce a thorough guide.",
+      "description": "When the Trainee (4) hits panicLevel >= 80, there is a 30% chance the Perfectionist (1) is pulled into a joint session — leveraging his deep documentation habits.",
       "trigger": "agent_4.panicLevel >= 80",
       "probability": 0.30,
-      "joint_session_outcome": "Same as trainee-escalation-qa: joint troubleshooting with Claude, guide authored if missing, agent_4.panicLevel resets to 0."
+      "joint_session_outcome": "Same as trainee-escalation-qa: joint troubleshooting with Claude, agent_4.panicLevel resets to 0."
     },
     {
       "id": "trainee-escalation-random",

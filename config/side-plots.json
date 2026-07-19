@@ -51,7 +51,7 @@
       "stages": [
         { "day": 1, "event": "The breakthrough case is solved; agent enters HAPPY (and possibly COMPLACENT if agent_5/agent_10)." },
         { "day": 2, "event": "Recognition: a senior agent (5 or 10) or the Team Lead (7) acknowledges the breakthrough in the next standup, providing a team-wide morale boost." },
-        { "day": 3, "event": "Optional follow-on: the agent fileSuggestion()s a new bookmark/guide based on the breakthrough, feeding data-center-archive/guides/." }
+        { "day": 3, "event": "Optional follow-on: the agent fileSuggestion()s a write-up of the approach based on the breakthrough." }
       ],
       "resolution": "Mood boost applied to the breakthrough agent and a smaller boost to attendees of the recognizing standup/meeting.",
       "output_path": "reports/side-plots/breakthrough-{{start_date}}.md"

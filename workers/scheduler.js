@@ -16,8 +16,8 @@
  * Also exposes /run/day and /run/week for manual `workflow_dispatch`-style
  * testing without waiting for the cron.
  *
- * Status: DRAFT (Phase 1 foundation) — GitHub commit steps (weekly report,
- * trainee guides) are stubbed pending a server-side GITHUB_TOKEN binding.
+ * Status: DRAFT (Phase 1 foundation) — GitHub commit steps (weekly report)
+ * are stubbed pending a server-side GITHUB_TOKEN binding.
  */
 
 import simulationConfig from '../config/simulation-config.json';
@@ -114,7 +114,7 @@ async function runWorkDayCycle(env) {
     let escalations = 0;
 
     for (const c of cases) {
-      const outcome = await agent.handleCase(c, { archiveGuides: [] });
+      const outcome = await agent.handleCase(c);
       handled += 1;
 
       if (outcome?.escalation?.type === 'TRAINEE_PANIC') {
@@ -140,44 +140,11 @@ async function runWorkDayCycle(env) {
   return summary;
 }
 
-/**
- * Joint session: the escalated agent also works the trainee's case.
- * If a guide was generated, commit it to data-center-archive/guides/
- * (Phase 2 — requires a server-side GITHUB_TOKEN secret; never exposed
- * to the frontend, per CLAUDE.md credential rules).
- */
+/** Joint session: the escalated agent also works the trainee's case. */
 async function handleTraineePanic(env, event) {
   const helper = instantiateAgent(event.selectedAgent, env);
   await helper.loadState();
-  await helper.handleCase(event.caseData, { archiveGuides: [] });
-
-  if (event.generatedGuide) {
-    await commitGuideToArchive(env, event.generatedGuide);
-  }
-}
-
-/**
- * Phase 2 stub: commits `guide.path`/`guide.content` to
- * data-center-archive/guides/ via the GitHub Contents API using
- * env.GITHUB_TOKEN. No-ops if the secret isn't configured yet.
- */
-async function commitGuideToArchive(env, guide) {
-  if (!env.GITHUB_TOKEN) return { committed: false, reason: 'GITHUB_TOKEN not configured' };
-
-  const url = `https://api.github.com/repos/avivnofar/data-center-archive/contents/${guide.path}`;
-  const res = await fetch(url, {
-    method: 'PUT',
-    headers: {
-      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-      'User-Agent': 'data-center-agent-sim',
-      Accept: 'application/vnd.github+json',
-    },
-    body: JSON.stringify({
-      message: `docs: auto-generated guide for ${guide.path} [skip ci]`,
-      content: btoa(unescape(encodeURIComponent(guide.content))),
-    }),
-  });
-  return { committed: res.ok, status: res.status };
+  await helper.handleCase(event.caseData);
 }
 
 /**

@@ -214,8 +214,38 @@ console.log('\n--- 2026-07-19 follow-ups: gap-note Gemini routing / agents sync 
 const agentBaseSrc2 = readFileSync(new URL('../agents/agent-base.js', import.meta.url), 'utf8');
 check('gap notes: flagCapabilityGap composes Hebrew via queryGeminiDirect (not the Groq-routed path)',
   /flagCapabilityGap[\s\S]{0,2200}queryGeminiDirect\(/.test(agentBaseSrc2));
-check('Trainee generateGuide (bilingual, committed artifact) uses queryGeminiDirect',
-  /generateGuide[\s\S]{0,700}queryGeminiDirect\(/.test(readFileSync(new URL('../agents/agent-4-trainee.js', import.meta.url), 'utf8')));
+/* ── 2026-07-19 (follow-up): guide generation retired entirely ──────────── */
+console.log('\n--- 2026-07-19 follow-up: guide generation (generateGuide/commitGuideToArchive) retired ---');
+{
+  // Owner decision: data-center-archive/guides/ never functionally existed
+  // (data-center-archive was never in project-permissions.json's known
+  // project keys) — generateGuide()/commitGuideToArchive() and the
+  // TRAINEE_PANIC guide-detection/commit steps were removed entirely, not
+  // just fixed/redirected. Mirrors the stale-`.queryGemini(` tripwire above:
+  // a stale reference must fail loudly, not silently linger.
+  const codeFiles = [
+    '../agents/agent-4-trainee.js', '../agents/agent-base.js', '../agents/agent-stub.js',
+    '../workers/agent-runner.js', '../workers/scheduler.js',
+  ];
+  const configFiles = ['../config/agents-config.json', '../config/relationships.json', '../config/side-plots.json'];
+
+  const codeSrcs = codeFiles.map((f) => [f, readFileSync(new URL(f, import.meta.url), 'utf8')]);
+  const staleFns = codeSrcs.filter(([, src]) => /generateGuide\s*\(|commitGuideToArchive\s*\(|archiveGuides/.test(src)).map(([f]) => f);
+  check('no generateGuide()/commitGuideToArchive()/archiveGuides reference remains in code', staleFns.length === 0,
+    `stale reference in: ${staleFns.join(', ')}`);
+
+  const configSrcs = configFiles.map((f) => [f, readFileSync(new URL(f, import.meta.url), 'utf8')]);
+  const staleConfig = configSrcs.filter(([, src]) => src.includes('data-center-archive')).map(([f]) => f);
+  check('no data-center-archive reference remains in live config', staleConfig.length === 0,
+    `stale reference in: ${staleConfig.join(', ')}`);
+
+  // AGENTS.md deliberately still NAMES data-center-archive once, to document
+  // the removal — checked for the explanatory note, not for absence.
+  const agentsMdSrc = readFileSync(new URL('../AGENTS.md', import.meta.url), 'utf8');
+  check('AGENTS.md documents the guide-generation removal (not silently dropped)',
+    agentsMdSrc.includes('generateGuide()') && agentsMdSrc.includes('commitGuideToArchive()') &&
+    /removed from this protocol/.test(agentsMdSrc));
+}
 {
   // 2026-07-19 rename: the old `queryGemini()` name read as "calls Gemini"
   // while bare calls went Groq-first — no invocation of it may remain.

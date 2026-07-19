@@ -57,7 +57,6 @@ import { runChoreRotationSlot } from './chore-runner.js';
 const ALLOWED_ORIGINS = ['https://avivnofar.github.io', 'http://localhost:3000', 'http://127.0.0.1:5500'];
 const REPO_OWNER = 'avivnofar';
 const REPO_NAME = 'office-AI-agents';
-const ARCHIVE_REPO_NAME = 'data-center-archive';
 
 // Maps this file's GitHub repo constants to config/project-permissions.json
 // keys, so commitFileToRepo()/fileGitHubIssue() can enforce push permission
@@ -72,7 +71,6 @@ const ARCHIVE_REPO_NAME = 'data-center-archive';
 // project-permissions.json's office_agents_push_true_is_load_bearing note.
 const REPO_TO_PROJECT_KEY = {
   [REPO_NAME]: 'office-agents',
-  [ARCHIVE_REPO_NAME]: 'data-center',
 };
 
 /** Maps year-tracker.json milestone keys to the meeting they trigger (in
@@ -866,7 +864,7 @@ ${meeting.transcript || '_Not available._'}
 /** Normalizes the differing handleCase() return shapes across agent classes. */
 function extractOutcome(raw) {
   if (!raw) return { result: null, escalation: null, quality: undefined };
-  if (Object.prototype.hasOwnProperty.call(raw, 'escalation') || Object.prototype.hasOwnProperty.call(raw, 'guide')) {
+  if (Object.prototype.hasOwnProperty.call(raw, 'escalation')) {
     return { result: raw.result || null, escalation: raw.escalation || null, quality: raw.result?.quality };
   }
   return { result: raw, escalation: null, quality: raw.quality };
@@ -874,26 +872,14 @@ function extractOutcome(raw) {
 
 /**
  * Joint session: the escalated agent (selected by TraineeAgent's
- * escalation protocol) also works the trainee's case. If a guide was
- * generated, commits it to data-center-archive/guides/.
+ * escalation protocol) also works the trainee's case.
  */
 async function handleTraineePanic(env, event) {
   const helper = instantiateAgent(event.selectedAgent, env);
   await helper.loadState();
-  await helper.handleCase(event.caseData, { archiveGuides: [] });
+  await helper.handleCase(event.caseData);
 
-  let guideCommit = null;
-  if (event.generatedGuide) {
-    guideCommit = await commitFileToRepo(
-      env,
-      ARCHIVE_REPO_NAME,
-      event.generatedGuide.path,
-      event.generatedGuide.content,
-      `docs: auto-generated guide for ${event.generatedGuide.path} [skip ci]`
-    );
-  }
-
-  return { helperAgentId: event.selectedAgent, guideCommit };
+  return { helperAgentId: event.selectedAgent };
 }
 
 /* ─────────────────────────── Daily schedule (Phase 2) ──────────────────── */
@@ -983,7 +969,7 @@ async function processCaseBatch(env, batchCases, agentInstances, agentStats) {
     // cooldown logic in agent-2-productive.js handleCase()); it no longer
     // suppresses the core ask-and-evaluate task.
     for (const c of agentCases) {
-      const raw = await agent.handleCase(c, { archiveGuides: [] });
+      const raw = await agent.handleCase(c);
       const outcome = extractOutcome(raw);
       stats.handled += 1;
       if (c.difficulty === 'advanced') stats.advancedCases += 1;
