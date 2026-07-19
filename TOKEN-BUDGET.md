@@ -4094,3 +4094,59 @@ calls. Worst case under the new cap: 10 × ~$0.01 × 31d ≈ $3.13/mo.
 **Cron RESTORED** 2026-07-19T17:07:01Z (`*/30 0-13,23 * * *`), verified
 via live schedules API (exactly one schedule). Next tick 23:00 UTC =
 Monday 02:00 Israel, rollout day 1 (cap 40 questions, ≤10 data-center).
+
+---
+
+## 2026-07-19 (late) — Follow-ups: recovery-mechanic threshold checks, manual-trigger docs, Hebrew gap-note routing fix + agents-table sync
+
+**1. Anger-recovery across thresholds — verified, no conflicts, no code
+change needed.** Agent 2 (angry_threshold 3): forced to irritation 3/ANGRY,
+ran one case live — it ASKED (quality 0.43) and ended irritation 0/not
+angry. Its dedicated cooldown self-reset runs FIRST (start of handleCase;
+cooldownUntil is in-memory so any fresh invocation clears it), the generic
+recovery then sees a non-angry agent — strictly sequential, no double-fire;
+the generic snap (min(irritation, threshold-1)) is a dormant backstop for
+it. Boundary math holds at 3 exactly as at 5. Agent 4 (Trainee): forced to
+irritation 5/ANGRY/panic 50 — asked (quality 1.00), anger cleared via the
+generic recovery (5→4, snapped), HAPPY fired, and panicLevel moved
+independently by its own rule (50→35 via the isHappy -15 branch — the
+designed "good answer calms the trainee" direction). Panic and anger are
+fully orthogonal state variables; the only coupling (HAPPY → panic relief)
+is intentional. Pre-existing quirk noted, NOT introduced by the fix and not
+changed: agent 2 can stack irritation from BOTH the generic bad-answer
+branch (chance 0.3) and its own bad-answer check (chance 0.45) on the same
+low-quality answer — rebuild-era behavior, reads as persona flavor.
+
+**2. Manual-trigger docs fixed** (CLAUDE.md + DEPLOY.md): `{"type":"day"}`
+marked non-functional for a full day (Cloudflare per-invocation subrequest
+limit; per-block cron is why production is fine), the `block` trigger
+documented as the correct single-block tool, the block-by-block full-day
+walk documented as the real manual alternative, and `state_reset` (no side
+effects) documented alongside `week_reset` (also files reports + runs
+meetings).
+
+**3. Hebrew gap-note routing — CONFIRMED a routing bug, fixed.**
+flagCapabilityGap() called queryGemini() bare, and that router sends
+routine (non-report) calls to GROQ first — so the "composed via Gemini"
+documented design was actually Groq llama3-8b writing Hebrew, hence the
+garbled note. Fix: new opts.forceGemini branch in queryGemini() (reuses the
+existing direct-Gemini report path, gemini-3.1-flash-lite); gap notes now
+pass it. No translation pipeline built, per instruction. Degradation path
+unchanged: Gemini 429 → Cloudflare fallback.
+
+**Stale agent-name issue — same root-cause class, fixed at the source.**
+The D1 `agents` table still held a pre-rebuild roster (5:"The Specialist",
+6:"The Senior Sysadmin", 7:"The Security Auditor", 8:"The DevOps
+Engineer", 9:"The Helpdesk Coordinator", 10:"The IT Director", 11:"The
+CTO") — surfaced by EVERY `JOIN agents` consumer (gap digests,
+meeting-engine feeds ×4, interactions feed), not just the digest. New
+syncAgentsTable() upserts id/key/name/tier/clearance from
+agents-config.json: ran once now via the new `sync_agents` trigger (D1
+read-back: all 11 correct, "The QA" et al.), and runs automatically at
+each day-cycle start so it can't drift again.
+
+**Ops**: cron stayed live throughout (no ticks in the 17-23 UTC window);
+deployed as version `89395709`; verify-qa-engine.js 70/70; all 11 agents
+state_reset to clean (confirmed via status read-back) before tonight's
+23:00 UTC first batch. Test spend: 3 Notebook-X asks (free) + 0 Claude
+calls — month total unchanged at $0.0918/$4.50, 12 calls.

@@ -94,3 +94,25 @@ error usually means a binding (`DB`, `AGENT_STATE`, or `SIM_KV`) is missing.
 Once `/api/agents/status` returns data, the in-app 🔐 Admin tab in
 `data-center` (and this repo's `dashboard/admin-panel.html`) will load
 against `CONFIG.AGENTS_API_BASE` in `index.html`.
+
+## Manual triggers (`POST /api/agents/trigger`)
+
+All admin-token-gated. **Do NOT use `{"type":"day"}` for a full simulated
+day** — it exceeds Cloudflare's per-invocation subrequest limit and dies
+mid-run (confirmed live 2026-07-19; the per-block cron path is why
+production works fine). Instead walk the day block-by-block through the
+real scheduled path:
+
+```bash
+# {"type":"block","israelTime":"HH:MM","dayOfWeek":N}  (1=Sun..7=Sat)
+# Sun-Thu full day: 02:00 04:30 07:00 09:30 12:00 15:00 16:00 16:30 —
+# the last block runs the day finalize (summary, side plots, commit).
+```
+
+State/ops triggers: `state_reset` (all agents — or `{"agentId":N}` — to
+mood 50/irritation 0/no flags; NO side effects), `state_set`
+(`{"agentId":N,"state":{...}}`, supervised-testing override), `week_reset`
+(weekly reset — note it ALSO files weekly reports and runs weekly/audit
+meetings, i.e. real model calls; use `state_reset` for plain cleanup),
+`sync_agents` (re-sync D1 agents rows from agents-config.json — also runs
+automatically at each day-cycle start), `meeting`, `inspection`.

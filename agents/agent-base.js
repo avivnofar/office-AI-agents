@@ -236,8 +236,13 @@ export class AgentBase {
       return result.text;
     }
 
+    // opts.forceGemini (2026-07-19): route THIS call to Gemini directly even
+    // though it isn't a report call — used for Hebrew gap-note composition,
+    // where Groq's llama3-8b produced garbled Hebrew (routing bug: the
+    // documented design always said Gemini composes these; the routine-path
+    // routing below silently sent them to Groq instead).
     const isReportCall = /^(monthly|quarterly|semi_yearly|yearly)_report$/.test(opts.reportType || '');
-    if (isReportCall) {
+    if (isReportCall || opts.forceGemini) {
       const simConfig = this.env.SIM_CONFIG?.GEMINI || {};
       const result = await callGemini({
         apiKey: this.env.GEMINI_API_KEY,
@@ -665,12 +670,17 @@ export class AgentBase {
 
     let hebrewText;
     try {
+      // forceGemini: Hebrew composition goes to Gemini directly (2026-07-19
+      // routing fix) — the plain queryGemini() routine path routes to Groq,
+      // whose Hebrew output is not usably fluent.
       hebrewText = await this.queryGemini(
         `בעברית בלבד, 2-4 שורות קצרות, בגוף ראשון ובסגנון האופי שלך: תעד פער יכולת אמיתי שגילית עכשיו ` +
         `בכלי שאתה עובד איתו (${project === 'notebook-x' ? 'Notebook-X' : 'Claude ב-data-center'}). ` +
         `זו הערה פנימית של המשרד, לא דוח תקרית ללקוח — הטון הוא "הכלי שאני עובד איתו לא מספיק טוב פה, מסמן את זה לתיקון", ` +
         `לא תלונה כלפי חוץ. השאלה שנשאלה: "${query}". מה קרה: ${whatHappened} ` +
-        `כלול: מה חסר/שגוי, איפה (הנושא/ה-notebook), ומה זה מלמד. קצר ולעניין, בלי כותרות.`
+        `כלול: מה חסר/שגוי, איפה (הנושא/ה-notebook), ומה זה מלמד. קצר ולעניין, בלי כותרות.`,
+        null,
+        { forceGemini: true }
       );
     } catch (err) {
       hebrewText = `[שגיאה בניסוח הדוח: ${err.message}] ${whatHappened} שאלה: ${query}`;

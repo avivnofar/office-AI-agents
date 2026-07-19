@@ -223,15 +223,36 @@ EXISTS` alone will not retrofit these columns onto the live database).
 
 ## How to run a simulation day manually
 
+**`{"type":"day"}` is NON-FUNCTIONAL for a full simulated day** (confirmed
+live 2026-07-19): a whole day in one Worker invocation exceeds Cloudflare's
+per-invocation subrequest limit (every D1/DO/model/service-binding call
+counts) and dies mid-run with "Too many subrequests". The per-block cron
+design is exactly why production is unaffected — each 30-min tick is its own
+invocation. The switch case still exists but don't use it for a full day.
+
+The correct manual equivalent is running the day **block-by-block** through
+the real scheduled path (`runScheduledBlock()`, KV cycle persisted between
+invocations — identical mechanics to cron):
+
 ```bash
+# One scheduled block (repeat per block time; dayOfWeek 1=Sun..7=Sat).
+# Full-day walk (Sun-Thu): 02:00 04:30 07:00 09:30 12:00 15:00 16:00 16:30
+# — the last block triggers the day finalize (summary, side plots, commit).
 curl -X POST https://data-center-agents.avivnofar.workers.dev/api/agents/trigger \
   -H "X-Admin-Token: <ADMIN_TOKEN>" \
   -H "Content-Type: application/json" \
-  -d '{"type":"day"}'
+  -d '{"type":"block","israelTime":"02:00","dayOfWeek":1}'
 ```
 
 Other trigger types: `meeting` (`{"meetingType": "..."}`), `inspection`
-(`{"active": true|false}`), `week_reset`. See `agent-runner.js`'s
+(`{"active": true|false}`), `week_reset` (weekly reset — ALSO files weekly
+reports and runs weekly/audit meetings, i.e. real model calls),
+`state_reset` (2026-07-19 — clean mood/state zero for all agents, or
+`{"agentId": N}` for one, INCLUDING `permanentIrritationFlags`, with NO
+meetings/reports/model calls — prefer this for plain state cleanup),
+`state_set` (`{"agentId": N, "state": {...}}`, whitelisted per-agent
+override for supervised testing), `sync_agents` (re-sync D1 agents identity
+rows from agents-config.json). See `agent-runner.js`'s
 `/api/agents/trigger` handler for the full switch.
 
 Dry-run verification (no network/D1/KV/model calls) for the Q&A-engine

@@ -208,6 +208,18 @@ check('layer (b): _askDataCenter has the ask-time daily-cap skip (follow-ups cou
 check('cap worst case stays under the monthly soft-stop (10 x ~$0.01 x 31d < $4.50)',
   10 * 0.0101 * 31 < tokenEconomy.shared_claude_budget.cap_usd_per_month);
 
+/* ── 2026-07-19 follow-ups: Hebrew gap-note routing + agents-table sync ── */
+console.log('\n--- 2026-07-19 follow-ups: gap-note Gemini routing / agents sync ---');
+
+const agentBaseSrc2 = readFileSync(new URL('../agents/agent-base.js', import.meta.url), 'utf8');
+check('gap notes: flagCapabilityGap composes Hebrew via forceGemini (not the Groq routine path)',
+  /flagCapabilityGap[\s\S]{0,2200}forceGemini: true/.test(agentBaseSrc2));
+check('queryGemini honors opts.forceGemini on the direct-Gemini branch',
+  /isReportCall \|\| opts\.forceGemini/.test(agentBaseSrc2));
+check('agents-table sync: syncAgentsTable defined and run at day-cycle start',
+  runnerSrc.includes('async function syncAgentsTable') &&
+  /await syncAgentsTable\(env\);\s*\n\s*const cases = isOffDay/.test(runnerSrc));
+
 /* ── Summary ─────────────────────────────────────────────────────────── */
 console.log(`\n=== ${pass} passed, ${fail} failed ===`);
 if (fail > 0) {

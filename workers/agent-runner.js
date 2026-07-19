@@ -180,6 +180,30 @@ function pad(n, len) {
 
 /* ──────────────────────────── Status / read APIs ───────────────────────── */
 
+/**
+ * Upserts the 11 agents' identity rows (id/key/name/tier/clearance) from
+ * agents-config.json into the D1 `agents` table. Added 2026-07-19: the
+ * table still held a pre-rebuild roster ("The Senior Sysadmin", "The CTO",
+ * ...) that every `JOIN agents` consumer (gap digests, meeting-engine
+ * report feeds, the interactions feed) surfaced instead of the configured
+ * persona names — same "reading a stale source" class as the Hebrew
+ * gap-note routing bug fixed the same day. Config is the source of truth;
+ * this runs on each day-cycle start (one batch, 11 rows) so the table can
+ * never drift again, plus on demand via the `sync_agents` admin trigger.
+ */
+async function syncAgentsTable(env) {
+  if (!env.DB) return { synced: 0 };
+  const stmt = env.DB.prepare(
+    `INSERT INTO agents (id, key, name, tier, clearance) VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET key = excluded.key, name = excluded.name,
+       tier = excluded.tier, clearance = excluded.clearance`
+  );
+  await env.DB.batch(
+    agentsConfig.agents.map((a) => stmt.bind(a.id, a.key, a.name, a.tier || 'standard', a.clearance || 'standard'))
+  );
+  return { synced: agentsConfig.agents.length };
+}
+
 async function getAllAgentStatuses(env) {
   const statuses = [];
   for (const config of agentsConfig.agents) {
@@ -1526,6 +1550,10 @@ export async function runScheduledBlock(env, israelTime, dayOfWeek) {
 
     const maxTotalQuestions = isOffDay ? 0 : await computeDailyQuestionVolume(env, sim);
 
+    // Keep the D1 agents identity rows in lockstep with agents-config.json
+    // (one 11-row batch per day — see syncAgentsTable()).
+    await syncAgentsTable(env);
+
     const cases = isOffDay
       ? []
       : generateAssignedDailyBatch(dayOfWeek, { maxTotalQuestions, weekNumber: yearState.current_week || 1 });
@@ -1964,6 +1992,11 @@ export default {
             result = { agentId: body.agentId, before, after: body.state };
             break;
           }
+          case 'sync_agents':
+            // Re-sync D1 agents identity rows from agents-config.json
+            // (also runs automatically at each day-cycle start).
+            result = await syncAgentsTable(env);
+            break;
           case 'block':
             // Run ONE daily-schedule block through the REAL scheduled path
             // (runScheduledBlock: KV cycle persistence, per-block dispatch)
