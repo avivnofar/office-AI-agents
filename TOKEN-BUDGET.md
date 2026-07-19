@@ -4041,3 +4041,56 @@ itself isn't available locally — so the approved all-agent `state_reset`
 `block`-trigger micro-test could not be executed yet. Exact commands are in
 the session handoff; the owner either supplies the existing token or runs
 `npx wrangler secret put ADMIN_TOKEN` once themselves.
+
+---
+
+## 2026-07-19 (evening) — Approved fixes verified live; cap deployed; cron RESTORED
+
+**Budget cap live** (owner-approved numbers): `shared_claude_budget.
+max_calls_per_day: 10` — layer (a) qa-engine.js caps data-center-targeted
+questions at 10/generation-day (overflow re-picked from the notebook-x
+pool), layer (b) _askDataCenter() skips at >=10 model_source='claude'
+interactions per UTC day (`claude-daily-cap-skip`, follow-ups count).
+Layer (b) FIRED LIVE during testing: the 11th Claude ask of the day was
+skipped and logged exactly as designed.
+
+**Anger-deadlock fix completed in two parts**: part 2 (found by the live
+micro-test — commit 251fa9a): _applyQualityMood() now deterministically
+releases one irritation stack on a quality>0.7 answer and snaps an ANGRY
+agent below its anger threshold. Verified live: agent 3 forced to
+irritation 5/ANGRY/mood 20 → asked its question anyway (Fix A), then a
+0.94-quality answer dropped it to irritation 4/not-angry/HAPPY.
+
+**State reset**: new `state_reset` trigger ran twice (pre/post test) — all
+11 agents to mood 50/irritation 0/no flags/no ANGRY, confirmed by
+independent `/api/agents/status` read-back both times. The six stale-ANGRY
+agents (2,4,6,8,9,11) match the incident diagnosis exactly.
+
+**Micro-test (all clean)**: 02:00 block → 04:30 block with agent 3 forced
+ANGRY (still asked — Fix A in the real batch path) → separate-invocation
+16:00 report block produced AI-experience reports for exactly the 4 agents
+with KV-carried handled>0 (Fix B, genuinely cross-tick). Cleanup done
+(cycle KV deleted, states re-zeroed).
+
+**`{"type":"day"}` single-invocation trigger is DEAD on this plan**: it
+died at ~2m54s with Cloudflare's "Too many subrequests by single Worker
+invocation" (every D1/DO/model/service-binding call counts; a full day in
+one invocation blows the cap). Not a code bug — the production per-block
+cron path is unaffected. The supervised day therefore ran BLOCK-BY-BLOCK
+via the new `block` trigger (production-identical mechanics): all 8 blocks
+of day 24 clean, **12/12 questions handled, zero drops** (incident day:
+5/12), finalize wrote day-024-summary with populated AI-experience +
+gap-digest sections, the gap pipeline committed its first real Hebrew
+digest (`reports/gaps/data-center/2026-07-19.md`, a 0.05-quality Claude
+answer), and advanceSidePlots auto-closed the lingering client_crisis row
+("(plot type 'client_crisis' retired — auto-closed)", resolved_at
+2026-07-19T17:01:22Z). Known cosmetics, non-blocking: Hebrew fluency of
+the Groq-written gap note is rough; the digest showed a stale agent name
+from the D1 `agents` table.
+
+**Spend after ALL testing**: $0.0918 / $4.50 month-to-date, 12 Claude
+calls. Worst case under the new cap: 10 × ~$0.01 × 31d ≈ $3.13/mo.
+
+**Cron RESTORED** 2026-07-19T17:07:01Z (`*/30 0-13,23 * * *`), verified
+via live schedules API (exactly one schedule). Next tick 23:00 UTC =
+Monday 02:00 Israel, rollout day 1 (cap 40 questions, ≤10 data-center).
