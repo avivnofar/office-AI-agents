@@ -427,10 +427,28 @@ export class AgentBase {
    */
   async _applyQualityMood(quality) {
     let stateChange = null;
-    if (quality > 0.7 && Math.random() < (this.config.states?.HAPPY?.trigger_chance ?? 0.5)) {
-      await this.triggerHappy();
-      if (this.session) this.session.happy_events += 1;
-      stateChange = 'HAPPY';
+    if (quality > 0.7) {
+      // 2026-07-19 (anger-deadlock fix, part 2): de-escalation is the
+      // deterministic counterpart of the bad-answer branch below — a
+      // genuinely good answer always releases one irritation stack, and
+      // snaps an ANGRY agent back below its anger threshold. Without this,
+      // nothing in the generic quality path ever DECREASED irritation
+      // (only agent 1's class called resolveIrritation()), so an angry
+      // agent could ask again post-fix but stayed flagged ANGRY until the
+      // weekly reset — not the approved same-day recovery. HAPPY itself
+      // stays chance-gated as before.
+      await this.resolveIrritation();
+      if (this.isAngry) {
+        const angryThreshold = this.config.irritation_stack?.angry_threshold ?? IRRITATION_MAX;
+        this.irritation = Math.min(this.irritation, Math.max(0, angryThreshold - 1));
+        this.isAngry = false;
+        await this.saveState();
+      }
+      if (Math.random() < (this.config.states?.HAPPY?.trigger_chance ?? 0.5)) {
+        await this.triggerHappy();
+        if (this.session) this.session.happy_events += 1;
+        stateChange = 'HAPPY';
+      }
     } else if (quality < 0.4 && Math.random() < (this.config.states?.IRRITATED?.trigger_chance ?? 0.3)) {
       await this.addIrritiation();
       if (this.session) this.session.irritation_events += 1;

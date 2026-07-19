@@ -178,6 +178,8 @@ const sidePlotsJson = require('../config/side-plots.json');
 
 check('Fix A: processCaseBatch has NO "if (agent.isAngry) continue/break" skip left',
   !/if \(agent\.isAngry\) (continue|break);/.test(runnerSrc));
+check('Fix A part 2: a good answer de-escalates irritation/ANGRY in _applyQualityMood (same-day recovery)',
+  /_applyQualityMood[\s\S]{0,900}resolveIrritation\(\)/.test(readFileSync(new URL('../agents/agent-base.js', import.meta.url), 'utf8')));
 check('Fix B: runDailyAiExperienceReports takes agentStats (cross-tick), not only instances',
   /runDailyAiExperienceReports\(env, agentInstances, agentStats\)/.test(runnerSrc));
 check('Fix B: the always-empty in-memory session gate is gone',
