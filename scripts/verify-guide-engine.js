@@ -239,9 +239,9 @@ check('agent-runner.js dispatches guide_draft/guide_review/guide_verify block ty
   agentRunnerSrc.includes("block.type === 'guide_review'") &&
   agentRunnerSrc.includes("block.type === 'guide_verify'"));
 check('agent-runner.js commits approved guides via the existing guarded commitFileToRepo()',
-  /processGuideReviewBlock[\s\S]{0,3500}commitFileToRepo\(/.test(agentRunnerSrc));
+  /processGuideReviewBlock[\s\S]{0,6000}commitFileToRepo\(/.test(agentRunnerSrc));
 check('agent-runner.js never escalates a rejected guide to a GitHub Issue',
-  !/processGuideReviewBlock[\s\S]{0,4500}fileGitHubIssue\(/.test(agentRunnerSrc));
+  !/processGuideReviewBlock[\s\S]{0,7000}fileGitHubIssue\(/.test(agentRunnerSrc));
 
 /* ── Kill-switch gate (guides_enabled, added 2026-08-02) ────────────────── */
 console.log('\n--- Kill-switch gate (guides_enabled) ---');
@@ -261,6 +261,19 @@ check('guides_enabled is whitelisted in updateSimulationState',
   /allowedKeys = \[[^\]]*'guides_enabled'[^\]]*\]/.test(agentRunnerSrc));
 check('review self-heal passes the gate decision through (inner draft call uses bypassGate)',
   /processGuideReviewBlock[\s\S]{0,900}processGuideDraftBlock\(env, dateStr, \{ bypassGate: true \}\)/.test(agentRunnerSrc));
+
+/* ── Fail-closed publish guards (2026-08-01 first-supervised-run bug) ───── */
+console.log('\n--- Fail-closed publish guards ---');
+check('review prompt explicitly requires the full guide body on APPROVE (invalid without it)',
+  /APPROVE response MUST include the ---GUIDE--- marker[\s\S]{0,400}invalid/.test(
+    readFileSync(new URL('../workers/guide-engine.js', import.meta.url), 'utf8')));
+check('APPROVE with a missing/implausibly-short guide body never commits (approve_without_guide_body)',
+  /finalGuide\.trim\(\)\.length < 500[\s\S]{0,600}approve_without_guide_body/.test(agentRunnerSrc) &&
+  agentRunnerSrc.indexOf('approve_without_guide_body') < agentRunnerSrc.indexOf("decision.decision === 'APPROVE') {\n    const finalMarkdown"));
+check('review call fails on a max_tokens-truncated response instead of parsing a fragment',
+  /maxTokens: 8192[\s\S]{0,700}stopReason === 'max_tokens'[\s\S]{0,300}truncated/.test(agentRunnerSrc));
+check('verify call never splices a max_tokens-truncated section into a published guide',
+  /processGuideVerifyBlock[\s\S]{0,3000}stopReason === 'max_tokens'[\s\S]{0,300}continue;/.test(agentRunnerSrc));
 
 /* ── Permissions — nothing loosens ──────────────────────────────────────── */
 console.log('\n--- Permissions unchanged ---');

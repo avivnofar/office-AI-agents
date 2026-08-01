@@ -648,15 +648,26 @@ async function processGuideReviewBlock(env, dateStr, opts = {}) {
   const writerAgentName = writerConfig ? writerConfig.name : `Agent ${row.writer_agent_id}`;
 
   const runReview = async (draftContent, isSecondPass) => {
+    // 8192, not 4096: an APPROVE response carries the FULL rewritten guide
+    // after ---GUIDE---, and a ceiling hit truncates exactly that section
+    // (found live 2026-08-01 — first supervised run committed an empty
+    // guide). The ceiling only bounds worst-case spend; typical responses
+    // stay far below it.
     const result = await callClaudeMessages({
       apiKey: env.ANTHROPIC_API_KEY,
       system: ARCHITECT_REVIEW_SYSTEM,
       messages: [{ role: 'user', content: buildReviewPrompt(topic, draftContent, { isSecondPass }) }],
-      maxTokens: 4096,
+      maxTokens: 8192,
       effort: 'medium',
       disableThinking: true,
     });
     await recordClaudeSpend(env, { inputTokens: result.inputTokens, outputTokens: result.outputTokens, component: 'guides' });
+    if (result.stopReason === 'max_tokens') {
+      // A truncated response is not an authoritative decision — its tail
+      // (the guide body, or part of it) is missing. Spend is recorded above;
+      // fail the review rather than parse a fragment.
+      throw new Error('review response truncated at max_tokens — not treated as a decision');
+    }
     return parseReviewDecision(result.text);
   };
 
@@ -689,6 +700,16 @@ async function processGuideReviewBlock(env, dateStr, opts = {}) {
     } catch (err) {
       return { reviewed: false, reason: `architect_revision_error: ${err.message}` };
     }
+  }
+
+  if (decision.decision === 'APPROVE' && decision.finalGuide.trim().length < 500) {
+    // Fail closed (same lesson as the 2026-07-11 Notebook-X incident:
+    // plausibility-check BEFORE the push, not after). An APPROVE whose
+    // ---GUIDE--- body is missing or implausibly short must never publish —
+    // the first supervised run (2026-08-01) hit exactly this and committed a
+    // byline-only file. The row stays 'drafted', so a re-trigger (or the
+    // next day's self-heal) retries cleanly.
+    return { reviewed: false, reason: 'approve_without_guide_body', notes: (decision.notes || '').slice(0, 300) };
   }
 
   if (decision.decision === 'APPROVE') {
@@ -771,6 +792,12 @@ async function processGuideVerifyBlock(env, opts = {}) {
         webSearch: true,
       });
       await recordClaudeSpend(env, { inputTokens: claudeResult.inputTokens, outputTokens: claudeResult.outputTokens, component: 'guides' });
+      if (claudeResult.stopReason === 'max_tokens') {
+        // Truncated verification = possibly half a rewritten section — never
+        // splice that into a published guide. Entry stays queued for next week.
+        outcomes.push({ ...item, outcome: 'error: truncated_max_tokens' });
+        continue;
+      }
       verifyResult = parseVerifyResult(claudeResult.text);
     } catch (err) {
       outcomes.push({ ...item, outcome: `error: ${err.message}` });

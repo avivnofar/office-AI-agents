@@ -353,7 +353,9 @@ Respond in EXACTLY this format, nothing before or after:
 DECISION: APPROVE | REVISE | REJECT
 NOTES: <your editor notes — required for REVISE/REJECT, one or two sentences for APPROVE>
 ---GUIDE---
-<the finalized guide markdown, ONLY when DECISION is APPROVE — omit this section entirely for REVISE/REJECT>`;
+<the finalized guide markdown, ONLY when DECISION is APPROVE — omit this section entirely for REVISE/REJECT>
+
+An APPROVE response MUST include the ---GUIDE--- marker followed by the COMPLETE finalized guide markdown — the guide text you output here is exactly what gets published, so never reply APPROVE with only notes, a summary, or a reference back to the draft. An APPROVE without a full guide body is invalid and will be discarded. Keep NOTES to one or two sentences on APPROVE so the guide itself gets the bulk of your output.`;
 
 export function buildReviewPrompt(topic, draftContent, opts = {}) {
   const revisionNote = opts.isSecondPass
