@@ -49,10 +49,21 @@ import { StubAgent } from '../agents/agent-stub.js';
 import { runMeeting, MEETING_TYPES } from './meeting-engine.js';
 import { callCFRouter } from './gemini-client.js';
 import { generateAssignedDailyBatch, persistQuestions } from './qa-engine.js';
-import { getClaudeBudgetStatus } from './model-router.js';
+import { getClaudeBudgetStatus, recordClaudeSpend } from './model-router.js';
 import { collectTodayGapReports, renderGapDigest } from './gap-reports.js';
 import { resolveWriteTarget, resolveIssueTarget, checkCodeWriteAllowed } from './permission-guard.js';
 import { runChoreRotationSlot } from './chore-runner.js';
+import { checkGeminiPacingSlot } from './gemini-pacer.js';
+import { callClaudeMessages } from './claude-client.js';
+import {
+  selectGuideTopic, buildDraftPrompt, isSplitRecommendation, pickWriterAgentId,
+  insertGuidePipelineRow, updateGuidePipelineRow, getTodayDraftRow,
+  buildReviewPrompt, parseReviewDecision, extractUnverifiedSections,
+  renderGuideFile, renderRejectedDraftFile, guidePath, draftPath,
+  fetchVerificationQueueText, parseVerificationQueue, renderVerificationQueue,
+  pickVerificationQueueItems, buildVerifyPrompt, parseVerifyResult, replaceGuideSection,
+  fetchRawRepoFile, ARCHITECT_REVIEW_SYSTEM, VERIFY_SYSTEM,
+} from './guide-engine.js';
 
 const ALLOWED_ORIGINS = ['https://avivnofar.github.io', 'http://localhost:3000', 'http://127.0.0.1:5500'];
 const REPO_OWNER = 'avivnofar';
@@ -280,7 +291,7 @@ async function getSimulationState(env) {
 
 async function updateSimulationState(env, patch) {
   const current = await getSimulationState(env);
-  const allowedKeys = ['inspection_mode', 'paused', 'phase'];
+  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled'];
   const next = { ...current };
   for (const key of allowedKeys) {
     if (key in patch) next[key] = patch[key];
@@ -526,6 +537,266 @@ async function fileAssetTaskIssue(env, item, ownerAgentIds) {
   });
 }
 
+/* ────────────────────────────── Guides pipeline ─────────────────────────── */
+
+/** UTC calendar day, matching this repo's existing DATE('now') convention
+ * (see gap-reports.js) — used as the guide_pipeline.date key so guide_draft
+ * and guide_review agree on "today" within the same simulated day. */
+function todayDateStr() {
+  return new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * Kill switch for the Guides pipeline (added 2026-08-02, before first
+ * activation). The daily-schedule guide blocks ship inside the deployed
+ * bundle, so without this gate the first deploy of the feature would start
+ * drafting/reviewing guides on the very next cron tick — before the owner
+ * has read a single guide. The flag lives in SIM_KV's simulation-state
+ * (`guides_enabled`), so flipping it needs no redeploy:
+ *   ON/OFF: POST /api/agents/trigger {"type":"guides_toggle","enabled":true|false}
+ * Flag absent or false → all three guide blocks are logged no-ops on the
+ * scheduled path. The supervised-test path ({"type":"guide_block"}) passes
+ * { bypassGate: true } and is unaffected.
+ */
+async function guidesEnabled(env) {
+  const sim = await getSimulationState(env);
+  return sim.guides_enabled === true;
+}
+
+/**
+ * 'guide_draft' block: picks today's topic (workers/guide-engine.js
+ * selectGuideTopic() — capability gaps first, guides/TOPICS.md fallback),
+ * has the domain-appropriate writer persona draft it via Gemini, and stores
+ * the draft in D1 (guide_pipeline, status='drafted'). Commits nothing —
+ * that only happens on the Architect's APPROVE/REJECT in
+ * processGuideReviewBlock(). No-ops if a draft already exists for today
+ * (idempotent against a re-fired tick) or if nothing was eligible.
+ */
+async function processGuideDraftBlock(env, dateStr, opts = {}) {
+  if (!opts.bypassGate && !(await guidesEnabled(env))) {
+    console.log('[guides] guides_enabled is off — guide_draft block skipped (gated no-op)');
+    return { drafted: false, skipped: true, reason: 'guides_disabled' };
+  }
+
+  const existing = await getTodayDraftRow(env, dateStr);
+  if (existing) return { drafted: false, reason: 'already_drafted_today' };
+
+  const topic = await selectGuideTopic(env, dateStr);
+  if (!topic) return { drafted: false, reason: 'no_eligible_topic' };
+
+  const pacing = await checkGeminiPacingSlot(env);
+  if (!pacing.allowed) return { drafted: false, reason: 'gemini_pacing', topic: topic.slug };
+
+  const writerAgentId = pickWriterAgentId(topic.platform || topic.domain);
+  const writer = instantiateAgent(writerAgentId, env);
+  await writer.loadState();
+
+  let draftText;
+  try {
+    draftText = await writer.queryGeminiDirect(buildDraftPrompt(topic, topic.priorDraft));
+  } catch (err) {
+    return { drafted: false, reason: `writer_error: ${err.message}`, topic: topic.slug };
+  }
+
+  if (isSplitRecommendation(draftText)) {
+    return { drafted: false, reason: 'split_recommended', topic: topic.slug, detail: draftText.slice(0, 300) };
+  }
+
+  const id = await insertGuidePipelineRow(env, {
+    date: dateStr, topic: topic.title, domain: topic.domain, slug: topic.slug,
+    source: topic.source, writerAgentId, status: 'drafted', draftContent: draftText,
+  });
+
+  return { drafted: true, id, topic: topic.slug, domain: topic.domain, writerAgentId };
+}
+
+/**
+ * 'guide_review' block: self-heals a missing draft (a missed tick or a
+ * paced-out Gemini call), then has the Architect (agent 10) review it via a
+ * DIRECT Anthropic API call (workers/claude-client.js, model claude-sonnet-5,
+ * tracked against the SEPARATE guides Claude sub-budget — component:'guides',
+ * config/token-economy.json guides_claude_budget). APPROVE commits the guide
+ * and queues any UNVERIFIED sections; REVISE sends fixes back to the writer
+ * for ONE round then re-reviews; REJECT (or a failed second review) commits
+ * the draft + rejection note to guides/_drafts/ instead. Never escalates to
+ * the owner — this is fire-and-forget, per CLAUDE.md "Review outcomes".
+ */
+async function processGuideReviewBlock(env, dateStr, opts = {}) {
+  if (!opts.bypassGate && !(await guidesEnabled(env))) {
+    console.log('[guides] guides_enabled is off — guide_review block skipped (gated no-op)');
+    return { reviewed: false, skipped: true, reason: 'guides_disabled' };
+  }
+
+  let row = await getTodayDraftRow(env, dateStr);
+  if (!row) {
+    // Self-heal inherits this call's gate decision (we're already past it).
+    const draftResult = await processGuideDraftBlock(env, dateStr, { bypassGate: true });
+    if (!draftResult.drafted) return { reviewed: false, reason: draftResult.reason || 'no_draft_available' };
+    row = await getTodayDraftRow(env, dateStr);
+    if (!row) return { reviewed: false, reason: 'draft_missing_after_self_heal' };
+  }
+
+  if (!env.ANTHROPIC_API_KEY) return { reviewed: false, reason: 'anthropic_api_key_not_configured' };
+
+  const budget = await getClaudeBudgetStatus(env, { component: 'guides' });
+  if (budget.overBudget) {
+    return { reviewed: false, reason: `guides_budget_exhausted ($${budget.spentUsd.toFixed(2)}/$${budget.capUsd}/mo)` };
+  }
+
+  const topic = { title: row.topic, domain: row.domain, slug: row.slug, source: row.source };
+  const writerConfig = getAgentConfig(row.writer_agent_id);
+  const writerAgentName = writerConfig ? writerConfig.name : `Agent ${row.writer_agent_id}`;
+
+  const runReview = async (draftContent, isSecondPass) => {
+    const result = await callClaudeMessages({
+      apiKey: env.ANTHROPIC_API_KEY,
+      system: ARCHITECT_REVIEW_SYSTEM,
+      messages: [{ role: 'user', content: buildReviewPrompt(topic, draftContent, { isSecondPass }) }],
+      maxTokens: 4096,
+      effort: 'medium',
+      disableThinking: true,
+    });
+    await recordClaudeSpend(env, { inputTokens: result.inputTokens, outputTokens: result.outputTokens, component: 'guides' });
+    return parseReviewDecision(result.text);
+  };
+
+  let decision;
+  try {
+    decision = await runReview(row.draft_content, false);
+  } catch (err) {
+    return { reviewed: false, reason: `architect_error: ${err.message}` };
+  }
+
+  if (decision.decision === 'REVISE' && (row.revision_count || 0) < 1) {
+    let revisedDraft = row.draft_content;
+    const pacing = await checkGeminiPacingSlot(env);
+    if (pacing.allowed) {
+      const writer = instantiateAgent(row.writer_agent_id, env);
+      await writer.loadState();
+      try {
+        revisedDraft = await writer.queryGeminiDirect(
+          buildDraftPrompt(topic, { draftContent: row.draft_content, reviewNotes: decision.notes })
+        );
+      } catch {
+        // Revision call failed — fall through and re-review the original
+        // draft rather than losing the round entirely.
+      }
+    }
+    await updateGuidePipelineRow(env, row.id, { draftContent: revisedDraft, revisionCount: 1 });
+    row = { ...row, draft_content: revisedDraft, revision_count: 1 };
+    try {
+      decision = await runReview(revisedDraft, true);
+    } catch (err) {
+      return { reviewed: false, reason: `architect_revision_error: ${err.message}` };
+    }
+  }
+
+  if (decision.decision === 'APPROVE') {
+    const finalMarkdown = renderGuideFile({ topic, writerAgentName, finalGuide: decision.finalGuide, dateStr });
+    const path = guidePath(topic.domain, topic.slug);
+    const commit = await commitFileToRepo(
+      env, REPO_NAME, path, finalMarkdown, `chore(agents): guide — ${topic.slug} (${topic.domain}) [skip ci]`
+    );
+
+    const unverifiedSections = extractUnverifiedSections(decision.finalGuide);
+    let queueUpdated = false;
+    if (unverifiedSections.length) {
+      const existingQueue = parseVerificationQueue(await fetchVerificationQueueText());
+      const newEntries = unverifiedSections
+        .filter((section) => !existingQueue.some((e) => e.guidePath === path && e.section === section))
+        .map((section) => ({ guidePath: path, section }));
+      if (newEntries.length) {
+        await commitFileToRepo(
+          env, REPO_NAME, 'guides/_verification-queue.md', renderVerificationQueue([...existingQueue, ...newEntries]),
+          `chore(agents): queue ${newEntries.length} UNVERIFIED section(s) — ${topic.slug} [skip ci]`
+        );
+        queueUpdated = true;
+      }
+    }
+
+    await updateGuidePipelineRow(env, row.id, { status: 'approved', reviewNotes: decision.notes });
+    return { reviewed: true, decision: 'APPROVE', path, committed: commit.committed, unverifiedCount: unverifiedSections.length, queueUpdated };
+  }
+
+  const draftMarkdown = renderRejectedDraftFile({
+    topic, writerAgentName, draftContent: row.draft_content, reviewNotes: decision.notes, dateStr,
+  });
+  const path = draftPath(topic.slug);
+  const commit = await commitFileToRepo(env, REPO_NAME, path, draftMarkdown, `chore(agents): guide draft rejected — ${topic.slug} [skip ci]`);
+  await updateGuidePipelineRow(env, row.id, { status: 'rejected', reviewNotes: decision.notes });
+  return { reviewed: true, decision: decision.decision, path, committed: commit.committed };
+}
+
+/**
+ * 'guide_verify' block: Saturday-only weekly verification pass. Pulls 1-2
+ * items from guides/_verification-queue.md, runs one Claude call per item
+ * WITH the web_search server tool for fresh grounding (own the guides
+ * sub-budget, same as guide_review). On success, updates the guide in place
+ * and removes the queue entry; on failure the entry stays for next week.
+ */
+async function processGuideVerifyBlock(env, opts = {}) {
+  if (!opts.bypassGate && !(await guidesEnabled(env))) {
+    console.log('[guides] guides_enabled is off — guide_verify block skipped (gated no-op)');
+    return { verified: 0, skipped: true, reason: 'guides_disabled' };
+  }
+
+  const entries = parseVerificationQueue(await fetchVerificationQueueText());
+  if (!entries.length) return { verified: 0, reason: 'queue_empty' };
+  if (!env.ANTHROPIC_API_KEY) return { verified: 0, reason: 'anthropic_api_key_not_configured' };
+
+  const items = pickVerificationQueueItems(entries, 2);
+  const outcomes = [];
+  let remaining = [...entries];
+
+  for (const item of items) {
+    const budget = await getClaudeBudgetStatus(env, { component: 'guides' });
+    if (budget.overBudget) {
+      outcomes.push({ ...item, outcome: 'skipped_budget' });
+      continue;
+    }
+
+    const guideMarkdown = await fetchRawRepoFile(item.guidePath);
+    if (!guideMarkdown) {
+      outcomes.push({ ...item, outcome: 'guide_not_found' });
+      continue;
+    }
+
+    let verifyResult;
+    try {
+      const claudeResult = await callClaudeMessages({
+        apiKey: env.ANTHROPIC_API_KEY,
+        system: VERIFY_SYSTEM,
+        messages: [{ role: 'user', content: buildVerifyPrompt(guideMarkdown, item.section) }],
+        maxTokens: 2048,
+        webSearch: true,
+      });
+      await recordClaudeSpend(env, { inputTokens: claudeResult.inputTokens, outputTokens: claudeResult.outputTokens, component: 'guides' });
+      verifyResult = parseVerifyResult(claudeResult.text);
+    } catch (err) {
+      outcomes.push({ ...item, outcome: `error: ${err.message}` });
+      continue;
+    }
+
+    if (verifyResult.verified && verifyResult.updatedSection) {
+      const updatedGuide = replaceGuideSection(guideMarkdown, item.section, verifyResult.updatedSection);
+      await commitFileToRepo(env, REPO_NAME, item.guidePath, updatedGuide, `chore(agents): guide verification — ${item.section} [skip ci]`);
+      remaining = remaining.filter((e) => !(e.guidePath === item.guidePath && e.section === item.section));
+      outcomes.push({ ...item, outcome: 'verified' });
+    } else {
+      outcomes.push({ ...item, outcome: 'still_unverified' });
+    }
+  }
+
+  if (remaining.length !== entries.length) {
+    await commitFileToRepo(
+      env, REPO_NAME, 'guides/_verification-queue.md', renderVerificationQueue(remaining),
+      'chore(agents): verification queue updated after weekly pass [skip ci]'
+    );
+  }
+
+  return { verified: outcomes.filter((o) => o.outcome === 'verified').length, outcomes };
+}
+
 /* ─────────────────────────── Config overrides ──────────────────────────── */
 
 /**
@@ -761,7 +1032,7 @@ ${scheduleSection}`;
 
 /** Renders the tactical-schedule section (case batches, tool-task window, AI-experience reports, spare time, weekly summary). */
 function renderScheduleSection(scheduleInfo) {
-  const { schedule, batches, toolTask, aiExperience, spareTime, weeklySummary, versionBumps, choreRotation } = scheduleInfo;
+  const { schedule, batches, toolTask, aiExperience, spareTime, weeklySummary, versionBumps, choreRotation, guideDraft, guideReview, guideVerify } = scheduleInfo;
 
   const batchLines = batches
     .map((b) => `- ${b.block.time || '—'} ${b.block.label}: ${b.cases.length} case(s)`)
@@ -776,6 +1047,12 @@ function renderScheduleSection(scheduleInfo) {
   const choreRotationLine = choreRotation
     ? `**${choreRotation.projectKey}**: ${choreRotation.reason}${choreRotation.routedModel ? ` (would route to ${choreRotation.routedModel})` : ''}`
     : '_No chore-rotation block today._';
+
+  const guideLines = [
+    guideDraft ? `- Draft: ${guideDraft.drafted ? `\`${guideDraft.topic}\` (${guideDraft.domain}, agent ${guideDraft.writerAgentId})` : `skipped — ${guideDraft.reason}`}` : null,
+    guideReview ? `- Review: ${guideReview.reviewed ? `${guideReview.decision} -> [\`${guideReview.path}\`](https://github.com/${REPO_OWNER}/${REPO_NAME}/blob/master/${guideReview.path})${guideReview.committed === false ? ' _(commit pending)_' : ''}` : `skipped — ${guideReview.reason}`}` : null,
+    guideVerify ? `- Weekly verify: ${guideVerify.verified}/${(guideVerify.outcomes || []).length || 0} section(s) verified${guideVerify.reason ? ` (${guideVerify.reason})` : ''}` : null,
+  ].filter(Boolean).join('\n') || '_No guides-pipeline blocks today._';
 
   const statusReportLines = (aiExperience?.statusReports || [])
     .map((r) => `- Agent ${r.agentId}: "${r.note}"`).join('\n') || '_None filed today._';
@@ -818,6 +1095,10 @@ ${toolTaskLine}
 ### Cross-Project Chore Rotation
 
 ${choreRotationLine}
+
+### Guides Pipeline
+
+${guideLines}
 
 ### Daily AI-Experience Reports
 
@@ -1554,7 +1835,10 @@ export async function runScheduledBlock(env, israelTime, dayOfWeek) {
       cases,
       batches: partitionCasesByShare(cases, schedule.blocks).map((b) => ({ ...b, done: false })),
       agentStats: {},
-      results: { toolTask: null, aiExperience: null, standup: null, spareTime: [], weeklySummary: null, versionBumps: [], choreRotation: null },
+      results: {
+        toolTask: null, aiExperience: null, standup: null, spareTime: [], weeklySummary: null, versionBumps: [], choreRotation: null,
+        guideDraft: null, guideReview: null, guideVerify: null,
+      },
     };
   }
 
@@ -1608,6 +1892,12 @@ export async function runScheduledBlock(env, israelTime, dayOfWeek) {
         // resolves/logs model routing, never calls a model, per the
         // 2026-07-08 session scope (TOKEN-BUDGET.md).
         cycle.results.choreRotation = await runChoreRotationSlot(env, { label: `${israelTime} chore_rotation` });
+      } else if (block.type === 'guide_draft') {
+        cycle.results.guideDraft = await processGuideDraftBlock(env, todayDateStr());
+      } else if (block.type === 'guide_review') {
+        cycle.results.guideReview = await processGuideReviewBlock(env, todayDateStr());
+      } else if (block.type === 'guide_verify') {
+        cycle.results.guideVerify = await processGuideVerifyBlock(env);
       }
     } catch (err) {
       await logScheduledError(env, { israelTime, dayOfWeek, blockType: block.type, error: err });
@@ -1674,7 +1964,7 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
     });
   }
 
-  const { standup, toolTask, aiExperience, spareTime, weeklySummary, versionBumps, choreRotation } = cycle.results;
+  const { standup, toolTask, aiExperience, spareTime, weeklySummary, versionBumps, choreRotation, guideDraft, guideReview, guideVerify } = cycle.results;
 
   const sidePlotStarted = await maybeStartSidePlots(env, { day: nextDay, summary, cases: cycle.cases, standup });
   const sidePlotUpdates = await advanceSidePlots(env, nextDay);
@@ -1720,7 +2010,7 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
     current_quarter: Math.ceil(nextDay / 91),
     stats: newStats,
   };
-  const scheduleInfo = { schedule, dayOfWeek, batches: cycle.batches, toolTask, aiExperience, spareTime, weeklySummary, versionBumps, choreRotation };
+  const scheduleInfo = { schedule, dayOfWeek, batches: cycle.batches, toolTask, aiExperience, spareTime, weeklySummary, versionBumps, choreRotation, guideDraft, guideReview, guideVerify };
   const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo);
   const report = await commitFileToRepo(
     env, REPO_NAME, `reports/daily/day-${pad(nextDay, 3)}-summary.md`, markdown,
@@ -1985,6 +2275,35 @@ export default {
             // (also runs automatically at each day-cycle start).
             result = await syncAgentsTable(env);
             break;
+          case 'guides_toggle':
+            // Guides-pipeline kill switch (see guidesEnabled()): flips the
+            // SIM_KV simulation-state `guides_enabled` flag without a
+            // redeploy. Body: { enabled: true|false }. While off (or absent),
+            // scheduled guide_draft/guide_review/guide_verify blocks are
+            // logged no-ops.
+            result = await updateSimulationState(env, { guides_enabled: !!body.enabled });
+            break;
+          case 'guide_block': {
+            // Supervised Guides test: runs ONE guide handler directly — the
+            // SAME functions the cron path dispatches — with the
+            // guides_enabled gate bypassed. Deliberately NOT routed through
+            // runScheduledBlock(): a {"type":"block"} trigger at 16:00/16:30
+            // would also fire the report/standup/spare_time blocks and (at
+            // the day's last block) finalize + clear the LIVE day cycle.
+            // Guide state crosses invocations via D1 (guide_pipeline), so a
+            // draft trigger followed by a review trigger still exercises the
+            // real cross-tick handoff. Body: { block: 'draft'|'review'|'verify' }.
+            const guideHandlers = {
+              draft: () => processGuideDraftBlock(env, todayDateStr(), { bypassGate: true }),
+              review: () => processGuideReviewBlock(env, todayDateStr(), { bypassGate: true }),
+              verify: () => processGuideVerifyBlock(env, { bypassGate: true }),
+            };
+            if (!guideHandlers[body.block]) {
+              return json({ error: 'guide_block_requires_block_draft_review_or_verify' }, 400, origin);
+            }
+            result = await guideHandlers[body.block]();
+            break;
+          }
           case 'block':
             // Run ONE daily-schedule block through the REAL scheduled path
             // (runScheduledBlock: KV cycle persistence, per-block dispatch)

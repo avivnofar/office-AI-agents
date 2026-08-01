@@ -12,6 +12,16 @@
  * design, not two separate economies anymore. The old 11-agent-only per-day
  * CALL-COUNT cap (tokenEconomy.claude_daily_cap) this comment used to
  * contrast against has been removed from config/token-economy.json.
+ *
+ * UPDATED (Guides feature): added a SECOND, independent sub-budget for the
+ * Guides pipeline (workers/guide-engine.js — Architect review/finalize calls
+ * and the weekly verification pass, both via workers/claude-client.js's
+ * direct Anthropic API call). Same table (`claude_budget_usage`), same
+ * functions, distinguished by an explicit `component: 'qa' | 'guides'`
+ * option that defaults to `'qa'` — every existing caller (which never passes
+ * `component`) is byte-for-byte unaffected. Guides rows use month key
+ * `'YYYY-MM#guides'` instead of `'YYYY-MM'`, so the two sub-budgets can never
+ * collide or drain each other regardless of read/write order.
  */
 
 import tokenEconomy from '../config/token-economy.json';
@@ -45,22 +55,32 @@ const BUDGET_TABLE_SQL = `CREATE TABLE IF NOT EXISTS claude_budget_usage (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )`;
 
-function currentMonthKey(date = new Date()) {
-  return date.toISOString().slice(0, 7); // 'YYYY-MM'
+function currentMonthKey(date = new Date(), component = 'qa') {
+  const base = date.toISOString().slice(0, 7); // 'YYYY-MM'
+  return component === 'guides' ? `${base}#guides` : base;
+}
+
+/** Per-component monthly $ cap. 'qa' keeps reading the pre-existing
+ * chore_automation/shared_claude_budget value (unchanged); 'guides' reads
+ * the new config/token-economy.json `guides_claude_budget` block. */
+function capUsdForComponent(component) {
+  if (component === 'guides') return tokenEconomy.guides_claude_budget?.cap_usd_per_month ?? 4.5;
+  return CHORE.claude_budget_usd_per_month;
 }
 
 /**
- * Reads this month's chore-automation Claude spend against the shared
- * $4.50/mo soft cap (config/token-economy.json chore_automation.claude_budget_usd_per_month;
- * the account's own $5/month spend ceiling is the hard backstop).
+ * Reads this month's Claude spend against a component's soft cap —
+ * 'qa' (default, config/token-economy.json chore_automation.claude_budget_usd_per_month
+ * == shared_claude_budget.cap_usd_per_month, the account's own $5/month
+ * spend ceiling is the hard backstop) or 'guides' (guides_claude_budget.cap_usd_per_month).
  * No-ops (reports $0 spent, allowed) if env.DB isn't available.
  */
-export async function getClaudeBudgetStatus(env, { asOf = new Date() } = {}) {
-  const capUsd = CHORE.claude_budget_usd_per_month;
-  const month = currentMonthKey(asOf);
+export async function getClaudeBudgetStatus(env, { asOf = new Date(), component = 'qa' } = {}) {
+  const capUsd = capUsdForComponent(component);
+  const month = currentMonthKey(asOf, component);
 
   if (!env?.DB) {
-    console.warn('[model-router] No D1 binding — Claude chore-budget tracking skipped (treated as $0 spent).');
+    console.warn(`[model-router] No D1 binding — Claude ${component}-budget tracking skipped (treated as $0 spent).`);
     return { month, spentUsd: 0, capUsd, remainingUsd: capUsd, overBudget: false };
   }
 
@@ -90,11 +110,12 @@ export async function getClaudeCallsToday(env) {
 /** The per-day Claude call cap (0/undefined = no daily cap, monthly $ cap still applies). */
 export const CLAUDE_MAX_CALLS_PER_DAY = tokenEconomy.shared_claude_budget?.max_calls_per_day ?? 0;
 
-/** Records a chore-automation Claude call's estimated cost against this month's soft cap. No-ops without env.DB. */
-export async function recordClaudeSpend(env, { inputTokens, outputTokens, asOf = new Date() }) {
+/** Records a Claude call's cost against this month's soft cap for the given
+ * component ('qa' default, or 'guides'). No-ops without env.DB. */
+export async function recordClaudeSpend(env, { inputTokens, outputTokens, asOf = new Date(), component = 'qa' }) {
   if (!env?.DB) return { recorded: false, reason: 'no DB binding' };
 
-  const month = currentMonthKey(asOf);
+  const month = currentMonthKey(asOf, component);
   const costUsd = estimateClaudeCostUsd(inputTokens, outputTokens, asOf);
 
   await env.DB.prepare(BUDGET_TABLE_SQL).run();

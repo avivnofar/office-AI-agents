@@ -176,6 +176,30 @@ CREATE TABLE IF NOT EXISTS claude_budget_usage (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Guides pipeline state (Gemini draft -> Architect/Claude review -> commit).
+-- Brand-new table (no live-D1 migration needed, unlike cases/reports above).
+-- `status`: 'drafted' -> 'reviewing' -> 'approved' | 'rejected' (one revision
+-- round max, see workers/guide-engine.js). `source` records where the topic
+-- came from ('gap:<report_id>' or 'topics_md:<slug>') for traceability.
+CREATE TABLE IF NOT EXISTS guide_pipeline (
+  id TEXT PRIMARY KEY,
+  date TEXT NOT NULL,
+  topic TEXT NOT NULL,
+  domain TEXT NOT NULL,
+  slug TEXT NOT NULL,
+  source TEXT,
+  writer_agent_id INTEGER,
+  status TEXT DEFAULT 'drafted',
+  draft_content TEXT,
+  review_notes TEXT,
+  revision_count INTEGER DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_guide_pipeline_slug ON guide_pipeline(slug);
+CREATE INDEX IF NOT EXISTS idx_guide_pipeline_date ON guide_pipeline(date);
+
 -- General agent-conduct rule: max 1 pull (external repo checkout/fetch) per
 -- day, repo-wide, regardless of config/project-permissions.json push state.
 -- See workers/permission-guard.js checkAndRecordPull().

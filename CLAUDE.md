@@ -157,6 +157,126 @@ is always enforced per-call at ask time, this just avoids generating
 questions nobody will get a real answer to. That total is spread across the
 day via the existing `case_batch` blocks in `config/daily-schedule.json`.
 
+## Guides (owner-directed Architect task)
+
+The office also produces high-quality ENGLISH technical guides for the
+owner's Smart Archive app. This repo only produces markdown files under
+`guides/` — the owner uploads them to the archive manually; nothing here
+touches Google Drive, the archive app, or any external repo. This is an
+**owner-directed special task for the dormant Architect** (agent 10, see
+"The 11 agents" above) — the one exception to that agent's dormancy, and
+still not part of the daily Q&A flow.
+
+**Pipeline — exactly two model calls, two names on each guide:**
+
+1. **Draft** — a writer persona chosen by domain (`workers/guide-engine.js`
+   `pickWriterAgentId()`: The QA/agent 6 for firewall+vpn, The Lead QA/agent
+   8 for cybersecurity+networking, The Team Lead/agent 7 for the rest) drafts
+   via `agent.queryGeminiDirect()` — free tier, persona system prompt already
+   wired. The prompt hard-requires English only, a closing Sources section, a
+   per-section `Confidence: high|medium|low` marker, and a
+   `SPLIT_RECOMMENDATION:` reply instead of an oversized (>10-page) guide.
+2. **Review/finalize** — the Architect reviews via a **direct Anthropic API
+   call** (`workers/claude-client.js`, `POST api.anthropic.com/v1/messages`,
+   model `claude-sonnet-5` — deliberately NOT routed through
+   data-center-api's `/api/chat`, which is sized for short chat answers with
+   its own model/prompt/output-token limit, not a rewritten 3-5 page guide).
+   Claude is final authority, not a rubber stamp: fact-checks end to end with
+   EXTRA skepticism on sections Gemini marked high-confidence, rewrites
+   freely, and marks anything it can't verify `UNVERIFIED` in the published
+   text rather than guessing. No Groq anywhere in this pipeline; a
+   Gemini-self-QA pass was considered and rejected (Gemini checking Gemini
+   finds nothing).
+
+**Topic selection** (`selectGuideTopic()`, runs in the `guide_draft` block):
+today's capability-gap reports (`reports` rows, `type='gap_hebrew'`, joined
+back to the original `cases` row for platform/category) first, mapped to a
+domain via `mapPlatformToDomain()`; falls back to `guides/TOPICS.md` in file
+order when no gap is eligible. An **ABSOLUTE ZERO blocklist**
+(`BLOCKLIST_KEYWORDS`: 1COM, MirtaPBX, Netvill, voip/sip/pbx/cloud-telephony)
+is checked against both sources — the owner left that work behind
+permanently, no exceptions. A rejected prior draft for the same topic
+becomes an "improve this draft per its rejection note" revision task instead
+of a fresh write. `guides/TOPICS.md` is stale-by-design (the owner will
+rarely update it) — Windows guides in particular ONLY ever come from that
+file, since neither Notebook-X nor data-center's question pool covers
+Windows.
+
+**Review outcomes**: APPROVE commits `guides/<domain>/<slug>.md` (domains:
+`networking`, `firewall`, `windows`, `ai`, `linux`, `cloud`, `cybersecurity`)
+via the same guarded `commitFileToRepo()` gap digests already use, and
+queues any `UNVERIFIED` sections into `guides/_verification-queue.md`.
+REVISE sends specific fixes back to the writer for **one revision round**,
+then re-reviews (a second failure is treated as REJECT — no further
+rounds). REJECT commits the draft + rejection note to
+`guides/_drafts/<slug>.md` instead. **Never escalates to the owner** — this
+is fire-and-forget, same posture as gap digests.
+
+**Weekly verification** (Saturday 08:00 Israel, `guide_verify` block): pulls
+1-2 items off `guides/_verification-queue.md` and runs one Claude call per
+item **with the `web_search` server tool** for fresh grounding, updating the
+guide and clearing the queue entry on success. **This makes Saturday no
+longer a zero-API-calls day** — Saturday is still zero Q&A/simulation
+activity (no case batches, no meetings, no routine Gemini/Claude asks), just
+not zero Claude calls overall; see `config/daily-schedule.json`'s
+`saturday_schedule` and `guides_program`.
+
+**Budget**: a SECOND, independent Claude sub-budget alongside the Q&A
+engine's — same D1 `claude_budget_usage` table, same
+`workers/model-router.js` functions, distinguished by an explicit
+`component: 'qa' | 'guides'` option (default `'qa'`, so every pre-existing
+caller is untouched) and a distinct month key (`'YYYY-MM#guides'` vs
+`'YYYY-MM'`). `config/token-economy.json`'s `guides_claude_budget` gives it
+its own $4.50/mo soft-stop — total Anthropic spend is now effectively
+$10/month combined with the Q&A engine's unchanged $4.50. Fail-by-skip on
+exhaustion, logged; occasional skipped guide days are expected and
+accepted (owner-approved cost model: ~$0.06-0.085/guide per review pass,
+~1 guide/day, expected $2.50-3.50/month, all-revisions worst case ~$5.30
+which DOES exceed the soft-stop by design).
+
+**Schedule blocks** (`config/daily-schedule.json`, riding the existing
+cron): Sun-Thu `guide_draft` 16:00 (after `report`, so today's gap digests
+already exist) + `guide_review` 16:30; Friday `guide_draft` 10:30 (after the
+Friday `report`) + `guide_review` 12:00; Saturday `guide_verify` 08:00.
+**Self-healing**: given the ~2.4% tick-miss rate, `guide_review` first
+checks D1 for today's draft and generates it in the same tick if missing
+(one Gemini + one Claude call in one invocation, well within Cloudflare's
+subrequest limit) — a missed review tick carries the draft to the next
+day's review instead of silently dropping it.
+
+**Files**: `workers/guide-engine.js` (pipeline logic — topic selection,
+blocklist, prompt building, decision parsing, D1 `guide_pipeline` reads/
+writes; no GitHub commits of its own, mirroring `workers/gap-reports.js`'s
+split), `workers/claude-client.js` (direct Anthropic Messages API call +
+real-usage spend recording), `guides/TOPICS.md`, `guides/_verification-queue.md`,
+`scripts/verify-guide-engine.js` (dry-run verifier, keeps
+`scripts/verify-qa-engine.js` green alongside it). The three block handlers
+(`processGuideDraftBlock`/`processGuideReviewBlock`/`processGuideVerifyBlock`)
+and the actual `commitFileToRepo()` calls live in `workers/agent-runner.js`.
+
+**Permissions — nothing loosens**: `automated_code_write: false` stays as-is.
+Guides are markdown content, gated the same way gap digests are
+(`checkCodeWriteAllowed()` already treats `.md` as content, not code); the
+Architect's review is an API call, not a repo-code write.
+
+**Kill switch (`guides_enabled`, added 2026-08-02)**: all three guide block
+handlers check a `guides_enabled` flag in SIM_KV's `simulation-state` at the
+top and are logged no-ops while it's absent/false — so deploying the feature
+does NOT start the pipeline; the cron's guide blocks stay inert until the
+flag is explicitly flipped. Toggle without redeploy:
+`POST /api/agents/trigger {"type":"guides_toggle","enabled":true|false}`.
+For supervised testing, `{"type":"guide_block","block":"draft"|"review"|"verify"}`
+runs ONE guide handler directly with the gate bypassed — deliberately NOT via
+`{"type":"block"}`, which at 16:00/16:30 would also fire the report/standup
+blocks and (on the day's last block) finalize + clear the LIVE day cycle.
+Draft→review as two separate `guide_block` calls still exercises the real
+cross-invocation handoff (guide state lives in D1 `guide_pipeline`).
+
+**Before enabling these blocks live**, run one supervised end-to-end guide
+cycle manually via `{"type":"guide_block","block":"draft"}` then
+`{"type":"guide_block","block":"review"}` and read the resulting guide file
+in full before flipping `guides_enabled` on.
+
 ## Token economy (`config/token-economy.json`)
 
 - **Groq `llama3-8b-8192`** — primary model for all routine per-case agent
@@ -202,6 +322,13 @@ day via the existing `case_batch` blocks in `config/daily-schedule.json`.
   row, not two separate budgets. The old per-day CALL-COUNT cap
   (`claude_daily_cap: 30`) is retired — replaced by this per-month DOLLAR
   cap, checked per-call.
+- **Guides Claude budget** (`guides_claude_budget` in token-economy.json):
+  a SECOND, independent $4.50/month soft-stop for the Guides pipeline (see
+  "Guides" above) — same D1 table and `model-router.js` functions as the
+  shared budget above, distinguished by `component: 'guides'` vs the
+  default `'qa'`. Covers `workers/claude-client.js`'s direct Anthropic
+  calls (model `claude-sonnet-5`) only; never drawn down by, or draining,
+  the Q&A engine's own $4.50/mo.
 - **Google AI Studio** (`GOOGLE_AI_API_KEY`) — optional, reserved for
   human-in-the-loop creative-tool sessions (Agents 9/10 building design
   assets), never called programmatically by the Worker.
@@ -215,6 +342,7 @@ npx wrangler secret put GROQ_API_KEY
 npx wrangler secret put ADMIN_TOKEN
 npx wrangler secret put GITHUB_TOKEN       # optional
 npx wrangler secret put GOOGLE_AI_API_KEY  # optional
+npx wrangler secret put ANTHROPIC_API_KEY  # required for the Guides pipeline (see "Guides" above)
 npx wrangler deploy
 ```
 
@@ -386,8 +514,13 @@ site, not merely defined nearby.
 - `workers/gap-reports.js` — capability-gap classification + Hebrew digest
   rendering (2026-07-18, new)
 - `workers/gemini-pacer.js` — Notebook-X Gemini call pacing (2026-07-18, new)
-- `workers/model-router.js` — shared $4.50/mo Claude budget tracking (D1
-  `claude_budget_usage`) + chore-automation model routing
+- `workers/model-router.js` — component-aware ('qa'|'guides') Claude budget
+  tracking (D1 `claude_budget_usage`) + chore-automation model routing
+- `workers/guide-engine.js` — Guides pipeline logic: topic selection,
+  ABSOLUTE ZERO blocklist, draft/review/verify prompt building, decision
+  parsing, D1 `guide_pipeline` reads/writes (new)
+- `workers/claude-client.js` — direct Anthropic Messages API client
+  (model `claude-sonnet-5`), used only by the Guides pipeline (new)
 - `workers/scheduler.js` — dead/unwired (confirmed 2026-07-18 — nothing
   imports it, `wrangler.toml`'s `main` points at `agent-runner.js`); kept,
   not deleted, out of scope this session, import updated so it doesn't
@@ -408,13 +541,21 @@ site, not merely defined nearby.
   `relationships.json`, `promotion-config.json`, `side-plots.json`,
   `year-tracker.json`, `token-economy.json` — simulation parameters
 - `database/schema.sql` — D1 schema, incl. the 2026-07-18 manual-migration
-  note for `cases.project`/`cases.kb_slug`/`reports.project`
+  note for `cases.project`/`cases.kb_slug`/`reports.project`, and the
+  brand-new `guide_pipeline` table (no manual migration needed — `CREATE
+  TABLE IF NOT EXISTS` deploys cleanly since it's a new table, not an ALTER
+  on an existing one)
 - `dashboard/admin-panel.html` + `dashboard.js` — standalone admin UI
 - `reports/` — generated daily/weekly/meeting/gap reports, asset-pipeline board
+- `guides/` — approved guides (`<domain>/<slug>.md`), `_drafts/` (rejected
+  drafts + rejection notes), `_verification-queue.md`, `TOPICS.md` (fallback
+  topic list) — see "Guides" above
 - `checkpoints/` — saved simulation-state snapshots before major changes
 - `assets/incoming/` — raw human-in-the-loop tool exports awaiting integration
 - `scripts/verify-qa-engine.js` — dry-run verification for the Q&A-engine
   rebuild (2026-07-18, new)
+- `scripts/verify-guide-engine.js` — dry-run verification for the Guides
+  pipeline (new)
 - `wrangler.toml` — Worker bindings, cron, secrets reference
 - `AGENTS.md` / `PENDING-WORK.md` / `DEPLOY.md` — spec, open work, and
   deploy reference docs (`STRATEGY.md` was deleted in the 2026-07-16

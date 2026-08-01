@@ -42,10 +42,17 @@ binding = "AI"
 
 # Secrets (set via `wrangler secret put <NAME>`, not here):
 #   GEMINI_API_KEY    - required, report synthesis (monthly/quarterly/semi_yearly/yearly)
+#                       + the Guides pipeline's writer-persona drafts
 #   GROQ_API_KEY      - required, routine per-case agent work (callGroq(), config/token-economy.json)
 #   GOOGLE_AI_API_KEY - optional, reserved for Google AI Studio report tooling (see token-economy.json)
 #   ADMIN_TOKEN       - required, validates X-Admin-Token on /api/agents/*
 #   GITHUB_TOKEN      - optional, gates report/guide commits + claude-action issues to GitHub
+#   ANTHROPIC_API_KEY - required for the Guides pipeline (workers/claude-client.js,
+#                       direct https://api.anthropic.com/v1/messages calls — the
+#                       error-1042 *.workers.dev restriction doesn't apply to
+#                       external hosts, so no service binding is needed). The
+#                       11-agent Q&A engine's own Claude asks still go through
+#                       the APP_API service binding above, unaffected by this.
 
 # Per-block office-simulation cron. Fires every 30 min across 23:00-23:30 +
 # 00:00-13:30 UTC = 02:00-16:30 IDT (Israel Daylight Time, UTC+3) — the

@@ -12,7 +12,7 @@
       "4": "Wednesday (full work day)",
       "5": "Thursday (full work day)",
       "6": "Friday (short day — weekly summary meeting, reduced case load)",
-      "7": "Saturday (off — idle only, no Gemini/Claude calls)"
+      "7": "Saturday (off for the office simulation — no case batches, no meetings, no routine Q&A Gemini/Claude calls. NOT a zero-API-calls day since the Guides feature added a weekly verification pass here — see saturday_schedule.blocks / guides_program.)"
     },
     "case_volume_design_note": "SUPERSEDED 2026-07-18 (Q&A-engine rebuild) — volume is no longer a fixed per-agent quota at all. Once per day, at cycle start, agent-runner.js's computeDailyQuestionVolume() checks the remaining shared Claude budget for the month (config/token-economy.json shared_claude_budget) and picks a conservative day total from it (0 if exhausted) — never a fixed number decided in advance. That total is then SPREAD across the day exactly as before, via the existing case_batch case_share proportions below (6 case_batch blocks, 02:00-15:00 Israel, several hours apart; full_day_schedule has 11 blocks total — the 6 case batches plus tool_task_window, chore_rotation, report, standup meeting, and spare_time). Non-burstiness for Notebook-X specifically doesn't come from this per-day total at all — it comes from workers/gemini-pacer.js's per-call pacing check at ask time (agent-base.js askAssignedProject()), which is what actually rate-limits Gemini calls regardless of how many questions a block was handed."
   },
@@ -32,8 +32,10 @@
       { "time": "12:30", "type": "chore_rotation", "label": "Cross-project chore rotation (Notebook-X/data-center/archive-alpha, Gemini-routed, wiring-only)", "ref": "chore-schedule.json" },
       { "time": "15:00", "type": "case_batch", "label": "Afternoon batch", "case_share": 0.20 },
       { "time": "16:00", "type": "report", "label": "Daily AI-experience reports + model-education case studies", "ref": "model_education_program" },
+      { "time": "16:00", "type": "guide_draft", "label": "Guides pipeline: Gemini draft (ordered after 'report' so today's gap digests already exist)", "ref": "guides_program" },
       { "time": "16:30", "type": "meeting", "meeting_type": "daily_standup", "label": "Daily standup (existing meeting-engine.js type)" },
-      { "time": "16:30", "type": "spare_time", "label": "Spare time: coworker interaction or idle (token-saving)", "ref": "spare_time_program" }
+      { "time": "16:30", "type": "spare_time", "label": "Spare time: coworker interaction or idle (token-saving)", "ref": "spare_time_program" },
+      { "time": "16:30", "type": "guide_review", "label": "Guides pipeline: Architect (Claude) review + finalize/commit", "ref": "guides_program" }
     ]
   },
 
@@ -45,17 +47,20 @@
       { "time": "05:30", "type": "case_batch", "label": "Friday mid batch", "case_share": 0.30 },
       { "time": "09:00", "type": "case_batch", "label": "Friday late-morning batch", "case_share": 0.30 },
       { "time": "10:30", "type": "report", "label": "Daily AI-experience reports + model-education case studies", "ref": "model_education_program" },
+      { "time": "10:30", "type": "guide_draft", "label": "Guides pipeline: Gemini draft (ordered after the Friday 'report' block)", "ref": "guides_program" },
       { "time": "12:00", "type": "weekly_summary", "label": "Weekly executive summary meeting + PDF/Excel generation", "ref": "weekly_summary_program" },
       { "time": "12:00", "type": "meeting", "meeting_type": "daily_standup", "label": "Daily standup (existing meeting-engine.js type)" },
-      { "time": "12:00", "type": "spare_time", "label": "Spare time: coworker interaction or idle (token-saving)", "ref": "spare_time_program" }
+      { "time": "12:00", "type": "spare_time", "label": "Spare time: coworker interaction or idle (token-saving)", "ref": "spare_time_program" },
+      { "time": "12:00", "type": "guide_review", "label": "Guides pipeline: Architect (Claude) review + finalize/commit", "ref": "guides_program" }
     ]
   },
 
   "saturday_schedule": {
     "applies_to_day_of_week": [7],
-    "label": "Day off: no case batches, no meetings, no Gemini/Claude calls. Pure idle to preserve tokens.",
+    "label": "Day off: no case batches, no meetings, no routine Q&A Gemini/Claude calls. Pure idle to preserve tokens, EXCEPT one weekly guides-verification Claude call (owner-approved — see guides_program below). Saturday is no longer a zero-API-calls day; it is a zero-SIMULATION-activity day.",
     "blocks": [
-      { "time": "08:00", "type": "spare_time", "label": "Full-day idle (off day)", "force_idle": true, "ref": "spare_time_program" }
+      { "time": "08:00", "type": "spare_time", "label": "Full-day idle (off day)", "force_idle": true, "ref": "spare_time_program" },
+      { "time": "08:00", "type": "guide_verify", "label": "Guides pipeline: weekly verification pass (Claude + web_search, 1-2 queue items)", "ref": "guides_program" }
     ]
   },
 
@@ -127,5 +132,18 @@
     "version_format": "X.YY (e.g. 1.00 -> 1.01 -> 1.02 ... -> 1.99 -> 2.00)",
     "increment": 0.01,
     "starting_version": 1.00
+  },
+
+  "guides_program": {
+    "description": "Owner-directed special task for the dormant Architect persona (agent 10) — see CLAUDE.md 'Guides'. Two model calls per guide: a writer persona (chosen by domain, workers/guide-engine.js pickWriterAgentId()) drafts via Gemini; the Architect reviews/finalizes via a DIRECT Anthropic API call (workers/claude-client.js, model claude-sonnet-5, tracked against its OWN $4.50/mo sub-budget — config/token-economy.json guides_claude_budget, workers/model-router.js component:'guides'). Output: markdown files under guides/<domain>/<slug>.md, committed through the existing guarded commitFileToRepo() — same class of write as gap digests.",
+    "guide_draft": {
+      "what": "Picks today's topic (capability gaps first, then guides/TOPICS.md fallback — see workers/guide-engine.js selectGuideTopic()), asks the chosen writer persona to draft via Gemini (agent.queryGeminiDirect(), paced through the existing checkGeminiPacingSlot()). Stores the draft in D1 guide_pipeline (status='drafted'); does not commit anything itself."
+    },
+    "guide_review": {
+      "what": "Self-healing: if today's draft is missing (missed tick, or Gemini paced out), generates it in the same tick before reviewing (one Gemini + one Claude call in one invocation — well within Cloudflare subrequest limits). The Architect reviews via Claude: APPROVE commits guides/<domain>/<slug>.md and appends any UNVERIFIED sections to guides/_verification-queue.md; REVISE sends fixes back to the writer for ONE revision round then re-reviews; REJECT (or a failed second review) commits the draft + rejection note to guides/_drafts/<slug>.md instead. Never escalates to the owner — fire-and-forget, log and move on."
+    },
+    "guide_verify": {
+      "what": "Saturday 08:00 Israel only. Pulls 1-2 items from guides/_verification-queue.md, runs one Claude call per item WITH the web_search server tool for fresh grounding. On success, updates the guide and removes the queue entry; on failure the entry stays for next week."
+    }
   }
 }

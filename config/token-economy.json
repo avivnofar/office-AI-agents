@@ -8,7 +8,8 @@
   "primary_case_model": "groq/llama3-8b-8192",
   "routing_model": "cloudflare/@cf/meta/llama-3.1-8b-instruct-fp8",
   "report_model": "google/gemini-3.1-flash-lite",
-  "app_search_model": "anthropic/claude-sonnet-4-6",
+  "app_search_model": "anthropic/claude-sonnet-5",
+  "_app_search_model_meta": "Corrected from the stale 'claude-sonnet-4-6' claim (Guides-feature session) — the owner verified directly that data-center-api runs Sonnet 5 today. This field is documentation only (data-center-api chooses its own model independently); workers/claude-client.js's CLAUDE_MODEL constant, used by the Guides pipeline's own direct Anthropic calls, is the actual source of truth for that pipeline and is set to the same 'claude-sonnet-5'.",
   "architect_model": "human+claude-code",
 
   "shared_claude_budget": {
@@ -23,6 +24,11 @@
     "_meta": "Added 2026-07-18 for the FIRST LIVE ACTIVATION of the Q&A engine (cron re-enabled the same day, first run 2026-07-19). This is a TEMPORARY graduated-rollout throttle, NOT a permanent volume limit: workers/agent-runner.js's computeDailyQuestionVolume() caps the day's generated question total at ramp_daily_caps[N], where N = calendar days elapsed in Israel time since activation_date_israel (N=0 on the activation day itself). Once N >= ramp_daily_caps.length the throttle is automatically inert — volume returns to the normal budget-driven computation with NO manual step-up needed. The per-call $-budget check (_askDataCenter) and Gemini pacing (gemini-pacer.js) remain the real backstops throughout. Safe to delete this whole block once the ramp window has passed; applyGraduatedRolloutCap() treats a missing block as 'no throttle'.",
     "activation_date_israel": "2026-07-19",
     "ramp_daily_caps": [12, 40, 100]
+  },
+
+  "guides_claude_budget": {
+    "_meta": "Added for the Guides feature (workers/guide-engine.js): a SECOND, independent Claude sub-budget alongside shared_claude_budget above — total Anthropic spend rises $5 -> $10/month, split into two $5 sub-budgets each with its own $4.50 soft-stop (matching shared_claude_budget's own headroom convention under the account's real spend ceiling, now effectively $10/month combined). Tracked via the SAME D1 claude_budget_usage table and the SAME workers/model-router.js getClaudeBudgetStatus()/recordClaudeSpend() functions as shared_claude_budget, distinguished by an explicit component:'guides' option (default is 'qa', so every pre-existing caller is untouched) and a distinct month key ('YYYY-MM#guides' vs 'YYYY-MM') — overrun in one sub-budget cannot drain the other. Covers: the Architect's (agent 10) review/finalize pass on each daily draft (workers/claude-client.js, direct Anthropic API, model claude-sonnet-5) plus the weekly Saturday verification pass (same model, +web_search tool). Fail-by-skip on exhaustion, logged, mirroring the existing 'claude-budget-skip' pattern — occasional skipped guide days are expected and acceptable, per the owner's cost approval (one review pass ~=$0.06-0.085/guide, one-revision worst case ~=$0.12-0.17, ~1 guide/day expected $2.50-3.50/month, all-revisions worst case ~=$5.30/month which DOES breach this soft-stop by design — the skip mechanism is load-bearing here, not decorative).",
+    "cap_usd_per_month": 4.50
   },
 
   "notebook_x_gemini_pacing": {
