@@ -1,11 +1,5 @@
 # Verification Queue
 
-Every UNVERIFIED section across all guides. Appended when a guide with
-UNVERIFIED sections is finalized (workers/guide-engine.js's `guide_review`
-path); entries are removed once the weekly `guide_verify` pass (Saturday
-08:00 Israel) confirms them, via a Claude call with the web_search tool.
-A guide with no queue presence is considered stable.
+Every UNVERIFIED section across all guides. Appended when a guide with UNVERIFIED sections is finalized; entries removed once verified.
 
-Format: `- guides/<domain>/<slug>.md — Section Name`
-
-_No entries — every guide is currently stable._
+- guides/networking/networking-vlan-trunking-misconfig.md — 4. Detection Mechanisms and Protocol Behavior
