@@ -43,6 +43,103 @@
   "run_until_quota_exhausted": true,
   "description": "Groq and CF AI are free — run agents hard. Claude is paid — capped by shared_claude_budget above ($4.50/month soft-stop shared with chore-automation, under the account's own $5/month spend ceiling), not a per-day call count. Primary purpose: real usage of both production AI systems (Claude, Gemini) surfaces genuine capability gaps.",
 
+  "providers": {
+    "_meta": {
+      "added": "2026-08-05",
+      "description": "Per-provider FREE-TIER limits for the task-type routing table (workers/model-router.js, plan Phase 3). Every provider client module added this session (workers/github-models-client.js, cerebras-client.js, mistral-client.js, cohere-client.js) exports a matching `<PROVIDER>_LIMITS` constant, and scripts/verify-providers.js asserts this block and those constants agree — so changing one alone FAILS the verifier instead of drifting silently. Code and config are two copies of the same fact here on purpose: the client modules deliberately import no JSON, so they can be loaded by a plain `node` verifier.",
+      "the_overtime_rule": "EVERY PROVIDER IN THIS BLOCK STAYS ON ITS FREE TIER. `paid: false` is a standing constraint, not a current observation. Any paid usage anywhere — a new provider, an upgraded plan, or an overage on an existing one — requires the owner's EXPLICIT, PER-INSTANCE approval, called 'overtime'. It is never a standing budget and never a monthly allowance: one approval, one instance, asked for at the time. A session or code path that needs paid usage STOPS AND ASKS; it does not spend and report. There is no automatic escalation from a free tier to a paid one, for any provider, ever — a call that would exceed a free tier is refused and logged as `overtime_required`.",
+      "anthropic_is_deliberately_absent": "Anthropic does NOT appear in this block, and its absence is load-bearing rather than an omission. This block enumerates providers the ROUTER may select, and Anthropic is never routed and never shuffled — it is reserved for the Architect and genuine data-center Q&A, under the separate shared_claude_budget / guides_claude_budget caps above. Its two live call paths (agents/agent-base.js _askDataCenter() via the APP_API service binding, and workers/claude-client.js's direct Messages API calls for the Guides pipeline) are pre-existing DIRECT callers that never went through the router and are untouched by it. scripts/verify-providers.js asserts no anthropic key exists here.",
+      "nulls_are_honest": "A null limit means THIS REPO DOES NOT KNOW the number — it does not mean unlimited. Where a real free-tier figure was not established against the live provider this session, it is null with a note rather than a plausible-looking invention, because a cap the router enforces against a number nobody verified is worse than no local cap at all: it refuses real work for a reason that was never true. The router treats null as 'pace conservatively and believe the response headers'. The supervised test procedure (back-office-AI-agents/docs/procedures/) establishes the real values against live APIs before any lane carries volume.",
+      "pre_existing_providers": "groq / cloudflare_ai / gemini were already in service before this block existed. `daily_limits` above REMAINS the source of truth for their daily numbers; they are repeated here only so the router sees one uniform provider shape, and verify-providers.js asserts the two agree."
+    },
+
+    "github_models": {
+      "role": "Judgment / quality lane PRIMARY — short scored calls (QA, Lead QA, Team Lead reviews).",
+      "secret": "GITHUB_MODELS_TOKEN",
+      "endpoint": "https://models.github.ai/inference",
+      "max_input_tokens_per_request": 8000,
+      "max_output_tokens_per_request": 4000,
+      "requests_per_minute": null,
+      "requests_per_day": null,
+      "reset_utc": null,
+      "paid": false,
+      "_token_caps_note": "The ~8K input / ~4K output per-request caps are the defining constraint of this lane: they make it RIGHT for short judgment calls and WRONG for long report processing, which goes to cerebras. The client module REFUSES oversized input rather than truncating it, and refuses an over-cap output request rather than clamping it — see its header for why truncation specifically is forbidden in this repo (the 2026-07-11/12 incident).",
+      "_rate_null_note": "requests_per_minute / requests_per_day are null because GitHub Models publishes DIFFERENT request-rate allowances per model tier — there is no single honest number for this field. Read the real allowance for the configured model at supervised-test time.",
+      "_secret_scope_note": "Deliberately its own secret, NOT a reuse of the existing GITHUB_TOKEN. That token carries repo WRITE scope for report/guide commits; giving it to an inference path would hand a model-calling code path more reach than its work requires — exactly what the one-scoped-token-per-target decision (plan item 0.8) exists to prevent."
+    },
+
+    "cerebras": {
+      "role": "Long-document lane PRIMARY (daily report batches) + judgment lane BACKUP.",
+      "secret": "CEREBRAS_API_KEY",
+      "endpoint": "https://api.cerebras.ai/v1",
+      "max_input_tokens_per_request": null,
+      "max_output_tokens_per_request": null,
+      "requests_per_minute": null,
+      "requests_per_day": null,
+      "tokens_per_minute": null,
+      "reset_utc": null,
+      "paid": false,
+      "_null_note": "UNCOMFORTABLE BUT HONEST: the context ceiling is null on the provider whose entire job is long input. The free-tier context limit here varies by model and has moved before, and no live call was made this session to establish today's value. Establishing it is the FIRST item in this lane's supervised test — until then the only protection against an over-long request is the provider's own 400, surfaced as a logged null."
+    },
+
+    "mistral": {
+      "role": "BACKUP only, in two lanes — long-document (behind cerebras) and Hebrew composition (behind gemini). Primary in none.",
+      "secret": "MISTRAL_API_KEY",
+      "endpoint": "https://api.mistral.ai/v1",
+      "max_input_tokens_per_request": null,
+      "max_output_tokens_per_request": null,
+      "requests_per_minute": null,
+      "requests_per_day": null,
+      "tokens_per_month": null,
+      "reset_utc": null,
+      "paid": false,
+      "_hebrew_note": "Its Hebrew-composition role is the one carrying real quality risk: Hebrew internal notes are the office's own voice, Gemini is primary there for a reason, and this runs when Gemini is exhausted or paced out. A weaker Hebrew note still beats a skipped one — but the gap is precisely what the Lead QA's cross-embodiment comparison exists to measure, so it gets measured, not assumed. The Front is ENGLISH ONLY, so this lane never touches published content."
+    },
+
+    "cohere": {
+      "role": "Embeddings / semantic search ONLY — never chat, not even as a backup. This lane has NO backup by design.",
+      "secret": "COHERE_API_KEY",
+      "endpoint": "https://api.cohere.com/v2",
+      "max_input_tokens_per_request": null,
+      "max_texts_per_request": null,
+      "requests_per_minute": null,
+      "requests_per_month": null,
+      "reset_utc": null,
+      "paid": false,
+      "_no_backup_note": "'Fail, don't degrade' is a CORRECTNESS rule here, not a preference. Vectors from two different embedding models do not share a space, so a similarity score computed across them is meaningless — and meaningless in the worst way, since it still returns a confident-looking number between 0 and 1. Substituting a backup provider would corrupt a search index rather than slow it down.",
+      "_no_callers_yet_note": "EXPECTED to have zero callers for some time. It exists for two capabilities that are designed but NOT BUILT: the local brain's semantic search over campus/agents/<NN-slug>/adaptations/, and the Lead QA's cross-report comparison (plan items 2.7 and 1.5). It ships now because it ships on the one set of secrets the owner installs once."
+    },
+
+    "groq": {
+      "role": "Routine volume lane PRIMARY (drafts, worker chatter) + classification lane BACKUP. Pre-existing.",
+      "secret": "GROQ_API_KEY",
+      "requests_per_day": 14400,
+      "reset_utc": "00:00",
+      "paid": false,
+      "_source": "daily_limits.groq / groq_reset_utc above remain the source of truth; repeated here for a uniform provider shape."
+    },
+
+    "cloudflare_ai": {
+      "role": "Classification / routing lane PRIMARY + routine volume lane BACKUP. Pre-existing; account-scoped AI binding, no secret.",
+      "secret": null,
+      "requests_per_day": 10000,
+      "reset_utc": "00:00",
+      "paid": false,
+      "_source": "daily_limits.cloudflare_ai / cloudflare_fallback above remain the source of truth."
+    },
+
+    "gemini": {
+      "role": "Hebrew composition lane PRIMARY (gap notes, summaries) + report synthesis + Notebook-X asks. Pre-existing.",
+      "secret": "GEMINI_API_KEY",
+      "requests_per_day": 1500,
+      "reset_israel": "11:00",
+      "paid": false,
+      "min_spacing_ms_between_notebook_x_calls": 20000,
+      "_source": "daily_limits.gemini / gemini_reset_israel / notebook_x_gemini_pacing above remain the source of truth.",
+      "_pacing_note": "Gemini's free-tier quota is shared with consumers this repo cannot observe (Notebook-X's own backend and its weekly gap-analysis job). workers/gemini-pacer.js's 20s spacing STAYS IN FORCE under routing — routing does not get to spend the headroom that pacing deliberately leaves."
+    }
+  },
+
   "daily_limits": {
     "groq": 14400,
     "cloudflare_ai": 10000,
