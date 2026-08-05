@@ -401,9 +401,35 @@ project. The Worker writes reports/issues back to **this** repo
 `office-AI-agents`), not to `data-center`.
 
 `TOKEN-BUDGET.md` is duplicated in both repos (GitHub Actions in both need
-it); `CLAUDE-datacenter-ref.md` is a point-in-time copy of
-`data-center/CLAUDE.md` kept here for context — it will drift, so cross-check
-the live file in `data-center` for anything load-bearing.
+it). `CLAUDE-datacenter-ref.md` — a point-in-time copy of
+`data-center/CLAUDE.md` — **moved 2026-08-05 to
+`back-office-AI-agents/docs/reference/CLAUDE-datacenter-ref.md`** (private);
+this repo keeps a one-line pointer stub at that path. It will drift, so
+cross-check the live file in `data-center` for anything load-bearing.
+
+## The three-repo split (2026-08-05)
+
+This repo is no longer the only one. The office runs across three: this one
+(`office-AI-agents`, public — the operational base **and** the public face,
+where the live Worker writes its reports and guides),
+`back-office-AI-agents` (private — the brain: plans, specs, session
+handoffs, reference snapshots, and the campus of per-agent character files),
+and `warehouse-office-AI-agents` (private — the workshop, the only place
+agents may write code). **Internal planning now lives in back-office**; its
+`CLAUDE.md` is the session-start protocol for that work, and
+`back-office-AI-agents/plans/OFFICE-SCALING-TODO.md` is the live master plan
+(this repo's `OFFICE-SCALING-TODO.md` is a pointer stub). Permissions for
+all three are in `config/project-permissions.json`
+(`_meta.code_write_warehouse_2026-08`) — note the warehouse code-write
+exception is **documented but not yet wired** into
+`workers/permission-guard.js`, which currently fails closed on both new
+keys. **The office's root documents are private and live in back-office
+only** — the character bible (`AGENTS-CHARACTER-CORE-v2.md`, plus the
+formatting-preserved `.docx` it was transcribed from), the owner's original
+Word document, and the living spec tables `PROJECT-SPEC-TABLES.md`. None of
+them exist in this repo, deliberately; the bible carries a `private`
+classification in its own header. Anything in this repo that needs them
+names them, and names the repo they live in — it does not link a path here.
 
 ## Connection to `Notebook-X`
 

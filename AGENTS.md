@@ -8,6 +8,50 @@
 
 ---
 
+## Where the characters now live (2026-08-05)
+
+**The authoritative source for agent character is no longer this file.** It
+is the character bible, *THE OFFICE — CHARACTER CORE (Official Bible, v2.0)*,
+which lives in the **private** `back-office-AI-agents` repo as
+`AGENTS-CHARACTER-CORE-v2.md` (the agent-readable version) alongside the
+`.docx` it was transcribed from (the human/presentation copy). **It is not in
+this repo and will not be** — it is classified private in its own header, so
+this section names it rather than linking a path that does not exist here.
+
+The bible holds each persona's inner mindset, operational reality, traits,
+ascension/abyss behaviour, and per-agent technical values — plus the
+**generic state machine**, which generalizes the original mood model so a
+mood event can fire on meetings, review sessions, build tasks and
+publications, not only on a scored answer. Newer dated bible versions
+supersede older ones; the newest is always the referenced root.
+
+**This file remains the config-derived technical summary for agents 1-11** —
+what `config/agents-config.json` and `agents/agent-base.js` actually
+implement today. It deliberately does **not** duplicate the bible's prose.
+When the two disagree about behaviour, this file describes what runs and the
+bible describes what is intended; flag the divergence rather than quietly
+picking one.
+
+**Two scope gaps to be aware of, both accurate as of 2026-08-05:**
+
+- **Agents 12 (The Workflow, Operations Manager, sudo) and 13 (The Cyber
+  Expert, Security Specialist, sudo)** exist in the bible and have campus
+  folders at `back-office-AI-agents/campus/agents/`, but are **not in
+  `config/agents-config.json`** — the live roster is still 11. Wiring them
+  is a future session. Everything below covers 1-11 only.
+- **The generic state machine** described in the bible is a superset of the
+  quality-score-driven machine documented below. What `agents/agent-base.js`
+  implements today is the answer-quality trigger; the broader event types
+  are specified, not built.
+
+Per-agent working files live at
+`back-office-AI-agents/campus/agents/<NN-slug>/` — `active-context.md`
+(curated, QA- and Team-Lead-approved, feeds the agent's prompt) and
+`journal.md` (the agent's own free writing, append-only, never
+prompt-feeding). See that directory's `README.md` for the approval flow.
+
+---
+
 ## Shared state machine (`AgentBase`)
 
 Every agent (1-11) carries:

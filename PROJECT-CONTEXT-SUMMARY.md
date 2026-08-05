@@ -199,6 +199,17 @@ that's a reasonable next step — just not one this session could verify.
 
 ## 4. What's built but not live
 
+> **STATUS UPDATE 2026-08-05 — this section is superseded and kept for the
+> record.** Everything below was true on 2026-07-18. It stopped being true
+> the same day: the Q&A engine was deployed and activated 2026-07-18, the
+> D1 migration ran, and the first live day executed Sunday 2026-07-19. That
+> day surfaced a stale-Durable-Object-state defect that skipped questions;
+> fixes were deployed and the cron was **restored the same evening**
+> (`TOKEN-BUDGET.md`, 2026-07-19 entries). The verifier has also grown since
+> — `scripts/verify-qa-engine.js` now runs 74 checks, not 56, and
+> `scripts/verify-guide-engine.js` joined it. For current live state always
+> read `CLAUDE.md` and `TOKEN-BUDGET.md`, never this section.
+
 Everything described in `CLAUDE.md`'s "The Q&A engine" section exists in
 code, passes `node scripts/verify-qa-engine.js` (56/56 checks — topic pool
 composition, persona config completeness, gap classification, shared-budget
@@ -240,8 +251,32 @@ automation, not deletion of the character.
   automation specifically, by removing the write capability rather than
   hardening the gate further — a different kind of fix than 2026-07-12's,
   and arguably a more durable one.
-- What hasn't happened yet: a live day has not run against this new
-  engine. Everything about its real-world behavior — actual question
-  quality, whether the Gemini pacing numbers hold up under real Notebook-X
-  traffic, whether $5/month is actually enough or too much — is informed
-  design, not observed fact. That's the next real test.
+- ~~What hasn't happened yet: a live day has not run against this new
+  engine.~~ **Corrected 2026-08-05:** the first live day ran 2026-07-19 and
+  the engine has been running on cron since (see the status update in part 4).
+  Real-world behavior — actual question quality, whether the Gemini pacing
+  numbers hold up under real Notebook-X traffic, whether the budget is enough
+  — is now partly observed rather than purely designed, and the observations
+  live in `TOKEN-BUDGET.md`'s dated entries.
+
+## 7. What changed after this document was written
+
+This file is a **2026-07-18 snapshot** and is deliberately not rewritten as
+the project moves; corrections are marked inline and dated. The two largest
+developments since:
+
+- **The Guides pipeline** (2026-08) — the office also produces English
+  technical guides for the owner's Smart Archive app, drafted by a writer
+  persona via Gemini and reviewed by the Architect via a direct Anthropic
+  call, on its own second $4.50/mo sub-budget. Deployed but gated OFF behind
+  a `guides_enabled` flag. See `CLAUDE.md`'s "Guides" section.
+- **The three-repo split** (2026-08-05) — this repo is now the public
+  operational base *and* public face; `back-office-AI-agents` (private) is
+  the brain, holding plans, specs, handoffs and the campus of per-agent
+  character files; `warehouse-office-AI-agents` (private) is the only place
+  agents may write code. Two further agents, The Workflow (12) and The Cyber
+  Expert (13), are specified in the office's character bible — a **private**
+  document held in back-office, not in this repo — but are **not yet in
+  `config/agents-config.json`**, so the live roster this document describes,
+  11 personas, is still accurate. See `CLAUDE.md`'s "The three-repo split"
+  and `back-office-AI-agents/CLAUDE.md`.
