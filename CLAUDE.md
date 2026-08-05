@@ -333,6 +333,90 @@ in full before flipping `guides_enabled` on.
   human-in-the-loop creative-tool sessions (Agents 9/10 building design
   assets), never called programmatically by the Worker.
 
+### Task-type routing (added 2026-08-05) — **SHIPPED OFF**
+
+Four new free-tier providers and a routing table that picks a provider by
+**what kind of work a task is**, never by which agent is doing it — a
+persona's voice lives in its prompts and character files, never in which key
+answered.
+
+| Task type (lane) | Primary | Backup |
+|---|---|---|
+| Judgment / quality (QA, Lead QA, Team Lead reviews) | GitHub Models | Cerebras |
+| Long-document processing (daily report batches) | Cerebras | Mistral |
+| Hebrew composition (gap notes, summaries) | Gemini 3.1 Flash-Lite | Mistral |
+| Routine volume (drafts, worker chatter) | Groq | Cloudflare Workers AI |
+| Classification / routing decisions | Cloudflare Workers AI | Groq |
+| Conversations & office events | **controlled random** across all non-Anthropic providers, embodiment logged | n/a |
+| Embeddings / semantic search | Cohere | **none — fail, don't degrade** |
+| Architect | Anthropic — **never routed, never shuffled** | n/a |
+
+New secrets: `GITHUB_MODELS_TOKEN`, `CEREBRAS_API_KEY`, `MISTRAL_API_KEY`,
+`COHERE_API_KEY`. `GITHUB_MODELS_TOKEN` is deliberately its **own** secret
+with no fallback to `GITHUB_TOKEN` — that token carries repo write scope, and
+an inference path must not hold it. *(This supersedes the scaling plan's item
+3.1, which predates the one-scoped-token-per-target decision and suggested
+reusing the existing PAT — do not re-implement that fallback thinking it was
+an oversight.)*
+
+**Files**: `workers/task-router.js` (lane resolution, provider registry,
+embodiment assignment, per-provider quota counters — imports no JSON so
+`scripts/verify-routing.js` can load and *call* it), `workers/model-router.js`
+(binds it to the real config and re-exports; everything above its
+task-routing section is the pre-existing budget router, unchanged),
+`config/model-routing.json` (the lane table as **data** — changing a lane is
+a config edit, not a code edit), `config/token-economy.json`'s `providers`
+block (free-tier limits), the four `workers/*-client.js` modules, and
+`scripts/verify-providers.js` / `scripts/verify-routing.js`.
+
+**Kill switch (`routing_enabled`)**: absent or false — the shipped default —
+means every routed call is refused with `routing_disabled`, no provider is
+contacted, and no counter or D1 table is touched. Same shape as
+`guides_enabled`. Toggle without redeploy: `POST /api/agents/trigger
+{"type":"routing_toggle","enabled":true|false}`. Read-back:
+`{"type":"routing_status"}` (flag + resolved lanes + today's per-provider
+counters, no model calls). Supervised per-lane test with the gate bypassed:
+`{"type":"routing_test","lane":"judgment", ...}` — one lane per call, the
+same pattern `guide_block` uses.
+
+**No existing caller was rewired.** The daily Q&A engine, the meeting engine
+and the Guides pipeline all use exactly the providers they used before.
+Routing has no production caller yet; its first one is the improvement loop's
+judgment-lane reviews (scaling-plan Phase 1). So flipping the switch on does
+not, by itself, change any current behaviour.
+
+**Anthropic is unreachable from routing**, enforced two independent ways: the
+`architect` lane is marked non-routable and names no provider, and
+`PROVIDER_REGISTRY` imports no Anthropic client, so a lane naming one fails
+closed as `unknown_provider`. `verify-routing.js` proves both by pointing a
+lane at Anthropic on purpose and asserting the refusal. The two pre-existing
+Anthropic paths (`_askDataCenter()` via the `APP_API` binding, and
+`claude-client.js` for Guides) never went through this router and are
+untouched.
+
+**The overtime rule.** Every provider here is on its free tier and stays
+there. A call that would exceed a free tier is refused and logged as
+`overtime_required`; the lane degrades to its backup, or skips. **There is no
+automatic escalation to a paid tier, for any provider, ever** — paid usage
+requires the owner's explicit, per-instance approval at the time. Providers
+are refused at **60%** of a known daily cap (`soft_stop_fraction`), which is
+deliberate headroom serving the scaling plan's Gate 3.
+
+**A null limit means UNKNOWN, never unlimited.** Four providers' free-tier
+numbers were not established against a live API, so they are `null` with a
+note rather than a plausible invention. A provider with no known cap cannot
+be count-limited, so it is limited by **wall clock** instead — a 20s minimum
+spacing per provider, the same mechanism and floor as `gemini-pacer.js`.
+Filling a real number into `config/token-economy.json` switches that provider
+to the count check automatically, with no code change. Establishing those
+numbers is step 2 of the supervised test.
+
+**Before enabling**: run
+`back-office-AI-agents/docs/procedures/ROUTING-SUPERVISED-TEST.md` end to
+end. It starts by verifying that the four default model IDs still exist —
+none were checked against a live catalog, and this repo has been burned twice
+by a silently retired model.
+
 ## How to deploy the Worker
 
 ```bash
@@ -343,6 +427,12 @@ npx wrangler secret put ADMIN_TOKEN
 npx wrangler secret put GITHUB_TOKEN       # optional
 npx wrangler secret put GOOGLE_AI_API_KEY  # optional
 npx wrangler secret put ANTHROPIC_API_KEY  # required for the Guides pipeline (see "Guides" above)
+# Task-type routing (see "Task-type routing" above). Unset = that provider
+# fails closed with a logged message naming the missing secret.
+npx wrangler secret put GITHUB_MODELS_TOKEN  # NOT the same token as GITHUB_TOKEN — see above
+npx wrangler secret put CEREBRAS_API_KEY
+npx wrangler secret put MISTRAL_API_KEY
+npx wrangler secret put COHERE_API_KEY
 npx wrangler deploy
 ```
 
@@ -541,7 +631,17 @@ site, not merely defined nearby.
   rendering (2026-07-18, new)
 - `workers/gemini-pacer.js` — Notebook-X Gemini call pacing (2026-07-18, new)
 - `workers/model-router.js` — component-aware ('qa'|'guides') Claude budget
-  tracking (D1 `claude_budget_usage`) + chore-automation model routing
+  tracking (D1 `claude_budget_usage`) + chore-automation model routing, and
+  (2026-08-05) the binding layer for task-type routing
+- `workers/task-router.js` — task-type routing: lane resolution, provider
+  registry, controlled-random embodiment, per-provider quota counters (D1
+  `provider_usage`, created lazily — deliberately NOT in `database/schema.sql`).
+  Imports no JSON so its verifier can call it (new, ships OFF)
+- `workers/github-models-client.js` / `cerebras-client.js` /
+  `mistral-client.js` / `cohere-client.js` — the four free-tier provider
+  clients; `provider-common.js` holds their shared token estimate and
+  rate-limit header parsing (new)
+- `config/model-routing.json` — the lane table as data (new)
 - `workers/guide-engine.js` — Guides pipeline logic: topic selection,
   ABSOLUTE ZERO blocklist, draft/review/verify prompt building, decision
   parsing, D1 `guide_pipeline` reads/writes (new)
@@ -580,6 +680,10 @@ site, not merely defined nearby.
 - `assets/incoming/` — raw human-in-the-loop tool exports awaiting integration
 - `scripts/verify-qa-engine.js` — dry-run verification for the Q&A-engine
   rebuild (2026-07-18, new)
+- `scripts/verify-providers.js` / `scripts/verify-routing.js` — dry-run
+  verification for the provider clients and the routing table; both replace
+  `globalThis.fetch` with a tripwire that throws, so "no network calls" is
+  proven rather than claimed (new)
 - `scripts/verify-guide-engine.js` — dry-run verification for the Guides
   pipeline (new)
 - `wrangler.toml` — Worker bindings, cron, secrets reference

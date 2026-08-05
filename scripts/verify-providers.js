@@ -331,10 +331,21 @@ check('routing_model is untouched (Cloudflare stays the classification primary)'
   tokenEconomy.routing_model === 'cloudflare/@cf/meta/llama-3.1-8b-instruct-fp8');
 check('report_model is untouched (Gemini 3.1 Flash-Lite)', tokenEconomy.report_model === 'google/gemini-3.1-flash-lite');
 
-/* ── PHASE A INERTNESS: nothing imports these modules yet ───────────────── */
-console.log('\n--- Phase A inertness: the new modules have no callers ---');
+/* ── CONTAINMENT: the clients are reachable ONLY through the router ─────── */
+//
+// This started life as a Phase A inertness check ("nothing imports these at
+// all"). Phase B made that false on purpose: workers/task-router.js imports
+// all four, which is the entire point of a router. The check was rewritten
+// rather than deleted, because the property that actually matters survives
+// the change and is worth keeping enforced — NO PRE-EXISTING CALLER reaches
+// a new provider directly. Every path to one of these goes through the
+// router, which means every path passes the kill switch and the quota
+// allow-check. A future session that wires a client straight into
+// agent-base.js would bypass both, and this is what catches that.
+console.log('\n--- Containment: new providers are reachable only through the router ---');
 
 const NEW_MODULES = ['github-models-client.js', 'cerebras-client.js', 'mistral-client.js', 'cohere-client.js', 'provider-common.js'];
+const ALLOWED_IMPORTERS = ['task-router.js'];
 const workerFiles = readdirSync(new URL('../workers/', import.meta.url)).filter((f) => f.endsWith('.js'));
 const agentFiles = readdirSync(new URL('../agents/', import.meta.url)).filter((f) => f.endsWith('.js'));
 
@@ -342,6 +353,7 @@ const importers = [];
 for (const [dir, files] of [['workers', workerFiles], ['agents', agentFiles]]) {
   for (const file of files) {
     if (dir === 'workers' && NEW_MODULES.includes(file)) continue; // the new modules may import each other
+    if (dir === 'workers' && ALLOWED_IMPORTERS.includes(file)) continue; // the router is the one legitimate importer
     const src = readFileSync(new URL(`../${dir}/${file}`, import.meta.url), 'utf8');
     for (const newMod of NEW_MODULES) {
       if (new RegExp(`from\\s+['"][^'"]*${newMod.replace('.', '\\.')}['"]`).test(src)) {
@@ -350,8 +362,12 @@ for (const [dir, files] of [['workers', workerFiles], ['agents', agentFiles]]) {
     }
   }
 }
-check('no pre-existing worker/agent file imports any new provider module (Phase A is additive-only)',
+check('no file except the router imports a provider client directly (so nothing bypasses the switch or the quota check)',
   importers.length === 0, importers.join(', '));
+check('the router itself DOES import all four clients (it is the single entry point)',
+  ['github-models-client.js', 'cerebras-client.js', 'mistral-client.js', 'cohere-client.js'].every((m) =>
+    new RegExp(`from\\s+'\\./${m.replace('.', '\\.')}'`).test(
+      readFileSync(new URL('../workers/task-router.js', import.meta.url), 'utf8'))));
 
 const newModuleImports = NEW_MODULES.filter((f) => f !== 'provider-common.js').map((f) => {
   const src = readFileSync(new URL(`../workers/${f}`, import.meta.url), 'utf8');
@@ -360,8 +376,10 @@ const newModuleImports = NEW_MODULES.filter((f) => f !== 'provider-common.js').m
 check('every new client imports the shared helpers rather than copying them',
   newModuleImports.every((m) => m.importsCommon), JSON.stringify(newModuleImports));
 
-check('model-router.js does not reference the new providers yet (routing lands in Phase B)',
-  !/github-models|cerebras|mistral|cohere/i.test(readFileSync(new URL('../workers/model-router.js', import.meta.url), 'utf8')));
+check('model-router.js reaches the providers only via task-router.js, never by importing a client directly',
+  /from '\.\/task-router\.js'/.test(readFileSync(new URL('../workers/model-router.js', import.meta.url), 'utf8'))
+  && !/from '\.\/(github-models|cerebras|mistral|cohere)-client\.js'/.test(
+    readFileSync(new URL('../workers/model-router.js', import.meta.url), 'utf8')));
 
 /* ── Final network assertion ────────────────────────────────────────────── */
 console.log('\n--- Network tripwire ---');

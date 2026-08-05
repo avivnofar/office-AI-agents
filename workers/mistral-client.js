@@ -33,7 +33,7 @@
  * Status: added inert. Nothing imports this module as of this commit.
  */
 
-import { estimatePromptTokens, normalizeOpenAiChat } from './provider-common.js';
+import { estimatePromptTokens, normalizeOpenAiChat, parseRateLimitHeaders } from './provider-common.js';
 
 const MISTRAL_ENDPOINT = 'https://api.mistral.ai/v1';
 
@@ -113,6 +113,7 @@ export async function callMistral({
   maxTokens = 1024,
   model = DEFAULT_MODEL,
   agentId,
+  onResponse,
 }) {
   if (!apiKey) {
     console.warn(`[agent-${agentId}] MISTRAL_API_KEY not configured — set it with \`npx wrangler secret put MISTRAL_API_KEY\``);
@@ -143,6 +144,10 @@ export async function callMistral({
     console.warn(`[agent-${agentId}] Mistral request failed: ${err.message}`);
     return null;
   }
+
+  // Fires before the status checks: a 429 or 5xx still consumed a free-tier
+  // request allowance and must be counted. See task-router.js.
+  onResponse?.({ status: res.status, rateLimit: parseRateLimitHeaders(res) });
 
   if (res.status === 429) {
     console.warn(`[agent-${agentId}] Mistral 429 — free-tier rate limit hit`);

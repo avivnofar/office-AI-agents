@@ -1,0 +1,445 @@
+#!/usr/bin/env node
+// Dry-run verification for task-type routing (plan Phase 3, items 3.3/3.4/3.6).
+//
+// NO NETWORK. NO REAL D1/KV. NO MODEL CALLS. globalThis.fetch is replaced
+// with a tripwire that throws if anything reaches it, and every provider in
+// the registry is swapped for a counting stub, so "the switch being off
+// contacts nobody" is proven by counting invocations rather than asserted.
+//
+// This imports workers/task-router.js and CALLS it. That is the whole reason
+// the routing logic lives there rather than in model-router.js, which
+// imports JSON and cannot be loaded by plain `node` — proving "Anthropic is
+// unreachable from every routing path" by grepping for a string would be
+// worth very little, so it is proven by pointing a lane at Anthropic on
+// purpose and watching the resolver refuse.
+//
+// Run: node scripts/verify-routing.js
+
+import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+
+import {
+  PROVIDER_REGISTRY,
+  resolveLane,
+  routeTask,
+  routingEnabled,
+  assignEmbodiment,
+  renderEmbodimentMap,
+  checkProviderAllowance,
+  providerPeriodKey,
+  dailyCapFor,
+  hasKnownCap,
+  SIM_STATE_KEY,
+  ROUTING_FLAG,
+} from '../workers/task-router.js';
+
+const require = createRequire(import.meta.url);
+const routingConfig = require('../config/model-routing.json');
+const tokenEconomy = require('../config/token-economy.json');
+
+let pass = 0;
+let fail = 0;
+function check(label, condition, detail = '') {
+  if (condition) {
+    console.log(`[PASS] ${label}`);
+    pass += 1;
+  } else {
+    console.log(`[FAIL] ${label}${detail ? ` — ${detail}` : ''}`);
+    fail += 1;
+  }
+}
+
+const NETWORK_TRIPWIRE = [];
+globalThis.fetch = (...args) => {
+  NETWORK_TRIPWIRE.push(String(args[0]));
+  throw new Error(`verify-routing.js made a network call to ${args[0]} — this verifier must stay dry-run`);
+};
+
+/* ── Test doubles ───────────────────────────────────────────────────────── */
+
+/** Swaps every registry provider for a stub that counts invocations. */
+const INVOCATIONS = [];
+const REAL_INVOKE = {};
+function stubAllProviders({ failing = [] } = {}) {
+  INVOCATIONS.length = 0;
+  for (const [id, p] of Object.entries(PROVIDER_REGISTRY)) {
+    if (!(id in REAL_INVOKE)) REAL_INVOKE[id] = p.invoke;
+    p.invoke = async (env, opts) => {
+      INVOCATIONS.push(id);
+      if (failing.includes(id)) {
+        opts.onResponse?.({ status: 500 });
+        return null;
+      }
+      return { text: `stub:${id}`, source: id, finishReason: 'stop', usage: { inputTokens: 10, outputTokens: 5 }, rateLimit: {} };
+    };
+  }
+}
+
+/** Minimal fake D1 backed by a plain object of period_key -> call_count. */
+function fakeDb(counts = {}) {
+  return {
+    prepare(sql) {
+      return {
+        bind(...args) {
+          return {
+            async first() {
+              if (/SELECT call_count/.test(sql)) return { call_count: counts[args[0]] ?? 0 };
+              return null;
+            },
+            async run() { return {}; },
+            async all() { return { results: [] }; },
+          };
+        },
+        async run() { return {}; },
+        async first() { return null; },
+        async all() { return { results: [] }; },
+      };
+    },
+  };
+}
+
+function fakeEnv({ enabled = false, counts = {}, kv = {}, credentials = true } = {}) {
+  const store = { ...kv };
+  const env = {
+    SIM_KV: {
+      async get(key, type) {
+        if (key === SIM_STATE_KEY) return type === 'json' ? { [ROUTING_FLAG]: enabled } : JSON.stringify({ [ROUTING_FLAG]: enabled });
+        return store[key] ?? null;
+      },
+      async put(key, value) { store[key] = value; },
+    },
+    DB: fakeDb(counts),
+    _kvStore: store,
+  };
+  if (credentials) {
+    Object.assign(env, {
+      GITHUB_MODELS_TOKEN: 'stub', CEREBRAS_API_KEY: 'stub', MISTRAL_API_KEY: 'stub',
+      COHERE_API_KEY: 'stub', GROQ_API_KEY: 'stub', GEMINI_API_KEY: 'stub', AI: {},
+    });
+  }
+  return env;
+}
+
+/** Deterministic rng for reproducible shuffles. */
+function seededRng(seed = 1) {
+  let s = seed;
+  return () => { s = (s * 1103515245 + 12345) % 2147483648; return s / 2147483648; };
+}
+
+console.log('=== Task-type routing verification — dry-run only, no network/model/D1/KV calls ===\n');
+
+/* ── 1. The lane table matches the owner's routing table ────────────────── */
+console.log('--- The routing table resolves each task type to the right provider ---');
+
+const EXPECTED = [
+  ['judgment', 'github-models', 'cerebras'],
+  ['long_document', 'cerebras', 'mistral'],
+  ['hebrew_composition', 'gemini', 'mistral'],
+  ['routine_volume', 'groq', 'cloudflare-ai'],
+  ['classification', 'cloudflare-ai', 'groq'],
+  ['embeddings', 'cohere', undefined],
+];
+
+for (const [lane, primary, backup] of EXPECTED) {
+  const r = resolveLane(routingConfig, lane);
+  check(`lane "${lane}" is routable`, r.routable === true, r.reason || '');
+  check(`lane "${lane}" primary is ${primary}`, r.candidates[0] === primary, `got ${r.candidates[0]}`);
+  if (backup) {
+    check(`lane "${lane}" backup is ${backup}`, r.candidates[1] === backup, `got ${r.candidates[1]}`);
+  } else {
+    check(`lane "${lane}" has NO backup (fail, don't degrade)`, r.candidates.length === 1, `got ${r.candidates.join(',')}`);
+  }
+}
+
+const conv = resolveLane(routingConfig, 'conversation', { rng: seededRng(7) });
+check('lane "conversation" is routable', conv.routable === true, conv.reason || '');
+check('lane "conversation" uses controlled_random mode', conv.mode === 'controlled_random');
+check('lane "conversation" pool has more than one provider (a shuffle of one measures nothing)', conv.candidates.length > 1);
+check('lane "conversation" pool contains NO embeddings provider (cohere cannot serve chat)',
+  !conv.candidates.includes('cohere'), conv.candidates.join(','));
+check('lane "conversation" shuffles — two different seeds give different first picks',
+  resolveLane(routingConfig, 'conversation', { rng: seededRng(1) }).candidates[0]
+  !== resolveLane(routingConfig, 'conversation', { rng: seededRng(99) }).candidates[0]);
+
+check('every ordered lane resolves to providers that exist in the registry',
+  EXPECTED.every(([lane]) => resolveLane(routingConfig, lane).candidates.every((id) => !!PROVIDER_REGISTRY[id])));
+check('the embeddings lane resolves to an embeddings-kind provider',
+  PROVIDER_REGISTRY[resolveLane(routingConfig, 'embeddings').candidates[0]].kind === 'embeddings');
+check('every chat lane resolves to chat-kind providers only',
+  EXPECTED.filter(([l]) => l !== 'embeddings').every(([lane]) =>
+    resolveLane(routingConfig, lane).candidates.every((id) => PROVIDER_REGISTRY[id].kind === 'chat')));
+
+/* ── 2. Anthropic is unreachable from every routing path ────────────────── */
+console.log('\n--- Anthropic is unreachable from every routing path ---');
+
+const architect = resolveLane(routingConfig, 'architect');
+check('the architect lane is NOT routable', architect.routable === false);
+check('the architect lane refuses with lane_never_routed', architect.reason === 'lane_never_routed', architect.reason);
+check('the architect lane yields zero candidates', architect.candidates.length === 0);
+check('the architect lane names no provider in config', !routingConfig.lanes.architect.primary && !routingConfig.lanes.architect.backup);
+
+check('PROVIDER_REGISTRY has no anthropic/claude entry',
+  !Object.keys(PROVIDER_REGISTRY).some((id) => /anthropic|claude/i.test(id)), Object.keys(PROVIDER_REGISTRY).join(','));
+check('no lane in config/model-routing.json names an anthropic provider',
+  !/"(primary|backup)":\s*"[^"]*(anthropic|claude)/i.test(JSON.stringify(routingConfig)));
+check('the conversation pool contains no anthropic provider',
+  !routingConfig.lanes.conversation.pool.some((id) => /anthropic|claude/i.test(id)));
+
+// The second, independent barrier: even a lane that DOES name Anthropic fails
+// closed, because the registry has no such provider to resolve it to.
+const sabotaged = JSON.parse(JSON.stringify(routingConfig));
+sabotaged.lanes.judgment.primary = 'anthropic';
+const sabotagedResolve = resolveLane(sabotaged, 'judgment');
+check('a lane deliberately pointed at "anthropic" is REFUSED, not routed',
+  sabotagedResolve.routable === false, JSON.stringify(sabotagedResolve));
+check('...and refuses specifically as unknown_provider (registry is the second barrier)',
+  sabotagedResolve.reason.startsWith('unknown_provider'), sabotagedResolve.reason);
+
+const sabotagedPool = JSON.parse(JSON.stringify(routingConfig));
+sabotagedPool.lanes.conversation.pool = ['groq', 'anthropic'];
+check('an anthropic entry smuggled into the conversation pool is also refused',
+  resolveLane(sabotagedPool, 'conversation', { rng: seededRng(3) }).routable === false);
+
+const taskRouterSrc = readFileSync(new URL('../workers/task-router.js', import.meta.url), 'utf8');
+check('task-router.js imports no anthropic/claude client',
+  !/from\s+['"][^'"]*claude-client\.js['"]/.test(taskRouterSrc));
+check('task-router.js never references api.anthropic.com', !taskRouterSrc.includes('api.anthropic.com'));
+
+/* ── 3. The switch, OFF, reproduces today's behaviour exactly ───────────── */
+console.log('\n--- Kill switch OFF: nothing routes, nothing is contacted ---');
+
+stubAllProviders();
+
+check('routingEnabled() is false when the flag is absent',
+  (await routingEnabled({ SIM_KV: { get: async () => ({}) } })) === false);
+check('routingEnabled() is false when SIM_KV is missing entirely (fails closed)',
+  (await routingEnabled({})) === false);
+check('routingEnabled() is false for a truthy non-true value (=== true, like guidesEnabled)',
+  (await routingEnabled({ SIM_KV: { get: async () => ({ routing_enabled: 'yes' }) } })) === false);
+check('routingEnabled() is true only for an explicit true',
+  (await routingEnabled({ SIM_KV: { get: async () => ({ routing_enabled: true }) } })) === true);
+
+const offEnv = fakeEnv({ enabled: false });
+for (const lane of ['judgment', 'long_document', 'hebrew_composition', 'routine_volume', 'classification', 'conversation', 'embeddings']) {
+  // eslint-disable-next-line no-await-in-loop
+  const r = await routeTask({ env: offEnv, taskType: lane, routingConfig, tokenEconomy, prompt: 'hi', texts: ['hi'] });
+  check(`lane "${lane}" refuses with routing_disabled while the switch is off`,
+    r.ok === false && r.routed === false && r.reason === 'routing_disabled', JSON.stringify(r));
+}
+check('NO provider was invoked while the switch was off', INVOCATIONS.length === 0, INVOCATIONS.join(','));
+check('no KV pacing key was written while the switch was off',
+  Object.keys(offEnv._kvStore).length === 0, Object.keys(offEnv._kvStore).join(','));
+
+check('the shipped config defaults the switch to false', routingConfig.switch.default_when_absent === false);
+check('task-router.js reads the same SIM_KV key agent-runner.js uses', SIM_STATE_KEY === 'simulation-state');
+const agentRunnerSrc = readFileSync(new URL('../workers/agent-runner.js', import.meta.url), 'utf8');
+check('agent-runner.js SIM_STATE_KEY matches task-router.js SIM_STATE_KEY',
+  new RegExp(`SIM_STATE_KEY = '${SIM_STATE_KEY}'`).test(agentRunnerSrc));
+check('routing_enabled is whitelisted in updateSimulationState',
+  /allowedKeys = \[[^\]]*'routing_enabled'[^\]]*\]/.test(agentRunnerSrc));
+check('guides_enabled is STILL whitelisted (the new flag did not displace it)',
+  /allowedKeys = \[[^\]]*'guides_enabled'[^\]]*\]/.test(agentRunnerSrc));
+check('a routing_toggle trigger exists (flip without redeploy)',
+  /case 'routing_toggle':[\s\S]{0,900}routing_enabled: !!body\.enabled/.test(agentRunnerSrc));
+check('the ONLY gate bypass is the supervised routing_test trigger',
+  (agentRunnerSrc.match(/bypassGate: true/g) || []).filter((_, i, a) => a).length >= 1
+  && /case 'routing_test':[\s\S]{0,900}bypassGate: true/.test(agentRunnerSrc));
+check('no scheduled/cron path passes bypassGate for routing',
+  !/runScheduledBlock[\s\S]{0,4000}routeTaskTypeCall/.test(agentRunnerSrc));
+
+/* ── 3b. No pre-existing caller was rewired ─────────────────────────────── */
+console.log('\n--- No pre-existing caller changed provider ---');
+
+const agentBaseSrc = readFileSync(new URL('../agents/agent-base.js', import.meta.url), 'utf8');
+check('agent-base.js does not import the task router (its providers are unchanged)',
+  !/task-router\.js/.test(agentBaseSrc));
+check('agent-base.js still routes routine work through callGroq (unchanged)', /callGroq\(/.test(agentBaseSrc));
+check('agent-base.js still composes Hebrew through callGemini (unchanged)', /callGemini\(/.test(agentBaseSrc));
+
+for (const f of ['meeting-engine.js', 'qa-engine.js', 'gap-reports.js', 'chore-runner.js', 'guide-engine.js', 'claude-client.js']) {
+  const src = readFileSync(new URL(`../workers/${f}`, import.meta.url), 'utf8');
+  check(`${f} does not import the task router`, !/task-router\.js/.test(src));
+  check(`${f} does not call routeTaskTypeCall`, !/routeTaskTypeCall/.test(src));
+}
+
+const modelRouterSrc = readFileSync(new URL('../workers/model-router.js', import.meta.url), 'utf8');
+check('selectModelForChoreTask() is unchanged — Notebook-X easy tasks still pick groq',
+  /projectKey === 'notebook-x'[\s\S]{0,400}taskType === 'easy'[\s\S]{0,200}model: 'groq'/.test(modelRouterSrc));
+check('selectModelForChoreTask() is unchanged — code/approval still picks claude under budget',
+  /taskType === 'code' \|\| taskType === 'approval'\) && !overBudget[\s\S]{0,200}model: 'claude'/.test(modelRouterSrc));
+check('getClaudeBudgetStatus() still defaults to component "qa"',
+  /getClaudeBudgetStatus\(env, \{ asOf = new Date\(\), component = 'qa' \}/.test(modelRouterSrc));
+check('recordClaudeSpend() still defaults to component "qa"',
+  /recordClaudeSpend\(env, \{ inputTokens, outputTokens, asOf = new Date\(\), component = 'qa' \}/.test(modelRouterSrc));
+check('the new routing section is appended below the pre-existing budget router',
+  modelRouterSrc.indexOf('selectModelForChoreTask') < modelRouterSrc.indexOf('routeTaskTypeCall'));
+
+/* ── 4. Quota: allow-check before, record after, degrade on deny ────────── */
+console.log('\n--- Token economy: allow-check before, degrade on deny, never throw ---');
+
+const onEnv = (opts) => fakeEnv({ enabled: true, ...opts });
+
+check('groq has a KNOWN daily cap', hasKnownCap(tokenEconomy, 'groq') === true);
+check('groq cap agrees with token-economy daily_limits', dailyCapFor(tokenEconomy, 'groq') === 14400);
+check('cerebras cap is UNKNOWN (null), not a guess', dailyCapFor(tokenEconomy, 'cerebras') === null);
+check('github-models cap is UNKNOWN (null)', dailyCapFor(tokenEconomy, 'github-models') === null);
+check('period key is the composite <provider>#YYYY-MM-DD pattern',
+  providerPeriodKey('groq', new Date('2026-08-05T10:00:00Z')) === 'groq#2026-08-05');
+
+const softStop = Math.floor(14400 * routingConfig.soft_stop_fraction);
+const exhausted = { [providerPeriodKey('groq', new Date())]: softStop };
+const denial = await checkProviderAllowance(onEnv({ counts: exhausted }), 'groq', { tokenEconomy, routingConfig });
+check('a provider at its soft-stop is DENIED', denial.allowed === false);
+check('...and the denial reason is exactly `overtime_required`', denial.reason === 'overtime_required', denial.reason);
+check('the soft stop is 60% of the known cap, not 100% (serves Gate 3)', denial.softStop === softStop && softStop < 14400);
+
+const allowed = await checkProviderAllowance(onEnv({ counts: {} }), 'groq', { tokenEconomy, routingConfig });
+check('a provider under its soft-stop is allowed', allowed.allowed === true && allowed.reason === null);
+check('an allowed check reports cap and callsToday for the quota dashboard',
+  allowed.cap === 14400 && allowed.callsToday === 0 && allowed.capUnknown === false);
+
+const missingCred = await checkProviderAllowance({ SIM_KV: null, DB: null }, 'groq', { tokenEconomy, routingConfig });
+check('a provider with no credential is denied by name, not silently skipped',
+  missingCred.allowed === false && missingCred.reason === 'missing_credential:GROQ_API_KEY', missingCred.reason);
+
+// Unknown cap: paced, never treated as unlimited.
+const pacedEnv = onEnv({});
+const first = await checkProviderAllowance(pacedEnv, 'cerebras', { tokenEconomy, routingConfig, now: 1_000_000 });
+check('an unknown-cap provider is allowed on its first call', first.allowed === true && first.capUnknown === true);
+const tooSoon = await checkProviderAllowance(pacedEnv, 'cerebras', { tokenEconomy, routingConfig, now: 1_005_000 });
+check('an unknown-cap provider is PACED, not treated as unlimited', tooSoon.allowed === false);
+check('...and the pacing denial reason is `unknown_cap_paced`', tooSoon.reason === 'unknown_cap_paced', tooSoon.reason);
+const laterOk = await checkProviderAllowance(pacedEnv, 'cerebras', { tokenEconomy, routingConfig, now: 1_000_000 + routingConfig.unknown_cap_min_spacing_ms + 1 });
+check('...and it is allowed again once the spacing has elapsed', laterOk.allowed === true);
+check('the spacing floor matches gemini-pacer.js\'s proven 20s conservative floor',
+  routingConfig.unknown_cap_min_spacing_ms === tokenEconomy.notebook_x_gemini_pacing.min_spacing_ms_between_calls);
+
+/* ── 5. Degradation ladder ──────────────────────────────────────────────── */
+console.log('\n--- Degradation: deny -> backup -> skip, never a throw ---');
+
+stubAllProviders();
+const groqDenied = { [providerPeriodKey('groq', new Date())]: softStop };
+const degraded = await routeTask({
+  env: onEnv({ counts: groqDenied }), taskType: 'routine_volume', routingConfig, tokenEconomy, prompt: 'hi',
+});
+check('a denied PRIMARY degrades to the lane backup', degraded.ok === true && degraded.provider === 'cloudflare-ai',
+  JSON.stringify(degraded.attempts));
+check('the denial is recorded in the attempt trail with its reason',
+  degraded.attempts[0].provider === 'groq' && degraded.attempts[0].reason === 'overtime_required');
+check('the backup was the only provider actually invoked', INVOCATIONS.join(',') === 'cloudflare-ai', INVOCATIONS.join(','));
+
+stubAllProviders();
+const cfCap = dailyCapFor(tokenEconomy, 'cloudflare-ai');
+const bothDenied = {
+  [providerPeriodKey('groq', new Date())]: softStop,
+  [providerPeriodKey('cloudflare-ai', new Date())]: Math.floor(cfCap * routingConfig.soft_stop_fraction),
+};
+const skipped = await routeTask({
+  env: onEnv({ counts: bothDenied }), taskType: 'routine_volume', routingConfig, tokenEconomy, prompt: 'hi',
+});
+check('primary AND backup denied -> skip, not throw', skipped.ok === false && skipped.reason === 'all_candidates_exhausted');
+check('a fully-denied lane invoked no provider at all', INVOCATIONS.length === 0, INVOCATIONS.join(','));
+check('both denials are logged in the attempt trail',
+  skipped.attempts.length === 2 && skipped.attempts.every((a) => a.reason === 'overtime_required'));
+
+stubAllProviders({ failing: ['github-models'] });
+const failedOver = await routeTask({
+  env: onEnv({}), taskType: 'judgment', routingConfig, tokenEconomy, prompt: 'score this',
+});
+check('a FAILING primary (not denied — it answered badly) degrades to the backup',
+  failedOver.ok === true && failedOver.provider === 'cerebras', JSON.stringify(failedOver.attempts));
+check('the failed primary is still counted as an attempt (a failed call spent rate allowance)',
+  failedOver.attempts[0].outcome === 'failed');
+
+stubAllProviders({ failing: ['cohere'] });
+const embedFail = await routeTask({
+  env: onEnv({}), taskType: 'embeddings', routingConfig, tokenEconomy, texts: ['a'],
+});
+check('the embeddings lane FAILS rather than degrading to another provider',
+  embedFail.ok === false && embedFail.reason === 'all_candidates_exhausted');
+check('...and no chat provider was substituted for it',
+  INVOCATIONS.every((id) => id === 'cohere'), INVOCATIONS.join(','));
+
+check('no degradation path threw — every result came back structured', true);
+check('nothing in the degradation tests reached the network', NETWORK_TRIPWIRE.length === 0, NETWORK_TRIPWIRE.join(','));
+
+/* ── 6. Controlled-random embodiment ────────────────────────────────────── */
+console.log('\n--- Controlled-random embodiment (a measurement instrument) ---');
+
+const PERSONAS = [
+  { id: 1, name: 'The Perfectionist' }, { id: 6, name: 'The QA' }, { id: 7, name: 'The Team Lead' },
+  { id: 8, name: 'The Lead QA' }, { id: 10, name: 'The Architect' }, { id: 11, name: 'The CEO' },
+];
+
+const map = assignEmbodiment({ personas: PERSONAS, pool: routingConfig.lanes.conversation.pool, rng: seededRng(42), eventId: 'daily_standup:2026-08-05' });
+check('every non-Architect persona is assigned a provider', map.assignments.length === PERSONAS.length - 1);
+check('THE ARCHITECT IS NEVER SHUFFLED', !map.assignments.some((a) => String(a.agentId) === '10'));
+check('...and his exclusion is recorded with a reason, not silently dropped',
+  map.excluded.length === 1 && map.excluded[0].reason === 'architect_never_shuffled');
+check('the Architect is excluded by NAME too, not only by id',
+  assignEmbodiment({ personas: [{ id: 99, name: 'The Architect' }], pool: ['groq'], rng: seededRng(1) }).assignments.length === 0);
+check('every assigned provider comes from the pool', map.assignments.every((a) => routingConfig.lanes.conversation.pool.includes(a.provider)));
+check('no persona is embodied by an embeddings provider', !map.assignments.some((a) => a.provider === 'cohere'));
+check('no persona is embodied by Anthropic', !map.assignments.some((a) => /anthropic|claude/i.test(a.provider || '')));
+
+const mapA = assignEmbodiment({ personas: PERSONAS, pool: routingConfig.lanes.conversation.pool, rng: seededRng(1) });
+const mapB = assignEmbodiment({ personas: PERSONAS, pool: routingConfig.lanes.conversation.pool, rng: seededRng(500) });
+check('the assignment actually varies between events (otherwise it measures nothing)',
+  JSON.stringify(mapA.assignments) !== JSON.stringify(mapB.assignments));
+
+const rendered = renderEmbodimentMap(map);
+check('the embodiment map renders a table naming each agent and its provider',
+  rendered.includes('The QA') && rendered.includes('Embodiment map'));
+check('the rendered map records the event id (so it ties to a meeting record)',
+  rendered.includes('daily_standup:2026-08-05'));
+check('the rendered map shows the Architect as deliberately not shuffled',
+  /The Architect[\s\S]{0,80}not shuffled/.test(rendered));
+
+stubAllProviders();
+const convRouted = await routeTask({
+  env: onEnv({}), taskType: 'conversation', routingConfig, tokenEconomy,
+  prompt: 'standup', personas: PERSONAS, rng: seededRng(11), eventId: 'evt-1',
+});
+check('a routed conversation returns its embodiment map alongside the result',
+  convRouted.ok === true && !!convRouted.embodiment && convRouted.embodiment.assignments.length === 5);
+check('the routed conversation excluded the Architect from the map',
+  convRouted.embodiment.excluded[0].reason === 'architect_never_shuffled');
+check('task-router.js documents that embodiment is a measurement instrument, not a fallback',
+  /MEASUREMENT INSTRUMENT, NOT A FALLBACK/.test(taskRouterSrc));
+
+/* ── 7. Config integrity ────────────────────────────────────────────────── */
+console.log('\n--- Config integrity ---');
+
+check('every registry provider maps to a token-economy providers entry',
+  Object.values(PROVIDER_REGISTRY).every((p) => !!tokenEconomy.providers[p.tokenEconomyKey]),
+  Object.values(PROVIDER_REGISTRY).filter((p) => !tokenEconomy.providers[p.tokenEconomyKey]).map((p) => p.id).join(','));
+check('every provider the lane table names exists in the registry',
+  Object.values(routingConfig.lanes)
+    .flatMap((l) => [l.primary, l.backup, ...(l.pool || [])])
+    .filter(Boolean)
+    .every((id) => !!PROVIDER_REGISTRY[id]));
+check('every routable provider declares paid:false (the overtime rule)',
+  Object.values(PROVIDER_REGISTRY).every((p) => tokenEconomy.providers[p.tokenEconomyKey].paid === false));
+check('the routing config states the overtime rule', /overtime/i.test(JSON.stringify(routingConfig._meta)));
+check('the routing config states that null caps are not unlimited',
+  /does NOT mean unlimited/i.test(routingConfig._unknown_cap_meta || ''));
+check('the routing config records that it supersedes the older four-lane draft table',
+  /supersedes/i.test(JSON.stringify(routingConfig._meta)));
+check('soft_stop_fraction is a fraction below 1 (headroom, not a hard ceiling)',
+  routingConfig.soft_stop_fraction > 0 && routingConfig.soft_stop_fraction < 1);
+
+/* ── Final network assertion ────────────────────────────────────────────── */
+console.log('\n--- Network tripwire ---');
+check('this verifier made ZERO network calls end to end', NETWORK_TRIPWIRE.length === 0, NETWORK_TRIPWIRE.join(', '));
+
+// Restore the real invoke functions so nothing leaks between runs.
+for (const [id, invoke] of Object.entries(REAL_INVOKE)) PROVIDER_REGISTRY[id].invoke = invoke;
+
+console.log(`\n=== ${pass} passed, ${fail} failed ===`);
+if (fail > 0) {
+  console.log('MISMATCH — see FAIL lines above.');
+  process.exit(1);
+} else {
+  console.log('All scenarios matched expectations.');
+  process.exit(0);
+}

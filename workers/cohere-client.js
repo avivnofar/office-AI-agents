@@ -150,6 +150,7 @@ export async function callCohereEmbed({
   inputType = 'search_document',
   model = DEFAULT_MODEL,
   agentId,
+  onResponse,
 }) {
   if (!apiKey) {
     console.warn(`[agent-${agentId}] COHERE_API_KEY not configured — set it with \`npx wrangler secret put COHERE_API_KEY\``);
@@ -191,6 +192,10 @@ export async function callCohereEmbed({
     console.warn(`[agent-${agentId}] Cohere request failed: ${err.message}`);
     return null;
   }
+
+  // Fires before the status checks: a 429 or 5xx still consumed a free-tier
+  // request allowance and must be counted. See task-router.js.
+  onResponse?.({ status: res.status, rateLimit: parseRateLimitHeaders(res) });
 
   if (res.status === 429) {
     console.warn(`[agent-${agentId}] Cohere 429 — free-tier rate limit hit`);

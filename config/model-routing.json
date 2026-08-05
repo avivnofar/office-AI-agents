@@ -1,0 +1,84 @@
+{
+  "_meta": {
+    "version": "1.0.0",
+    "added": "2026-08-05",
+    "status": "SHIPPED OFF — see `switch` below. Nothing routes until the owner flips the flag.",
+    "description": "The task-type routing table. Lanes are DATA, deliberately, so changing which provider serves a task is a config edit rather than a code edit — workers/task-router.js reads this file and contains no per-lane conditionals of its own. Routing by TASK TYPE, never by agent: a persona's voice lives in its prompts and character files (back-office-AI-agents/campus/agents/<NN-slug>/), never in which key answered.",
+    "the_overtime_rule": "Every provider here is on its FREE TIER and stays there. A call that would exceed a free tier is REFUSED and logged as `overtime_required`. There is no automatic escalation to a paid tier, for any provider, ever — paid usage requires the owner's explicit, per-instance approval, asked for at the time.",
+    "anthropic_is_not_here": "Anthropic has no lane, no pool entry, and no registry entry. The `architect` lane below exists to STATE that rule where someone would look to break it, not to enable it — it carries `routable: false` and no provider id. Two independent barriers enforce this: (1) resolveLane() refuses a non-routable lane, and (2) workers/task-router.js's PROVIDER_REGISTRY imports no Anthropic client, so a lane naming one fails closed as `unknown_provider`. scripts/verify-routing.js proves both, including by pointing a lane at 'anthropic' on purpose and asserting it is denied.",
+    "supersedes": "plans/OFFICE-SCALING-TODO.md item 3.1's four-lane draft table and PROJECT-SPEC-TABLES.md's matching row, both of which predate this session: neither had a long-document lane or an embeddings lane, and both backed Hebrew composition with GitHub Models rather than Mistral. Both documents are corrected in the same session as this file, per the spec-tables maintenance rule."
+  },
+
+  "switch": {
+    "flag": "routing_enabled",
+    "kv_key": "simulation-state",
+    "default_when_absent": false,
+    "_meta": "Mirrors the `guides_enabled` pattern (workers/agent-runner.js guidesEnabled(), added 2026-08-02), which is the proven shape in this repo for shipping a feature dark. Absent or false means the router refuses every routed call with `routing_disabled` and every pre-existing caller keeps its current provider untouched. Toggle without a redeploy: POST /api/agents/trigger {\"type\":\"routing_toggle\",\"enabled\":true|false}."
+  },
+
+  "soft_stop_fraction": 0.6,
+  "_soft_stop_fraction_meta": "A provider is refused once its counted calls for the day reach this fraction of its KNOWN free-tier daily cap — not at 100%. Two reasons. (1) It directly serves Gate 3 in plans/OFFICE-SCALING-TODO.md, whose acceptance criterion is '48h of live routing logs reviewed; no provider over 60% of its free-tier daily quota' — the router should KEEP the office under that line rather than let the owner discover a breach afterwards. (2) It mirrors the deliberate-headroom convention the Anthropic budget already uses ($4.50 soft-stop under a $5 ceiling). Raising it is a config edit and an owner decision.",
+
+  "unknown_cap_min_spacing_ms": 20000,
+  "_unknown_cap_meta": "A NULL daily cap in config/token-economy.json's `providers` block means THIS REPO DOES NOT KNOW the limit. It does NOT mean unlimited, and the router must never treat it as such (owner instruction, 2026-08-05). Since an unknown cap cannot be enforced by counting, it is enforced by WALL CLOCK instead: a provider with no known daily cap gets a minimum spacing between routed calls, tracked by a KV timestamp. The mechanism and the 20s floor are lifted from workers/gemini-pacer.js, which solves the same problem for the same reason — a quota this repo cannot observe. Once a real cap is established by the supervised test, fill it into token-economy.json and the count check takes over automatically; nothing here needs editing.",
+
+  "lanes": {
+    "judgment": {
+      "primary": "github-models",
+      "backup": "cerebras",
+      "kind": "chat",
+      "description": "Judgment / quality — QA (agent 6), Lead QA (agent 8) and Team Lead (agent 7) reviews. Short scored calls.",
+      "_why": "GitHub Models' ~8K-token per-request ceiling is a poor fit for bulk text but a fine fit for 'score this answer 0-1' — and the backup is the long-context lane precisely so a judgment call that overflows has somewhere to land instead of failing."
+    },
+    "long_document": {
+      "primary": "cerebras",
+      "backup": "mistral",
+      "kind": "chat",
+      "description": "Long-document processing — daily report batches, cross-report input, anything past the judgment lane's per-request ceiling."
+    },
+    "hebrew_composition": {
+      "primary": "gemini",
+      "backup": "mistral",
+      "kind": "chat",
+      "description": "Hebrew composition — capability-gap notes and internal summaries, in the flagging agent's own voice.",
+      "_why": "Hebrew here is INTERNAL only. The Front is English only (owner decision, 2026-08-05), so this lane never touches published content. Gemini stays primary; workers/gemini-pacer.js's 20s spacing on Notebook-X asks remains in force and routing does not get to spend the headroom that pacing deliberately leaves."
+    },
+    "routine_volume": {
+      "primary": "groq",
+      "backup": "cloudflare-ai",
+      "kind": "chat",
+      "description": "Routine volume — drafts, coworker chatter, spare-time interactions.",
+      "_why": "This lane is already exactly what agents/agent-base.js queryGroqRouted() does today (Groq first, Cloudflare Workers AI on failure). It is written down here so the table is complete, not to change anything."
+    },
+    "classification": {
+      "primary": "cloudflare-ai",
+      "backup": "groq",
+      "kind": "chat",
+      "description": "Classification / routing decisions — short triage tags, category labels."
+    },
+    "conversation": {
+      "mode": "controlled_random",
+      "pool": ["github-models", "cerebras", "mistral", "groq", "cloudflare-ai", "gemini"],
+      "backup": null,
+      "kind": "chat",
+      "description": "Conversations & office events — meetings, standups, side plots. The persona→provider assignment is shuffled per event and the resulting embodiment map is logged.",
+      "_why_random": "This is a MEASUREMENT INSTRUMENT, not a fallback mechanism. The Lead QA (agent 8) compares report quality across agents AND across embodiment models — 'this persona is more consistent under that provider', 'that provider invents facts in meetings'. Shuffling is what generates the comparison data; logging the map is what makes it readable. If this ever gets quietly replaced by a fixed assignment, the cross-embodiment half of the improvement loop stops producing evidence and nothing else will notice.",
+      "_pool_excludes_cohere": "cohere is an embeddings provider and cannot serve a chat lane. The registry's `kind` check enforces this independently of this list; verify-routing.js asserts the pool contains no embeddings provider."
+    },
+    "embeddings": {
+      "primary": "cohere",
+      "backup": null,
+      "kind": "embeddings",
+      "on_unavailable": "fail",
+      "description": "Embeddings / semantic search — the local brain's search and cross-report comparison. Neither is built yet, so this lane has no callers.",
+      "_why_no_backup": "Fail, do not degrade — a CORRECTNESS rule, not a preference. Vectors from two different embedding models do not share a space, so a similarity computed across them is meaningless while still returning a confident-looking number between 0 and 1. Substituting a backup would corrupt a search index rather than slow it down."
+    },
+    "architect": {
+      "routable": false,
+      "primary": null,
+      "backup": null,
+      "description": "The Architect (agent 10). NEVER routed, NEVER shuffled.",
+      "_why": "He runs on the Anthropic API exclusively, per the character bible, and Anthropic is reserved for him and for genuine data-center Q&A under its own capped budget. This lane is present so that the rule is visible in the table a future session would edit to break it — it names no provider, and resolveLane() refuses it. His actual call paths (workers/claude-client.js and the APP_API service binding) are direct callers that never went through this router and are untouched by it."
+    }
+  }
+}

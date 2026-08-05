@@ -39,7 +39,7 @@
  * Status: added inert. Nothing imports this module as of this commit.
  */
 
-import { estimatePromptTokens, normalizeOpenAiChat } from './provider-common.js';
+import { estimatePromptTokens, normalizeOpenAiChat, parseRateLimitHeaders } from './provider-common.js';
 
 const CEREBRAS_ENDPOINT = 'https://api.cerebras.ai/v1';
 
@@ -126,6 +126,7 @@ export async function callCerebras({
   maxTokens = 2048,
   model = DEFAULT_MODEL,
   agentId,
+  onResponse,
 }) {
   if (!apiKey) {
     console.warn(`[agent-${agentId}] CEREBRAS_API_KEY not configured — set it with \`npx wrangler secret put CEREBRAS_API_KEY\``);
@@ -156,6 +157,10 @@ export async function callCerebras({
     console.warn(`[agent-${agentId}] Cerebras request failed: ${err.message}`);
     return null;
   }
+
+  // Fires before the status checks: a 429 or 5xx still consumed a free-tier
+  // request allowance and must be counted. See task-router.js.
+  onResponse?.({ status: res.status, rateLimit: parseRateLimitHeaders(res) });
 
   if (res.status === 429) {
     console.warn(`[agent-${agentId}] Cerebras 429 — free-tier rate limit hit`);

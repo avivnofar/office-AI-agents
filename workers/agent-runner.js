@@ -49,7 +49,7 @@ import { StubAgent } from '../agents/agent-stub.js';
 import { runMeeting, MEETING_TYPES } from './meeting-engine.js';
 import { callCFRouter } from './gemini-client.js';
 import { generateAssignedDailyBatch, persistQuestions } from './qa-engine.js';
-import { getClaudeBudgetStatus, recordClaudeSpend } from './model-router.js';
+import { getClaudeBudgetStatus, recordClaudeSpend, routeTaskTypeCall, resolveTaskLane, getRoutingQuotaStatus, MODEL_ROUTING } from './model-router.js';
 import { collectTodayGapReports, renderGapDigest } from './gap-reports.js';
 import { resolveWriteTarget, resolveIssueTarget, checkCodeWriteAllowed } from './permission-guard.js';
 import { runChoreRotationSlot } from './chore-runner.js';
@@ -291,7 +291,7 @@ async function getSimulationState(env) {
 
 async function updateSimulationState(env, patch) {
   const current = await getSimulationState(env);
-  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled'];
+  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled'];
   const next = { ...current };
   for (const key of allowedKeys) {
     if (key in patch) next[key] = patch[key];
@@ -2310,6 +2310,52 @@ export default {
             // logged no-ops.
             result = await updateSimulationState(env, { guides_enabled: !!body.enabled });
             break;
+          case 'routing_toggle':
+            // Task-type routing kill switch (see workers/task-router.js
+            // routingEnabled()): flips the SIM_KV simulation-state
+            // `routing_enabled` flag without a redeploy. Body:
+            // { enabled: true|false }. While off (or absent — the shipped
+            // default) every routed call is refused with `routing_disabled`,
+            // no provider is contacted, and every pre-existing caller keeps
+            // the provider it uses today.
+            result = await updateSimulationState(env, { routing_enabled: !!body.enabled });
+            break;
+          case 'routing_status':
+            // Read-back for the supervised test: the flag, the lane table as
+            // RESOLVED (not as written), and today's per-provider counters.
+            // Makes no model calls.
+            result = {
+              ...(await getRoutingQuotaStatus(env)),
+              lanes: Object.fromEntries(
+                Object.keys(MODEL_ROUTING.lanes).map((lane) => [lane, resolveTaskLane(lane)])
+              ),
+            };
+            break;
+          case 'routing_test': {
+            // ONE narrow supervised call down ONE lane, with the gate
+            // bypassed — the same shape as the `guide_block` trigger, and
+            // for the same reason: the owner tests a lane before enabling
+            // the switch, not after. This is the ONLY path that bypasses
+            // routingEnabled(), it runs one lane at a time, and the
+            // scheduled path never reaches it.
+            // Body: { lane: 'judgment'|..., prompt?, texts?, personas? }
+            if (!body.lane) {
+              return json({ error: 'routing_test_requires_lane' }, 400, origin);
+            }
+            result = await routeTaskTypeCall(env, body.lane, {
+              bypassGate: true,
+              prompt: body.prompt || 'Reply with the single word: ok',
+              systemPrompt: body.systemPrompt,
+              maxTokens: body.maxTokens || 64,
+              texts: body.texts,
+              personas: body.personas,
+              eventId: body.eventId || `routing_test:${body.lane}`,
+              geminiModel: simulationConfig.GEMINI?.model,
+              geminiEndpoint: simulationConfig.GEMINI?.api_endpoint,
+              agentId: 'routing-test',
+            });
+            break;
+          }
           case 'guide_block': {
             // Supervised Guides test: runs ONE guide handler directly — the
             // SAME functions the cron path dispatches — with the

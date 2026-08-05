@@ -47,6 +47,16 @@ binding = "AI"
 #   GOOGLE_AI_API_KEY - optional, reserved for Google AI Studio report tooling (see token-economy.json)
 #   ADMIN_TOKEN       - required, validates X-Admin-Token on /api/agents/*
 #   GITHUB_TOKEN      - optional, gates report/guide commits + claude-action issues to GitHub
+#   GITHUB_MODELS_TOKEN - task-type routing, judgment lane (workers/github-models-client.js).
+#                       DELIBERATELY NOT the same secret as GITHUB_TOKEN above: that one
+#                       carries repo WRITE scope for report/guide commits, and an inference
+#                       path must not hold it. No fallback between them.
+#   CEREBRAS_API_KEY  - task-type routing, long-document lane (workers/cerebras-client.js)
+#   MISTRAL_API_KEY   - task-type routing, backup lanes (workers/mistral-client.js)
+#   COHERE_API_KEY    - task-type routing, embeddings lane (workers/cohere-client.js).
+#                       No callers yet — the local brain's search is not built.
+#                       All four fail closed (logged, null) while unset. Routing itself
+#                       ships OFF behind SIM_KV `routing_enabled`; see CLAUDE.md.
 #   ANTHROPIC_API_KEY - required for the Guides pipeline (workers/claude-client.js,
 #                       direct https://api.anthropic.com/v1/messages calls — the
 #                       error-1042 *.workers.dev restriction doesn't apply to

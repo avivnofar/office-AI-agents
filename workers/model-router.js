@@ -25,6 +25,21 @@
  */
 
 import tokenEconomy from '../config/token-economy.json';
+import modelRouting from '../config/model-routing.json';
+import {
+  routeTask,
+  resolveLane,
+  routingEnabled,
+  assignEmbodiment,
+  renderEmbodimentMap,
+  checkProviderAllowance,
+  recordProviderCall,
+  getProviderCallsToday,
+  getProviderUsageToday,
+  hasKnownCap,
+  dailyCapFor,
+  PROVIDER_REGISTRY,
+} from './task-router.js';
 
 const CHORE = tokenEconomy.chore_automation;
 
@@ -170,3 +185,102 @@ export function selectModelForChoreTask({ projectKey, taskType, requiresHighQual
   }
   return { model: 'gemini', reason: 'General economy: Gemini is the expanded-role default writer for content generation.' };
 }
+
+/* ════════════════════════════════════════════════════════════════════════
+ * TASK-TYPE ROUTING (added 2026-08-05, plan Phase 3) — SHIPPED OFF
+ *
+ * Everything above this line is the pre-existing budget router and is
+ * unchanged: selectModelForChoreTask() still returns the same model for the
+ * same inputs, and getClaudeBudgetStatus()/recordClaudeSpend() still behave
+ * exactly as they did. Nothing below is reachable from any of it.
+ *
+ * This section binds workers/task-router.js — which deliberately imports no
+ * JSON so its verifier can load it under plain `node` — to the two real
+ * config files and re-exports the result. model-router.js stays the module
+ * name the plan and CLAUDE.md point at for "routing"; task-router.js is
+ * where the logic lives so it can be tested by calling it rather than by
+ * grepping it.
+ *
+ * THE SWITCH: routeTaskTypeCall() refuses with `routing_disabled` while
+ * SIM_KV's simulation-state `routing_enabled` flag is absent or false, which
+ * is the state this ships in. It contacts no provider, creates no D1 table
+ * and touches no counter while off.
+ *
+ * ANTHROPIC IS NOT REACHABLE FROM ANY OF THIS. There is no Anthropic entry
+ * in PROVIDER_REGISTRY and no Anthropic id in config/model-routing.json.
+ * The pre-existing Anthropic callers — agents/agent-base.js _askDataCenter()
+ * through the APP_API service binding, and workers/claude-client.js's direct
+ * Messages API calls for the Guides pipeline — never went through this
+ * router and are untouched by it. Their budgets remain the ones above.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+/** The lane table as loaded (config/model-routing.json). */
+export const MODEL_ROUTING = modelRouting;
+
+/**
+ * Routes one task by task type and calls the resolved provider.
+ * Never throws. See task-router.js routeTask() for the degradation ladder.
+ *
+ * @param {object} env - Worker env
+ * @param {string} taskType - a lane key: 'judgment' | 'long_document' |
+ *   'hebrew_composition' | 'routine_volume' | 'classification' |
+ *   'conversation' | 'embeddings'. ('architect' resolves to a refusal.)
+ * @param {object} [opts] - prompt/systemPrompt/maxTokens/personas/etc.,
+ *   plus `bypassGate: true` for supervised testing only.
+ */
+export async function routeTaskTypeCall(env, taskType, opts = {}) {
+  return routeTask({ env, taskType, routingConfig: modelRouting, tokenEconomy, ...opts });
+}
+
+/** Resolves a task type to its ordered candidate providers without calling
+ * anything. Used by the verifier and the supervised-test read-back. */
+export function resolveTaskLane(taskType, opts = {}) {
+  return resolveLane(modelRouting, taskType, opts);
+}
+
+/** Per-provider allowance check bound to the real config. */
+export async function checkRoutedProviderAllowance(env, providerId, opts = {}) {
+  return checkProviderAllowance(env, providerId, { tokenEconomy, routingConfig: modelRouting, ...opts });
+}
+
+/** Today's per-provider usage plus each provider's known cap and soft-stop —
+ * the quota view for the admin status endpoint (plan item 3.5). */
+export async function getRoutingQuotaStatus(env, asOf = new Date()) {
+  const usage = await getProviderUsageToday(env, asOf);
+  const byProvider = Object.fromEntries(usage.map((r) => [r.provider, r]));
+  const fraction = modelRouting.soft_stop_fraction ?? 0.6;
+
+  return {
+    routingEnabled: await routingEnabled(env),
+    softStopFraction: fraction,
+    day: asOf.toISOString().slice(0, 10),
+    providers: Object.keys(PROVIDER_REGISTRY).map((id) => {
+      const cap = dailyCapFor(tokenEconomy, id);
+      const row = byProvider[id];
+      return {
+        provider: id,
+        callsToday: row?.call_count ?? 0,
+        confirmedToday: row?.confirmed_count ?? 0,
+        inputTokensToday: row?.input_tokens ?? 0,
+        outputTokensToday: row?.output_tokens ?? 0,
+        dailyCap: cap,
+        softStop: cap === null ? null : Math.floor(cap * fraction),
+        // null cap means UNKNOWN, never unlimited — such a provider is
+        // constrained by wall-clock pacing instead of a count.
+        capUnknown: cap === null,
+      };
+    }),
+  };
+}
+
+export {
+  routingEnabled,
+  assignEmbodiment,
+  renderEmbodimentMap,
+  recordProviderCall,
+  getProviderCallsToday,
+  getProviderUsageToday,
+  hasKnownCap,
+  dailyCapFor,
+  PROVIDER_REGISTRY,
+};

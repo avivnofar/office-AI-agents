@@ -52,7 +52,7 @@
  * Status: added inert. Nothing imports this module as of this commit.
  */
 
-import { estimatePromptTokens, normalizeOpenAiChat } from './provider-common.js';
+import { estimatePromptTokens, normalizeOpenAiChat, parseRateLimitHeaders } from './provider-common.js';
 
 const GITHUB_MODELS_ENDPOINT = 'https://models.github.ai/inference';
 
@@ -156,6 +156,7 @@ export async function callGithubModels({
   maxTokens = 512,
   model = DEFAULT_MODEL,
   agentId,
+  onResponse,
 }) {
   if (!apiKey) {
     console.warn(`[agent-${agentId}] GITHUB_MODELS_TOKEN not configured — set it with \`npx wrangler secret put GITHUB_MODELS_TOKEN\``);
@@ -186,6 +187,12 @@ export async function callGithubModels({
     console.warn(`[agent-${agentId}] GitHub Models request failed: ${err.message}`);
     return null;
   }
+
+  // The provider responded — whatever it said. This fires BEFORE the status
+  // checks below on purpose: a 429 or a 500 still consumed a free-tier
+  // request allowance, and the token economy has to count it. See
+  // task-router.js recordProviderCall()'s note on confirmed evidence.
+  onResponse?.({ status: res.status, rateLimit: parseRateLimitHeaders(res) });
 
   if (res.status === 429) {
     console.warn(`[agent-${agentId}] GitHub Models 429 — free-tier request rate exhausted`);
