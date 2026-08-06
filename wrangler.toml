@@ -72,20 +72,66 @@ binding = "AI"
 #                       11-agent Q&A engine's own Claude asks still go through
 #                       the APP_API service binding above, unaffected by this.
 
-# Per-block office-simulation cron. Fires every 30 min across 23:00-23:30 +
-# 00:00-13:30 UTC = 02:00-16:30 IDT (Israel Daylight Time, UTC+3) — the
-# owner's 02:00-17:00 Israel activity window. Each tick, scheduled()
-# converts to Israel local time and calls runScheduledBlock(), which is a
-# no-op unless config/daily-schedule.json has a block at that exact time
-# for that day-of-week. RE-ENABLED 2026-07-18 (first live activation of the
-# Q&A engine, after the 2026-07-08 pause) with the widened window above —
-# first-days volume is capped by config/token-economy.json's
-# graduated_rollout_throttle, see TOKEN-BUDGET.md's 2026-07-18 activation
-# entry. DST CAVEAT: when Israel switches to IST (UTC+2, late Oct) or back
-# to IDT (late Mar), update BOTH this cron window and
-# ISRAEL_UTC_OFFSET_HOURS in agent-runner.js — see CLAUDE.md.
+# Per-block office-simulation cron — OFFICE HOURS, 08:00-18:00 Israel.
+#
+# CHANGED 2026-08-06 from `*/30 0-13,23 * * *` (which was 02:00-16:30 Israel,
+# 30 ticks/day) to the two expressions below (08:00-18:00 Israel, 21
+# ticks/day). The old window started before dawn because it was set to the
+# owner's own activity window in July, not to anything the office needed.
+#
+# THE ARITHMETIC, against IDT = UTC+3, so you can re-derive it rather than
+# trust it:
+#   `*/30 5-14 * * *` -> minutes {0,30} x hours {5..14} UTC
+#                     =  05:00 .. 14:30 UTC  =  08:00 .. 17:30 Israel  (20)
+#   `0 15 * * *`      ->  15:00 UTC          =  18:00 Israel exactly    (1)
+#                                               ------------------------
+#                                               08:00-18:00 inclusive   21
+#
+# WHY TWO EXPRESSIONS AND NOT `*/30 5-15`: that form would also fire at
+# 15:30 UTC = 18:30 Israel, half an hour past closing. The single `0 15`
+# picks up the 18:00 boundary tick without the 18:30 one.
+#
+# Each tick, scheduled() converts to Israel local time and calls
+# runScheduledBlock(), which is a NO-OP unless config/daily-schedule.json
+# has a block at that exact time for that day-of-week. Ticks are therefore
+# cheap; blocks are what cost anything.
+#
+# CONFIG THAT MOVED WITH THIS — config/daily-schedule.json. Five case_batch
+# blocks sat before 08:00 (Sun-Thu 02:00/04:30/07:00, Friday 02:00/05:30)
+# and were RETIMED into this window in the same change, not left outside
+# it. That was not cosmetic: partitionCasesByShare() (agent-runner.js
+# L1203) allocates each batch its `case_share` slice UP FRONT and does not
+# redistribute a slice whose block never fires, so leaving them would have
+# silently DROPPED 50% of a Sun-Thu day's question volume and 70% of a
+# Friday's. No share value was edited and no block was added or removed —
+# only times moved, so day totals are unchanged. Every block time must land
+# on a :00 or :30 tick inside this window or it is simply never reached.
+#
+# DST CAVEAT — UNCHANGED AND STILL LOAD-BEARING. When Israel switches to
+# IST (UTC+2, late Oct) or back to IDT (late Mar), update BOTH this cron
+# window AND ISRAEL_UTC_OFFSET_HOURS (agent-runner.js L1767, hardcoded 3) —
+# see CLAUDE.md. Neither self-corrects. At UTC+2 and with this cron left
+# alone, the window silently becomes 07:00-17:00 Israel.
+#
+# DST AND THE LOCAL AUTOMATION RUNS. The Windows Task Scheduler runs on the
+# owner's machine fire at 00:00 and 05:00 Israel LOCAL time (owner
+# decision, 2026-08-06), and Task Scheduler self-corrects across DST
+# because it is wall-clock local. This cron does not. At UTC+3 the 05:00
+# run is 3 hours clear of this window's 08:00 open; at UTC+2 the window
+# opens at 07:00 instead and that margin narrows to 2 hours. The
+# separation survives the DST shift; the margin does not — so a future
+# widening of this window toward the morning spends that margin.
+# (ARCHITECT-AUTOMATION-SPEC.md in back-office states 02:30 and 07:28.
+# Those times are STALE and superseded by the above; that file belongs to
+# a separate chat and is corrected there, not here. The divergence is
+# recorded in back-office-AI-agents/plans/OFFICE-SCALING-TODO.md.)
+#
+# RE-ENABLED 2026-07-18 (first live activation of the Q&A engine, after the
+# 2026-07-08 pause) — first-days volume is capped by
+# config/token-economy.json's graduated_rollout_throttle, see
+# TOKEN-BUDGET.md's 2026-07-18 activation entry.
 [triggers]
 # RESTORED 2026-07-19 evening after the stale-DO-state incident fixes were
 # verified live (micro-test + supervised block-by-block day 24, both clean —
 # see TOKEN-BUDGET.md's 2026-07-19 entries).
-crons = ["*/30 0-13,23 * * *"]
+crons = ["*/30 5-14 * * *", "0 15 * * *"]

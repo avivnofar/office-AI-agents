@@ -200,6 +200,59 @@ CREATE TABLE IF NOT EXISTS guide_pipeline (
 CREATE INDEX IF NOT EXISTS idx_guide_pipeline_slug ON guide_pipeline(slug);
 CREATE INDEX IF NOT EXISTS idx_guide_pipeline_date ON guide_pipeline(date);
 
+-- Per-provider free-tier call counters for task-type routing
+-- (config/model-routing.json, workers/task-router.js). The routing analogue of
+-- claude_budget_usage above: that one counts DOLLARS per month against a spend
+-- ceiling, this one counts CALLS per period against a free-tier allowance.
+--
+-- DECLARED HERE 2026-08-06 (plan item 1.8). Until then this table lived ONLY
+-- as PROVIDER_USAGE_TABLE_SQL in workers/task-router.js, created lazily on
+-- first routed call — a knowing break from the claude_budget_usage precedent
+-- of living in both places. It is declared now, in the session that gives the
+-- table its first real writer, so the declaration and the first write are
+-- verified together rather than a table being declared that nothing uses.
+--
+-- ⚠️ THIS DECLARATION WILL NOT RETROFIT A LIVE TABLE. Same trap as the
+-- 2026-07-18 ALTER TABLE note at the bottom of this file: `CREATE TABLE IF
+-- NOT EXISTS` is a no-op against a database where the table already exists,
+-- and this table is created LAZILY by code. If routing has ever run against a
+-- given D1 instance, that instance's provider_usage was built by
+-- task-router.js and this statement will silently do nothing to it. Should the
+-- two ever diverge, they must be cross-checked BY HAND — there is no migration
+-- path here and SQLite/D1 has no "ADD COLUMN IF NOT EXISTS".
+-- As of 2026-08-06 the table does NOT exist in production (verified: routing
+-- has never been enabled, so nothing has ever routed), which is precisely why
+-- declaring it now is cheap and declaring it later would not be.
+--
+-- Kept character-for-character identical to PROVIDER_USAGE_TABLE_SQL
+-- (workers/task-router.js L408-417). Two copies of one fact, on purpose: the
+-- Worker cannot read this file at runtime, and a fresh-database rebuild cannot
+-- read the Worker. Change one, change the other.
+--
+-- `period_key` is the composite '<provider>#<bucket>' — the same shape as
+-- claude_budget_usage's month key. `day` holds the BUCKET LABEL, not
+-- necessarily a calendar date: 'YYYY-MM-DD' for a daily allowance,
+-- 'YYYY-MM' for a monthly one (Cohere's 1,000/month trial key is the only
+-- monthly provider today). One column serves both because the composite
+-- primary key already keeps the two families from colliding, and because
+-- adding a second column to a lazily-created table is exactly the migration
+-- this design avoids.
+--
+-- `call_count` vs `confirmed_count`: calls are recorded AFTER the fact on
+-- evidence, and the split records whether the provider's own response
+-- confirmed the call happened. An unconfirmed call still counts against the
+-- allowance — the conservative direction.
+CREATE TABLE IF NOT EXISTS provider_usage (
+  period_key TEXT PRIMARY KEY,
+  provider TEXT NOT NULL,
+  day TEXT NOT NULL,
+  call_count INTEGER DEFAULT 0,
+  confirmed_count INTEGER DEFAULT 0,
+  input_tokens INTEGER DEFAULT 0,
+  output_tokens INTEGER DEFAULT 0,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- General agent-conduct rule: max 1 pull (external repo checkout/fetch) per
 -- day, repo-wide, regardless of config/project-permissions.json push state.
 -- See workers/permission-guard.js checkAndRecordPull().
