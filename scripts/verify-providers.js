@@ -18,7 +18,6 @@
 import { createRequire } from 'node:module';
 import { readFileSync, readdirSync } from 'node:fs';
 
-import * as githubModels from '../workers/github-models-client.js';
 import * as cerebras from '../workers/cerebras-client.js';
 import * as mistral from '../workers/mistral-client.js';
 import * as cohere from '../workers/cohere-client.js';
@@ -79,7 +78,6 @@ console.log('=== Provider client verification — dry-run only, no network/model
 console.log('--- Uniform export surface (what the router expects from every provider) ---');
 
 const MODULES = [
-  { name: 'github-models-client.js', mod: githubModels, id: 'github-models', kind: 'chat', secret: 'GITHUB_MODELS_TOKEN', limitsExport: 'GITHUB_MODELS_LIMITS' },
   { name: 'cerebras-client.js', mod: cerebras, id: 'cerebras', kind: 'chat', secret: 'CEREBRAS_API_KEY', limitsExport: 'CEREBRAS_LIMITS' },
   { name: 'mistral-client.js', mod: mistral, id: 'mistral', kind: 'chat', secret: 'MISTRAL_API_KEY', limitsExport: 'MISTRAL_LIMITS' },
   { name: 'cohere-client.js', mod: cohere, id: 'cohere', kind: 'embeddings', secret: 'COHERE_API_KEY', limitsExport: 'COHERE_LIMITS' },
@@ -127,42 +125,90 @@ for (const { name, mod, secret } of MODULES) {
 
 check('no missing-key path reached the network', NETWORK_TRIPWIRE.length === 0, NETWORK_TRIPWIRE.join(', '));
 
-/* ── GitHub Models: the input caps are REAL and enforced ────────────────── */
-console.log('\n--- GitHub Models free-tier caps (8K in / 4K out) enforced, never truncated ---');
+/* ── GitHub Models is GONE, and stays gone ──────────────────────────────── */
+//
+// Removed 2026-08-06: the service was permanently retired on 2026-07-30. This
+// section exists because a dead provider is easy to half-remove — the client
+// file goes but a registry entry, a pool member or a config block survives and
+// resolves to `unknown_provider` at runtime instead of at verify time.
+console.log('\n--- GitHub Models is fully removed (retired 2026-07-30) ---');
 
-check('GITHUB_MODELS_LIMITS.maxInputTokensPerRequest is 8000', githubModels.GITHUB_MODELS_LIMITS.maxInputTokensPerRequest === 8000);
-check('GITHUB_MODELS_LIMITS.maxOutputTokensPerRequest is 4000', githubModels.GITHUB_MODELS_LIMITS.maxOutputTokensPerRequest === 4000);
+const routingConfigForRemoval = require('../config/model-routing.json');
+const workerSources = readdirSync(new URL('../workers/', import.meta.url))
+  .filter((f) => f.endsWith('.js'))
+  .map((f) => ({ f, src: readFileSync(new URL(`../workers/${f}`, import.meta.url), 'utf8') }));
+
+check('workers/github-models-client.js no longer exists',
+  !readdirSync(new URL('../workers/', import.meta.url)).includes('github-models-client.js'));
+// Matches an IMPORT specifically, not a mention. The removal notes in
+// task-router.js and elsewhere name the dead file on purpose — that is
+// decision history, and a check that forbids writing the name would force
+// those notes to be deleted to stay green.
+const GH_IMPORT = /from\s+['"][^'"]*github-models-client\.js['"]/;
+check('no worker module imports a github-models client',
+  workerSources.every(({ src }) => !GH_IMPORT.test(src)),
+  workerSources.filter(({ src }) => GH_IMPORT.test(src)).map((m) => m.f).join(','));
+check('no lane names github-models as primary or backup',
+  !Object.values(routingConfigForRemoval.lanes).some((l) => l.primary === 'github-models' || l.backup === 'github-models'));
+check('the conversation pool no longer contains github-models',
+  !routingConfigForRemoval.lanes.conversation.pool.includes('github-models'),
+  routingConfigForRemoval.lanes.conversation.pool.join(','));
+check('token-economy has no live providers.github_models block',
+  !tokenEconomy.providers.github_models);
+check('...but the removal IS recorded rather than silently vanishing (decision history)',
+  !!tokenEconomy.providers._github_models_removed?.why);
+check('the removal note warns against re-adding it on the stale "brownout" wording',
+  /stale/i.test(tokenEconomy.providers._github_models_removed?.do_not_re_add || ''));
+check('the outstanding owner action (delete the dead secret) is recorded',
+  /GITHUB_MODELS_TOKEN/.test(tokenEconomy.providers._github_models_removed?.owner_action_outstanding || ''));
+check('GITHUB_TOKEN (repo write scope) is explicitly NOT the secret being retired',
+  /GITHUB_TOKEN/.test(tokenEconomy.providers._github_models_removed?.owner_action_outstanding || ''));
+
+/* ── Cerebras: the context ceiling is REAL, measured, and enforced ──────── */
+console.log('\n--- Cerebras 131K context ceiling enforced, never truncated ---');
+
+check('CEREBRAS_LIMITS.maxInputTokensPerRequest is the measured 131000',
+  cerebras.CEREBRAS_LIMITS.maxInputTokensPerRequest === 131000,
+  String(cerebras.CEREBRAS_LIMITS.maxInputTokensPerRequest));
+check('CEREBRAS_LIMITS.requestsPerMinute is the measured 1000', cerebras.CEREBRAS_LIMITS.requestsPerMinute === 1000);
+check('CEREBRAS_LIMITS.requestsPerDay stays null — the 1440000 daily header is rpm x 1440, not a real ceiling',
+  cerebras.CEREBRAS_LIMITS.requestsPerDay === null, String(cerebras.CEREBRAS_LIMITS.requestsPerDay));
+check('cerebras default model is the catalog-verified gpt-oss-120b (llama-3.3-70b did not exist)',
+  cerebras.PROVIDER.defaultModel === 'gpt-oss-120b', cerebras.PROVIDER.defaultModel);
 
 const shortPrompt = 'Score this answer 0-1.';
-const okVerdict = githubModels.checkInputWithinCaps({ prompt: shortPrompt, maxTokens: 512 });
+const okVerdict = cerebras.checkInputWithinCaps({ prompt: shortPrompt, maxTokens: 512 });
 check('a short judgment call passes the cap check', okVerdict.ok === true);
 check('a passing verdict carries no reason', okVerdict.reason === null);
 
-// chars/3 estimator => 8000 tokens ≈ 24000 chars. 40000 chars is comfortably over.
-const longReportBatch = 'x'.repeat(40_000);
-const overVerdict = githubModels.checkInputWithinCaps({ prompt: longReportBatch, maxTokens: 512 });
-check('a long report batch FAILS the cap check', overVerdict.ok === false);
+// chars/3 estimator => 131000 tokens ≈ 393000 chars. 500000 chars is over.
+const hugeReportBatch = 'x'.repeat(500_000);
+const overVerdict = cerebras.checkInputWithinCaps({ prompt: hugeReportBatch, maxTokens: 512 });
+check('an over-131K report batch FAILS the cap check', overVerdict.ok === false);
 check('the refusal reason names the measured size and the cap',
-  /~\d+ tokens/.test(overVerdict.reason || '') && (overVerdict.reason || '').includes('8000'), overVerdict.reason);
+  /~\d+ tokens/.test(overVerdict.reason || '') && (overVerdict.reason || '').includes('131000'), overVerdict.reason);
 check('the refusal reason says it is NOT truncating', /[Nn]ot truncating/.test(overVerdict.reason || ''), overVerdict.reason);
-check('the refusal points at the long-context lane (cerebras) as the correct destination',
-  /cerebras/i.test(overVerdict.reason || ''), overVerdict.reason);
+check('the refusal says there is no larger provider behind this lane',
+  /no larger provider/i.test(overVerdict.reason || ''), overVerdict.reason);
 
-const overOutput = githubModels.checkInputWithinCaps({ prompt: shortPrompt, maxTokens: 8192 });
-check('an over-cap OUTPUT request also fails the check', overOutput.ok === false);
-check('the output refusal says it is NOT clamping', /[Nn]ot clamping/.test(overOutput.reason || ''), overOutput.reason);
+// A 130K-token batch must still PASS — the cap has to admit the work the lane
+// exists for, not just reject the extreme. The estimator over-counts (chars/3),
+// so size the input by the estimate rather than by raw length.
+const nearLimit = 'x'.repeat(130_000 * 3 - 3000);
+check('a just-under-limit batch is still ACCEPTED (the cap admits the lane\'s real work)',
+  cerebras.checkInputWithinCaps({ prompt: nearLimit, maxTokens: 512 }).ok === true);
 
 const [oversizeCall, oversizeWarnings] = await captureWarnings(() =>
-  githubModels.callGithubModels({ apiKey: 'fake-key-never-sent', prompt: longReportBatch, agentId: 'verify' }));
-check('callGithubModels() with a VALID key still refuses oversized input', oversizeCall === null);
-check('the refusal is logged, naming the cap', oversizeWarnings.some((w) => w.includes('8000')), JSON.stringify(oversizeWarnings));
+  cerebras.callCerebras({ apiKey: 'fake-key-never-sent', prompt: hugeReportBatch, agentId: 'verify' }));
+check('callCerebras() with a VALID key still refuses oversized input', oversizeCall === null);
+check('the refusal is logged, naming the cap', oversizeWarnings.some((w) => w.includes('131000')), JSON.stringify(oversizeWarnings));
 check('the refusal happened BEFORE any network call (cap is pre-flight, not a provider 400)',
   NETWORK_TRIPWIRE.length === 0, NETWORK_TRIPWIRE.join(', '));
 
 /* ── The other clients: caps are null, and null means "unknown" ─────────── */
 console.log('\n--- Unknown caps are null and permissive, never invented ---');
 
-for (const { name, mod } of MODULES.filter((m) => m.id !== 'github-models')) {
+for (const { name, mod } of MODULES.filter((m) => m.id !== 'cerebras')) {
   const limits = mod.PROVIDER.limits;
   check(`${name} declares maxInputTokensPerRequest explicitly (null = unknown)`,
     'maxInputTokensPerRequest' in limits);
@@ -234,10 +280,10 @@ const envelope = normalizeOpenAiChat({
     usage: { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 },
   },
   res: fakeRes,
-  source: 'github-models',
+  source: 'cerebras',
 });
 check('envelope carries text, trimmed', envelope.text === 'scored 0.8');
-check('envelope carries source', envelope.source === 'github-models');
+check('envelope carries source', envelope.source === 'cerebras');
 check('envelope carries finishReason (so a max_tokens truncation can be REJECTED, not parsed)', envelope.finishReason === 'stop');
 check('envelope carries provider-reported usage (evidence a call happened, for the token economy)',
   envelope.usage?.inputTokens === 100 && envelope.usage?.outputTokens === 20);
@@ -277,7 +323,7 @@ check('providers._meta states there is no automatic escalation to paid, for any 
 check('providers._meta explains that null means unknown, NOT unlimited',
   /does not mean unlimited|not.*unlimited/i.test(providers._meta?.nulls_are_honest || ''));
 
-const CONFIG_KEYS = { 'github-models': 'github_models', cerebras: 'cerebras', mistral: 'mistral', cohere: 'cohere' };
+const CONFIG_KEYS = { cerebras: 'cerebras', mistral: 'mistral', cohere: 'cohere' };
 for (const { name, mod, secret } of MODULES) {
   const cfg = providers[CONFIG_KEYS[mod.PROVIDER.id]];
   check(`providers.${CONFIG_KEYS[mod.PROVIDER.id]} exists in config`, !!cfg);
@@ -291,14 +337,45 @@ for (const { name, mod, secret } of MODULES) {
     `config ${cfg?.max_input_tokens_per_request} vs module ${mod.PROVIDER.limits.maxInputTokensPerRequest}`);
 }
 
-check('providers.github_models records the 8000-token input cap',
-  providers.github_models?.max_input_tokens_per_request === 8000);
-check('providers.github_models records the 4000-token output cap',
-  providers.github_models?.max_output_tokens_per_request === 4000);
-check('providers.github_models keeps its request-rate fields null (rate varies by model tier — no honest single number)',
-  providers.github_models?.requests_per_day === null && providers.github_models?.requests_per_minute === null);
-check('providers.github_models documents why its own secret is not the repo-write GITHUB_TOKEN',
-  /GITHUB_TOKEN/.test(providers.github_models?._secret_scope_note || ''));
+/* ── The measured rate limits agree between config and modules ──────────── */
+console.log('\n--- Measured free-tier numbers (2026-08-06) are recorded, and recorded consistently ---');
+
+check('providers.cerebras records the measured 131000-token input cap',
+  providers.cerebras?.max_input_tokens_per_request === 131000);
+check('providers.cerebras records the measured 1000 req/min',
+  providers.cerebras?.requests_per_minute === 1000);
+check('providers.cerebras.requests_per_minute matches CEREBRAS_LIMITS',
+  providers.cerebras?.requests_per_minute === cerebras.CEREBRAS_LIMITS.requestsPerMinute);
+check('providers.cerebras.requests_per_day is null (the daily header is derived, not a real ceiling)',
+  providers.cerebras?.requests_per_day === null);
+check('...and the config EXPLAINS why, naming the 1440000 figure it is refusing to copy',
+  /1440000/.test(providers.cerebras?._why_requests_per_day_is_still_null || ''));
+check('providers.cerebras records the concentration risk of serving two lanes',
+  /two lanes|both lanes/i.test(providers.cerebras?._concentration_risk || ''));
+check('...and names OpenRouter as the intended diversification',
+  /OpenRouter/i.test(providers.cerebras?._concentration_risk || ''));
+
+check('providers.mistral records the measured 50 req/min', providers.mistral?.requests_per_minute === 50);
+check('providers.mistral.requests_per_minute matches MISTRAL_LIMITS',
+  providers.mistral?.requests_per_minute === mistral.MISTRAL_LIMITS.requestsPerMinute);
+check('providers.mistral.requests_per_day is null (Mistral publishes no daily header at all)',
+  providers.mistral?.requests_per_day === null);
+
+check('providers.cohere carries a MONTHLY cap, not a daily one',
+  providers.cohere?.requests_per_month === 1000 && providers.cohere?.requests_per_day === null);
+check('providers.cohere.requests_per_month matches COHERE_LIMITS',
+  providers.cohere?.requests_per_month === cohere.COHERE_LIMITS.requestsPerMonth);
+check('providers.cohere records that this is a TRIAL key, not a free production tier',
+  /trial/i.test(providers.cohere?._THIS_IS_A_TRIAL_KEY_NOT_A_FREE_TIER || ''));
+check('...and explains why a monthly cap was NOT divided into a daily one',
+  /monthly/i.test(providers.cohere?._why_the_cap_is_MONTHLY_and_the_daily_field_is_null || ''));
+
+check('providers._meta documents the requests_per_month field and its bucketing',
+  /requests_per_month/.test(providers._meta?.cap_periods_added_2026_08_06 || ''));
+check('providers._meta states that per-minute is the binding constraint where no true daily cap exists',
+  /per.minute/i.test(providers._meta?.per_minute_is_the_binding_constraint_where_no_true_daily_cap_exists || ''));
+check('...and warns against copying a derived daily number out of a response header',
+  /DO NOT copy/i.test(providers._meta?.per_minute_is_the_binding_constraint_where_no_true_daily_cap_exists || ''));
 
 /* ── Anthropic is absent from the routable set ──────────────────────────── */
 console.log('\n--- Anthropic is unreachable from the routable provider set ---');
@@ -344,7 +421,7 @@ check('report_model is untouched (Gemini 3.1 Flash-Lite)', tokenEconomy.report_m
 // agent-base.js would bypass both, and this is what catches that.
 console.log('\n--- Containment: new providers are reachable only through the router ---');
 
-const NEW_MODULES = ['github-models-client.js', 'cerebras-client.js', 'mistral-client.js', 'cohere-client.js', 'provider-common.js'];
+const NEW_MODULES = ['cerebras-client.js', 'mistral-client.js', 'cohere-client.js', 'provider-common.js'];
 const ALLOWED_IMPORTERS = ['task-router.js'];
 const workerFiles = readdirSync(new URL('../workers/', import.meta.url)).filter((f) => f.endsWith('.js'));
 const agentFiles = readdirSync(new URL('../agents/', import.meta.url)).filter((f) => f.endsWith('.js'));
@@ -364,8 +441,8 @@ for (const [dir, files] of [['workers', workerFiles], ['agents', agentFiles]]) {
 }
 check('no file except the router imports a provider client directly (so nothing bypasses the switch or the quota check)',
   importers.length === 0, importers.join(', '));
-check('the router itself DOES import all four clients (it is the single entry point)',
-  ['github-models-client.js', 'cerebras-client.js', 'mistral-client.js', 'cohere-client.js'].every((m) =>
+check('the router itself DOES import all three clients (it is the single entry point)',
+  ['cerebras-client.js', 'mistral-client.js', 'cohere-client.js'].every((m) =>
     new RegExp(`from\\s+'\\./${m.replace('.', '\\.')}'`).test(
       readFileSync(new URL('../workers/task-router.js', import.meta.url), 'utf8'))));
 
@@ -378,7 +455,7 @@ check('every new client imports the shared helpers rather than copying them',
 
 check('model-router.js reaches the providers only via task-router.js, never by importing a client directly',
   /from '\.\/task-router\.js'/.test(readFileSync(new URL('../workers/model-router.js', import.meta.url), 'utf8'))
-  && !/from '\.\/(github-models|cerebras|mistral|cohere)-client\.js'/.test(
+  && !/from '\.\/(cerebras|mistral|cohere)-client\.js'/.test(
     readFileSync(new URL('../workers/model-router.js', import.meta.url), 'utf8')));
 
 /* ── Final network assertion ────────────────────────────────────────────── */

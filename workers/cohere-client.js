@@ -59,8 +59,9 @@ const COHERE_ENDPOINT = 'https://api.cohere.com/v2';
  * poor vectors for exactly the Hebrew half — poor, not absent, which is the
  * hard failure mode to notice.
  *
- * UNVERIFIED against the live catalog as of 2026-08-05 — no network call was
- * made this session.
+ * VERIFIED against the live catalog on 2026-08-06 — present, alongside
+ * embed-v4.0 and the light/english variants. A live call returned a
+ * 1024-dimension vector.
  */
 const DEFAULT_MODEL = 'embed-multilingual-v3.0';
 
@@ -69,16 +70,37 @@ const DEFAULT_MODEL = 'embed-multilingual-v3.0';
  * `providers.cohere` block; scripts/verify-providers.js asserts the two
  * agree.
  *
- * All null — unknown to this session, not unlimited. Cohere's trial-key
- * allowances (per-minute calls and a monthly call ceiling) are published but
- * were not read back live this session, and a trial key's limits differ from
- * a production key's.
+ * MEASURED 2026-08-06 from live response headers on a v2/embed call:
+ *   x-trial-endpoint-call-limit     100   (per minute)
+ *   x-endpoint-monthly-call-limit  1000   (per MONTH)
+ *
+ * ── THIS IS A TRIAL KEY, NOT A FREE PRODUCTION TIER ──────────────────────
+ *
+ * The header is literally named `x-trial-endpoint-call-limit`. Trial keys are
+ * rate-limited harder than production keys, are not licensed for production
+ * use under Cohere's terms, and can be expired or revoked on a schedule this
+ * repo does not control. If the local brain's semantic search ever becomes
+ * load-bearing, moving to a production key is an OWNER decision under the
+ * overtime rule — not a config edit.
+ *
+ * ── THE CAP IS MONTHLY, AND THAT IS WHY requests_per_day DOES NOT EXIST ──
+ *
+ * 1000 calls per MONTH is the real allowance, and there is no honest daily
+ * equivalent. Dividing by 30 gives ~33/day, and the router's 60% soft stop
+ * would then refuse at ~20 calls/day while 980 monthly calls sat unused;
+ * treating it as a daily number would let one busy day spend the whole month.
+ * So workers/task-router.js's capFor() reads `requests_per_month` and buckets
+ * this provider's counter as '<provider>#YYYY-MM'. Cohere is the only
+ * provider in this repo on a monthly period.
  */
 export const COHERE_LIMITS = {
   maxInputTokensPerRequest: null,
   maxTextsPerRequest: null,
-  requestsPerMinute: null,
-  requestsPerMonth: null,
+  requestsPerMinute: 100,
+  requestsPerDay: null,
+  requestsPerMonth: 1000,
+  embeddingDimensions: 1024,
+  trialKey: true,
   resetUtc: null,
   paid: false,
 };

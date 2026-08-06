@@ -40,9 +40,38 @@
  * The two are independent: breaking one does not open the path.
  * scripts/verify-routing.js proves both, including by deliberately pointing
  * a lane at 'anthropic' and asserting the denial.
+ *
+ * ── GITHUB MODELS WAS REMOVED, 2026-08-06 ────────────────────────────────
+ *
+ * The judgment lane originally ran on GitHub Models with Cerebras behind it.
+ * GitHub Models was **fully retired on 2026-07-30** — playground, catalog,
+ * inference API and BYOK, permanently, for all customers. The supervised
+ * test's Step 1 caught it: both the catalog and the inference endpoint return
+ * HTTP 410, and they return it *with no Authorization header at all*, which
+ * is what distinguishes a dead service from a bad key.
+ *
+ * The provider is gone from this registry, from config/model-routing.json,
+ * from config/token-economy.json, and workers/github-models-client.js is
+ * deleted. **Do not re-add it as a fallback.** The 410 body still says
+ * "temporarily unavailable ... brownout"; that text is stale and outlived the
+ * service it describes. Trust the retirement date, not the error string.
+ *
+ * ── CONCENTRATION RISK, STATED SO IT IS NOT DISCOVERED LATER ─────────────
+ *
+ * The replacement puts Cerebras PRIMARY on both `judgment` and
+ * `long_document`. That is a deliberate accepted risk, not an oversight:
+ * **one Cerebras outage now takes out two lanes at once**, and judgment
+ * degrades to Mistral while long_document degrades to the same Mistral — so
+ * a Cerebras failure concentrates both lanes onto a single backup.
+ *
+ * The intended diversification, if this ever bites, is **OpenRouter** as a
+ * third chat provider so the two lanes can hold different primaries again.
+ * It is deliberately NOT added now (owner decision, 2026-08-06): adding a
+ * provider to solve a risk that has not yet materialised spends a free tier
+ * and a secret on a hypothetical. Name it here so the option is found by
+ * whoever hits the outage, rather than rediscovered under pressure.
  */
 
-import { callGithubModels, PROVIDER as GITHUB_MODELS_PROVIDER } from './github-models-client.js';
 import { callCerebras, PROVIDER as CEREBRAS_PROVIDER } from './cerebras-client.js';
 import { callMistral, PROVIDER as MISTRAL_PROVIDER } from './mistral-client.js';
 import { callCohereEmbed, PROVIDER as COHERE_PROVIDER } from './cohere-client.js';
@@ -84,15 +113,8 @@ function envelope({ text, source, finishReason = null, usage = null, rateLimit =
 }
 
 export const PROVIDER_REGISTRY = {
-  'github-models': {
-    id: 'github-models',
-    kind: 'chat',
-    tokenEconomyKey: 'github_models',
-    secretName: GITHUB_MODELS_PROVIDER.secretName,
-    checkInputWithinCaps: GITHUB_MODELS_PROVIDER.checkInputWithinCaps,
-    hasCredential: (env) => !!env?.GITHUB_MODELS_TOKEN,
-    invoke: (env, opts) => callGithubModels({ ...opts, apiKey: env.GITHUB_MODELS_TOKEN }),
-  },
+  // GitHub Models was removed on 2026-08-06 — see the header note. Do not
+  // re-add it: the service is retired, not degraded.
   cerebras: {
     id: 'cerebras',
     kind: 'chat',
@@ -369,8 +391,10 @@ export function renderEmbodimentMap({ eventId, assignments = [], excluded = [] }
  * each other ('YYYY-MM#guides' there, '<provider>#YYYY-MM-DD' here), an
  * allow-check before the call, and a record after it.
  *
- * The period is a DAY, not a month, because these are free-tier request
- * allowances that reset daily — unlike a dollar budget.
+ * The period is USUALLY a day, because these are free-tier request allowances
+ * that reset daily — unlike a dollar budget. It is not always: Cohere's free
+ * tier is a MONTHLY call allowance, so the period is per-provider and comes
+ * from which field the config actually sets. See capFor().
  *
  * NOTE ON THE TABLE: it is created lazily here and is NOT declared in
  * database/schema.sql. That is a deliberate deviation from the
@@ -392,22 +416,73 @@ const PROVIDER_USAGE_TABLE_SQL = `CREATE TABLE IF NOT EXISTS provider_usage (
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )`;
 
-/** '<provider>#YYYY-MM-DD' — the composite-key pattern from the Claude budget. */
-export function providerPeriodKey(providerId, asOf = new Date()) {
-  return `${providerId}#${asOf.toISOString().slice(0, 10)}`;
+/**
+ * The bucket string a provider's counter is keyed on.
+ *
+ * 'day'   -> 'YYYY-MM-DD'
+ * 'month' -> 'YYYY-MM'
+ *
+ * Both go in the SAME `day` column of provider_usage. That column holds a
+ * bucket label, not necessarily a calendar date, and the composite
+ * `period_key` keeps the two families from colliding. Keeping one column
+ * avoids a schema migration on a table that is created lazily and cannot be
+ * altered by `CREATE TABLE IF NOT EXISTS`.
+ */
+export function periodBucket(period, asOf = new Date()) {
+  const iso = asOf.toISOString();
+  return period === 'month' ? iso.slice(0, 7) : iso.slice(0, 10);
 }
 
-/** Known daily cap for a provider, or null if this repo does not know it. */
-export function dailyCapFor(tokenEconomy, providerId) {
+/** '<provider>#<bucket>' — the composite-key pattern from the Claude budget. */
+export function providerPeriodKey(providerId, asOf = new Date(), period = 'day') {
+  return `${providerId}#${periodBucket(period, asOf)}`;
+}
+
+/**
+ * The cap this repo actually knows for a provider, and the period it resets on.
+ *
+ * A free tier is not always expressed per day. Cohere's is a MONTHLY call
+ * allowance (1,000/month on the trial key), and forcing that into a daily
+ * field was the one thing guaranteed to be wrong: divide it by 30 and the
+ * soft stop refuses legitimate work three weeks early; leave it as a daily
+ * number and a single busy day can spend the month. So the config carries
+ * `requests_per_day` AND `requests_per_month`, and this reads whichever is
+ * present.
+ *
+ * DAILY WINS when both are set. That is the conservative direction — a daily
+ * cap is the tighter window, and a provider that publishes both is telling
+ * you the daily one binds first.
+ *
+ * @returns {{cap: number|null, period: 'day'|'month'|null}}
+ */
+export function capFor(tokenEconomy, providerId) {
   const key = PROVIDER_REGISTRY[providerId]?.tokenEconomyKey;
-  if (!key) return null;
-  return tokenEconomy?.providers?.[key]?.requests_per_day ?? null;
+  if (!key) return { cap: null, period: null };
+
+  const cfg = tokenEconomy?.providers?.[key];
+  const perDay = cfg?.requests_per_day ?? null;
+  if (perDay !== null) return { cap: perDay, period: 'day' };
+
+  const perMonth = cfg?.requests_per_month ?? null;
+  if (perMonth !== null) return { cap: perMonth, period: 'month' };
+
+  return { cap: null, period: null };
 }
 
-/** True when this repo knows the provider's daily cap. Used as the
- * degrade-order tie-break in the controlled-random lane. */
+/** Known DAILY cap, or null. Kept as its own accessor because the pre-existing
+ * providers (groq/cloudflare/gemini) are daily by definition and several
+ * callers and verifier assertions ask that narrower question. */
+export function dailyCapFor(tokenEconomy, providerId) {
+  const { cap, period } = capFor(tokenEconomy, providerId);
+  return period === 'day' ? cap : null;
+}
+
+/** True when this repo knows the provider's cap on ANY period. Used as the
+ * degrade-order tie-break in the controlled-random lane — a verifiable
+ * remaining quota is what makes candidates comparable there, and a monthly
+ * allowance is just as verifiable as a daily one. */
 export function hasKnownCap(tokenEconomy, providerId) {
-  return dailyCapFor(tokenEconomy, providerId) !== null;
+  return capFor(tokenEconomy, providerId).cap !== null;
 }
 
 /**
@@ -457,14 +532,14 @@ export async function checkProviderAllowance(env, providerId, {
   now = null,
 } = {}) {
   const provider = PROVIDER_REGISTRY[providerId];
-  const base = { providerId, callsToday: 0, cap: null, softStop: null, capUnknown: true };
+  const base = { providerId, callsToday: 0, cap: null, softStop: null, capUnknown: true, period: null };
 
   if (!provider) return { ...base, allowed: false, reason: 'unknown_provider' };
   if (!provider.hasCredential(env)) {
     return { ...base, allowed: false, reason: `missing_credential:${provider.secretName || 'AI binding'}` };
   }
 
-  const cap = dailyCapFor(tokenEconomy, providerId);
+  const { cap, period } = capFor(tokenEconomy, providerId);
 
   if (cap === null) {
     const spacing = routingConfig?.unknown_cap_min_spacing_ms ?? 20_000;
@@ -480,7 +555,7 @@ export async function checkProviderAllowance(env, providerId, {
 
   const fraction = routingConfig?.soft_stop_fraction ?? 0.6;
   const softStop = Math.floor(cap * fraction);
-  const callsToday = await getProviderCallsToday(env, providerId, asOf);
+  const callsToday = await getProviderCallsToday(env, providerId, asOf, period);
 
   if (callsToday >= softStop) {
     return {
@@ -491,18 +566,20 @@ export async function checkProviderAllowance(env, providerId, {
       cap,
       softStop,
       capUnknown: false,
+      period,
     };
   }
 
-  return { ...base, allowed: true, reason: null, callsToday, cap, softStop, capUnknown: false };
+  return { ...base, allowed: true, reason: null, callsToday, cap, softStop, capUnknown: false, period };
 }
 
-/** Today's counted calls for one provider. Degrades to 0 without D1, same
- * posture as getClaudeCallsToday(). */
-export async function getProviderCallsToday(env, providerId, asOf = new Date()) {
+/** Counted calls for one provider in its CURRENT period — the day bucket for a
+ * daily cap, the month bucket for a monthly one. Degrades to 0 without D1,
+ * same posture as getClaudeCallsToday(). */
+export async function getProviderCallsToday(env, providerId, asOf = new Date(), period = 'day') {
   if (!env?.DB) return 0;
   const row = await env.DB.prepare('SELECT call_count FROM provider_usage WHERE period_key = ?')
-    .bind(providerPeriodKey(providerId, asOf))
+    .bind(providerPeriodKey(providerId, asOf, period))
     .first()
     .catch(() => null);
   return row?.call_count ?? 0;
@@ -538,11 +615,14 @@ export async function recordProviderCall(env, providerId, {
   inputTokens = 0,
   outputTokens = 0,
   asOf = new Date(),
+  period = 'day',
 } = {}) {
   if (!env?.DB) return { recorded: false, reason: 'no DB binding' };
 
-  const periodKey = providerPeriodKey(providerId, asOf);
-  const day = asOf.toISOString().slice(0, 10);
+  const periodKey = providerPeriodKey(providerId, asOf, period);
+  // The `day` column holds this provider's BUCKET label — a date for a daily
+  // cap, 'YYYY-MM' for a monthly one. See periodBucket().
+  const day = periodBucket(period, asOf);
 
   await env.DB.prepare(PROVIDER_USAGE_TABLE_SQL).run();
   await env.DB.prepare(
@@ -559,14 +639,19 @@ export async function recordProviderCall(env, providerId, {
   return { recorded: true, periodKey, confirmed };
 }
 
-/** Per-provider usage for today — feeds the admin status endpoint's quota
- * view. Returns [] without D1. */
+/**
+ * Per-provider usage for the CURRENT period — feeds the admin status
+ * endpoint's quota view. Returns [] without D1.
+ *
+ * Matches both bucket families, because a monthly-capped provider (cohere)
+ * never writes a date-shaped bucket and would otherwise be invisible in the
+ * status view exactly when someone is checking whether it is near its limit.
+ */
 export async function getProviderUsageToday(env, asOf = new Date()) {
   if (!env?.DB) return [];
-  const day = asOf.toISOString().slice(0, 10);
   const rows = await env.DB.prepare(
-    'SELECT provider, call_count, confirmed_count, input_tokens, output_tokens FROM provider_usage WHERE day = ? ORDER BY provider'
-  ).bind(day).all().catch(() => null);
+    'SELECT provider, day, call_count, confirmed_count, input_tokens, output_tokens FROM provider_usage WHERE day IN (?, ?) ORDER BY provider'
+  ).bind(periodBucket('day', asOf), periodBucket('month', asOf)).all().catch(() => null);
   return rows?.results ?? [];
 }
 
@@ -669,12 +754,17 @@ export async function routeTask({
 
     const result = await provider.invoke(env, { ...callOpts, onResponse });
 
+    // Count against the same period the allow-check just read, so a provider
+    // can never be checked monthly and recorded daily.
+    const countPeriod = capFor(tokenEconomy, providerId).period ?? 'day';
+
     if (result) {
       await recordProviderCall(env, providerId, {
         confirmed: true,
         inputTokens: result.usage?.inputTokens ?? 0,
         outputTokens: result.usage?.outputTokens ?? 0,
         asOf,
+        period: countPeriod,
       });
       attempts.push({ provider: providerId, outcome: 'ok' });
       return {
@@ -696,6 +786,7 @@ export async function routeTask({
       inputTokens: responseUsage?.inputTokens ?? 0,
       outputTokens: responseUsage?.outputTokens ?? 0,
       asOf,
+      period: countPeriod,
     });
     attempts.push({ provider: providerId, outcome: 'failed', reason: responded ? 'provider_error' : 'no_response' });
     console.warn(`[routing] ${taskType}: ${providerId} returned no result — degrading`);

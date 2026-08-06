@@ -1,11 +1,23 @@
 {
   "_meta": {
-    "version": "1.0.0",
+    "version": "1.1.0",
     "added": "2026-08-05",
+    "last_updated": "2026-08-06",
     "status": "SHIPPED OFF — see `switch` below. Nothing routes until the owner flips the flag.",
     "description": "The task-type routing table. Lanes are DATA, deliberately, so changing which provider serves a task is a config edit rather than a code edit — workers/task-router.js reads this file and contains no per-lane conditionals of its own. Routing by TASK TYPE, never by agent: a persona's voice lives in its prompts and character files (back-office-AI-agents/campus/agents/<NN-slug>/), never in which key answered.",
     "the_overtime_rule": "Every provider here is on its FREE TIER and stays there. A call that would exceed a free tier is REFUSED and logged as `overtime_required`. There is no automatic escalation to a paid tier, for any provider, ever — paid usage requires the owner's explicit, per-instance approval, asked for at the time.",
     "anthropic_is_not_here": "Anthropic has no lane, no pool entry, and no registry entry. The `architect` lane below exists to STATE that rule where someone would look to break it, not to enable it — it carries `routable: false` and no provider id. Two independent barriers enforce this: (1) resolveLane() refuses a non-routable lane, and (2) workers/task-router.js's PROVIDER_REGISTRY imports no Anthropic client, so a lane naming one fails closed as `unknown_provider`. scripts/verify-routing.js proves both, including by pointing a lane at 'anthropic' on purpose and asserting it is denied.",
+    "_provider_removals": {
+      "github-models": {
+        "removed": "2026-08-06",
+        "reason": "GitHub Models was FULLY RETIRED on 2026-07-30 — playground, catalog, inference API and BYOK, permanently, for all customers. Not a brownout, not a degraded tier, not a bad key: the catalog and inference endpoints both return HTTP 410 WITHOUT an Authorization header, which is what proves the service is gone rather than the credential rejected.",
+        "found_by": "The supervised test procedure's Step 1 (back-office-AI-agents/docs/procedures/ROUTING-SUPERVISED-TEST.md), run 2026-08-06 — the FIRST time any model ID in this table was checked against a live catalog.",
+        "do_not_re_add": "The 410 response body still reads 'temporarily unavailable ... scheduled retirement brownout'. That text is STALE — it outlived the service it describes. Trust the retirement date, not the error string. Anything re-adding this provider on the strength of the word 'temporarily' is reading a tombstone as a status page.",
+        "what_was_removed": "the lane primary (judgment), the conversation pool entry, the PROVIDER_REGISTRY entry in workers/task-router.js, the providers.github_models block in config/token-economy.json, and workers/github-models-client.js (deleted). The GITHUB_MODELS_TOKEN Cloudflare secret is the owner's to delete — no session holds secret-write authority.",
+        "not_to_be_confused_with": "GITHUB_TOKEN, which is a DIFFERENT secret carrying repo write scope for report/guide commits. It is untouched and still required."
+      }
+    },
+
     "supersedes": "plans/OFFICE-SCALING-TODO.md item 3.1's four-lane draft table and PROJECT-SPEC-TABLES.md's matching row, both of which predate this session: neither had a long-document lane or an embeddings lane, and both backed Hebrew composition with GitHub Models rather than Mistral. Both documents are corrected in the same session as this file, per the spec-tables maintenance rule."
   },
 
@@ -24,17 +36,20 @@
 
   "lanes": {
     "judgment": {
-      "primary": "github-models",
-      "backup": "cerebras",
+      "primary": "cerebras",
+      "backup": "mistral",
       "kind": "chat",
       "description": "Judgment / quality — QA (agent 6), Lead QA (agent 8) and Team Lead (agent 7) reviews. Short scored calls.",
-      "_why": "GitHub Models' ~8K-token per-request ceiling is a poor fit for bulk text but a fine fit for 'score this answer 0-1' — and the backup is the long-context lane precisely so a judgment call that overflows has somewhere to land instead of failing."
+      "_why": "REPOINTED 2026-08-06. This lane originally ran GitHub Models primary with Cerebras behind it, chosen because GitHub Models' ~8K-token per-request ceiling was a poor fit for bulk text but a fine fit for 'score this answer 0-1'. GitHub Models was permanently RETIRED on 2026-07-30 (see _provider_removals below), so the backup was promoted and Mistral moved in behind it. Cerebras' 131K context means this lane no longer has a per-request ceiling that a long judgment call can overflow — the reason the old table needed the long-context lane as its backup no longer applies.",
+      "_concentration_risk": "This lane and `long_document` now share a PRIMARY (cerebras) AND a BACKUP (mistral). One Cerebras outage takes out both lanes at once, and both then land on the same Mistral free tier — the failure concentrates rather than spreads. Owner-accepted on 2026-08-06 rather than papered over. The intended diversification IF IT BITES is OpenRouter as a third chat provider, so the two lanes can hold different primaries again; it is deliberately NOT added now, because adding a provider to solve a risk that has not materialised spends a free tier and a secret on a hypothetical."
     },
     "long_document": {
       "primary": "cerebras",
       "backup": "mistral",
       "kind": "chat",
-      "description": "Long-document processing — daily report batches, cross-report input, anything past the judgment lane's per-request ceiling."
+      "description": "Long-document processing — daily report batches, cross-report input, anything past what a single judgment call should carry.",
+      "_context_ceiling": "Cerebras' real per-request input limit was MEASURED on 2026-08-06 at 131000 tokens (gpt-oss-120b) and is now enforced client-side. It was null — unknown — until then, on the lane whose entire job is long input. See workers/cerebras-client.js for the read-back.",
+      "_concentration_risk": "See `judgment._concentration_risk` — the two lanes share both providers."
     },
     "hebrew_composition": {
       "primary": "gemini",
@@ -58,7 +73,7 @@
     },
     "conversation": {
       "mode": "controlled_random",
-      "pool": ["github-models", "cerebras", "mistral", "groq", "cloudflare-ai", "gemini"],
+      "pool": ["cerebras", "mistral", "groq", "cloudflare-ai", "gemini"],
       "backup": null,
       "kind": "chat",
       "description": "Conversations & office events — meetings, standups, side plots. The persona→provider assignment is shuffled per event and the resulting embodiment map is logged.",

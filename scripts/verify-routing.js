@@ -27,6 +27,8 @@ import {
   renderEmbodimentMap,
   checkProviderAllowance,
   providerPeriodKey,
+  periodBucket,
+  capFor,
   dailyCapFor,
   hasKnownCap,
   SIM_STATE_KEY,
@@ -113,7 +115,7 @@ function fakeEnv({ enabled = false, counts = {}, kv = {}, credentials = true } =
   };
   if (credentials) {
     Object.assign(env, {
-      GITHUB_MODELS_TOKEN: 'stub', CEREBRAS_API_KEY: 'stub', MISTRAL_API_KEY: 'stub',
+      CEREBRAS_API_KEY: 'stub', MISTRAL_API_KEY: 'stub',
       COHERE_API_KEY: 'stub', GROQ_API_KEY: 'stub', GEMINI_API_KEY: 'stub', AI: {},
     });
   }
@@ -132,7 +134,10 @@ console.log('=== Task-type routing verification — dry-run only, no network/mod
 console.log('--- The routing table resolves each task type to the right provider ---');
 
 const EXPECTED = [
-  ['judgment', 'github-models', 'cerebras'],
+  // judgment was repointed 2026-08-06 when GitHub Models was retired. It now
+  // shares BOTH providers with long_document — a known concentration risk,
+  // asserted below rather than left implicit.
+  ['judgment', 'cerebras', 'mistral'],
   ['long_document', 'cerebras', 'mistral'],
   ['hebrew_composition', 'gemini', 'mistral'],
   ['routine_volume', 'groq', 'cloudflare-ai'],
@@ -157,9 +162,28 @@ check('lane "conversation" uses controlled_random mode', conv.mode === 'controll
 check('lane "conversation" pool has more than one provider (a shuffle of one measures nothing)', conv.candidates.length > 1);
 check('lane "conversation" pool contains NO embeddings provider (cohere cannot serve chat)',
   !conv.candidates.includes('cohere'), conv.candidates.join(','));
-check('lane "conversation" shuffles — two different seeds give different first picks',
-  resolveLane(routingConfig, 'conversation', { rng: seededRng(1) }).candidates[0]
-  !== resolveLane(routingConfig, 'conversation', { rng: seededRng(99) }).candidates[0]);
+// The shuffle is checked by DISTRIBUTION, not by two hand-picked seeds.
+//
+// It used to compare seed 1 against seed 99 and assert they differed. That
+// passed with a six-provider pool and broke the moment GitHub Models was
+// removed — not because the shuffle regressed, but because both seeds happen
+// to land on mistral in a five-provider pool. A test that depends on which
+// seeds collide is measuring the fixture, not the behaviour, and it fails
+// exactly when the pool changes: the one moment you actually want a trustworthy
+// signal. Sampling many seeds and requiring EVERY pool member to come up first
+// at least once is both stronger (it catches a provider that can never be
+// picked) and stable across pool edits.
+const CONV_SEEDS = 200;
+const firstPicks = new Map();
+for (let seed = 1; seed <= CONV_SEEDS; seed += 1) {
+  const pick = resolveLane(routingConfig, 'conversation', { rng: seededRng(seed) }).candidates[0];
+  firstPicks.set(pick, (firstPicks.get(pick) || 0) + 1);
+}
+check(`lane "conversation" shuffles — more than one distinct first pick over ${CONV_SEEDS} seeds`,
+  firstPicks.size > 1, JSON.stringify([...firstPicks]));
+check('lane "conversation" — EVERY provider in the pool can be picked first (none is unreachable)',
+  routingConfig.lanes.conversation.pool.every((id) => firstPicks.has(id)),
+  `pool=${routingConfig.lanes.conversation.pool.join(',')} picked=${[...firstPicks.keys()].join(',')}`);
 
 check('every ordered lane resolves to providers that exist in the registry',
   EXPECTED.every(([lane]) => resolveLane(routingConfig, lane).candidates.every((id) => !!PROVIDER_REGISTRY[id])));
@@ -168,6 +192,51 @@ check('the embeddings lane resolves to an embeddings-kind provider',
 check('every chat lane resolves to chat-kind providers only',
   EXPECTED.filter(([l]) => l !== 'embeddings').every(([lane]) =>
     resolveLane(routingConfig, lane).candidates.every((id) => PROVIDER_REGISTRY[id].kind === 'chat')));
+
+/* ── 1b. GitHub Models is gone from every routing surface ───────────────── */
+//
+// Retired by the provider on 2026-07-30, removed here 2026-08-06. A dead
+// provider is easy to half-remove: the client file goes but a pool entry or a
+// lane survives and fails at RUNTIME as `unknown_provider` instead of here.
+console.log('\n--- GitHub Models is absent from every routing surface ---');
+
+check('PROVIDER_REGISTRY has no github-models entry',
+  !PROVIDER_REGISTRY['github-models'], Object.keys(PROVIDER_REGISTRY).join(','));
+check('no lane names github-models anywhere (primary, backup or pool)',
+  !Object.values(routingConfig.lanes)
+    .flatMap((l) => [l.primary, l.backup, ...(l.pool || [])])
+    .includes('github-models'));
+check('the removal is RECORDED in the config, not silently dropped (decision history)',
+  !!routingConfig._meta._provider_removals?.['github-models']?.reason);
+check('the removal note warns that the 410 "brownout" wording is stale',
+  /stale/i.test(routingConfig._meta._provider_removals?.['github-models']?.do_not_re_add || ''));
+check('a lane still pointed at github-models would be REFUSED, not routed',
+  resolveLane(
+    { ...routingConfig, lanes: { ...routingConfig.lanes, judgment: { primary: 'github-models', backup: 'mistral', kind: 'chat' } } },
+    'judgment'
+  ).reason?.startsWith('unknown_provider'));
+
+/* ── 1c. The concentration risk is declared where someone will read it ──── */
+//
+// judgment and long_document now share a primary AND a backup. That is an
+// accepted risk, but an UNDOCUMENTED shared dependency is how a two-lane
+// outage becomes a surprise. These checks fail if the note is ever dropped.
+console.log('\n--- The Cerebras two-lane concentration risk is documented ---');
+
+const judgmentLane = routingConfig.lanes.judgment;
+const longDocLane = routingConfig.lanes.long_document;
+check('judgment and long_document genuinely DO share a primary (the risk is real, not theoretical)',
+  judgmentLane.primary === longDocLane.primary && judgmentLane.primary === 'cerebras');
+check('...and share a backup too, so a primary outage concentrates rather than spreads',
+  judgmentLane.backup === longDocLane.backup && judgmentLane.backup === 'mistral');
+check('the judgment lane declares the concentration risk',
+  /concentration|one .*outage|both lanes/i.test(judgmentLane._concentration_risk || ''), judgmentLane._concentration_risk);
+check('the risk note names OpenRouter as the intended diversification',
+  /OpenRouter/i.test(judgmentLane._concentration_risk || ''));
+check('...and states it is deliberately NOT added yet (so nobody "fixes" it by surprise)',
+  /not added|NOT added/i.test(judgmentLane._concentration_risk || ''));
+check('long_document cross-references the same risk rather than restating it inconsistently',
+  /concentration_risk/i.test(longDocLane._concentration_risk || ''));
 
 /* ── 2. Anthropic is unreachable from every routing path ────────────────── */
 console.log('\n--- Anthropic is unreachable from every routing path ---');
@@ -281,10 +350,59 @@ const onEnv = (opts) => fakeEnv({ enabled: true, ...opts });
 
 check('groq has a KNOWN daily cap', hasKnownCap(tokenEconomy, 'groq') === true);
 check('groq cap agrees with token-economy daily_limits', dailyCapFor(tokenEconomy, 'groq') === 14400);
-check('cerebras cap is UNKNOWN (null), not a guess', dailyCapFor(tokenEconomy, 'cerebras') === null);
-check('github-models cap is UNKNOWN (null)', dailyCapFor(tokenEconomy, 'github-models') === null);
+check('cerebras has NO daily cap — the provider publishes no real daily ceiling',
+  dailyCapFor(tokenEconomy, 'cerebras') === null);
+check('mistral has NO daily cap either (no daily header exists to read)',
+  dailyCapFor(tokenEconomy, 'mistral') === null);
 check('period key is the composite <provider>#YYYY-MM-DD pattern',
   providerPeriodKey('groq', new Date('2026-08-05T10:00:00Z')) === 'groq#2026-08-05');
+
+/* ── 4b. Monthly caps: a free tier is not always per-day ────────────────── */
+//
+// Added 2026-08-06. Cohere's real allowance is 1000 calls per MONTH, and
+// forcing that into requests_per_day was the one guaranteed-wrong option:
+// /30 refuses at ~20/day with 980 unused, and as-is lets one day drain the
+// month. capFor() reads whichever field is set and buckets to match.
+console.log('\n--- Monthly caps are read and counted on their own period ---');
+
+check('cohere resolves to a MONTHLY cap of 1000',
+  capFor(tokenEconomy, 'cohere').cap === 1000 && capFor(tokenEconomy, 'cohere').period === 'month',
+  JSON.stringify(capFor(tokenEconomy, 'cohere')));
+check('cohere has NO daily cap (dailyCapFor must not report the monthly number as daily)',
+  dailyCapFor(tokenEconomy, 'cohere') === null, String(dailyCapFor(tokenEconomy, 'cohere')));
+check('cohere still counts as a KNOWN cap for the degrade-order tie-break',
+  hasKnownCap(tokenEconomy, 'cohere') === true);
+check('a daily-capped provider resolves to period "day"',
+  capFor(tokenEconomy, 'groq').period === 'day' && capFor(tokenEconomy, 'groq').cap === 14400);
+check('a provider with neither cap resolves to period null (paced, not counted)',
+  capFor(tokenEconomy, 'cerebras').cap === null && capFor(tokenEconomy, 'cerebras').period === null);
+
+check('a monthly bucket is YYYY-MM, a daily bucket is YYYY-MM-DD',
+  periodBucket('month', new Date('2026-08-06T10:00:00Z')) === '2026-08'
+  && periodBucket('day', new Date('2026-08-06T10:00:00Z')) === '2026-08-06');
+check('a monthly period key cannot collide with a daily one',
+  providerPeriodKey('cohere', new Date('2026-08-06T10:00:00Z'), 'month') === 'cohere#2026-08'
+  && providerPeriodKey('cohere', new Date('2026-08-06T10:00:00Z'), 'day') === 'cohere#2026-08-06');
+
+// The monthly soft stop must bite on the MONTH's count, read from the month
+// bucket — not from a day bucket that would silently always be near-zero.
+const cohereSoftStop = Math.floor(1000 * routingConfig.soft_stop_fraction);
+const cohereSpent = { [providerPeriodKey('cohere', new Date(), 'month')]: cohereSoftStop };
+const cohereDenial = await checkProviderAllowance(fakeEnv({ enabled: true, counts: cohereSpent }), 'cohere', { tokenEconomy, routingConfig });
+check('a monthly-capped provider at 60% of its MONTH is denied as overtime_required',
+  cohereDenial.allowed === false && cohereDenial.reason === 'overtime_required', JSON.stringify(cohereDenial));
+check('...and reports the month period so the dashboard cannot mislabel it as daily',
+  cohereDenial.period === 'month', String(cohereDenial.period));
+check('...and the soft stop is 600, not 1000 (headroom applies to monthly caps too)',
+  cohereDenial.softStop === 600, String(cohereDenial.softStop));
+
+// The inverse: spending recorded in the DAY bucket must NOT deny a monthly
+// provider. This is the check that catches a period mix-up, which would
+// otherwise look like a working system that simply never refuses.
+const cohereDayBucketOnly = { [providerPeriodKey('cohere', new Date(), 'day')]: 5000 };
+const cohereNotDenied = await checkProviderAllowance(fakeEnv({ enabled: true, counts: cohereDayBucketOnly }), 'cohere', { tokenEconomy, routingConfig });
+check('a monthly provider reads its MONTH bucket, not the day bucket',
+  cohereNotDenied.allowed === true && cohereNotDenied.callsToday === 0, JSON.stringify(cohereNotDenied));
 
 const softStop = Math.floor(14400 * routingConfig.soft_stop_fraction);
 const exhausted = { [providerPeriodKey('groq', new Date())]: softStop };
@@ -342,12 +460,12 @@ check('a fully-denied lane invoked no provider at all', INVOCATIONS.length === 0
 check('both denials are logged in the attempt trail',
   skipped.attempts.length === 2 && skipped.attempts.every((a) => a.reason === 'overtime_required'));
 
-stubAllProviders({ failing: ['github-models'] });
+stubAllProviders({ failing: ['cerebras'] });
 const failedOver = await routeTask({
   env: onEnv({}), taskType: 'judgment', routingConfig, tokenEconomy, prompt: 'score this',
 });
 check('a FAILING primary (not denied — it answered badly) degrades to the backup',
-  failedOver.ok === true && failedOver.provider === 'cerebras', JSON.stringify(failedOver.attempts));
+  failedOver.ok === true && failedOver.provider === 'mistral', JSON.stringify(failedOver.attempts));
 check('the failed primary is still counted as an attempt (a failed call spent rate allowance)',
   failedOver.attempts[0].outcome === 'failed');
 

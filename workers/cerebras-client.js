@@ -5,31 +5,46 @@
  * completions against https://api.cerebras.ai/v1, authenticated with the
  * CEREBRAS_API_KEY Worker secret.
  *
- * ── THE LONG-CONTEXT LANE ────────────────────────────────────────────────
+ * ── TWO LANES, ONE PROVIDER — AN ACCEPTED CONCENTRATION RISK ─────────────
  *
- * This is where long report processing goes — a day's batch of agent
- * reports, cross-report comparison input, anything that does not fit the
- * ~8K-token per-request ceiling on the judgment lane
- * (workers/github-models-client.js). It is also the judgment lane's backup,
- * so a judgment call that overflows GitHub Models has somewhere to land
- * instead of failing.
+ * As of 2026-08-06 this client is PRIMARY on BOTH routing lanes that carry
+ * chat work of consequence:
  *
- * ── AN HONEST GAP, STATED RATHER THAN PAPERED OVER ───────────────────────
+ *   judgment       — short scored calls (QA, Lead QA, Team Lead reviews)
+ *   long_document  — daily report batches, cross-report input
  *
- * `maxInputTokensPerRequest` below is null, and that is uncomfortable for a
- * module whose entire job is long input. The free-tier context ceiling on
- * this provider varies by model and has moved more than once, and no network
- * call was made this session to establish today's real number. Writing a
- * plausible-looking figure would be worse than writing none: the router
- * would enforce a cap this repo invented, and the first over-long report
- * batch would be refused for a reason that was never true.
+ * It got the judgment lane because GitHub Models, which used to hold it, was
+ * permanently retired on 2026-07-30 (see workers/task-router.js's header).
  *
- * So the cap is null — meaning "unknown, do not enforce locally" — and the
- * supervised test procedure for this lane has to establish the real number
- * against the live API before the long-document lane carries real volume.
- * Until then this client's protection against an over-long request is the
- * provider's own 400, surfaced as a logged null like every other failure.
- * See docs/procedures/ in back-office-AI-agents for the read-back step.
+ * **One Cerebras outage now takes out both lanes**, and both degrade to the
+ * same backup (Mistral), so the failure concentrates rather than spreads.
+ * That is a known, owner-accepted risk, recorded here rather than left to be
+ * discovered during an incident. The intended fix if it ever bites is
+ * **OpenRouter** as a third chat provider, giving the two lanes different
+ * primaries again — deliberately not added now, because adding a provider to
+ * solve a risk that has not materialised spends a free tier and a secret on a
+ * hypothetical.
+ *
+ * ── THE CONTEXT CEILING IS MEASURED, NOT GUESSED ─────────────────────────
+ *
+ * `maxInputTokensPerRequest` was null until 2026-08-06 — an honest gap on the
+ * module whose entire job is long input. It is now **131000**, and that is a
+ * read-back from the live API, not an estimate:
+ *
+ *   POST /v1/chat/completions, model gpt-oss-120b, 2026-08-06
+ *     200068-token prompt -> HTTP 400
+ *       "Please reduce the length of the messages or completion.
+ *        Current length is 200068 while limit is 131000"
+ *     130868-token prompt -> HTTP 200
+ *     131018-token prompt -> HTTP 400 (same message, limit 131000)
+ *
+ * The number the provider compares against is the PROMPT length; `max_tokens`
+ * is not added to it (131018 was refused while carrying max_tokens 128, and
+ * the reported "current length" matched the prompt alone).
+ *
+ * The estimator that feeds this check over-counts on purpose
+ * (provider-common.js, chars/3), so the local refusal fires slightly before
+ * the provider's would. That is the safe direction.
  *
  * ── ERROR SEMANTICS ──────────────────────────────────────────────────────
  *
@@ -44,29 +59,47 @@ import { estimatePromptTokens, normalizeOpenAiChat, parseRateLimitHeaders } from
 const CEREBRAS_ENDPOINT = 'https://api.cerebras.ai/v1';
 
 /**
- * UNVERIFIED against the live catalog as of 2026-08-05 — no network call was
- * made this session. Same standing caution as every other model ID in this
- * repo: two Gemini IDs have already been retired out from under this project
- * (CLAUDE.md, token economy). The supervised test procedure reads the model
- * catalog back before this lane runs anything real.
+ * VERIFIED against the live catalog on 2026-08-06.
+ *
+ * The previous value, `llama-3.3-70b`, DID NOT EXIST — it was written from
+ * memory in the build session and the supervised test's Step 1 found it
+ * returned `model_not_found` on a 404 while the same key served a 200 for the
+ * model below (so: a dead model ID, not a bad key). That is the third time
+ * this project has been burned by a model retired out from under it, after
+ * two Gemini IDs.
+ *
+ * The full catalog on this key at that date was exactly three models:
+ *   gpt-oss-120b, zai-glm-4.7, gemma-4-31b
+ *
+ * gpt-oss-120b is the only one with the size and context to serve the
+ * long-document lane; gemma-4-31b is far too small for a lane that exists to
+ * absorb overflow. Re-check with the monthly model-currency job (plan item
+ * 3.6) rather than assuming this ID outlives the next catalog change.
  */
-const DEFAULT_MODEL = 'llama-3.3-70b';
+const DEFAULT_MODEL = 'gpt-oss-120b';
 
 /**
  * Free-tier limits. Mirrored in config/token-economy.json's
  * `providers.cerebras` block; scripts/verify-providers.js asserts the two
  * agree, so changing one alone fails the verifier instead of drifting.
  *
- * Every numeric field is null — genuinely unknown to this session, not
- * "unlimited". The router must treat null as "pace conservatively and
- * believe the response headers".
+ * MEASURED 2026-08-06 against the live API (see the header for the read-back).
+ *
+ * `requestsPerDay` stays NULL on purpose, and it is the interesting one. The
+ * response headers DO carry an `x-ratelimit-limit-requests-day` of 1,440,000
+ * — but that is exactly 1,000/min x 1,440 min, i.e. the per-minute limit
+ * multiplied out, which is what a provider emits when it is not publishing a
+ * real daily ceiling. Writing it here would hand the router a 864,000-call
+ * soft stop, which is not a limit in any useful sense. The binding
+ * constraint on this provider is REQUESTS PER MINUTE, so the daily field
+ * stays null and the router's wall-clock pacing keeps applying.
  */
 export const CEREBRAS_LIMITS = {
-  maxInputTokensPerRequest: null,
+  maxInputTokensPerRequest: 131000,
   maxOutputTokensPerRequest: null,
-  requestsPerMinute: null,
+  requestsPerMinute: 1000,
   requestsPerDay: null,
-  tokensPerMinute: null,
+  tokensPerMinute: 1000000,
   resetUtc: null,
   paid: false,
 };
@@ -76,11 +109,12 @@ export const CEREBRAS_LIMITS = {
  * session adds so the router can call it uniformly without knowing which
  * provider it holds.
  *
- * Always `ok: true` while the limits above are null — this module will not
- * refuse a request against a number it does not actually know. It still
- * reports the estimate, so the router and the verifier can see the size it
- * measured and a future session can turn the cap on by filling in one
- * constant rather than rewriting this function.
+ * LIVE since 2026-08-06: the input cap is a measured 131000, so this now
+ * genuinely refuses. It refuses rather than truncating, for the reason the
+ * whole repo refuses to truncate — a silently shortened report batch produces
+ * a confident summary of the part that fit. The lane has no larger provider
+ * to fall through to, so an over-131K input is a REAL failure that must
+ * surface, not be quietly resized.
  */
 export function checkInputWithinCaps({ prompt = '', systemPrompt = '', maxTokens = 1024 } = {}) {
   const estimatedInputTokens = estimatePromptTokens({ prompt, systemPrompt });
@@ -91,7 +125,7 @@ export function checkInputWithinCaps({ prompt = '', systemPrompt = '', maxTokens
       ok: false,
       estimatedInputTokens,
       requestedOutputTokens: maxTokens,
-      reason: `input is ~${estimatedInputTokens} tokens, over the Cerebras free-tier cap of ${cap}. Not truncating.`,
+      reason: `input is ~${estimatedInputTokens} tokens, over the Cerebras per-request context limit of ${cap} (measured 2026-08-06). Not truncating — this is the long-document lane, there is no larger provider behind it.`,
     };
   }
 

@@ -46,53 +46,59 @@
   "providers": {
     "_meta": {
       "added": "2026-08-05",
-      "description": "Per-provider FREE-TIER limits for the task-type routing table (workers/model-router.js, plan Phase 3). Every provider client module added this session (workers/github-models-client.js, cerebras-client.js, mistral-client.js, cohere-client.js) exports a matching `<PROVIDER>_LIMITS` constant, and scripts/verify-providers.js asserts this block and those constants agree — so changing one alone FAILS the verifier instead of drifting silently. Code and config are two copies of the same fact here on purpose: the client modules deliberately import no JSON, so they can be loaded by a plain `node` verifier.",
+      "last_updated": "2026-08-06",
+      "description": "Per-provider FREE-TIER limits for the task-type routing table (workers/model-router.js, plan Phase 3). Every provider client module (workers/cerebras-client.js, mistral-client.js, cohere-client.js) exports a matching `<PROVIDER>_LIMITS` constant, and scripts/verify-providers.js asserts this block and those constants agree — so changing one alone FAILS the verifier instead of drifting silently. Code and config are two copies of the same fact here on purpose: the client modules deliberately import no JSON, so they can be loaded by a plain `node` verifier.",
       "the_overtime_rule": "EVERY PROVIDER IN THIS BLOCK STAYS ON ITS FREE TIER. `paid: false` is a standing constraint, not a current observation. Any paid usage anywhere — a new provider, an upgraded plan, or an overage on an existing one — requires the owner's EXPLICIT, PER-INSTANCE approval, called 'overtime'. It is never a standing budget and never a monthly allowance: one approval, one instance, asked for at the time. A session or code path that needs paid usage STOPS AND ASKS; it does not spend and report. There is no automatic escalation from a free tier to a paid one, for any provider, ever — a call that would exceed a free tier is refused and logged as `overtime_required`.",
       "anthropic_is_deliberately_absent": "Anthropic does NOT appear in this block, and its absence is load-bearing rather than an omission. This block enumerates providers the ROUTER may select, and Anthropic is never routed and never shuffled — it is reserved for the Architect and genuine data-center Q&A, under the separate shared_claude_budget / guides_claude_budget caps above. Its two live call paths (agents/agent-base.js _askDataCenter() via the APP_API service binding, and workers/claude-client.js's direct Messages API calls for the Guides pipeline) are pre-existing DIRECT callers that never went through the router and are untouched by it. scripts/verify-providers.js asserts no anthropic key exists here.",
+      "cap_periods_added_2026_08_06": "A free tier is not always expressed per day, so a provider may carry `requests_per_day` OR `requests_per_month`. workers/task-router.js's capFor() reads whichever is present and buckets that provider's D1 counter to match — '<provider>#YYYY-MM-DD' for daily, '<provider>#YYYY-MM' for monthly. DAILY WINS if both are set, since a daily window is the tighter one. Only `cohere` is monthly today (1000 calls/month on a trial key). Before this, the counter was daily-only and Cohere's monthly allowance had nowhere honest to live: forced into the daily field it would either refuse at ~20 calls/day or let one day drain the month.",
+
+      "per_minute_is_the_binding_constraint_where_no_true_daily_cap_exists": "ADDED 2026-08-06 after reading real rate-limit headers. `cerebras` and `mistral` both have `requests_per_day: null` NOT because the number is unknown in the old sense, but because NEITHER PROVIDER PUBLISHES A REAL DAILY CEILING. Mistral emits no daily header at all. Cerebras emits x-ratelimit-limit-requests-day 1440000 — which is exactly its 1000/min multiplied by 1440 minutes, i.e. the per-minute limit restated, not an independent daily allowance. Both are therefore constrained BY THE MINUTE, and the router's 20s wall-clock pacing (which a null daily cap keeps switched on) is the correct mechanism for them, not a count-based soft stop. DO NOT copy a derived daily number out of a response header into `requests_per_day` — it reads as a real limit, disables the pacing that is actually protecting the free tier, and sets a soft stop in the hundreds of thousands.",
+
       "nulls_are_honest": "A null limit means THIS REPO DOES NOT KNOW the number — it does not mean unlimited. Where a real free-tier figure was not established against the live provider this session, it is null with a note rather than a plausible-looking invention, because a cap the router enforces against a number nobody verified is worse than no local cap at all: it refuses real work for a reason that was never true. The router treats null as 'pace conservatively and believe the response headers'. The supervised test procedure (back-office-AI-agents/docs/procedures/) establishes the real values against live APIs before any lane carries volume.",
       "pre_existing_providers": "groq / cloudflare_ai / gemini were already in service before this block existed. `daily_limits` above REMAINS the source of truth for their daily numbers; they are repeated here only so the router sees one uniform provider shape, and verify-providers.js asserts the two agree."
     },
 
-    "github_models": {
-      "role": "Judgment / quality lane PRIMARY — short scored calls (QA, Lead QA, Team Lead reviews).",
-      "secret": "GITHUB_MODELS_TOKEN",
-      "endpoint": "https://models.github.ai/inference",
-      "max_input_tokens_per_request": 8000,
-      "max_output_tokens_per_request": 4000,
-      "requests_per_minute": null,
-      "requests_per_day": null,
-      "reset_utc": null,
-      "paid": false,
-      "_token_caps_note": "The ~8K input / ~4K output per-request caps are the defining constraint of this lane: they make it RIGHT for short judgment calls and WRONG for long report processing, which goes to cerebras. The client module REFUSES oversized input rather than truncating it, and refuses an over-cap output request rather than clamping it — see its header for why truncation specifically is forbidden in this repo (the 2026-07-11/12 incident).",
-      "_rate_null_note": "requests_per_minute / requests_per_day are null because GitHub Models publishes DIFFERENT request-rate allowances per model tier — there is no single honest number for this field. Read the real allowance for the configured model at supervised-test time.",
-      "_secret_scope_note": "Deliberately its own secret, NOT a reuse of the existing GITHUB_TOKEN. That token carries repo WRITE scope for report/guide commits; giving it to an inference path would hand a model-calling code path more reach than its work requires — exactly what the one-scoped-token-per-target decision (plan item 0.8) exists to prevent."
+    "_github_models_removed": {
+      "removed": "2026-08-06",
+      "was": "Judgment / quality lane PRIMARY, secret GITHUB_MODELS_TOKEN, endpoint https://models.github.ai/inference, 8000-token input cap.",
+      "why": "GitHub Models was FULLY RETIRED on 2026-07-30 — playground, catalog, inference API and BYOK, permanently, for all customers. Its catalog and inference endpoints return HTTP 410 even with NO Authorization header, which is what distinguishes a dead service from a rejected credential. Found by the supervised test's Step 1 on 2026-08-06, the first time any model ID in this table was checked against a live catalog.",
+      "do_not_re_add": "The 410 body still says 'temporarily unavailable ... brownout'. That string is stale and outlived the service. Trust the retirement date, not the error text.",
+      "owner_action_outstanding": "Delete the GITHUB_MODELS_TOKEN secret from the Cloudflare Worker. Not done by any session — no session holds secret-write authority. NOT to be confused with GITHUB_TOKEN, a different secret carrying repo write scope, which is untouched and still required.",
+      "_kept_as_a_tombstone": "This block records a removal rather than vanishing, per the repo's preserve-decision-history rule. It carries no `secret`, `endpoint` or `paid` key, so it is not a provider entry and the verifier's per-provider assertions do not apply to it."
     },
 
     "cerebras": {
-      "role": "Long-document lane PRIMARY (daily report batches) + judgment lane BACKUP.",
+      "role": "PRIMARY on BOTH the judgment lane (short scored calls) and the long-document lane (daily report batches). Promoted to judgment on 2026-08-06 when GitHub Models was removed.",
       "secret": "CEREBRAS_API_KEY",
       "endpoint": "https://api.cerebras.ai/v1",
-      "max_input_tokens_per_request": null,
+      "max_input_tokens_per_request": 131000,
       "max_output_tokens_per_request": null,
-      "requests_per_minute": null,
+      "requests_per_minute": 1000,
       "requests_per_day": null,
-      "tokens_per_minute": null,
+      "tokens_per_minute": 1000000,
       "reset_utc": null,
       "paid": false,
-      "_null_note": "UNCOMFORTABLE BUT HONEST: the context ceiling is null on the provider whose entire job is long input. The free-tier context limit here varies by model and has moved before, and no live call was made this session to establish today's value. Establishing it is the FIRST item in this lane's supervised test — until then the only protection against an over-long request is the provider's own 400, surfaced as a logged null."
+      "_measured_2026_08_06": "These are READ-BACKS from the live API, not estimates. The 131000 input ceiling was established by binary search against gpt-oss-120b: a 130868-token prompt returned 200, a 131018-token prompt returned 400 with 'Current length is 131018 while limit is 131000'. The provider compares against PROMPT length; max_tokens is not added to it. requests_per_minute and tokens_per_minute are from the x-ratelimit-limit-requests-minute / -tokens-minute response headers.",
+      "_why_requests_per_day_is_still_null": "THE HEADERS DO CARRY A DAILY NUMBER AND IT IS DELIBERATELY NOT WRITTEN HERE. x-ratelimit-limit-requests-day reports 1440000, which is exactly 1000/min x 1440 min — the per-minute limit multiplied out, which is what a provider emits when it is not publishing a real daily ceiling. Writing it would give the router an 864000-call soft stop: arithmetically valid, meaningless as a limit, and it would silently disable the wall-clock pacing that is currently the only real constraint on this provider. The binding constraint here is REQUESTS PER MINUTE. Null keeps the pacing on. Do not 'fill in the gap' from the header.",
+      "_concentration_risk": "One provider, two lanes, and both lanes degrade to the same backup (mistral). Owner-accepted 2026-08-06. Intended diversification if it bites: OpenRouter as a third chat provider — deliberately not added yet.",
+      "_model_note": "DEFAULT_MODEL is gpt-oss-120b. The previous value llama-3.3-70b did not exist on this key (404 model_not_found while the same key served a 200 for gpt-oss-120b). The full catalog at that date was three models: gpt-oss-120b, zai-glm-4.7, gemma-4-31b."
     },
 
     "mistral": {
-      "role": "BACKUP only, in two lanes — long-document (behind cerebras) and Hebrew composition (behind gemini). Primary in none.",
+      "role": "BACKUP only, in three lanes — judgment and long-document (both behind cerebras) and Hebrew composition (behind gemini). Primary in none.",
       "secret": "MISTRAL_API_KEY",
       "endpoint": "https://api.mistral.ai/v1",
       "max_input_tokens_per_request": null,
       "max_output_tokens_per_request": null,
-      "requests_per_minute": null,
+      "requests_per_minute": 50,
       "requests_per_day": null,
+      "tokens_per_minute": 50000,
       "tokens_per_month": null,
       "reset_utc": null,
       "paid": false,
+      "_measured_2026_08_06": "requests_per_minute 50 and tokens_per_minute 50000 are read-backs from the x-ratelimit-limit-req-minute / x-ratelimit-limit-tokens-minute response headers on a live mistral-small-latest call. mistral-small-latest was confirmed PRESENT in the live catalog (53 models) the same day.",
+      "_why_requests_per_day_is_null": "Mistral publishes NO daily figure in its response headers — there is no per-day header to read and none was invented. Per-minute is the only rate this repo can actually observe, so it is the binding constraint, and the router's wall-clock pacing stays on for this provider.",
+      "_carries_the_backup_load": "Now the backup for BOTH cerebras lanes as well as gemini's Hebrew lane. A cerebras outage lands judgment AND long_document on this 50-req/min free tier simultaneously. That is the concentration risk recorded on the cerebras block, seen from the other side.",
       "_hebrew_note": "Its Hebrew-composition role is the one carrying real quality risk: Hebrew internal notes are the office's own voice, Gemini is primary there for a reason, and this runs when Gemini is exhausted or paced out. A weaker Hebrew note still beats a skipped one — but the gap is precisely what the Lead QA's cross-embodiment comparison exists to measure, so it gets measured, not assumed. The Front is ENGLISH ONLY, so this lane never touches published content."
     },
 
@@ -102,10 +108,15 @@
       "endpoint": "https://api.cohere.com/v2",
       "max_input_tokens_per_request": null,
       "max_texts_per_request": null,
-      "requests_per_minute": null,
-      "requests_per_month": null,
+      "requests_per_minute": 100,
+      "requests_per_day": null,
+      "requests_per_month": 1000,
+      "embedding_dimensions": 1024,
       "reset_utc": null,
       "paid": false,
+      "_measured_2026_08_06": "Read-backs from a live v2/embed call on embed-multilingual-v3.0 (confirmed PRESENT in the catalog the same day): x-trial-endpoint-call-limit 100 (per minute), x-endpoint-monthly-call-limit 1000. The call returned a 1024-dimension vector and billed 1 input token.",
+      "_THIS_IS_A_TRIAL_KEY_NOT_A_FREE_TIER": "The limit header is literally named `x-trial-endpoint-call-limit`. This is a Cohere TRIAL key, which is not the same thing as a free production tier: trial keys are rate-limited harder, are not licensed for production use under Cohere's terms, and can be expired or revoked on a schedule this repo does not control. Recorded here, in the config, because this is where someone checking quota will look — and 'why did embeddings stop working' is a much slower question to answer if this distinction is only in a session log. If the local brain's search ever becomes load-bearing, converting to a production key is an OWNER decision under the overtime rule, not a config edit.",
+      "_why_the_cap_is_MONTHLY_and_the_daily_field_is_null": "ADDED 2026-08-06. Cohere's allowance is 1000 calls per MONTH — there is no daily figure, and there is no honest way to derive one. Dividing by 30 gives ~33/day, and the router's 60% soft stop would then refuse at ~20 calls/day while 980 monthly calls sat unused; leaving it as a daily number would let a single busy day spend the entire month. So `requests_per_day` stays null and `requests_per_month` carries the real number. workers/task-router.js's capFor() reads whichever field is present and buckets the counter to match ('<provider>#YYYY-MM' instead of '<provider>#YYYY-MM-DD'). This is the ONLY provider in this block on a monthly period.",
       "_no_backup_note": "'Fail, don't degrade' is a CORRECTNESS rule here, not a preference. Vectors from two different embedding models do not share a space, so a similarity score computed across them is meaningless — and meaningless in the worst way, since it still returns a confident-looking number between 0 and 1. Substituting a backup provider would corrupt a search index rather than slow it down.",
       "_no_callers_yet_note": "EXPECTED to have zero callers for some time. It exists for two capabilities that are designed but NOT BUILT: the local brain's semantic search over campus/agents/<NN-slug>/adaptations/, and the Lead QA's cross-report comparison (plan items 2.7 and 1.5). It ships now because it ships on the one set of secrets the owner installs once."
     },

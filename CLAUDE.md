@@ -335,14 +335,13 @@ in full before flipping `guides_enabled` on.
 
 ### Task-type routing (added 2026-08-05) — **SHIPPED OFF**
 
-Four new free-tier providers and a routing table that picks a provider by
-**what kind of work a task is**, never by which agent is doing it — a
-persona's voice lives in its prompts and character files, never in which key
-answered.
+Free-tier providers and a routing table that picks a provider by **what kind
+of work a task is**, never by which agent is doing it — a persona's voice
+lives in its prompts and character files, never in which key answered.
 
 | Task type (lane) | Primary | Backup |
 |---|---|---|
-| Judgment / quality (QA, Lead QA, Team Lead reviews) | GitHub Models | Cerebras |
+| Judgment / quality (QA, Lead QA, Team Lead reviews) | Cerebras | Mistral |
 | Long-document processing (daily report batches) | Cerebras | Mistral |
 | Hebrew composition (gap notes, summaries) | Gemini 3.1 Flash-Lite | Mistral |
 | Routine volume (drafts, worker chatter) | Groq | Cloudflare Workers AI |
@@ -351,13 +350,43 @@ answered.
 | Embeddings / semantic search | Cohere | **none — fail, don't degrade** |
 | Architect | Anthropic — **never routed, never shuffled** | n/a |
 
-New secrets: `GITHUB_MODELS_TOKEN`, `CEREBRAS_API_KEY`, `MISTRAL_API_KEY`,
-`COHERE_API_KEY`. `GITHUB_MODELS_TOKEN` is deliberately its **own** secret
-with no fallback to `GITHUB_TOKEN` — that token carries repo write scope, and
-an inference path must not hold it. *(This supersedes the scaling plan's item
-3.1, which predates the one-scoped-token-per-target decision and suggested
-reusing the existing PAT — do not re-implement that fallback thinking it was
-an oversight.)*
+**GitHub Models was removed on 2026-08-06.** It held the judgment lane until
+the supervised test's Step 1 found the service returns HTTP 410 — **fully
+retired on 2026-07-30**, permanently, for all customers. Its 410 body still
+claims a "temporary ... brownout"; that text is stale and outlived the
+service. Do not re-add the provider on the strength of the word "temporary".
+The `GITHUB_MODELS_TOKEN` secret is dead and should be deleted from the
+Worker — **not** `GITHUB_TOKEN`, which is a different secret carrying repo
+write scope and is still required.
+
+> ⚠️ **Concentration risk, accepted knowingly.** Cerebras is now primary on
+> **both** judgment and long-document, and both degrade to the **same**
+> backup (Mistral). One Cerebras outage takes out two lanes and lands them
+> together on one free tier. The intended diversification if it ever bites is
+> **OpenRouter** as a third chat provider — deliberately not added now.
+
+Secrets: `CEREBRAS_API_KEY`, `MISTRAL_API_KEY`, `COHERE_API_KEY`. *(The
+scaling plan's item 3.1 predates the one-scoped-token-per-target decision and
+suggested reusing the existing GitHub PAT for inference — do not re-implement
+that fallback thinking it was an oversight; the provider it applied to no
+longer exists in any case.)*
+
+**Real free-tier numbers, measured 2026-08-06** (they were all `null` before
+— nothing had ever been checked against a live API):
+
+| Provider | Verified model | Rate | Per-request input |
+|---|---|---|---|
+| Cerebras | `gpt-oss-120b` | 1,000 req/min | **131,000 tokens** (measured) |
+| Mistral | `mistral-small-latest` | 50 req/min | unknown |
+| Cohere | `embed-multilingual-v3.0` | 100 req/min, **1,000 calls/month** | unknown |
+
+Cerebras' previous model ID, `llama-3.3-70b`, **did not exist** — the third
+model this project has had retired out from under it. Neither Cerebras nor
+Mistral publishes a real *daily* ceiling, so `requests_per_day` stays `null`
+for both and the 20s wall-clock pacing keeps applying; Cerebras' 1,440,000
+daily header is just its per-minute limit × 1,440 and must not be copied into
+the config. Cohere is the one provider on a **monthly** period, and its key
+is a **trial** key, not a free production tier.
 
 **Files**: `workers/task-router.js` (lane resolution, provider registry,
 embodiment assignment, per-provider quota counters — imports no JSON so
@@ -366,7 +395,7 @@ embodiment assignment, per-provider quota counters — imports no JSON so
 task-routing section is the pre-existing budget router, unchanged),
 `config/model-routing.json` (the lane table as **data** — changing a lane is
 a config edit, not a code edit), `config/token-economy.json`'s `providers`
-block (free-tier limits), the four `workers/*-client.js` modules, and
+block (free-tier limits), the three `workers/*-client.js` modules, and
 `scripts/verify-providers.js` / `scripts/verify-routing.js`.
 
 **Kill switch (`routing_enabled`)**: absent or false — the shipped default —
@@ -429,7 +458,10 @@ npx wrangler secret put GOOGLE_AI_API_KEY  # optional
 npx wrangler secret put ANTHROPIC_API_KEY  # required for the Guides pipeline (see "Guides" above)
 # Task-type routing (see "Task-type routing" above). Unset = that provider
 # fails closed with a logged message naming the missing secret.
-npx wrangler secret put GITHUB_MODELS_TOKEN  # NOT the same token as GITHUB_TOKEN — see above
+# GITHUB_MODELS_TOKEN is NO LONGER SET — the provider was retired 2026-07-30.
+# If it is still on the Worker from an earlier setup, delete it:
+#   npx wrangler secret delete GITHUB_MODELS_TOKEN
+# Do NOT delete GITHUB_TOKEN above — different secret, still required.
 npx wrangler secret put CEREBRAS_API_KEY
 npx wrangler secret put MISTRAL_API_KEY
 npx wrangler secret put COHERE_API_KEY
@@ -637,10 +669,10 @@ site, not merely defined nearby.
   registry, controlled-random embodiment, per-provider quota counters (D1
   `provider_usage`, created lazily — deliberately NOT in `database/schema.sql`).
   Imports no JSON so its verifier can call it (new, ships OFF)
-- `workers/github-models-client.js` / `cerebras-client.js` /
-  `mistral-client.js` / `cohere-client.js` — the four free-tier provider
-  clients; `provider-common.js` holds their shared token estimate and
-  rate-limit header parsing (new)
+- `workers/cerebras-client.js` / `mistral-client.js` / `cohere-client.js` —
+  the three free-tier provider clients; `provider-common.js` holds their
+  shared token estimate and rate-limit header parsing (new).
+  `github-models-client.js` was **deleted 2026-08-06** — provider retired
 - `config/model-routing.json` — the lane table as data (new)
 - `workers/guide-engine.js` — Guides pipeline logic: topic selection,
   ABSOLUTE ZERO blocklist, draft/review/verify prompt building, decision

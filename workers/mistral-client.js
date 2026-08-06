@@ -38,10 +38,9 @@ import { estimatePromptTokens, normalizeOpenAiChat, parseRateLimitHeaders } from
 const MISTRAL_ENDPOINT = 'https://api.mistral.ai/v1';
 
 /**
- * UNVERIFIED against the live catalog as of 2026-08-05 — no network call was
- * made this session. Same standing caution as every other model ID here; the
- * supervised test procedure reads the catalog back before this lane runs
- * anything real.
+ * VERIFIED against the live catalog on 2026-08-06 — present, in a catalog of
+ * 53 models. The only one of this repo's four guessed model IDs that turned
+ * out to be correct.
  */
 const DEFAULT_MODEL = 'mistral-small-latest';
 
@@ -50,16 +49,29 @@ const DEFAULT_MODEL = 'mistral-small-latest';
  * `providers.mistral` block; scripts/verify-providers.js asserts the two
  * agree.
  *
- * All null — unknown to this session, not unlimited. Mistral's free
- * ("experiment") tier publishes request-rate and monthly-token allowances
- * that have changed more than once, and this session made no call to
- * establish today's values.
+ * MEASURED 2026-08-06 from live response headers on a mistral-small-latest
+ * call: x-ratelimit-limit-req-minute 50, x-ratelimit-limit-tokens-minute
+ * 50000.
+ *
+ * `requestsPerDay` stays NULL because Mistral publishes NO daily header at
+ * all — a genuine absence, not an unread value. Per-minute is the only rate
+ * this repo can observe, so it is the binding constraint here, and a null
+ * daily cap is what keeps the router's 20s wall-clock pacing switched on for
+ * this provider. Do NOT synthesise a daily figure by multiplying the
+ * per-minute one out; see config/token-economy.json's
+ * `per_minute_is_the_binding_constraint_where_no_true_daily_cap_exists`.
+ *
+ * LOAD NOTE: since 2026-08-06 this provider is the backup for THREE lanes —
+ * judgment and long_document (both behind cerebras) and hebrew_composition
+ * (behind gemini). A single Cerebras outage lands two of them here at once,
+ * on 50 req/min.
  */
 export const MISTRAL_LIMITS = {
   maxInputTokensPerRequest: null,
   maxOutputTokensPerRequest: null,
-  requestsPerMinute: null,
+  requestsPerMinute: 50,
   requestsPerDay: null,
+  tokensPerMinute: 50000,
   tokensPerMonth: null,
   resetUtc: null,
   paid: false,
