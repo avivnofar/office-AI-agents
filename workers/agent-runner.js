@@ -52,6 +52,7 @@ import { generateAssignedDailyBatch, persistQuestions } from './qa-engine.js';
 import { getClaudeBudgetStatus, recordClaudeSpend, routeTaskTypeCall, resolveTaskLane, getRoutingQuotaStatus, MODEL_ROUTING } from './model-router.js';
 import { collectTodayGapReports, renderGapDigest } from './gap-reports.js';
 import { resolveIssueTarget, resolveRepoWrite } from './permission-guard.js';
+import { improvementLoopEnabled } from './improvement-loop.js';
 import { runChoreRotationSlot } from './chore-runner.js';
 import { checkGeminiPacingSlot } from './gemini-pacer.js';
 import { callClaudeMessages } from './claude-client.js';
@@ -329,7 +330,7 @@ async function getSimulationState(env) {
 
 async function updateSimulationState(env, patch) {
   const current = await getSimulationState(env);
-  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled'];
+  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled', 'improvement_loop_enabled'];
   const next = { ...current };
   for (const key of allowedKeys) {
     if (key in patch) next[key] = patch[key];
@@ -2373,6 +2374,44 @@ export default {
             // logged no-ops.
             result = await updateSimulationState(env, { guides_enabled: !!body.enabled });
             break;
+          case 'improvement_loop_toggle':
+            // Improvement-loop CAPTURE kill switch (workers/improvement-loop.js
+            // improvementLoopEnabled()): flips SIM_KV simulation-state
+            // `improvement_loop_enabled` without a redeploy. Body:
+            // { enabled: true|false }. While off — or absent, which is the
+            // shipped default — recordOfficeEvent() writes nothing and the
+            // live Q&A path behaves exactly as it did before this existed.
+            // Turning it ON starts CAPTURE ONLY: no review job exists yet
+            // (plan 1.2-1.5 are not built), by design — the reviews need a
+            // day or two of accumulated rows to review.
+            result = await updateSimulationState(env, { improvement_loop_enabled: !!body.enabled });
+            break;
+          case 'improvement_loop_status': {
+            // Read-back for the supervised test. Makes no model calls and
+            // writes nothing: the flag, and today's captured rows grouped by
+            // event_type and track. Returns capture_table_missing when the
+            // ALTER TABLE migration has not been run yet, which is a
+            // different and much more useful answer than "0 rows".
+            const flagOn = await improvementLoopEnabled(env);
+            let rows = null;
+            let tableReady = false;
+            if (env.DB) {
+              const probe = await env.DB.prepare(
+                `SELECT event_type, track, COUNT(*) AS n, AVG(quality) AS avg_quality
+                   FROM reports
+                  WHERE event_type IS NOT NULL AND date(created_at) = date('now')
+                  GROUP BY event_type, track ORDER BY event_type`
+              ).all().catch(() => null);
+              tableReady = probe !== null;
+              rows = probe?.results ?? null;
+            }
+            result = {
+              improvementLoopEnabled: flagOn,
+              captureColumnsPresent: tableReady,
+              ...(tableReady ? { today: rows } : { note: 'reports.event_type is missing — run the four ALTER TABLE statements in database/schema.sql' }),
+            };
+            break;
+          }
           case 'routing_toggle':
             // Task-type routing kill switch (see workers/task-router.js
             // routingEnabled()): flips the SIM_KV simulation-state

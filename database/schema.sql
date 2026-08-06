@@ -76,6 +76,39 @@ CREATE TABLE IF NOT EXISTS interactions (
 -- (type='gap_hebrew', see workers/gap-reports.js) can be grouped into the
 -- right reports/gaps/<project>/<date>.md file without parsing `title`.
 -- NULL for every report type that predates this and doesn't need it.
+-- IMPROVEMENT-LOOP CAPTURE COLUMNS added 2026-08-06 (plan item 1.1):
+-- event_type, embodiment_model, track, quality. Written by
+-- workers/improvement-loop.js recordOfficeEvent(), gated on SIM_KV
+-- `improvement_loop_enabled` (default OFF). See the MANUAL MIGRATION block at
+-- the bottom of this file — these four are ALTER TABLE on the live database.
+--
+-- ── `type` VERSUS `event_type` — THE RULE, so the two do not drift ────────
+--   `type`       = WHAT KIND OF DOCUMENT this row is. Pre-existing values:
+--                  status, incident, gap_hebrew, weekly, day, disabled.
+--                  Rows from the improvement loop all carry 'office_event',
+--                  so any pre-existing consumer filtering on the old values
+--                  sees nothing new.
+--   `event_type` = WHAT THE OFFICE DID. case_answer, qa_review,
+--                  team_lead_review, lead_qa_weekly, meeting, guide_review.
+-- Two different axes, deliberately not merged (owner decision 2026-08-06):
+-- overloading `type` would make "yesterday's QA reviews" the same query shape
+-- as "incident reports", and plan items 1.2-1.5 all query BY EVENT.
+--
+-- `track` is 'client' (the Q&A engine — Track A) or 'office' (office-building
+-- — Track B). It is the ONLY thing that makes per-track quota consumption
+-- separable, which the plan requires BEFORE any rebalancing is proposed. A row
+-- with no track is REFUSED by recordOfficeEvent() rather than defaulted: a
+-- guessed track silently misattributes the measurement the decision rests on.
+--
+-- `embodiment_model` is the provider that ACTUALLY SERVED the call, including
+-- after a lane degraded to its backup — never the provider that was asked for.
+-- Writing the configured primary would make the Lead QA's cross-embodiment
+-- comparison (1.5) measure the routing table instead of reality.
+--
+-- `quality` is REAL in [0,1], or NULL where no score exists. NULL means "no
+-- score here", never zero. Until 2026-08-06 this value was computed on every
+-- answer and DISCARDED — it appeared in no INSERT anywhere in the repo, so the
+-- improvement loop had been specified against data nobody was collecting.
 CREATE TABLE IF NOT EXISTS reports (
   id TEXT PRIMARY KEY,
   agent_id INTEGER NOT NULL,
@@ -86,6 +119,10 @@ CREATE TABLE IF NOT EXISTS reports (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   acknowledged BOOLEAN DEFAULT FALSE,
   project TEXT,
+  event_type TEXT,
+  embodiment_model TEXT,
+  track TEXT,
+  quality REAL,
   FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 
@@ -280,6 +317,47 @@ CREATE TABLE IF NOT EXISTS pull_log (
 -- ALTER TABLE cases ADD COLUMN project TEXT;
 -- ALTER TABLE cases ADD COLUMN kb_slug TEXT;
 -- ALTER TABLE reports ADD COLUMN project TEXT;
+-- ─────────────────────────────────────────────────────────────────────────
+
+-- ─────────────────────────────────────────────────────────────────────────
+-- MANUAL MIGRATION — 2026-08-06 improvement-loop capture (plan item 1.1).
+--
+-- Same trap as the 2026-07-18 block above, and the same reason: `reports`
+-- already exists on the live D1 instance, so the CREATE TABLE IF NOT EXISTS
+-- near the top of this file is a NO-OP against it and will not add these four
+-- columns. Run them once, by hand, against `data-center-db`:
+--
+--   npx wrangler d1 execute data-center-db --remote \
+--     --command "ALTER TABLE reports ADD COLUMN event_type TEXT"
+--   npx wrangler d1 execute data-center-db --remote \
+--     --command "ALTER TABLE reports ADD COLUMN embodiment_model TEXT"
+--   npx wrangler d1 execute data-center-db --remote \
+--     --command "ALTER TABLE reports ADD COLUMN track TEXT"
+--   npx wrangler d1 execute data-center-db --remote \
+--     --command "ALTER TABLE reports ADD COLUMN quality REAL"
+--
+-- ORDER RELATIVE TO DEPLOY, AND WHAT BREAKS IF IT IS WRONG:
+--
+--   Either order is SAFE, because the capture write is gated OFF by default
+--   and nothing reads these columns until the flag is flipped. What is NOT
+--   safe is flipping `improvement_loop_enabled` before running these.
+--
+--   · Deploy first, migrate later  — fine. recordOfficeEvent() is inert while
+--     the flag is off, so the INSERT naming these columns is never executed.
+--   · Migrate first, deploy later  — also fine. Four unused nullable columns
+--     sit on the table; every existing INSERT names its columns explicitly,
+--     so none of them break.
+--   · Flip the flag before migrating — THIS IS THE ONE THAT BREAKS. The
+--     INSERT would reference columns that do not exist and fail. It fails
+--     SAFELY (recordOfficeEvent() catches, warns, returns capture_error, and
+--     the client answer is unaffected) but every row is silently lost, and
+--     "the loop is on and capturing nothing" looks identical to "the office
+--     had a quiet day". The `improvement_loop_status` trigger exists to make
+--     that distinction visible: it reports `captureColumnsPresent: false`
+--     rather than an empty result set.
+--
+-- SQLite/D1 has no "ADD COLUMN IF NOT EXISTS" — if a column already exists
+-- the ALTER errors, which is expected and safe to ignore.
 -- ─────────────────────────────────────────────────────────────────────────
 
 CREATE INDEX IF NOT EXISTS idx_sessions_agent ON agent_sessions(agent_id);

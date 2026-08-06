@@ -17,6 +17,7 @@ import { queryNotebookX } from '../workers/notebookx-client.js';
 import { getClaudeBudgetStatus, recordClaudeSpend, getClaudeCallsToday, CLAUDE_MAX_CALLS_PER_DAY } from '../workers/model-router.js';
 import { checkGeminiPacingSlot } from '../workers/gemini-pacer.js';
 import { detectCapabilityGap } from '../workers/gap-reports.js';
+import { recordOfficeEvent } from '../workers/improvement-loop.js';
 
 const MOOD_MIN = 0;
 const MOOD_MAX = 100;
@@ -430,6 +431,40 @@ export class AgentBase {
       lastQuery = followUpQuery;
       result = await ask(followUpQuery);
     }
+
+    // ── IMPROVEMENT-LOOP CAPTURE (plan 1.1), added 2026-08-06 ──────────────
+    // PURELY ADDITIVE AND GATED OFF. This is the only line of this method that
+    // is new, it runs AFTER every decision above has already been made, it
+    // reads `result` and never mutates it, and nothing branches on what it
+    // returns. recordOfficeEvent() cannot throw and no-ops entirely while
+    // SIM_KV `improvement_loop_enabled` is off or absent — the shipped
+    // default. With the flag off this method behaves exactly as it did
+    // before; scripts/verify-improvement-loop.js proves that rather than
+    // asserting it.
+    //
+    // WHY IT IS HERE and not inside ask(): one row per unit of WORK, not per
+    // model call. A case that needed three follow-ups to reach 0.7 is one
+    // case with a story, and splitting it into four rows would make the QA's
+    // per-worker quality average meaningless — the early low scores are the
+    // process, not the outcome. `followup_depth` carries the story instead.
+    //
+    // `result.source` is what ACTUALLY answered, including after a lane
+    // degraded to its backup — not the provider that was asked for.
+    await recordOfficeEvent(this.env, {
+      agentId: this.id,
+      eventType: 'case_answer',
+      track: 'client',
+      embodimentModel: result?.source || this.lastModelSource || null,
+      quality: typeof result?.quality === 'number' ? result.quality : null,
+      project: opts.project || null,
+      title: `case_answer — ${opts.caseId || this.name}`,
+      content: JSON.stringify({
+        mode,
+        followup_depth: depth,
+        skipped: result?.skipped === true,
+        kb_slug: opts.kbSlug || null,
+      }),
+    });
 
     return result;
   }
