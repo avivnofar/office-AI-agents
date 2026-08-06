@@ -51,7 +51,7 @@ import { callCFRouter } from './gemini-client.js';
 import { generateAssignedDailyBatch, persistQuestions } from './qa-engine.js';
 import { getClaudeBudgetStatus, recordClaudeSpend, routeTaskTypeCall, resolveTaskLane, getRoutingQuotaStatus, MODEL_ROUTING } from './model-router.js';
 import { collectTodayGapReports, renderGapDigest } from './gap-reports.js';
-import { resolveWriteTarget, resolveIssueTarget, checkCodeWriteAllowed } from './permission-guard.js';
+import { resolveIssueTarget, resolveRepoWrite } from './permission-guard.js';
 import { runChoreRotationSlot } from './chore-runner.js';
 import { checkGeminiPacingSlot } from './gemini-pacer.js';
 import { callClaudeMessages } from './claude-client.js';
@@ -80,9 +80,47 @@ const REPO_NAME = 'office-AI-agents';
 // were ever missing or push:false, self-writes would be redirected into
 // agent-output/office-agents/... same as any other blocked project — see
 // project-permissions.json's office_agents_push_true_is_load_bearing note.
+// back-office / warehouse mapped 2026-08-06 (plan item 0.3). Both keys already
+// existed in project-permissions.json with push:true; what was missing was
+// this lookup, and its absence did NOT fail closed — see resolveRepoWrite()'s
+// header in permission-guard.js.
+const BACKOFFICE_REPO_NAME = 'back-office-AI-agents';
+const WAREHOUSE_REPO_NAME = 'warehouse-office-AI-agents';
+
 const REPO_TO_PROJECT_KEY = {
   [REPO_NAME]: 'office-agents',
+  [BACKOFFICE_REPO_NAME]: 'back-office',
+  [WAREHOUSE_REPO_NAME]: 'warehouse',
 };
+
+// ONE SCOPED TOKEN PER WRITE TARGET (plan decision 0.8), made enforceable
+// rather than merely documented. The token follows the repo; there is no
+// fallback and no default. A repo whose secret is unmapped or unset is a
+// DENIAL — see resolveRepoWrite() step 4.
+//
+// Why this map exists at all: commitFileToRepo() used to hardcode
+// env.GITHUB_TOKEN for every destination. That token carries write scope on
+// the PUBLIC repo, so the moment anything wrote to back-office it would have
+// been presenting a public-repo credential to a private target — the exact
+// over-reach 0.8 exists to prevent.
+//
+// WAREHOUSE_REPO_TOKEN is mapped but NOT SET on the Worker as of 2026-08-06.
+// That is deliberate and is the second lock on the warehouse code-write
+// exception: the policy is now enforceable in code (code_write:true is read),
+// while the capability stays off because no token exists to perform the write.
+const REPO_TO_TOKEN_SECRET = {
+  [REPO_NAME]: 'GITHUB_TOKEN',
+  [BACKOFFICE_REPO_NAME]: 'BACKOFFICE_REPO_TOKEN',
+  [WAREHOUSE_REPO_NAME]: 'WAREHOUSE_REPO_TOKEN',
+};
+
+/** Secret NAMES to booleans. Never carries a token value — resolveRepoWrite()
+ * decides on presence alone, so no secret reaches the guard or a log line. */
+function secretsPresentIn(env) {
+  const out = {};
+  for (const name of Object.values(REPO_TO_TOKEN_SECRET)) out[name] = !!env?.[name];
+  return out;
+}
 
 /** Maps year-tracker.json milestone keys to the meeting they trigger (in
  * addition to the daily standup, which always runs). */
@@ -393,38 +431,48 @@ function updateYearStats(prevStats, { summary, standup, sidePlotStarted, sidePlo
 /* ─────────────────────────────── GitHub ────────────────────────────────── */
 
 /**
- * Commits a file to a repo via the GitHub Contents API. No-ops if
- * env.GITHUB_TOKEN (a Worker secret, never shipped to the browser) isn't
- * configured.
+ * Commits a file to a repo via the GitHub Contents API.
  *
- * Enforces the two General agent-conduct rules before ever calling GitHub:
- *   1. Code-file writes are blocked unless `opts.explicitCodeTask` is true
- *      (agents don't write code files unless directly instructed).
- *   2. Writes to a project repo (including this one — see
- *      REPO_TO_PROJECT_KEY's comment) are redirected into REPO_NAME under
- *      agent-output/<projectKey>/ when that project's
- *      config/project-permissions.json entry has push:false (agents may
- *      only recommend/write-to-own-repo for those projects).
+ * EVERY decision is delegated to resolveRepoWrite() (permission-guard.js) —
+ * this function contains no permission logic of its own, deliberately, so
+ * there is exactly one place where a write can be allowed and one dry-run
+ * verifier scenario table covering it. It enforces, in order:
+ *   1. Unmapped repo name -> DENIED. Not skipped. (Fixed 2026-08-06; this
+ *      was the fail-open hole — see resolveRepoWrite()'s header.)
+ *   2. push:false -> redirected into REPO_NAME under agent-output/<key>/
+ *      rather than dropped (agents may recommend / write-to-own-repo).
+ *   3. Code-file writes blocked unless `opts.explicitCodeTask` is true OR
+ *      the DESTINATION project carries code_write:true (warehouse only).
+ *   4. The token FOLLOWS THE REPO — GITHUB_TOKEN for the public repo,
+ *      BACKOFFICE_REPO_TOKEN for back-office. No fallback: an unmapped or
+ *      unset secret is a denial, never a borrow of another target's token.
  * See workers/permission-guard.js.
  */
 async function commitFileToRepo(env, repoName, path, content, message, opts = {}) {
-  const codeCheck = checkCodeWriteAllowed(projectPermissions, { filePath: path, explicitCodeTask: opts.explicitCodeTask });
-  if (!codeCheck.allowed) {
-    return { committed: false, reason: codeCheck.reason, blocked: 'code-write-guard' };
+  // ONE resolution for permission, destination, code-file rule and token.
+  // Rewritten 2026-08-06: this previously ran the permission check inside
+  // `if (projectKey)`, so an UNMAPPED repo name skipped the check entirely
+  // and the write proceeded — fail-open, not fail-closed. See
+  // resolveRepoWrite()'s header for the full account.
+  const verdict = resolveRepoWrite(projectPermissions, {
+    repoToProjectKey: REPO_TO_PROJECT_KEY,
+    repoToTokenSecret: REPO_TO_TOKEN_SECRET,
+    ownRepoName: REPO_NAME,
+    targetRepoName: repoName,
+    path,
+    explicitCodeTask: opts.explicitCodeTask,
+    secretsPresent: secretsPresentIn(env),
+  });
+  if (!verdict.allowed) {
+    return { committed: false, reason: verdict.reason, blocked: verdict.blocked };
   }
 
-  const projectKey = REPO_TO_PROJECT_KEY[repoName];
-  if (projectKey) {
-    const target = resolveWriteTarget(projectPermissions, { projectKey, ownRepoName: REPO_NAME, targetRepoName: repoName, path });
-    repoName = target.repoName;
-    path = target.path;
-    if (target.redirected) message = `${message} [redirected: push disabled for "${target.projectKey}"]`;
-  }
-
-  if (!env.GITHUB_TOKEN) return { committed: false, reason: 'GITHUB_TOKEN not configured' };
+  repoName = verdict.repoName;
+  path = verdict.path;
+  if (verdict.redirected) message = `${message} [redirected: push disabled for "${verdict.projectKey}"]`;
 
   const headers = {
-    Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+    Authorization: `Bearer ${env[verdict.tokenSecret]}`,
     'User-Agent': 'data-center-agent-sim',
     Accept: 'application/vnd.github+json',
   };
@@ -456,21 +504,36 @@ async function commitFileToRepo(env, repoName, path, content, message, opts = {}
  * REPO_NAME instead of landing in the external repo.
  */
 async function fileGitHubIssue(env, repoName, { title, body, labels }) {
+  // Same fail-open fix as commitFileToRepo() (2026-08-06): an unmapped repo
+  // name used to skip resolveIssueTarget() entirely and open the Issue
+  // anyway. An Issue is a write to that repo just as much as a file commit
+  // is, so it gets the same fail-closed treatment and the same
+  // token-follows-the-repo rule.
   const projectKey = REPO_TO_PROJECT_KEY[repoName];
-  if (projectKey) {
-    const target = resolveIssueTarget(projectPermissions, { projectKey, ownRepoName: REPO_NAME, targetRepoName: repoName, title, body });
-    repoName = target.repoName;
-    title = target.title;
-    body = target.body;
+  if (!projectKey) {
+    const reason = `no config/project-permissions.json key mapped for repo "${repoName}" — Issue creation DENIED (fail closed).`;
+    console.warn(`[permission-guard] ${reason}`);
+    return { created: false, reason, blocked: 'unmapped_repo' };
   }
 
-  if (!env.GITHUB_TOKEN) return { created: false, reason: 'GITHUB_TOKEN not configured' };
+  const target = resolveIssueTarget(projectPermissions, { projectKey, ownRepoName: REPO_NAME, targetRepoName: repoName, title, body });
+  repoName = target.repoName;
+  title = target.title;
+  body = target.body;
+
+  const tokenSecret = REPO_TO_TOKEN_SECRET[repoName];
+  if (!tokenSecret) {
+    return { created: false, reason: `no token secret mapped for repo "${repoName}" — DENIED`, blocked: 'no_token_mapped' };
+  }
+  if (!env?.[tokenSecret]) {
+    return { created: false, reason: `${tokenSecret} not configured — DENIED for repo "${repoName}"`, blocked: 'token_not_configured' };
+  }
 
   const url = `https://api.github.com/repos/${REPO_OWNER}/${repoName}/issues`;
   const res = await fetch(url, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+      Authorization: `Bearer ${env[tokenSecret]}`,
       'User-Agent': 'data-center-agent-sim',
       Accept: 'application/vnd.github+json',
       'Content-Type': 'application/json',

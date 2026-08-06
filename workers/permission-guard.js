@@ -117,13 +117,138 @@ export function isCodeFilePath(filePath) {
  * replaces the 2026-07-11 model-scoped branch (`code_write.<model>`),
  * whose only consumer (notebook-x-daily.mjs) was deleted the same day.
  */
-export function checkCodeWriteAllowed(permissions, { filePath, explicitCodeTask = false }) {
+export function checkCodeWriteAllowed(permissions, { filePath, explicitCodeTask = false, projectKey = undefined }) {
   if (!isCodeFilePath(filePath)) return { allowed: true };
 
   if (explicitCodeTask) return { allowed: true };
-  const reason = `Blocked: "${filePath}" is a code file and the triggering task was not an explicit code-writing instruction (General rule: agents research/investigate/recommend/write files but don't write code files unless directly instructed).`;
+
+  // Per-project exception, wired 2026-08-06. Until then this function read
+  // only the blanket rule and IGNORED the per-project `code_write` field
+  // entirely — so `warehouse: { code_write: true }`, the single deliberate
+  // exception in the whole repo, was documentation with no enforcement path,
+  // and so was `back-office: { code_write: false }`. Neither key was read by
+  // any code. `permissions[undefined]` is undefined, so a caller that passes
+  // no projectKey lands on the blanket denial exactly as before.
+  if (permissions?.[projectKey]?.code_write === true) {
+    return { allowed: true, reason: `code_write:true for project "${projectKey}"` };
+  }
+
+  const scope = projectKey ? ` for project "${projectKey}" (code_write is not true)` : '';
+  const reason = `Blocked: "${filePath}" is a code file and the triggering task was not an explicit code-writing instruction${scope} (General rule: agents research/investigate/recommend/write files but don't write code files unless directly instructed).`;
   console.warn(`[permission-guard] ${reason}`);
   return { allowed: false, reason };
+}
+
+/**
+ * THE SINGLE ENTRY POINT FOR "may this write happen, where does it land, and
+ * which secret pays for it". Added 2026-08-06 to close a FAIL-OPEN hole.
+ *
+ * ── WHAT WAS WRONG ──────────────────────────────────────────────────────
+ *
+ * commitFileToRepo() and fileGitHubIssue() both gated the entire permission
+ * check behind a map lookup:
+ *
+ *     const projectKey = REPO_TO_PROJECT_KEY[repoName];
+ *     if (projectKey) { ...resolveWriteTarget()... }   // else: nothing
+ *     // ...then wrote to repoName anyway
+ *
+ * An unmapped repo name did not get denied — it SKIPPED THE CHECK ENTIRELY
+ * and the write proceeded unchecked. `unknown_project_key_default` in
+ * config/project-permissions.json says "deny (fail closed)", and
+ * canPushToProject() does implement exactly that, but for an unmapped repo
+ * name it was never reached. The documented safe state was real in the
+ * config and absent from the call path.
+ *
+ * It was LATENT: all 17 commitFileToRepo() call sites passed REPO_NAME,
+ * which was mapped, so nothing ever reached the hole. Latent is why there
+ * is no damage to clean up. It is not why the documentation was wrong.
+ *
+ * This is the THIRD time this project has hit the same shape — a guard that
+ * exists, documentation asserting the calling path reaches it, and a calling
+ * path that does not. See the 2026-07-11/12 incident and the 2026-07-18
+ * discovery that checkCodeWriteAllowedForModel() was never wired. The
+ * pattern is worth naming: DOCUMENTATION ASSERTS A GUARD, THE CALLING PATH
+ * NEVER REACHES IT.
+ *
+ * ── WHAT THIS DOES ──────────────────────────────────────────────────────
+ *
+ * Resolution is ordered, and every step can only deny:
+ *
+ *   1. Repo name -> project key. NO KEY IS A DENIAL, never a skip. This is
+ *      the step that used to be `if (projectKey)`.
+ *   2. resolveWriteTarget() — push:false redirects into ownRepoName rather
+ *      than dropping the write, unchanged behaviour.
+ *   3. Code-file check against the FINAL destination's key, after any
+ *      redirect, because that is the repo the bytes actually land in.
+ *   4. Repo name -> token secret name. A repo with no mapped secret, or a
+ *      mapped secret that is not configured, is a DENIAL — never a fallback
+ *      to whichever token happens to be in scope. This is decision 0.8 (one
+ *      scoped token per target) made enforceable: a write to back-office
+ *      that silently used GITHUB_TOKEN would hand the campus path a
+ *      public-repo write credential.
+ *
+ * Takes `secretsPresent` — a map of secret NAME to boolean — rather than
+ * `env`, so no token value ever enters this module and the whole decision is
+ * a pure function a dry-run verifier can call directly.
+ *
+ * @returns {{allowed: boolean, repoName?: string, path?: string,
+ *            projectKey?: string, tokenSecret?: string, redirected?: boolean,
+ *            reason?: string, blocked?: string}}
+ */
+export function resolveRepoWrite(permissions, {
+  repoToProjectKey,
+  repoToTokenSecret,
+  ownRepoName,
+  targetRepoName,
+  path: filePath,
+  explicitCodeTask = false,
+  secretsPresent = {},
+}) {
+  // 1. Unmapped repo name is a denial. This is the fail-open fix.
+  const projectKey = repoToProjectKey?.[targetRepoName];
+  if (!projectKey) {
+    const reason = `no config/project-permissions.json key mapped for repo "${targetRepoName}" — DENIED (fail closed). Add it to REPO_TO_PROJECT_KEY only alongside a real permissions entry and a scoped token secret.`;
+    console.warn(`[permission-guard] ${reason}`);
+    return { allowed: false, reason, blocked: 'unmapped_repo' };
+  }
+
+  // 2. push:false redirects rather than drops.
+  const target = resolveWriteTarget(permissions, { projectKey, ownRepoName, targetRepoName, path: filePath });
+
+  // 3. Code-file rule, judged against where the bytes actually land.
+  const finalProjectKey = repoToProjectKey?.[target.repoName];
+  if (!finalProjectKey) {
+    const reason = `redirect destination "${target.repoName}" has no project-permissions key — DENIED (fail closed).`;
+    console.warn(`[permission-guard] ${reason}`);
+    return { allowed: false, reason, blocked: 'unmapped_redirect_destination' };
+  }
+  const codeCheck = checkCodeWriteAllowed(permissions, { filePath: target.path, explicitCodeTask, projectKey: finalProjectKey });
+  if (!codeCheck.allowed) {
+    return { allowed: false, reason: codeCheck.reason, blocked: 'code_write_guard' };
+  }
+
+  // 4. The token follows the repo. No fallback, ever.
+  const tokenSecret = repoToTokenSecret?.[target.repoName];
+  if (!tokenSecret) {
+    const reason = `no token secret mapped for repo "${target.repoName}" — DENIED. A write target without its own scoped secret does not borrow another target's token (plan decision 0.8).`;
+    console.warn(`[permission-guard] ${reason}`);
+    return { allowed: false, reason, blocked: 'no_token_mapped' };
+  }
+  if (!secretsPresent[tokenSecret]) {
+    const reason = `token secret "${tokenSecret}" is not configured on this Worker — DENIED for repo "${target.repoName}". Not a fallback condition: set that secret or the write does not happen.`;
+    console.warn(`[permission-guard] ${reason}`);
+    return { allowed: false, reason, blocked: 'token_not_configured' };
+  }
+
+  return {
+    allowed: true,
+    repoName: target.repoName,
+    path: target.path,
+    projectKey: finalProjectKey,
+    tokenSecret,
+    redirected: target.redirected === true,
+    reason: target.reason ?? null,
+  };
 }
 
 const PULL_LOG_TABLE_SQL = `CREATE TABLE IF NOT EXISTS pull_log (
