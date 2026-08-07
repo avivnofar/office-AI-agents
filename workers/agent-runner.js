@@ -52,7 +52,7 @@ import { generateAssignedDailyBatch, persistQuestions } from './qa-engine.js';
 import { getClaudeBudgetStatus, recordClaudeSpend, routeTaskTypeCall, resolveTaskLane, getRoutingQuotaStatus, MODEL_ROUTING } from './model-router.js';
 import { collectTodayGapReports, renderGapDigest } from './gap-reports.js';
 import { resolveIssueTarget } from './permission-guard.js';
-import { getOfficeContext } from './office-context.js';
+import { getOfficeContext, getOfficeSnapshot, officeContextEnabled } from './office-context.js';
 import {
   REPO_OWNER, REPO_NAME, BACKOFFICE_REPO_NAME, WAREHOUSE_REPO_NAME,
   REPO_TO_PROJECT_KEY, REPO_TO_TOKEN_SECRET, secretsPresentIn, commitFileToRepo,
@@ -2397,6 +2397,66 @@ export default {
               improvementLoopEnabled: flagOn,
               captureColumnsPresent: tableReady,
               ...(tableReady ? { today: rows } : { note: 'reports.event_type is missing — run the four ALTER TABLE statements in database/schema.sql' }),
+            };
+            break;
+          }
+          case 'office_context_toggle':
+            // Office-context kill switch (workers/office-context.js
+            // officeContextEnabled()): flips SIM_KV simulation-state
+            // `office_context_enabled` without a redeploy. Body:
+            // { enabled: true|false }. While off — or absent, the shipped
+            // default — getOfficeContext() returns
+            // { text: null, reason: 'office_context_disabled' } at all four
+            // injection sites and no GitHub call is made.
+            //
+            // ADDED 2026-08-08, and the reason it was added is worth keeping.
+            // The flag shipped 2026-08-07 on the updateSimulationState()
+            // allow-list but WITHOUT this case, so the only way to set it was
+            // `POST /api/simulation` — which sits outside the
+            // `/api/agents/*` admin-token check. The three sibling flags
+            // (guides/routing/architect_liaison) all have a toggle case, and
+            // that is not decoration: the toggle cases are the AUTHENTICATED
+            // path. A production flag whose only operational route is an
+            // unauthenticated endpoint is the gap, not the missing symmetry.
+            result = await updateSimulationState(env, { office_context_enabled: !!body.enabled });
+            break;
+          case 'office_context_status': {
+            // Read-back for the supervised test, and the answer to the
+            // question the owner actually has: not "is the flag on" but
+            // "is the flag on AND is there content behind it". Those differ —
+            // a missing BACKOFFICE_REPO_TOKEN, a renamed board file or a
+            // changed heading format all yield flag-ON-input-EMPTY, which
+            // renders as a report built on nothing rather than as an error.
+            //
+            // Makes no model calls and writes no report row. It is NOT
+            // side-effect-free: with the flag on it calls getOfficeSnapshot()
+            // with allowFetch, which costs two GitHub Contents API reads and
+            // REFRESHES the cached snapshot in SIM_KV. That is deliberate —
+            // a status probe that reads a stale cache cannot tell you whether
+            // the fetch path still works.
+            const flagOn = await officeContextEnabled(env);
+            if (!flagOn) {
+              result = { officeContextEnabled: false, note: 'flag is off — no fetch attempted, all four injection sites return text:null' };
+              break;
+            }
+            const snapshot = await getOfficeSnapshot(env, { allowFetch: true });
+            const built = await getOfficeContext(env, { shape: 'report', snapshot });
+            result = {
+              officeContextEnabled: true,
+              backofficeTokenPresent: !!env.BACKOFFICE_REPO_TOKEN,
+              fetched_at: snapshot?.fetched_at ?? null,
+              errors: snapshot?.errors ?? ['no snapshot returned at all'],
+              board: snapshot?.board
+                ? { counts: snapshot.board.counts, malformed: snapshot.board.malformed ?? [] }
+                : null,
+              requirements: snapshot?.requirements
+                ? {
+                    due: snapshot.requirements.due,
+                    rows: snapshot.requirements.requirements.length,
+                    malformed: snapshot.requirements.malformed ?? [],
+                  }
+                : null,
+              reportShape: { degraded: built.degraded, reason: built.reason, tokens: built.tokens, dropped: built.dropped },
             };
             break;
           }

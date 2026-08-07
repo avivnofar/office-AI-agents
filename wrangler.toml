@@ -46,7 +46,29 @@ binding = "AI"
 #   GROQ_API_KEY      - required, routine per-case agent work (callGroq(), config/token-economy.json)
 #   GOOGLE_AI_API_KEY - optional, reserved for Google AI Studio report tooling (see token-economy.json)
 #   ADMIN_TOKEN       - required, validates X-Admin-Token on /api/agents/*
-#   GITHUB_TOKEN      - optional, gates report/guide commits + claude-action issues to GitHub
+#   GITHUB_TOKEN      - optional, gates report/guide commits + claude-action issues to GitHub.
+#                       PUBLIC REPO ONLY. resolveRepoWrite() (workers/repo-write.js)
+#                       maps the token to the destination repo with no fallback, so
+#                       this one is never presented to a private target.
+#   BACKOFFICE_REPO_TOKEN - required by TWO modules, and this line was missing from
+#                       this block until 2026-08-08 despite both depending on it:
+#                         * workers/office-context.js fetchOfficeSnapshot() — READS
+#                           back-office BOARD.md + CLIENT-REQUIREMENTS.md. Unset does
+#                           NOT raise: it returns {board:null, requirements:null,
+#                           errors:['BACKOFFICE_REPO_TOKEN is not configured…']}, so
+#                           `office_context_enabled` reads ON while every report is
+#                           built on an empty office context. Probe it with
+#                           `POST /api/agents/trigger {"type":"office_context_status"}`,
+#                           which reports the token's presence and the parsed counts.
+#                         * workers/repo-write.js — the WRITE credential for
+#                           back-office-AI-agents (REPO_TO_TOKEN_SECRET), the path
+#                           plan item 0.3 built. Unmapped or unset is a denial, never
+#                           a fallback to GITHUB_TOKEN above.
+#                       CONFIRMED SET on the Worker 2026-08-08 (owner).
+#   WAREHOUSE_REPO_TOKEN - mapped in repo-write.js and DELIBERATELY NOT SET. The
+#                       warehouse code-write exception is enforceable but not live:
+#                       a warehouse write passes the code rule and is then denied for
+#                       want of a token. Two independent locks — see CLAUDE.md.
 #   GITHUB_MODELS_TOKEN - REMOVED 2026-08-06. GitHub Models was permanently retired
 #                       on 2026-07-30; its client is deleted and no code reads this.
 #                       The secret is DEAD and should be deleted from the Worker:

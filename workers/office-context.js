@@ -249,7 +249,17 @@ export function parseRequirements(markdown) {
     return { ok: false, reason: 'requirements markdown was empty or not a string' };
   }
 
-  const dueMatch = /^- \*\*Due:\*\*\s*\*\*(.+?)\*\*\s*$/m.exec(markdown);
+  // The `>?` accepts the line inside a blockquote. It was NOT there until
+  // 2026-08-08, and the real defect was not the anchor — it was that a `null`
+  // due date rendered as nothing at all. The date lived at
+  // `> - **Due:** **2026-09-07**`, the regex could not see it, and the office
+  // ran for a day with no deadline in any prompt while every signal available
+  // said healthy: no error, `degraded:false`, no `malformed` entry, and a
+  // headline that read "8 on record" as though a commitment window with no end
+  // date were the normal case. A missing due date is now REPORTED (below) and
+  // RENDERED (buildOfficeContext) — the anchor fix alone would have closed this
+  // instance and left the silence in place for the next one.
+  const dueMatch = /^\s*>?\s*- \*\*Due:\*\*\s*\*\*(.+?)\*\*\s*$/m.exec(markdown);
   const due = dueMatch ? dueMatch[1].trim() : null;
 
   const rowRe = /^\|\s*\*\*(REQ-[0-9A-Za-z]+)\*\*\s*\|([^|]*)\|([^|]*)\|([^|]*)\|/gm;
@@ -281,6 +291,18 @@ export function parseRequirements(markdown) {
 
   if (!requirements.length) {
     return { ok: false, reason: `no readable requirement rows found${malformed.length ? ` — ${malformed.join('; ')}` : ''}` };
+  }
+
+  // Same rule the per-row status check follows: REFUSE, do not guess — and say
+  // so. An absent commitment date is not a benign omission; every report is
+  // required to lead with where the office stands against the deadline, so a
+  // null here silently removes the thing the reports are measured against.
+  // `malformed` is the module's existing channel for "input we could not read",
+  // is surfaced by the office_context_status trigger, and is logged by
+  // getOfficeContext() — so this makes the failure visible in three places
+  // without inventing a fourth mechanism.
+  if (!due) {
+    malformed.push('commitment Due date not found — expected `- **Due:** **YYYY-MM-DD**` (a leading `>` is tolerated). The office has no deadline in any prompt until this parses.');
   }
 
   return { ok: true, due, requirements, malformed };
@@ -469,7 +491,10 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
     sections.push({
       label: 'requirements-headline',
       priority: PRIORITY.headline,
-      text: `Client requirements: ${requirements.requirements.length} on record${requirements.due ? `, commitment due ${requirements.due}` : ''}${urgentCount ? `, ${urgentCount} marked URGENT by the client` : ''}. Full text: back-office docs/CLIENT-REQUIREMENTS.md.`,
+      // A null `due` renders as a LOUD marker, never as nothing. Omitting it
+      // produced a headline that was indistinguishable from a genuine
+      // no-deadline state, which is how it survived a full day unnoticed.
+      text: `Client requirements: ${requirements.requirements.length} on record${requirements.due ? `, commitment due ${requirements.due}` : ', COMMITMENT DUE DATE UNREADABLE — the deadline could not be parsed from docs/CLIENT-REQUIREMENTS.md and this is a defect, not an absence of deadline'}${urgentCount ? `, ${urgentCount} marked URGENT by the client` : ''}. Full text: back-office docs/CLIENT-REQUIREMENTS.md.`,
     });
     sections.push({
       label: 'requirements-status',
@@ -605,6 +630,18 @@ export async function getOfficeContext(env, { shape = 'agent', agentId = null, a
   }
   if (built.dropped.length) {
     console.warn(`[office-context] ${shape} over budget — dropped: ${built.dropped.join(', ')}`);
+  }
+  // Unreadable INPUT is a different failure from a degraded or over-budget
+  // RENDER, and it had no log line at all until 2026-08-08 — the parsers
+  // recorded `malformed` faithfully and nothing ever read it, so a board task
+  // with an unreadable State and a missing commitment date were both invisible
+  // in production logs. Warn once per call, naming the shape.
+  const malformed = [
+    ...(snapshot?.requirements?.malformed || []),
+    ...(snapshot?.board?.malformed || []),
+  ];
+  if (malformed.length) {
+    console.warn(`[office-context] ${shape} built from UNREADABLE input — ${malformed.join(' | ')}`);
   }
   return built;
 }

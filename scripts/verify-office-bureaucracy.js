@@ -222,6 +222,65 @@ check('office context ON only for the boolean true', (await officeContext.office
 check('the two new flags are on the simulation-state allow-list (else they can never be set)',
   /'office_context_enabled', 'action_items_to_board_enabled'/.test(read('workers/agent-runner.js')));
 
+// OPERATIONAL PATH (added 2026-08-08). Being on the allow-list only means the
+// flag CAN be set; it says nothing about there being a documented, authenticated
+// way to set it. office_context_enabled shipped 2026-08-07 allow-listed but with
+// no trigger case, so its only route was the unauthenticated POST /api/simulation
+// — the owner burned twenty minutes guessing trigger-type names that did not
+// exist. These checks make "capability with no operational path" a test failure.
+const arSrc0 = read('workers/agent-runner.js');
+for (const flag of ['guides', 'routing', 'architect_liaison', 'improvement_loop', 'office_context']) {
+  check(`${flag} has a toggle case on /api/agents/trigger (the AUTHENTICATED path)`,
+    arSrc0.includes(`case '${flag}_toggle':`));
+}
+check('office_context_status exists so flag-ON-input-EMPTY is observable without generating a report',
+  arSrc0.includes("case 'office_context_status':"));
+check('office_context_status reports the token presence — the silent-empty cause',
+  /officeContextEnabled: true[\s\S]{0,200}backofficeTokenPresent/.test(arSrc0));
+check('action_items_to_board_enabled deliberately has NO toggle case (stays owner-only, see MEETING-PROTOCOL.md)',
+  !arSrc0.includes("case 'action_items_to_board_toggle':"));
+
+// THE SILENT DROP (found 2026-08-08, live). The commitment due date sat inside
+// a blockquote, `^- **Due:**` could not match it, and `due:null` rendered as
+// NOTHING — so the office ran a full day with no deadline in any prompt while
+// every health signal said fine. The regex was the trigger; the silence was the
+// defect. These scenarios pin all three layers of the fix, because fixing only
+// the anchor would close this instance and leave the next one silent.
+const REQ_ROWS = [
+  '| ID | Requirement | Urgency | Status |',
+  '|---|---|---|---|',
+  '| **REQ-001** | Ship the thing | URGENT | in progress |',
+  '| **REQ-002** | Ship the other thing |  | not started |',
+].join('\n');
+
+const dueQuoted = officeContext.parseRequirements(`> - **Due:** **2026-09-07**\n\n${REQ_ROWS}`);
+check('due date parses when BLOCKQUOTED (the live shape that silently failed)',
+  dueQuoted.ok === true && dueQuoted.due === '2026-09-07');
+check('...and a blockquoted due date produces NO malformed entry',
+  dueQuoted.malformed.length === 0);
+
+const duePlain = officeContext.parseRequirements(`- **Due:** **2026-09-07**\n\n${REQ_ROWS}`);
+check('due date still parses UNQUOTED (the fix did not trade one anchor for another)',
+  duePlain.ok === true && duePlain.due === '2026-09-07');
+
+const dueMissing = officeContext.parseRequirements(`## No commitment here\n\n${REQ_ROWS}`);
+check('a MISSING due date still parses the rows (ok:true — it is not a total failure)',
+  dueMissing.ok === true && dueMissing.due === null && dueMissing.requirements.length === 2);
+check('...and is REPORTED as malformed rather than vanishing (the actual defect)',
+  dueMissing.malformed.length === 1 && /commitment Due date not found/.test(dueMissing.malformed[0]));
+
+const builtMissing = officeContext.buildOfficeContext(
+  { fetched_at: Date.now(), board: null, requirements: dueMissing, errors: [] }, 'report', {});
+check('...and the RENDERED context shouts it, so the office cannot read it as "no deadline"',
+  /COMMITMENT DUE DATE UNREADABLE/.test(builtMissing.text));
+const builtOk = officeContext.buildOfficeContext(
+  { fetched_at: Date.now(), board: null, requirements: dueQuoted, errors: [] }, 'report', {});
+check('...while a readable due date renders the date and NOT the marker',
+  /commitment due 2026-09-07/.test(builtOk.text) && !/UNREADABLE/.test(builtOk.text));
+
+check('getOfficeContext logs malformed INPUT (distinct from a degraded RENDER)',
+  read('workers/office-context.js').includes('built from UNREADABLE input'));
+
 // Switch OFF must not read the cache, not fetch, not log. The tripwire proves
 // no fetch; a throwing SIM_KV.get proves the cache is not read either.
 const throwingKv = { SIM_KV: { get: async (k) => { if (k === 'office-context-cache') throw new Error('cache was read while the switch was OFF'); return null; } } };
