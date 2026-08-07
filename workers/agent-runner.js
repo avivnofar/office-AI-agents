@@ -39,6 +39,7 @@ import dailyScheduleConfig from '../config/daily-schedule.json';
 import aiToolsConfig from '../config/ai-tools.json';
 import projectPermissions from '../config/project-permissions.json';
 import tokenEconomy from '../config/token-economy.json';
+import officeProjects from '../config/office-projects.json';
 
 import { PerfectionistAgent } from '../agents/agent-1-perfectionist.js';
 import { ProductiveAgent } from '../agents/agent-2-productive.js';
@@ -71,6 +72,16 @@ import {
   pickVerificationQueueItems, buildVerifyPrompt, parseVerifyResult, replaceGuideSection,
   fetchRawRepoFile, ARCHITECT_REVIEW_SYSTEM, VERIFY_SYSTEM,
 } from './guide-engine.js';
+import {
+  reportPipelineEnabled, planReportProviders, assertDistinctReviewer,
+  buildFactPack, buildDraftPrompt as buildReportDraftPrompt, DRAFT_SYSTEM as REPORT_DRAFT_SYSTEM,
+  buildReviewPrompt as buildReportReviewPrompt, REVIEW_SYSTEM as REPORT_REVIEW_SYSTEM,
+  parseReportReviewDecision, validateReportBody, renderReportFile, renderRejectedReportFile,
+  reportPath, rejectedReportPath, periodLabelFor, daysUntil,
+  getPendingReportRow, getLatestReportRow, insertReportRow, updateReportRow,
+  DRAFTER_AGENT_ID, REVIEWER_AGENT_ID, REPORT_TYPES, estimateReviewFit,
+  LATEST_INDEX_PATH, parseLatestIndex, renderLatestIndex, addToLatestIndex, wordCount,
+} from './report-pipeline.js';
 
 const ALLOWED_ORIGINS = ['https://avivnofar.github.io', 'http://localhost:3000', 'http://127.0.0.1:5500'];
 
@@ -291,7 +302,7 @@ async function getSimulationState(env) {
 
 async function updateSimulationState(env, patch) {
   const current = await getSimulationState(env);
-  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled', 'improvement_loop_enabled', 'architect_liaison_enabled', 'office_context_enabled', 'action_items_to_board_enabled'];
+  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled', 'improvement_loop_enabled', 'architect_liaison_enabled', 'office_context_enabled', 'action_items_to_board_enabled', 'report_pipeline_enabled'];
   const next = { ...current };
   for (const key of allowedKeys) {
     if (key in patch) next[key] = patch[key];
@@ -789,6 +800,465 @@ async function processGuideVerifyBlock(env, opts = {}) {
   }
 
   return { verified: outcomes.filter((o) => o.outcome === 'verified').length, outcomes };
+}
+
+/* ═══════════════════ The report pipeline (2026-08-08) ════════════════════
+ *
+ * Drafted by a model, reviewed by a second persona on a second provider,
+ * published only if it passes. See workers/report-pipeline.js for the rules
+ * and where each of them was paid for.
+ *
+ * SHIPPED OFF. With `report_pipeline_enabled` absent or false —  the shipped
+ * default — runReportPipeline() is a logged no-op, no model is called, and
+ * generateWeeklySummary() emits the SAME template markdown it emits today,
+ * byte for byte. Deploying this does not start it.
+ * ════════════════════════════════════════════════════════════════════════ */
+
+async function reportPipelineOn(env) {
+  return reportPipelineEnabled(env);
+}
+
+/**
+ * Output ceilings, sized against the REPORT and not against a case answer.
+ *
+ * A report of 550-950 words is roughly 730-1,270 tokens, and the review
+ * response carries the whole report again after its DECISION/NOTES header.
+ * Both are bounded rather than generous: the review's total must leave room
+ * for the fact pack and the draft inside the routing-off reviewer's
+ * 8,192-token context (see report-pipeline.js estimateReviewFit()).
+ */
+const REPORT_DRAFT_MAX_TOKENS = 1800;
+// 1,600 rather than 1,800: a 950-word report plus its DECISION/NOTES header is
+// ~1,350 tokens, and every token reserved here is a token the fact pack and the
+// draft cannot have inside the routing-off reviewer's 8,192-token total. The
+// remaining slack is real but small; a response that does overrun loses its
+// sentinel and is refused rather than published.
+const REPORT_REVIEW_MAX_TOKENS = 1600;
+
+/**
+ * Assembles the fact pack: everything the drafter is allowed to state.
+ *
+ * Reads only what already exists — the office snapshot (board + client
+ * requirements), the projects list, the per-agent rows the caller already
+ * computed, this period's meeting decisions and gap counts from D1, and the
+ * improvement loop's capture counts. NOTHING here calls a model.
+ */
+async function buildReportFacts(env, { reportType, periodLabel, dateStr, agentRows, pipelineSummary, sinceIso }) {
+  const snapshot = await getOfficeSnapshot(env, { allowFetch: true });
+  const board = snapshot?.board || null;
+  const requirements = snapshot?.requirements || null;
+
+  // Meeting decisions and conflicts this period.
+  //
+  // ── A ZERO HERE DOES NOT MEAN "NOTHING WAS DECIDED" ───────────────────
+  //
+  // Found 2026-08-08 while assembling the first fact pack: the office does
+  // NOT persist meeting decisions to D1 at all. `reports` has only carried
+  // incident / status / gap_hebrew / model_education / office_event —
+  // meeting output goes straight to GitHub as markdown
+  // (meeting-engine.js commitMeetingReport()), and applyMeetingEffects()
+  // consumes the decision arrays in memory without writing a row.
+  //
+  // So the naive query returns zero, and zero rendered as "no product
+  // decisions were taken this period" is a CONFIDENT FALSEHOOD — the office
+  // held a weekly meeting the day before this was written. It is the same
+  // shape as the four defects in ARCHITECTURAL-DECISIONS.md §7: a value that
+  // no path produces, read by something that treats its absence as a fact.
+  //
+  // The discriminator is the one the Workflow's metrics already use for
+  // idle agents — "no activity EVER recorded" is a different fact from
+  // "0 this period", and only one of them is about this period. If no
+  // meeting row has ever existed, the section is UNVERIFIED with its cause
+  // named; if rows exist historically and none fall in this window, then
+  // "none this period" is genuine and is said plainly.
+  const DECISION_TYPES = "('meeting', 'meeting_report', 'decision', 'meeting_decision')";
+  // Seeded with the no-database case rather than with [], so that "we could
+  // not look" never renders as "we looked and found nothing".
+  let decisions = ['UNVERIFIED — no database binding was available, so this period\'s decisions could not be read at all.'];
+  let gapSummary = null;
+  let captureSummary = null;
+  if (env.DB) {
+    const everRow = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM reports WHERE type IN ${DECISION_TYPES}`
+    ).first().catch(() => null);
+    const everRecorded = (everRow?.n ?? 0) > 0;
+
+    const decisionRows = await env.DB.prepare(
+      `SELECT title, severity FROM reports
+        WHERE type IN ${DECISION_TYPES} AND created_at >= ?
+        ORDER BY created_at ASC LIMIT 25`
+    ).bind(sinceIso).all().catch(() => null);
+    decisions = (decisionRows?.results || []).map((r) => `${r.title}${r.severity ? ` (${r.severity})` : ''}`);
+
+    if (!decisions.length && !everRecorded) {
+      decisions = [
+        'UNVERIFIED — the office does not persist meeting decisions or votes to a queryable store. '
+        + 'Meeting output is committed as markdown to reports/meetings/ and the decision arrays are applied in memory without a row. '
+        + 'This section therefore cannot be answered from data, and its emptiness is NOT evidence that nothing was decided. '
+        + 'Report it as a gap in the office\'s own record-keeping, in those words.',
+      ];
+    }
+
+    const gapRows = await env.DB.prepare(
+      `SELECT project, COUNT(*) AS n FROM reports
+        WHERE type = 'gap_hebrew' AND created_at >= ? GROUP BY project`
+    ).bind(sinceIso).all().catch(() => null);
+    gapSummary = (gapRows?.results || []).length
+      ? (gapRows.results).map((r) => `- ${r.project || 'unattributed'}: ${r.n} capability gap(s) flagged against that system this period`).join('\n')
+      : 'No capability gaps were flagged this period.';
+
+    const capRows = await env.DB.prepare(
+      `SELECT event_type, COUNT(*) AS n, AVG(quality) AS avg_quality FROM reports
+        WHERE event_type IS NOT NULL AND created_at >= ? GROUP BY event_type`
+    ).bind(sinceIso).all().catch(() => null);
+    if (capRows === null) {
+      captureSummary = 'Improvement-loop capture: UNVERIFIED — the capture columns are missing from the database, so no office events were recorded this period.';
+    } else if (!capRows.results.length) {
+      captureSummary = 'Improvement-loop capture: zero office events recorded this period. That is a fact about the capture, not necessarily about the work.';
+    } else {
+      captureSummary = `Improvement-loop capture: ${capRows.results.map((r) => `${r.n} ${r.event_type}${r.avg_quality != null ? ` (avg quality ${Number(r.avg_quality).toFixed(2)})` : ''}`).join(', ')}.`;
+    }
+  }
+
+  // WHAT THE OFFICE PRODUCED, not just how it is doing. Added after judging
+  // the first sample fact pack: it described state exhaustively and named not
+  // one artifact, so a report built from it could answer "where do we stand"
+  // and not "what did you do" — and the client asked the second question.
+  const artifacts = [];
+  if (env.DB) {
+    const guides = await env.DB.prepare(
+      `SELECT status, COUNT(*) AS n FROM guide_pipeline WHERE created_at >= ? GROUP BY status`
+    ).bind(sinceIso).all().catch(() => null);
+    if (guides === null) {
+      artifacts.push('UNVERIFIED — the guides pipeline table could not be read, so guide output is unknown for this period.');
+    } else if (guides.results.length) {
+      artifacts.push(`Guides: ${guides.results.map((r) => `${r.n} ${r.status}`).join(', ')}.`);
+    } else {
+      artifacts.push('Guides: none drafted this period.');
+    }
+
+    const gapDigests = await env.DB.prepare(
+      `SELECT project, COUNT(*) AS n FROM reports WHERE type = 'gap_hebrew' AND created_at >= ? GROUP BY project`
+    ).bind(sinceIso).all().catch(() => null);
+    for (const r of gapDigests?.results || []) {
+      artifacts.push(`Capability-gap findings filed against ${r.project || 'an unattributed system'}: ${r.n}, digested to reports/gaps/${r.project || 'unknown'}/.`);
+    }
+
+    const statusNotes = await env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM reports WHERE type = 'status' AND created_at >= ?`
+    ).bind(sinceIso).first().catch(() => null);
+    if (statusNotes?.n) artifacts.push(`Daily AI-experience notes filed by agents: ${statusNotes.n}.`);
+  }
+
+  // ── PERIOD-CORRECT CASE COUNTS ────────────────────────────────────────
+  //
+  // getWeeklyCasesHandled() looks back TWENTY-FOUR HOURS, not a week, despite
+  // its name (`Date.now() - 24 * 60 * 60 * 1000`). Its caller is the weekly
+  // CSV, which has been publishing a one-day number under a `weekly_cases`
+  // column header for as long as it has existed.
+  //
+  // That function is NOT changed here: it feeds committed output, and fixing
+  // it would move bytes this session promised not to move. But a weekly
+  // report cannot inherit the error — measured 2026-08-08, the 24-hour figure
+  // was 0 while the real 7-day figure was 167, which would have published
+  // "the office handled no cases this week" in a week it handled 167.
+  //
+  // So the pipeline computes its own, over its OWN period window, and the
+  // divergence is recorded rather than silently reconciled.
+  const casesByAgent = new Map();
+  if (env.DB) {
+    const rows = await env.DB.prepare(
+      `SELECT agent_id, COALESCE(SUM(cases_handled), 0) AS total
+         FROM agent_sessions WHERE started_at >= ? GROUP BY agent_id`
+    ).bind(sinceIso).all().catch(() => null);
+    for (const r of rows?.results || []) casesByAgent.set(Number(r.agent_id), Number(r.total) || 0);
+  }
+  const periodAgentRows = (agentRows || []).map((a) => ({
+    ...a,
+    weeklyCases: casesByAgent.has(a.agentId) ? casesByAgent.get(a.agentId) : a.weeklyCases,
+  }));
+
+  const blocked = (board?.tasks || [])
+    .filter((t) => t.state === 'BLOCKED' || t.state === 'NOT-READY')
+    .map((t) => `${t.id} [${t.state}] ${t.title} — waiting on: ${t.blockedBy || 'UNVERIFIED — nothing recorded'}`);
+
+  const due = requirements?.due || null;
+  const factPack = buildFactPack({
+    reportType,
+    periodLabel,
+    dateStr,
+    requirements,
+    daysRemaining: daysUntil(due),
+    decisions,
+    board,
+    projects: officeProjects.projects,
+    workflowMetrics: null,
+    agentRows: periodAgentRows,
+    captureSummary,
+    gapSummary,
+    artifacts,
+    blocked,
+    pipelineSummary,
+    dispatchedCount: null,
+  });
+
+  return { factPack, due, snapshotErrors: snapshot?.errors || [] };
+}
+
+/**
+ * One model call for the pipeline, in whichever flag state routing is in.
+ *
+ * Routing OFF is a CLEAN DEGRADATION: the router is not called at all (it
+ * would refuse with `routing_disabled` and contact nothing), and the two
+ * direct paths that already exist are used instead. Routing ON goes through
+ * routeTaskTypeCall() and reports which provider actually answered, because
+ * assertDistinctReviewer() needs the provider that ANSWERED, not the one
+ * that was planned — a lane degrading to its backup can land both calls on
+ * the same model.
+ *
+ * @returns {{text: string|null, provider: string|null, reason: string|null}}
+ */
+async function callReportModel(env, plan, { prompt, systemPrompt, maxTokens }) {
+  if (plan.mode === 'routed') {
+    const routed = await routeTaskTypeCall(env, plan.lane, {
+      prompt, systemPrompt, maxTokens,
+      geminiModel: simulationConfig.GEMINI?.model,
+      geminiEndpoint: simulationConfig.GEMINI?.api_endpoint,
+      agentId: `report-${plan.lane}`,
+    });
+    if (!routed.ok) return { text: null, provider: routed.provider || null, reason: routed.reason || 'routed_call_failed' };
+    return { text: routed.result?.text ?? null, provider: routed.provider, reason: null };
+  }
+
+  const agent = instantiateAgent(plan.agentId, env);
+  await agent.loadState();
+
+  if (plan.path === 'queryGeminiDirect') {
+    // The pacer governs THIS automation's Gemini calls. If it refuses, the
+    // report WAITS — it is not routed around, and it does not silently fall
+    // to another provider. Report generation is new load on a quota the
+    // office can only partially observe (workers/gemini-pacer.js header).
+    const pacing = await checkGeminiPacingSlot(env);
+    if (!pacing.allowed) return { text: null, provider: null, reason: 'gemini_pacing' };
+    const text = await agent.queryGeminiDirect(prompt, systemPrompt, { maxTokens, reportType: 'report-pipeline' });
+    return { text, provider: agent.lastModelSource || 'gemini', reason: null };
+  }
+
+  const text = await agent.queryGroqRouted(prompt, systemPrompt, { maxTokens });
+  return { text, provider: agent.lastModelSource || 'groq', reason: null };
+}
+
+/**
+ * The pipeline. Draft -> review -> (one revision) -> publish or file the
+ * rejection. Returns a result object and NEVER throws — a report that cannot
+ * be produced is a logged skip, never a broken cron tick, and never an
+ * escalation to the owner.
+ *
+ * Cross-invocation safe: a draft that was written but not reviewed lives in
+ * D1 (report_pipeline) and is picked up rather than rewritten, the same
+ * self-healing shape the guides pipeline uses.
+ */
+async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentRows = [], pipelineSummary = null, sinceIso, bypassGate = false }) {
+  if (!bypassGate && !(await reportPipelineOn(env))) {
+    console.log(`[report-pipeline] report_pipeline_enabled is off — ${reportType} ${periodLabel} not drafted (gated no-op)`);
+    return { ran: false, skipped: true, reason: 'report_pipeline_disabled' };
+  }
+  if (!REPORT_TYPES.includes(reportType)) {
+    return { ran: false, reason: `unknown_report_type: ${reportType}` };
+  }
+
+  const routingOn = await routingEnabledForReports(env);
+  const plan = planReportProviders({ routingOn, language: 'english' });
+  for (const note of plan.notes) console.warn(`[report-pipeline] ${note}`);
+
+  // ── Draft (or recover an unreviewed one) ──────────────────────────────
+  let row = await getPendingReportRow(env, reportType, periodLabel);
+  let factPack;
+  let due = null;
+
+  if (row) {
+    factPack = row.fact_pack || '';
+    const facts = await buildReportFacts(env, { reportType, periodLabel, dateStr, agentRows, pipelineSummary, sinceIso });
+    due = facts.due;
+  } else {
+    const facts = await buildReportFacts(env, { reportType, periodLabel, dateStr, agentRows, pipelineSummary, sinceIso });
+    factPack = facts.factPack;
+    due = facts.due;
+
+    const draft = await callReportModel(env, plan.draft, {
+      prompt: buildReportDraftPrompt(factPack, { reportType, periodLabel }),
+      systemPrompt: REPORT_DRAFT_SYSTEM,
+      maxTokens: REPORT_DRAFT_MAX_TOKENS,
+    });
+    if (!draft.text) return { ran: false, reason: `draft_failed: ${draft.reason || 'no text returned'}` };
+
+    const id = await insertReportRow(env, {
+      date: dateStr, reportType, periodLabel, status: 'drafted', factPack,
+      draftContent: draft.text, drafterAgentId: plan.draft.agentId, drafterProvider: draft.provider,
+      reviewerAgentId: plan.review.agentId,
+    });
+    row = await getPendingReportRow(env, reportType, periodLabel);
+    if (!row) return { ran: false, reason: 'draft_missing_after_insert', id };
+  }
+
+  // ── Review ────────────────────────────────────────────────────────────
+  //
+  // The routing-off reviewer (Groq llama3-8b-8192) has an 8,192-token TOTAL
+  // context, and the review prompt carries the whole fact pack AND the whole
+  // draft. Check the fit BEFORE sending: an overrun on this provider comes
+  // back as a truncated response that parses like a real one, because
+  // groq-client.js reports no finish reason. Refuse loudly instead.
+  // With routing ON the judgment lane is Cerebras at 131K input and this
+  // never binds — hence the mode check.
+  const runReview = async (draftContent, isSecondPass) => {
+    const reviewPrompt = buildReportReviewPrompt(factPack, draftContent, { reportType, periodLabel, isSecondPass });
+    if (plan.review.mode === 'direct') {
+      const fit = estimateReviewFit({ factPack, draftContent, maxOutputTokens: REPORT_REVIEW_MAX_TOKENS });
+      if (!fit.fits) {
+        console.warn(`[report-pipeline] ${fit.reason}`);
+        return { text: null, provider: null, reason: `review_input_exceeds_direct_context (~${fit.estimated}/${fit.ceiling})` };
+      }
+    }
+    return callReportModel(env, plan.review, {
+      prompt: reviewPrompt,
+      systemPrompt: REPORT_REVIEW_SYSTEM,
+      maxTokens: REPORT_REVIEW_MAX_TOKENS,
+    });
+  };
+
+  let review = await runReview(row.draft_content, false);
+  if (!review.text) return { ran: false, reason: `review_failed: ${review.reason || 'no text returned'}` };
+
+  // RULE 1, checked against the providers that ANSWERED. A review by the same
+  // model that drafted is not a review; the row stays 'drafted' for a retry
+  // in a configuration where the two differ.
+  const distinct = assertDistinctReviewer({
+    draftProvider: row.drafter_provider, reviewProvider: review.provider,
+    draftAgentId: row.drafter_agent_id, reviewAgentId: plan.review.agentId,
+  });
+  if (!distinct.ok) {
+    console.warn(`[report-pipeline] refusing to publish: ${distinct.reason}`);
+    return { ran: false, reason: `self_qa_refused: ${distinct.reason}` };
+  }
+
+  let decision = parseReportReviewDecision(review.text);
+  let revisionCount = row.revision_count || 0;
+
+  // ── One revision round. Exactly one. ──────────────────────────────────
+  if (decision.decision === 'REVISE' && revisionCount < 1) {
+    const revised = await callReportModel(env, plan.draft, {
+      prompt: buildReportDraftPrompt(factPack, {
+        reportType, periodLabel,
+        priorDraft: { draftContent: row.draft_content, reviewNotes: decision.notes },
+      }),
+      systemPrompt: REPORT_DRAFT_SYSTEM,
+      maxTokens: REPORT_DRAFT_MAX_TOKENS,
+    });
+    const nextDraft = revised.text || row.draft_content;
+    revisionCount = 1;
+    await updateReportRow(env, row.id, { draftContent: nextDraft, revisionCount });
+    row = { ...row, draft_content: nextDraft, revision_count: 1 };
+
+    review = await runReview(nextDraft, true);
+    if (!review.text) return { ran: false, reason: `revision_review_failed: ${review.reason || 'no text returned'}` };
+    decision = parseReportReviewDecision(review.text);
+    // A second REVISE is a REJECT. There is no third round.
+    if (decision.decision === 'REVISE') decision = { ...decision, decision: 'REJECT' };
+  } else if (decision.decision === 'REVISE') {
+    decision = { ...decision, decision: 'REJECT' };
+  }
+
+  // ── An APPROVE with a missing or truncated body is not a decision ─────
+  if (decision.decision === 'APPROVE') {
+    const structural = validateReportBody(decision.finalReport, {
+      factPack, due, projectNames: officeProjects.projects.map((p) => p.name),
+    });
+    if (!structural.ok) {
+      console.warn(`[report-pipeline] APPROVE refused structurally: ${structural.reasons.join(' | ')}`);
+      // Row stays 'drafted' — a re-trigger retries cleanly against the same
+      // draft. Deliberately NOT downgraded to a rejection: the reviewer's
+      // judgement was not the problem, its output was.
+      return { ran: false, reason: 'approve_failed_structural_check', structural: structural.reasons, notes: (decision.notes || '').slice(0, 300) };
+    }
+
+    const drafterConfig = getAgentConfig(row.drafter_agent_id);
+    const reviewerConfig = getAgentConfig(plan.review.agentId);
+    const finalMarkdown = renderReportFile({
+      reportType, periodLabel, dateStr,
+      finalReport: decision.finalReport,
+      drafterName: drafterConfig?.name || `Agent ${row.drafter_agent_id}`,
+      drafterProvider: row.drafter_provider,
+      reviewerName: reviewerConfig?.name || `Agent ${plan.review.agentId}`,
+      reviewerProvider: review.provider,
+      revisionCount,
+    });
+    const path = reportPath(reportType, periodLabel);
+    const commit = await commitFileToRepo(
+      env, REPO_NAME, path, finalMarkdown,
+      `chore(agents): ${reportType} report — ${periodLabel} (reviewed) [skip ci]`
+    );
+    await updateReportRow(env, row.id, {
+      status: 'approved', finalContent: finalMarkdown, reviewNotes: decision.notes,
+      reviewerProvider: review.provider, revisionCount,
+    });
+
+    // NEWEST FIRST. A flat directory of dated filenames is a filing cabinet,
+    // not a shopfront — a visitor cannot tell which of 19 files is current.
+    // The index is maintained HERE rather than hand-written, because a
+    // hand-written "latest" list is stale the next time the cron runs.
+    // It indexes; it never deletes. The archive is permanent.
+    let indexed = false;
+    if (commit.committed) {
+      try {
+        const existing = parseLatestIndex(await fetchRawRepoFile(LATEST_INDEX_PATH));
+        const next = addToLatestIndex(existing, {
+          title: `${reportType === 'monthly' ? 'Monthly' : 'Weekly'} report — ${periodLabel}`,
+          path: `/${path}`,
+          reportType,
+          dateStr,
+          words: wordCount(decision.finalReport),
+        });
+        const idx = await commitFileToRepo(
+          env, REPO_NAME, LATEST_INDEX_PATH, renderLatestIndex(next),
+          `chore(agents): index ${reportType} report ${periodLabel} [skip ci]`
+        );
+        indexed = idx.committed;
+      } catch (err) {
+        // The index is a convenience. A report that published successfully is
+        // not un-published because its index entry failed.
+        console.warn(`[report-pipeline] index update failed: ${err.message}`);
+      }
+    }
+
+    return { ran: true, decision: 'APPROVE', path, committed: commit.committed, indexed, revisionCount, drafterProvider: row.drafter_provider, reviewerProvider: review.provider };
+  }
+
+  // ── REJECT: saved with its note, and the pipeline moves on. ───────────
+  const drafterConfig = getAgentConfig(row.drafter_agent_id);
+  const reviewerConfig = getAgentConfig(plan.review.agentId);
+  const rejectedMarkdown = renderRejectedReportFile({
+    reportType, periodLabel, dateStr,
+    draftContent: row.draft_content, reviewNotes: decision.notes,
+    drafterName: drafterConfig?.name || `Agent ${row.drafter_agent_id}`,
+    reviewerName: reviewerConfig?.name || `Agent ${plan.review.agentId}`,
+  });
+  const path = rejectedReportPath(reportType, periodLabel);
+  const commit = await commitFileToRepo(
+    env, REPO_NAME, path, rejectedMarkdown,
+    `chore(agents): ${reportType} report rejected — ${periodLabel} [skip ci]`
+  );
+  await updateReportRow(env, row.id, {
+    status: 'rejected', reviewNotes: decision.notes, reviewerProvider: review.provider, revisionCount,
+  });
+  return { ran: true, decision: 'REJECT', path, committed: commit.committed, revisionCount };
+}
+
+/** Thin wrapper so the pipeline reads the routing flag through one name that
+ *  the verifier can find, and so a future change of switch cannot diverge
+ *  between the two callers. */
+async function routingEnabledForReports(env) {
+  const sim = await getSimulationState(env);
+  return sim.routing_enabled === true;
 }
 
 /* ─────────────────────────── Config overrides ──────────────────────────── */
@@ -1428,7 +1898,15 @@ async function generateWeeklySummary(env, yearState, weekNumber) {
   // Site 4 of the 2026-08-07 context survey. FREE — this is a string
   // template, not a prompt. The weekly summary was the report the owner
   // called thin, and this is the half that was missing from it.
-  const office = await getOfficeContext(env, { shape: 'report', allowFetch: true });
+  //
+  // `projects` ADDED 2026-08-08. It was passed by ONE of the five callers
+  // (meeting-engine.js) and by none of the three report sites or the
+  // per-agent site — so the office's own projects appeared in no report, the
+  // exact state office-context.js was built to end. The irony is on the
+  // record: that module exists because projects reached zero prompt-assembly
+  // sites, and its first implementation reinstated the condition for four of
+  // five callers. One line per site.
+  const office = await getOfficeContext(env, { shape: 'report', allowFetch: true, projects: officeProjects.projects });
 
   const md = `# Weekly Executive Summary — Week ${weekNumber}
 
@@ -1504,7 +1982,73 @@ diagnostics. No customer-facing issues to report.
     weeklyMeeting = { error: err.message };
   }
 
-  return { weekNumber, files, agentRows, weeklyMeeting };
+  // ── The written report (2026-08-08, behind report_pipeline_enabled) ────
+  //
+  // ADDITIVE, deliberately. The three template files above are committed
+  // exactly as before and are byte-unchanged whether the pipeline runs or
+  // not; the written report is a FOURTH file at a new path. Two reasons:
+  //
+  //   1. It makes the switch honest. "Off" has to mean the current output,
+  //      unchanged — not "the current output, mostly".
+  //   2. It is the shape plan item 0.4 needs. The template output IS the raw
+  //      agent output the publishing split moves to back-office; the reviewed
+  //      report is what keeps publishing here. Phase 3 changes a destination,
+  //      not a pipeline.
+  //
+  // Never throws: a report that cannot be produced is a logged skip. The
+  // weekly summary block must not fail because a provider was slow.
+  let writtenReport = { ran: false, reason: 'not_attempted' };
+  try {
+    writtenReport = await runReportPipeline(env, {
+      reportType: 'weekly',
+      periodLabel: periodLabelFor('weekly', weekNumber),
+      dateStr: todayDateStr(),
+      agentRows,
+      pipelineSummary: pipelineLines,
+      sinceIso: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+  } catch (err) {
+    console.warn(`[report-pipeline] weekly report failed: ${err.message}`);
+    writtenReport = { ran: false, reason: `error: ${err.message}` };
+  }
+
+  return { weekNumber, files, agentRows, weeklyMeeting, writtenReport };
+}
+
+/**
+ * The monthly written report. There has never been a monthly REPORT — only a
+ * monthly MEETING (MILESTONE_MEETINGS day_30), whose minutes were the closest
+ * thing to one. This is the report, and it runs on the same milestone, after
+ * the meeting, so the meeting's decisions are already filed and reach the
+ * fact pack.
+ *
+ * Same switch, same rules, same never-throws posture as the weekly.
+ */
+async function generateMonthlyReport(env, monthNumber) {
+  const agentRows = [];
+  for (const config of agentsConfig.agents) {
+    const agent = instantiateAgent(config.id, env);
+    await agent.loadState();
+    agentRows.push({
+      agentId: config.id, name: agent.name,
+      weeklyCases: await getWeeklyCasesHandled(env, config.id),
+      mood: agent.mood, irritation: agent.irritation,
+    });
+  }
+
+  try {
+    return await runReportPipeline(env, {
+      reportType: 'monthly',
+      periodLabel: periodLabelFor('monthly', monthNumber),
+      dateStr: todayDateStr(),
+      agentRows,
+      pipelineSummary: null,
+      sinceIso: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+    });
+  } catch (err) {
+    console.warn(`[report-pipeline] monthly report failed: ${err.message}`);
+    return { ran: false, reason: `error: ${err.message}` };
+  }
 }
 
 /**
@@ -1707,11 +2251,19 @@ export async function runWorkDayCycle(env) {
   const milestoneKey = `day_${nextDay}`;
   const milestone = yearTrackerSeed.milestones[milestoneKey] || null;
   let milestoneMeeting = null;
+  let monthlyReport = null;
   if (milestone && MILESTONE_MEETINGS[milestoneKey] && !isOffDay) {
     try {
       milestoneMeeting = await runMeeting(MILESTONE_MEETINGS[milestoneKey], env);
     } catch (err) {
       milestoneMeeting = { error: err.message };
+    }
+    // The monthly WRITTEN report (2026-08-08, behind report_pipeline_enabled).
+    // AFTER the meeting, deliberately: the meeting's decisions are filed as
+    // `reports` rows and the fact pack reads them, so a report generated
+    // first would be a report of the month that omits the month's meeting.
+    if (MILESTONE_MEETINGS[milestoneKey] === 'monthly') {
+      monthlyReport = await generateMonthlyReport(env, Math.ceil(nextDay / 30));
     }
   }
 
@@ -1748,7 +2300,8 @@ export async function runWorkDayCycle(env) {
   const scheduleInfo = { schedule, dayOfWeek, batches, toolTask, aiExperience, spareTime, weeklySummary, versionBumps };
   // allowFetch: true — the daily summary runs once per cycle, so it is one
   // of the callers permitted to refresh the office-context cache.
-  const office = await getOfficeContext(env, { shape: 'report', allowFetch: true });
+  // `projects` added 2026-08-08 — see generateWeeklySummary() for why.
+  const office = await getOfficeContext(env, { shape: 'report', allowFetch: true, projects: officeProjects.projects });
   const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office);
   const report = await commitFileToRepo(
     env, REPO_NAME, `reports/daily/day-${pad(nextDay, 3)}-summary.md`, markdown,
@@ -1756,7 +2309,7 @@ export async function runWorkDayCycle(env) {
   );
 
   return {
-    ...summary, year: newState, standup, sidePlotsStarted: sidePlotStarted, sidePlotUpdates, milestone, milestoneMeeting, report,
+    ...summary, year: newState, standup, sidePlotsStarted: sidePlotStarted, sidePlotUpdates, milestone, milestoneMeeting, monthlyReport, report,
     schedule: { dayOfWeek, toolTask, aiExperience, spareTime, weeklySummary, versionBumps },
   };
 }
@@ -2017,11 +2570,19 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
   const milestoneKey = `day_${nextDay}`;
   const milestone = yearTrackerSeed.milestones[milestoneKey] || null;
   let milestoneMeeting = null;
+  let monthlyReport = null;
   if (milestone && MILESTONE_MEETINGS[milestoneKey] && !isOffDay) {
     try {
       milestoneMeeting = await runMeeting(MILESTONE_MEETINGS[milestoneKey], env);
     } catch (err) {
       milestoneMeeting = { error: err.message };
+    }
+    // The monthly WRITTEN report (2026-08-08, behind report_pipeline_enabled).
+    // AFTER the meeting, deliberately: the meeting's decisions are filed as
+    // `reports` rows and the fact pack reads them, so a report generated
+    // first would be a report of the month that omits the month's meeting.
+    if (MILESTONE_MEETINGS[milestoneKey] === 'monthly') {
+      monthlyReport = await generateMonthlyReport(env, Math.ceil(nextDay / 30));
     }
   }
 
@@ -2058,7 +2619,8 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
   const scheduleInfo = { schedule, dayOfWeek, batches: cycle.batches, toolTask, aiExperience, spareTime, weeklySummary, versionBumps, choreRotation, guideDraft, guideReview, guideVerify };
   // allowFetch: true — the daily summary runs once per cycle, so it is one
   // of the callers permitted to refresh the office-context cache.
-  const office = await getOfficeContext(env, { shape: 'report', allowFetch: true });
+  // `projects` added 2026-08-08 — see generateWeeklySummary() for why.
+  const office = await getOfficeContext(env, { shape: 'report', allowFetch: true, projects: officeProjects.projects });
   const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office);
   const report = await commitFileToRepo(
     env, REPO_NAME, `reports/daily/day-${pad(nextDay, 3)}-summary.md`, markdown,
@@ -2066,7 +2628,7 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
   );
 
   return {
-    ...summary, year: newState, standup, sidePlotsStarted: sidePlotStarted, sidePlotUpdates, milestone, milestoneMeeting, report,
+    ...summary, year: newState, standup, sidePlotsStarted: sidePlotStarted, sidePlotUpdates, milestone, milestoneMeeting, monthlyReport, report,
     schedule: { dayOfWeek, toolTask, aiExperience, spareTime, weeklySummary, versionBumps },
   };
 }
@@ -2458,6 +3020,93 @@ export default {
                 : null,
               reportShape: { degraded: built.degraded, reason: built.reason, tokens: built.tokens, dropped: built.dropped },
             };
+            break;
+          }
+          case 'report_pipeline_toggle':
+            // Report-pipeline kill switch (workers/report-pipeline.js
+            // reportPipelineEnabled()). Body: { enabled: true|false }.
+            //
+            // THE TOGGLE CASE SHIPS WITH THE FLAG, and that is the whole
+            // lesson of 2026-08-08: `office_context_enabled` shipped on the
+            // updateSimulationState() allow-list with NO toggle case, so its
+            // only operational route was the UNAUTHENTICATED
+            // POST /api/simulation, and the owner spent twenty minutes
+            // guessing trigger names to set a boolean. A switch is not
+            // shipped until the authenticated way to flip it exists AND is
+            // written down — see back-office docs/procedures/
+            // SIMULATION-SWITCHES.md.
+            result = await updateSimulationState(env, { report_pipeline_enabled: !!body.enabled });
+            break;
+          case 'report_pipeline_status': {
+            // Read-back. Answers the question that matters — not "is the flag
+            // on" but "is the flag on and would a report have something to
+            // say". Makes NO model call and writes no report row; it does
+            // refresh the office-context cache, same as office_context_status.
+            const flagOn = await reportPipelineEnabled(env);
+            const routingOn = await routingEnabledForReports(env);
+            const plan = planReportProviders({ routingOn, language: 'english' });
+            let rows = null;
+            if (env.DB) {
+              const probe = await env.DB.prepare(
+                `SELECT report_type, period_label, status, revision_count, drafter_provider, reviewer_provider, updated_at
+                   FROM report_pipeline ORDER BY created_at DESC LIMIT 10`
+              ).all().catch(() => null);
+              rows = probe?.results ?? null;
+            }
+            result = {
+              reportPipelineEnabled: flagOn,
+              routingEnabled: routingOn,
+              plan: { draft: plan.draft, review: plan.review, geminiRequirementHolds: plan.geminiRequirementHolds, notes: plan.notes },
+              recent: rows ?? 'report_pipeline table not present yet (created lazily on first draft)',
+            };
+            break;
+          }
+          case 'report_block': {
+            // Supervised report-pipeline test: runs ONE report end to end with
+            // the gate bypassed — the same function the scheduled path calls.
+            // Same shape and same reasoning as `guide_block`: the owner tests
+            // the pipeline before enabling the switch, not after, and this is
+            // deliberately NOT sent through the per-block scheduled dispatcher,
+            // which would also fire the day's other blocks.
+            //
+            // (That sentence names the dispatcher by description rather than by
+            // its function name on purpose. verify-routing.js's "no scheduled
+            // path passes bypassGate for routing" check is a TEXT-PROXIMITY
+            // proxy — it asserts the two identifiers do not appear within 4,000
+            // characters of each other — so a comment mentioning the dispatcher
+            // near an unrelated routed call fails it. The check's intent is
+            // sound and this code does not violate it; the check's mechanism
+            // cannot tell a comment from a call. Recorded rather than worked
+            // around silently: a proximity check that a comment can break can
+            // also PASS by coincidence of layout, which is this project's own
+            // "two mechanisms agreeing by accident" in a verifier.)
+            // Body: { report: 'weekly'|'monthly', period?: number }
+            if (!REPORT_TYPES.includes(body.report)) {
+              return json({ error: 'report_block_requires_report_weekly_or_monthly' }, 400, origin);
+            }
+            const yearState = await getYearState(env);
+            const n = body.period != null
+              ? Number(body.period)
+              : (body.report === 'monthly' ? (yearState.current_month || 1) : (yearState.current_week || 1));
+            const agentRows = [];
+            for (const config of agentsConfig.agents) {
+              const agent = instantiateAgent(config.id, env);
+              await agent.loadState();
+              agentRows.push({
+                agentId: config.id, name: agent.name,
+                weeklyCases: await getWeeklyCasesHandled(env, config.id),
+                mood: agent.mood, irritation: agent.irritation,
+              });
+            }
+            const windowDays = body.report === 'monthly' ? 30 : 7;
+            result = await runReportPipeline(env, {
+              reportType: body.report,
+              periodLabel: periodLabelFor(body.report, n),
+              dateStr: todayDateStr(),
+              agentRows,
+              sinceIso: new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString(),
+              bypassGate: true,
+            });
             break;
           }
           case 'routing_toggle':

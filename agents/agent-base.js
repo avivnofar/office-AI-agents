@@ -19,6 +19,13 @@ import { checkGeminiPacingSlot } from '../workers/gemini-pacer.js';
 import { detectCapabilityGap } from '../workers/gap-reports.js';
 import { recordOfficeEvent } from '../workers/improvement-loop.js';
 import { getOfficeContext } from '../workers/office-context.js';
+// The office's own projects, as data. office-context.js deliberately imports
+// no JSON (its verifier must be able to `import` it under plain node), so the
+// list is PASSED IN by callers that already load config — see that file's
+// header. This site passed nothing until 2026-08-08, which meant every agent
+// prompt carried the board and the client requirements and still could not
+// name the projects the office works on.
+import officeProjects from '../config/office-projects.json';
 
 const MOOD_MIN = 0;
 const MOOD_MAX = 100;
@@ -242,7 +249,9 @@ export class AgentBase {
     // reader. getDbContext() is left exactly as it was.
     let officeBlock = '';
     try {
-      const office = await getOfficeContext(this.env, { shape: 'agent', agentId: this.id });
+      const office = await getOfficeContext(this.env, {
+        shape: 'agent', agentId: this.id, projects: officeProjects.projects,
+      });
       if (office?.text) officeBlock = office.text;
     } catch (err) {
       // Never let context assembly break a client answer. Track A yields to
@@ -281,12 +290,20 @@ export class AgentBase {
       return result.text;
     }
 
+    // opts.maxTokens added 2026-08-08 for the report pipeline's review call,
+    // which must emit a whole report and not a case-sized answer. It DEFAULTS
+    // to the pre-existing 512, so every existing caller is byte-unchanged.
+    // The reason it had to be explicit: neither groq-client.js nor
+    // gemini-client.js surfaces a finish reason, so a response cut off at the
+    // ceiling is indistinguishable from a short one at the call site — the
+    // pipeline detects it structurally instead (report-pipeline.js sentinel).
+    const outTokens = opts.maxTokens ?? 512;
     const groqResult = await callGroq({
       apiKey: this.env.GROQ_API_KEY,
       prompt,
       systemPrompt: fullSystemPrompt,
       temperature: 0.8,
-      maxTokens: 512,
+      maxTokens: outTokens,
       agentId: this.id,
     });
     if (groqResult) {
@@ -300,7 +317,7 @@ export class AgentBase {
       prompt,
       systemPrompt: fullSystemPrompt,
       temperature: 0.8,
-      maxTokens: 512,
+      maxTokens: outTokens,
     });
     this.lastModelSource = cfResult.source;
     return cfResult.text;
@@ -321,7 +338,9 @@ export class AgentBase {
       model: simConfig.model || 'gemini-3.1-flash-lite', // gemini-3.5-flash is deprecated — never reintroduce it, see CLAUDE.md
       endpoint: simConfig.api_endpoint || 'https://generativelanguage.googleapis.com/v1beta/models',
       temperature: simConfig.temperature ?? 0.8,
-      maxTokens: Math.max(simConfig.max_tokens ?? 1024, 2048),
+      // opts.maxTokens added 2026-08-08 — see queryGroqRouted(). Defaults to
+      // the pre-existing expression, so no existing caller changes.
+      maxTokens: opts.maxTokens ?? Math.max(simConfig.max_tokens ?? 1024, 2048),
       prompt,
       systemPrompt: fullSystemPrompt,
       ai: this.env.AI,

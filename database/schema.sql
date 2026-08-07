@@ -237,6 +237,43 @@ CREATE TABLE IF NOT EXISTS guide_pipeline (
 CREATE INDEX IF NOT EXISTS idx_guide_pipeline_slug ON guide_pipeline(slug);
 CREATE INDEX IF NOT EXISTS idx_guide_pipeline_date ON guide_pipeline(date);
 
+-- Report pipeline state (model draft -> QA review -> publish), 2026-08-08.
+-- Brand-new table, same as guide_pipeline above: no live-D1 migration needed.
+-- `status`: 'drafted' -> 'approved' | 'rejected'. One revision round maximum.
+--
+-- WHY BOTH PROVIDER COLUMNS EXIST. `drafter_provider` and `reviewer_provider`
+-- record which model ACTUALLY answered, not which was planned — a lane that
+-- degrades to its backup can land the draft and the review on the same
+-- provider, and a review by the model that wrote the thing is not a review.
+-- report-pipeline.js assertDistinctReviewer() reads them and refuses. They
+-- are also the embodiment record for the report: config/model-routing.json's
+-- `_why_random` note makes the persona->provider map a measurement
+-- instrument, and a report that does not say who wrote it cannot feed it.
+--
+-- `fact_pack` is stored because it is the evidence base a published claim
+-- traces back to. Without it, "did the reviewer let a fabricated number
+-- through" is unanswerable after the fact.
+CREATE TABLE IF NOT EXISTS report_pipeline (
+  id TEXT PRIMARY KEY,
+  date TEXT NOT NULL,
+  report_type TEXT NOT NULL,
+  period_label TEXT NOT NULL,
+  status TEXT DEFAULT 'drafted',
+  fact_pack TEXT,
+  draft_content TEXT,
+  final_content TEXT,
+  review_notes TEXT,
+  revision_count INTEGER DEFAULT 0,
+  drafter_agent_id INTEGER,
+  drafter_provider TEXT,
+  reviewer_agent_id INTEGER,
+  reviewer_provider TEXT,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_report_pipeline_period ON report_pipeline(report_type, period_label);
+
 -- Per-provider free-tier call counters for task-type routing
 -- (config/model-routing.json, workers/task-router.js). The routing analogue of
 -- claude_budget_usage above: that one counts DOLLARS per month against a spend

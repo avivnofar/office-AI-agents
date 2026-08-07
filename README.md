@@ -1,10 +1,33 @@
 # 🏢 Office AI Agents
 
-> An office of 11 AI personas whose job is to **use and stress-test two
+> An office of AI personas whose job is to **use and stress-test two
 > production AI systems** — Claude (in [Data Center](https://avivnofar.github.io/data-center/))
 > and Gemini (in [Notebook-X](https://github.com/avivnofar/Notebook-X)) — by
 > asking them real questions, judging the answers, and flagging genuine
 > capability gaps back to the project owner for review.
+
+## 👀 What you are looking at
+
+This repository is two things at once: the **live system** that runs the
+office, and the **output** that office produces. If you arrived to see what an
+AI office actually does, you want the second one.
+
+| Go here | To see |
+|---|---|
+| **[reports/LATEST.md](reports/LATEST.md)** | **Start here.** The newest reviewed reports, newest first |
+| [reports/](reports/) | Everything the office has written — daily summaries, meeting minutes, weekly and monthly reports |
+| [reports/gaps/](reports/gaps/) | Where the office judged one of the two AI systems *not good enough* — its actual findings, in Hebrew |
+| [guides/](guides/) | Technical guides the office wrote and fact-checked: one persona drafts, another reviews, nothing publishes unverified |
+| [workers/](workers/) | The system itself — a Cloudflare Worker on a 30-minute cron |
+
+**Nothing in `reports/` or `guides/` was written by a human.** The office
+drafts it, reviews it, and publishes it. Where a claim could not be verified,
+the text says so rather than guessing — that rule is enforced in code, not by
+good intentions.
+
+Everything public here is **English**. The office's internal notes are Hebrew,
+and the capability-gap findings are deliberately left in the language they
+were written in.
 
 ---
 
@@ -85,10 +108,18 @@ no-automated-writes rule).
 
 ## 👥 The Team
 
-11 personas, each with a mood/irritation state machine and a clearance tier
+Each persona has a mood/irritation state machine and a clearance tier
 (`standard` < `specialist` < `sudo` < `root`) that governs how their
 suggestions get routed. Personalities below are preserved as originally
 designed — what each one actually *does* is described alongside.
+
+> **Roster note, recorded rather than quietly corrected (2026-08-08).**
+> `config/agents-config.json` carries **13** personas. The profiles below
+> cover **11** — Agent 12 (The Workflow) and Agent 13 (The Cyber Expert) were
+> added to the roster later and have no profile here yet. This page is not
+> silently renumbered to match: which personas are *published* is the office's
+> own decision, tracked as board task **OB-013**, and the honest state today
+> is that the roster and this page disagree.
 
 ### 🔵 Agents 1–4 — dedicated state machines, standard clearance
 
