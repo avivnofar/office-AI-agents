@@ -34,6 +34,7 @@
     "applies_to_day_of_week": [1, 2, 3, 4, 5],
     "_retimed_2026_08_06": "Three case batches moved into office hours: 02:00 -> 08:00 (share 0.20), 04:30 -> 09:30 (0.15), 07:00 -> 11:00 (0.15). The remaining three moved only to keep the spread even: 09:30 -> 12:00 (0.15), 12:00 -> 13:30 (0.15), 15:00 unchanged (0.20). Six batches before, six after; shares unedited and still summing to 1.00. Non-batch blocks did not move at all.",
     "blocks": [
+      { "time": "08:00", "type": "architect_liaison", "label": "Architect liaison: file last night's headless run as a D1 report (gated, SEE architect_liaison_program — SHIPPED OFF 2026-08-07)", "ref": "architect_liaison_program" },
       { "time": "08:00", "type": "case_batch", "label": "Opening batch", "case_share": 0.20 },
       { "time": "09:30", "type": "case_batch", "label": "Mid-morning batch", "case_share": 0.15 },
       { "time": "11:00", "type": "case_batch", "label": "Late-morning batch", "case_share": 0.15 },
@@ -55,6 +56,7 @@
     "label": "Short day: reduced case load, weekly executive summary at 12:00",
     "_retimed_2026_08_06": "Two case batches moved into office hours: 02:00 -> 08:00 (share 0.40) and 05:30 -> 09:00 (0.30); the 09:00 batch shifted to 10:00 (0.30) to keep one-hour spacing. Three batches before, three after; shares unedited and still summing to 1.00. Friday stays a SHORT day — the batches finish at 10:00 and the day still closes at 12:00, so its reduced load is preserved rather than stretched across the full window.",
     "blocks": [
+      { "time": "08:00", "type": "architect_liaison", "label": "Architect liaison: file last night's headless run as a D1 report (gated, SEE architect_liaison_program — SHIPPED OFF 2026-08-07)", "ref": "architect_liaison_program" },
       { "time": "08:00", "type": "case_batch", "label": "Friday opening batch", "case_share": 0.40 },
       { "time": "09:00", "type": "case_batch", "label": "Friday mid batch", "case_share": 0.30 },
       { "time": "10:00", "type": "case_batch", "label": "Friday late-morning batch", "case_share": 0.30 },
@@ -144,6 +146,14 @@
     "version_format": "X.YY (e.g. 1.00 -> 1.01 -> 1.02 ... -> 1.99 -> 2.00)",
     "increment": 0.01,
     "starting_version": 1.00
+  },
+
+  "architect_liaison_program": {
+    "_meta": "Added 2026-08-07 (phase-2 Architect-automation build session). SHIPPED OFF — SIM_KV simulation-state `architect_liaison_enabled` is absent from production KV, which workers/architect-liaison.js's architectLiaisonEnabled() treats as false, same as every other key in this simulation-state pattern. This build session did not call the architect_liaison_toggle trigger and did not deploy this code to the live Worker; the block below exists in the schedule file and the bundle would recognise it once deployed, but recognising it is exactly what the flag gates.",
+    "description": "Recognises the Architect's (agent 10) headless midnight Claude Code run (back-office-AI-agents/campus/agents/10-the-architect/automation/, NOT part of this repo's own scheduled-claude.yml or the Worker's own guides pipeline) as a real office session. When enabled, reads the Architect's latest SESSION-RECORD-CONTRACT.md-shaped record from back-office-AI-agents via the GitHub Contents API (read-only) and files it as a D1 `reports` row attributed to agent_id 10, so agent context and the meeting engine can see the run happened.",
+    "flag": "architect_liaison_enabled — toggle via POST /api/agents/trigger {\"type\":\"architect_liaison_toggle\",\"enabled\":true|false}; read-back via {\"type\":\"architect_liaison_status\"} (flag only, makes no GitHub call).",
+    "gate_shape": "Gated at the CALL SITE in agent-runner.js's block dispatch, not just inside the module — see workers/architect-liaison.js's header for why this is stricter than guides_program's own gating.",
+    "known_mismatch_flagged_not_fixed": "The office's simulated work hours and this cron's actual window were mismatched before 2026-08-06 (case_batch blocks sat at 02:00/04:30/07:00 while work_hours declared 08:00 start) and were retimed into the 08:00-18:00 window that day — see _office_hours_retime_2026_08_06 above. This block was added AFTER that retime and sits at 08:00, the window's own first tick, specifically so it does not reintroduce a pre-dawn mismatch. Whether the Architect's own 00:00 midnight run and this 08:00 read create a useful gap (headless run finishes hours before anyone reads it) or too long a lag is unverified — flagged for the owner, not decided here."
   },
 
   "guides_program": {

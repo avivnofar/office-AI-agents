@@ -53,6 +53,7 @@ import { getClaudeBudgetStatus, recordClaudeSpend, routeTaskTypeCall, resolveTas
 import { collectTodayGapReports, renderGapDigest } from './gap-reports.js';
 import { resolveIssueTarget, resolveRepoWrite } from './permission-guard.js';
 import { improvementLoopEnabled } from './improvement-loop.js';
+import { architectLiaisonEnabled, processArchitectLiaisonBlock } from './architect-liaison.js';
 import { runChoreRotationSlot } from './chore-runner.js';
 import { checkGeminiPacingSlot } from './gemini-pacer.js';
 import { callClaudeMessages } from './claude-client.js';
@@ -330,7 +331,7 @@ async function getSimulationState(env) {
 
 async function updateSimulationState(env, patch) {
   const current = await getSimulationState(env);
-  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled', 'improvement_loop_enabled'];
+  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled', 'improvement_loop_enabled', 'architect_liaison_enabled'];
   const next = { ...current };
   for (const key of allowedKeys) {
     if (key in patch) next[key] = patch[key];
@@ -1928,7 +1929,7 @@ export async function runScheduledBlock(env, israelTime, dayOfWeek) {
       agentStats: {},
       results: {
         toolTask: null, aiExperience: null, standup: null, spareTime: [], weeklySummary: null, versionBumps: [], choreRotation: null,
-        guideDraft: null, guideReview: null, guideVerify: null,
+        guideDraft: null, guideReview: null, guideVerify: null, architectLiaison: null,
       },
     };
   }
@@ -1989,6 +1990,21 @@ export async function runScheduledBlock(env, israelTime, dayOfWeek) {
         cycle.results.guideReview = await processGuideReviewBlock(env, todayDateStr());
       } else if (block.type === 'guide_verify') {
         cycle.results.guideVerify = await processGuideVerifyBlock(env);
+      } else if (block.type === 'architect_liaison') {
+        // INERT BY DEFAULT — the gate is HERE, at the call site, not inside
+        // the module. When architectLiaisonEnabled(sim) is false (the
+        // shipped default: SIM_KV simulation-state carries no
+        // `architect_liaison_enabled` key at all until someone calls the
+        // architect_liaison_toggle trigger, which this build session does
+        // not do), processArchitectLiaisonBlock() is never invoked — no
+        // GitHub Contents API call, no D1 write, not even entered. This is
+        // deliberately stricter than the guide_* blocks above, which enter
+        // their function every tick and self-gate inside it. See
+        // workers/architect-liaison.js's header for why the stronger shape
+        // was chosen here.
+        cycle.results.architectLiaison = architectLiaisonEnabled(sim)
+          ? await processArchitectLiaisonBlock(env)
+          : { filed: false, skipped: true, reason: 'architect_liaison_disabled' };
       }
     } catch (err) {
       await logScheduledError(env, { israelTime, dayOfWeek, blockType: block.type, error: err });
@@ -2374,6 +2390,37 @@ export default {
             // logged no-ops.
             result = await updateSimulationState(env, { guides_enabled: !!body.enabled });
             break;
+          case 'architect_liaison_toggle':
+            // Architect-liaison kill switch (see workers/architect-liaison.js
+            // architectLiaisonEnabled()): flips SIM_KV simulation-state
+            // `architect_liaison_enabled` without a redeploy. Body:
+            // { enabled: true|false }. SHIPPED OFF, per this feature's own
+            // build session (2026-08-07, phase-2) — that session built this
+            // code and deliberately did not call this endpoint. Turning it
+            // on is a separate, explicit owner decision; this case existing
+            // is not that decision having been made. While off (or absent,
+            // the shipped default), the `architect_liaison` block's call
+            // site in the tick dispatch below never invokes
+            // processArchitectLiaisonBlock() at all — not a logged no-op,
+            // genuinely uncalled.
+            result = await updateSimulationState(env, { architect_liaison_enabled: !!body.enabled });
+            break;
+          case 'architect_liaison_status': {
+            // Read-back for the inertness proof this build session hands the
+            // owner: the flag as read from KV (via getSimulationState(), the
+            // same function the block dispatch itself calls — no separate
+            // code path that could disagree with production), and nothing
+            // else. Makes no GitHub API call and touches no report row —
+            // this endpoint's whole point is to be checkable without
+            // triggering the very call path it is reporting on.
+            const sim = await getSimulationState(env);
+            result = {
+              architectLiaisonEnabled: architectLiaisonEnabled(sim),
+              rawFlagValue: sim.architect_liaison_enabled,
+              note: 'This reads simulation-state only. It does not call processArchitectLiaisonBlock() and proves nothing about the GitHub Contents API fetch path by itself — see the written test procedure for how to check that the call site is not entered.',
+            };
+            break;
+          }
           case 'improvement_loop_toggle':
             // Improvement-loop CAPTURE kill switch (workers/improvement-loop.js
             // improvementLoopEnabled()): flips SIM_KV simulation-state
