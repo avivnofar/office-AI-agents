@@ -319,15 +319,26 @@ check('no scheduled/cron path passes bypassGate for routing',
 /* ── 3b. No pre-existing caller was rewired ─────────────────────────────── */
 console.log('\n--- No pre-existing caller changed provider ---');
 
+// TIGHTENED 2026-08-07: these were `!/task-router\.js/.test(src)` — a plain
+// substring test over the whole file, so they fired on any COMMENT that merely
+// NAMED task-router.js. One did exactly that when meeting-engine.js gained a
+// header recording that the Architect is excluded from assignEmbodiment() in
+// task-router.js — a true statement ABOUT the file, reported as an import OF it.
+//
+// A check that a comment can trip is worse than a loose one, because the
+// cheapest way to make it pass is to delete the explanation. It now tests for
+// an actual import/export-from statement, which is what the rule is about.
+const IMPORTS_TASK_ROUTER = /(?:^|\n)\s*(?:import|export)\b[^\n;]*from\s+['"][^'"]*task-router\.js['"]/;
+
 const agentBaseSrc = readFileSync(new URL('../agents/agent-base.js', import.meta.url), 'utf8');
 check('agent-base.js does not import the task router (its providers are unchanged)',
-  !/task-router\.js/.test(agentBaseSrc));
+  !IMPORTS_TASK_ROUTER.test(agentBaseSrc));
 check('agent-base.js still routes routine work through callGroq (unchanged)', /callGroq\(/.test(agentBaseSrc));
 check('agent-base.js still composes Hebrew through callGemini (unchanged)', /callGemini\(/.test(agentBaseSrc));
 
 for (const f of ['meeting-engine.js', 'qa-engine.js', 'gap-reports.js', 'chore-runner.js', 'guide-engine.js', 'claude-client.js']) {
   const src = readFileSync(new URL(`../workers/${f}`, import.meta.url), 'utf8');
-  check(`${f} does not import the task router`, !/task-router\.js/.test(src));
+  check(`${f} does not import the task router`, !IMPORTS_TASK_ROUTER.test(src));
   check(`${f} does not call routeTaskTypeCall`, !/routeTaskTypeCall/.test(src));
 }
 

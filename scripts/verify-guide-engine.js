@@ -267,9 +267,26 @@ console.log('\n--- Fail-closed publish guards ---');
 check('review prompt explicitly requires the full guide body on APPROVE (invalid without it)',
   /APPROVE response MUST include the ---GUIDE--- marker[\s\S]{0,400}invalid/.test(
     readFileSync(new URL('../workers/guide-engine.js', import.meta.url), 'utf8')));
+// FIXED 2026-08-07 — PRE-EXISTING FAILURE, not introduced by that session.
+// Proven against a pristine `git worktree` checkout of HEAD, which failed
+// identically (100 passed, 1 failed) before any of that session's changes.
+//
+// The ordering half used the literal "…APPROVE') {\n    const finalMarkdown".
+// Git checks this repo out with CRLF on Windows, so that LF literal matched
+// NOTHING, indexOf returned -1, and `guardIdx < -1` was false regardless of
+// what the code did. The guard being asserted was present and correct the
+// whole time; the check could not see it on this platform.
+//
+// Worth naming the shape, because this project keeps meeting its relatives:
+// not a guard that was never wired, but a CHECK THAT COULD NEVER PASS — a
+// verifier line that looked like coverage while being, here, impossible to
+// satisfy. Same family as "an unexercised assertion and an absent one look
+// identical from the outside".
+const approveBlockIdx = agentRunnerSrc.search(/decision\.decision === 'APPROVE'\) \{\r?\n\s*const finalMarkdown/);
 check('APPROVE with a missing/implausibly-short guide body never commits (approve_without_guide_body)',
-  /finalGuide\.trim\(\)\.length < 500[\s\S]{0,600}approve_without_guide_body/.test(agentRunnerSrc) &&
-  agentRunnerSrc.indexOf('approve_without_guide_body') < agentRunnerSrc.indexOf("decision.decision === 'APPROVE') {\n    const finalMarkdown"));
+  /finalGuide\.trim\(\)\.length < 500[\s\S]{0,600}approve_without_guide_body/.test(agentRunnerSrc)
+  && approveBlockIdx !== -1
+  && agentRunnerSrc.indexOf('approve_without_guide_body') < approveBlockIdx);
 check('review call fails on a max_tokens-truncated response instead of parsing a fragment',
   /maxTokens: 8192[\s\S]{0,700}stopReason === 'max_tokens'[\s\S]{0,300}truncated/.test(agentRunnerSrc));
 check('verify call never splices a max_tokens-truncated section into a published guide',

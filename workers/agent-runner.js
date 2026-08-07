@@ -51,7 +51,12 @@ import { callCFRouter } from './gemini-client.js';
 import { generateAssignedDailyBatch, persistQuestions } from './qa-engine.js';
 import { getClaudeBudgetStatus, recordClaudeSpend, routeTaskTypeCall, resolveTaskLane, getRoutingQuotaStatus, MODEL_ROUTING } from './model-router.js';
 import { collectTodayGapReports, renderGapDigest } from './gap-reports.js';
-import { resolveIssueTarget, resolveRepoWrite } from './permission-guard.js';
+import { resolveIssueTarget } from './permission-guard.js';
+import { getOfficeContext } from './office-context.js';
+import {
+  REPO_OWNER, REPO_NAME, BACKOFFICE_REPO_NAME, WAREHOUSE_REPO_NAME,
+  REPO_TO_PROJECT_KEY, REPO_TO_TOKEN_SECRET, secretsPresentIn, commitFileToRepo,
+} from './repo-write.js';
 import { improvementLoopEnabled } from './improvement-loop.js';
 import { architectLiaisonEnabled, processArchitectLiaisonBlock } from './architect-liaison.js';
 import { runChoreRotationSlot } from './chore-runner.js';
@@ -68,61 +73,16 @@ import {
 } from './guide-engine.js';
 
 const ALLOWED_ORIGINS = ['https://avivnofar.github.io', 'http://localhost:3000', 'http://127.0.0.1:5500'];
-const REPO_OWNER = 'avivnofar';
-const REPO_NAME = 'office-AI-agents';
 
-// Maps this file's GitHub repo constants to config/project-permissions.json
-// keys, so commitFileToRepo()/fileGitHubIssue() can enforce push permission
-// per the General rule (see workers/permission-guard.js) for EVERY repo
-// they might write to, including this one. REPO_NAME (office-AI-agents) is
-// deliberately included, not exempted — as of the 2026-07-08 config-driven
-// self-write session, self-repo writes are gated by the real
-// "office-agents" project-permissions.json entry (push:true, currently)
-// like any other project, not by a hardcoded bypass. If "office-agents"
-// were ever missing or push:false, self-writes would be redirected into
-// agent-output/office-agents/... same as any other blocked project — see
-// project-permissions.json's office_agents_push_true_is_load_bearing note.
-// back-office / warehouse mapped 2026-08-06 (plan item 0.3). Both keys already
-// existed in project-permissions.json with push:true; what was missing was
-// this lookup, and its absence did NOT fail closed — see resolveRepoWrite()'s
-// header in permission-guard.js.
-const BACKOFFICE_REPO_NAME = 'back-office-AI-agents';
-const WAREHOUSE_REPO_NAME = 'warehouse-office-AI-agents';
-
-const REPO_TO_PROJECT_KEY = {
-  [REPO_NAME]: 'office-agents',
-  [BACKOFFICE_REPO_NAME]: 'back-office',
-  [WAREHOUSE_REPO_NAME]: 'warehouse',
-};
-
-// ONE SCOPED TOKEN PER WRITE TARGET (plan decision 0.8), made enforceable
-// rather than merely documented. The token follows the repo; there is no
-// fallback and no default. A repo whose secret is unmapped or unset is a
-// DENIAL — see resolveRepoWrite() step 4.
-//
-// Why this map exists at all: commitFileToRepo() used to hardcode
-// env.GITHUB_TOKEN for every destination. That token carries write scope on
-// the PUBLIC repo, so the moment anything wrote to back-office it would have
-// been presenting a public-repo credential to a private target — the exact
-// over-reach 0.8 exists to prevent.
-//
-// WAREHOUSE_REPO_TOKEN is mapped but NOT SET on the Worker as of 2026-08-06.
-// That is deliberate and is the second lock on the warehouse code-write
-// exception: the policy is now enforceable in code (code_write:true is read),
-// while the capability stays off because no token exists to perform the write.
-const REPO_TO_TOKEN_SECRET = {
-  [REPO_NAME]: 'GITHUB_TOKEN',
-  [BACKOFFICE_REPO_NAME]: 'BACKOFFICE_REPO_TOKEN',
-  [WAREHOUSE_REPO_NAME]: 'WAREHOUSE_REPO_TOKEN',
-};
-
-/** Secret NAMES to booleans. Never carries a token value — resolveRepoWrite()
- * decides on presence alone, so no secret reaches the guard or a log line. */
-function secretsPresentIn(env) {
-  const out = {};
-  for (const name of Object.values(REPO_TO_TOKEN_SECRET)) out[name] = !!env?.[name];
-  return out;
-}
+// MOVED 2026-08-07 to workers/repo-write.js, unchanged — including
+// commitFileToRepo() itself, whose 17 call sites below are untouched because
+// the imported name is the same. They were only ever here because this file
+// was the only module that wrote to a repo; that stopped being true when
+// meeting-engine.js needed a governed write for the action_items consumer,
+// and it could not import them from here (circular: this file imports
+// meeting-engine.js). Nothing about the maps or the write path changed — see
+// repo-write.js's header for what DID change, which is that
+// meeting-engine.js's commitMeetingReport() stopped bypassing the guard.
 
 /** Maps year-tracker.json milestone keys to the meeting they trigger (in
  * addition to the daily standup, which always runs). */
@@ -331,7 +291,7 @@ async function getSimulationState(env) {
 
 async function updateSimulationState(env, patch) {
   const current = await getSimulationState(env);
-  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled', 'improvement_loop_enabled', 'architect_liaison_enabled'];
+  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled', 'improvement_loop_enabled', 'architect_liaison_enabled', 'office_context_enabled', 'action_items_to_board_enabled'];
   const next = { ...current };
   for (const key of allowedKeys) {
     if (key in patch) next[key] = patch[key];
@@ -433,68 +393,10 @@ function updateYearStats(prevStats, { summary, standup, sidePlotStarted, sidePlo
 /* ─────────────────────────────── GitHub ────────────────────────────────── */
 
 /**
- * Commits a file to a repo via the GitHub Contents API.
- *
- * EVERY decision is delegated to resolveRepoWrite() (permission-guard.js) —
- * this function contains no permission logic of its own, deliberately, so
- * there is exactly one place where a write can be allowed and one dry-run
- * verifier scenario table covering it. It enforces, in order:
- *   1. Unmapped repo name -> DENIED. Not skipped. (Fixed 2026-08-06; this
- *      was the fail-open hole — see resolveRepoWrite()'s header.)
- *   2. push:false -> redirected into REPO_NAME under agent-output/<key>/
- *      rather than dropped (agents may recommend / write-to-own-repo).
- *   3. Code-file writes blocked unless `opts.explicitCodeTask` is true OR
- *      the DESTINATION project carries code_write:true (warehouse only).
- *   4. The token FOLLOWS THE REPO — GITHUB_TOKEN for the public repo,
- *      BACKOFFICE_REPO_TOKEN for back-office. No fallback: an unmapped or
- *      unset secret is a denial, never a borrow of another target's token.
- * See workers/permission-guard.js.
+ * commitFileToRepo() now lives in workers/repo-write.js and is imported at
+ * the top of this file. Moved 2026-08-07, byte-identical — see that module's
+ * header. Its 17 call sites below are unchanged.
  */
-async function commitFileToRepo(env, repoName, path, content, message, opts = {}) {
-  // ONE resolution for permission, destination, code-file rule and token.
-  // Rewritten 2026-08-06: this previously ran the permission check inside
-  // `if (projectKey)`, so an UNMAPPED repo name skipped the check entirely
-  // and the write proceeded — fail-open, not fail-closed. See
-  // resolveRepoWrite()'s header for the full account.
-  const verdict = resolveRepoWrite(projectPermissions, {
-    repoToProjectKey: REPO_TO_PROJECT_KEY,
-    repoToTokenSecret: REPO_TO_TOKEN_SECRET,
-    ownRepoName: REPO_NAME,
-    targetRepoName: repoName,
-    path,
-    explicitCodeTask: opts.explicitCodeTask,
-    secretsPresent: secretsPresentIn(env),
-  });
-  if (!verdict.allowed) {
-    return { committed: false, reason: verdict.reason, blocked: verdict.blocked };
-  }
-
-  repoName = verdict.repoName;
-  path = verdict.path;
-  if (verdict.redirected) message = `${message} [redirected: push disabled for "${verdict.projectKey}"]`;
-
-  const headers = {
-    Authorization: `Bearer ${env[verdict.tokenSecret]}`,
-    'User-Agent': 'data-center-agent-sim',
-    Accept: 'application/vnd.github+json',
-  };
-  const url = `https://api.github.com/repos/${REPO_OWNER}/${repoName}/contents/${path}`;
-
-  // Updating an existing file requires its current blob sha.
-  let sha;
-  const existing = await fetch(url, { headers }).catch(() => null);
-  if (existing?.ok) {
-    const data = await existing.json().catch(() => null);
-    sha = data?.sha;
-  }
-
-  const res = await fetch(url, {
-    method: 'PUT',
-    headers: { ...headers, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, content: btoa(unescape(encodeURIComponent(content))), ...(sha ? { sha } : {}) }),
-  });
-  return { committed: res.ok, status: res.status, path };
-}
 
 /**
  * Generic GitHub Issue creation. No-ops without env.GITHUB_TOKEN.
@@ -1093,7 +995,31 @@ async function maybeStartSidePlots(env, { day, summary, cases, standup }) {
 
 /* ─────────────────────────────── Reporting ─────────────────────────────── */
 
-function renderDailySummary(yearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo) {
+/**
+ * Renders the office-context block for a REPORT (sites 3 and 4 of the
+ * 2026-08-07 context survey).
+ *
+ * These two renderers are string templates that make NO MODEL CALL — their
+ * output is committed markdown a human reads. So context here is FREE, which
+ * is why the report shape carries the fuller version (BUDGETS.report) while
+ * the per-call agent shape is held to 400 tokens.
+ *
+ * A degraded snapshot is rendered VISIBLY here rather than omitted. The
+ * prompts omit-and-log because an error string in a prompt is noise the model
+ * will try to act on; a report is read by a person, and a person needs to
+ * know the section is incomplete. "The office had a quiet week" and "the
+ * board could not be read" must never look the same.
+ */
+function renderOfficeSection(office) {
+  if (!office) return '';
+  if (office.reason === 'office_context_disabled') return '';
+  if (!office.text) {
+    return `\n## The Office's Own Work\n\n⚠️ **Could not be read this cycle** — ${office.reason || 'reason not reported'}.\nThis section is missing, not empty. Do not read its absence as "no office work".\n`;
+  }
+  return `\n## The Office's Own Work\n\n${office.text}\n`;
+}
+
+function renderDailySummary(yearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office) {
   const agentLines = summary.agents
     .map((a) => `- Agent ${a.agentId}: ${a.handled}/${a.caseCount} cases, mood ${a.mood}, irritation ${a.irritation}${a.isAngry ? ' (ANGRY)' : ''}${a.isPanic ? ' (PANIC)' : ''}`)
     .join('\n') || '_No agents processed cases today._';
@@ -1119,7 +1045,7 @@ ${standup?.transcript ? standup.transcript : standup?.error ? `_Standup error: $
 ## Side Plot Activity
 
 ${sidePlotLines}
-${scheduleSection}`;
+${renderOfficeSection(office)}${scheduleSection}`;
 }
 
 /** Renders the tactical-schedule section (case batches, tool-task window, AI-experience reports, spare time, weekly summary). */
@@ -1499,6 +1425,11 @@ async function generateWeeklySummary(env, yearState, weekNumber) {
     .map((i) => `- **${i.title}** (\`${i.id}\`): stage=${i.stage}${typeof i.version === 'number' ? `, v${i.version.toFixed(2)}` : ''}`)
     .join('\n') || '_No pipeline items._';
 
+  // Site 4 of the 2026-08-07 context survey. FREE — this is a string
+  // template, not a prompt. The weekly summary was the report the owner
+  // called thin, and this is the half that was missing from it.
+  const office = await getOfficeContext(env, { shape: 'report', allowFetch: true });
+
   const md = `# Weekly Executive Summary — Week ${weekNumber}
 
 *Permission: private/special (AI staff + owner). See reports/weekly/week-${pad(weekNumber, 2)}-public-summary.md for the public excerpt.*
@@ -1537,10 +1468,14 @@ See \`suggestions\` rows, grouped by \`permission_level\`.
 
 ## Cost & Token Usage Estimate
 
-Gemini (gemini-2.5-flash, office simulation): tracking toward the
-~$2-3/quarter target. Claude (claude-sonnet-4-6, data-center-api): tracking
-toward the $5-15/mo ceiling. See CLAUDE.md "Launch Decisions" cost model.
-
+See \`config/token-economy.json\` for the live per-provider caps and the
+Anthropic budget's \`claude_budget_usage\` D1 counter for actual spend.
+*(2026-08-07: the previous paragraph here named gemini-2.5-flash and
+claude-sonnet-4-6 and quoted a "$2-3/quarter" target. All three were stale —
+the model IDs are retired and the budget is the $4.50 soft-stop / $5 ceiling
+in CLAUDE.md. Replaced with a pointer rather than a fresh set of numbers to
+go stale: this template is committed weekly and nothing was re-checking it.)*
+${renderOfficeSection(office)}
 ## Action Items for Next Week
 
 - [ ] Review this week's model-education case studies.
@@ -1811,7 +1746,10 @@ export async function runWorkDayCycle(env) {
     stats: newStats,
   };
   const scheduleInfo = { schedule, dayOfWeek, batches, toolTask, aiExperience, spareTime, weeklySummary, versionBumps };
-  const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo);
+  // allowFetch: true — the daily summary runs once per cycle, so it is one
+  // of the callers permitted to refresh the office-context cache.
+  const office = await getOfficeContext(env, { shape: 'report', allowFetch: true });
+  const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office);
   const report = await commitFileToRepo(
     env, REPO_NAME, `reports/daily/day-${pad(nextDay, 3)}-summary.md`, markdown,
     `chore(agents): day ${nextDay} summary [skip ci]`
@@ -2118,7 +2056,10 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
     stats: newStats,
   };
   const scheduleInfo = { schedule, dayOfWeek, batches: cycle.batches, toolTask, aiExperience, spareTime, weeklySummary, versionBumps, choreRotation, guideDraft, guideReview, guideVerify };
-  const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo);
+  // allowFetch: true — the daily summary runs once per cycle, so it is one
+  // of the callers permitted to refresh the office-context cache.
+  const office = await getOfficeContext(env, { shape: 'report', allowFetch: true });
+  const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office);
   const report = await commitFileToRepo(
     env, REPO_NAME, `reports/daily/day-${pad(nextDay, 3)}-summary.md`, markdown,
     `chore(agents): day ${nextDay} summary [skip ci]`

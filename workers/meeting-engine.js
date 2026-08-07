@@ -36,8 +36,49 @@
 
 import agentsConfig from '../config/agents-config.json';
 import relationships from '../config/relationships.json';
+import officeProjects from '../config/office-projects.json';
 import { callGemini, callCloudflareFallback } from './gemini-client.js';
 import { callGroq } from './groq-client.js';
+import { commitFileToRepo, REPO_NAME, BACKOFFICE_REPO_NAME } from './repo-write.js';
+import { getOfficeContext, getOfficeSnapshot } from './office-context.js';
+import {
+  addOfficeDays, normalizeActionItems, renderBoardTask,
+  computeWorkflowMetrics, renderWorkflowMetrics,
+} from './meeting-decisions.js';
+
+/*
+ * The pure half of the action-items pipeline and the Workflow's metrics live
+ * in ./meeting-decisions.js so a plain-Node verifier can import and exercise
+ * the REAL functions rather than a hand-written mirror. This module imports
+ * config JSON at module scope, which plain `node` refuses; the alternative to
+ * splitting is the same three-copies-held-together-by-a-comment drift the
+ * 2026-07-12 permission-guard refactor existed to end. Re-exported here so
+ * this module's public surface is unchanged.
+ */
+export {
+  addOfficeDays, normalizeActionItems, renderBoardTask,
+  computeWorkflowMetrics, renderWorkflowMetrics,
+} from './meeting-decisions.js';
+
+const SIM_STATE_KEY = 'simulation-state';
+const ACTION_ITEMS_FLAG = 'action_items_to_board_enabled';
+
+/**
+ * The action_items -> board consumer's kill switch. Default OFF, `=== true`
+ * only, off on every failure path (no SIM_KV, unreadable value, absent key).
+ * Same shape as improvementLoopEnabled() and officeContextEnabled().
+ *
+ * ITS OWN SWITCH, not improvement_loop_enabled, deliberately: that flag
+ * governs D1 CAPTURE, which is additive and local. This performs a WRITE TO
+ * ANOTHER REPOSITORY. Sharing one flag would mean enabling capture silently
+ * enabled cross-repo writes, and a graduated rollout whose steps cannot be
+ * taken separately is not a graduated rollout.
+ */
+export async function actionItemsToBoardEnabled(env) {
+  if (!env?.SIM_KV) return false;
+  const stored = await env.SIM_KV.get(SIM_STATE_KEY, 'json').catch(() => null);
+  return stored?.[ACTION_ITEMS_FLAG] === true;
+}
 
 /** Meeting types whose transcripts are synthesized by Gemini 3.1 Flash-Lite
  *  (large-context report writing) — see config/token-economy.json
@@ -45,14 +86,31 @@ import { callGroq } from './groq-client.js';
  *  (llama3-8b-8192), falling back to Cloudflare Workers AI. */
 const GEMINI_MEETING_TYPES = new Set(['monthly', 'quarterly', 'semi_yearly', 'yearly']);
 
-const REPO_OWNER = 'avivnofar';
-const REPO_NAME = 'office-AI-agents';
+// REPO_OWNER / REPO_NAME removed 2026-08-07. They were this file's private
+// copies of the destination, used by a commitMeetingReport() that never
+// consulted the guard. REPO_NAME now comes from repo-write.js, and the
+// destination is RESOLVED rather than asserted.
 
 /** All meeting types this engine knows how to run. */
 export const MEETING_TYPES = {
   daily_standup: {
-    label: 'Daily Standup',
-    cadence: 'every simulated work day',
+    label: 'Opening Standup',
+    cadence: 'every simulated work day, at the START of the day',
+    requiresOpts: [],
+  },
+  // ADDED 2026-08-07. The day's second meeting, at the other end of it.
+  //
+  // TWO RUNS, NOT ONE MERGED MEETING, and the reasoning is a full day of
+  // latency. The opening standup is FORWARD-looking (dispatch, what is
+  // stuck); the closing review is BACKWARD-looking, on THAT DAY'S OUTPUT.
+  // Merged, the day's work could only be reviewed at the NEXT morning's
+  // standup, which pushes every conclusion into the following day — the
+  // improvement loop would close in two days instead of one. Run at the end
+  // of the day, conclusions reach character files before the next day opens.
+  // See docs/procedures/MEETING-PROTOCOL.md 4.1.
+  closing_qa_review: {
+    label: 'Closing QA Review',
+    cadence: 'every simulated work day, at the END of the day',
     requiresOpts: [],
   },
   weekly: {
@@ -182,6 +240,8 @@ async function gatherMeetingData(meetingType, env, attendeeIds, opts) {
   switch (meetingType) {
     case 'daily_standup':
       return gatherDailyStandup(env, attendeeIds);
+    case 'closing_qa_review':
+      return gatherClosingQaReview(env, attendeeIds);
     case 'weekly':
       return gatherWeekly(env);
     case 'monthly':
@@ -218,6 +278,36 @@ async function gatherDailyStandup(env, attendeeIds) {
   ).bind(since).all();
 
   return { window: '24h', sessionStats, openIncidents };
+}
+
+/**
+ * The closing review looks at THE DAY THAT JUST HAPPENED — its actual output,
+ * not its session statistics. Where the opening standup reads
+ * `agent_sessions` (who worked, what mood), this reads `interactions`,
+ * `cases` and the day's quality scores: what was actually produced.
+ */
+async function gatherClosingQaReview(env, attendeeIds) {
+  const since = new Date(Date.now() - 14 * 60 * 60 * 1000).toISOString();
+
+  const { results: todaysWork } = await env.DB.prepare(
+    `SELECT i.agent_id, a.name AS agent_name, COUNT(*) AS interactions
+     FROM interactions i JOIN agents a ON a.id = i.agent_id
+     WHERE i.timestamp >= ? AND i.type != 'idle'
+     GROUP BY i.agent_id ORDER BY interactions DESC`
+  ).bind(since).all().catch(() => ({ results: [] }));
+
+  const { results: samples } = await env.DB.prepare(
+    `SELECT agent_id, type, query, response_summary FROM interactions
+     WHERE timestamp >= ? AND type != 'idle' ORDER BY RANDOM() LIMIT 6`
+  ).bind(since).all().catch(() => ({ results: [] }));
+
+  const { results: quality } = await env.DB.prepare(
+    `SELECT agent_id, AVG(quality) AS avg_quality, COUNT(*) AS scored
+     FROM reports WHERE event_type = 'case_answer' AND created_at >= ?
+     GROUP BY agent_id`
+  ).bind(since).all().catch(() => ({ results: [] }));
+
+  return { window: 'today', todaysWork, samples, quality, workflowMetrics: null };
 }
 
 async function gatherWeekly(env) {
@@ -346,10 +436,44 @@ function relationshipNotesFor(attendeeIds) {
   return notes;
 }
 
+/** Meetings where the Workflow presents his picture: the opening standup
+ *  (he dispatches) and the substantive meetings (agenda item 4). */
+const WORKFLOW_METRICS_MEETINGS = new Set(['daily_standup', 'weekly', 'monthly', 'quarterly', 'semi_yearly', 'yearly']);
+
+/**
+ * Last recorded activity per agent, in epoch ms. Absent from the map means NO
+ * activity has ever been recorded — deliberately distinct from "zero days
+ * ago", because computeWorkflowMetrics() reports those two differently and
+ * only one of them is a problem to act on.
+ */
+async function lastActivityByAgent(env) {
+  if (!env?.DB) return {};
+  const { results } = await env.DB.prepare(
+    `SELECT agent_id, MAX(timestamp) AS last_at FROM interactions
+     WHERE type != 'idle' GROUP BY agent_id`
+  ).all().catch(() => ({ results: [] }));
+  const out = {};
+  for (const r of results || []) {
+    const t = Date.parse(r.last_at);
+    if (!Number.isNaN(t)) out[r.agent_id] = t;
+  }
+  return out;
+}
+
+/** The standing agenda for the substantive meetings, in order
+ *  (MEETING-PROTOCOL.md 4.2). Item 1 is prepended separately in
+ *  buildMeetingPrompt() so a new meeting type cannot omit it. */
+const SUBSTANTIVE_AGENDA = `Then, IN THIS ORDER:
+2. PRODUCT DECISIONS — only after the relevant agents have reviewed the preliminary work. The Architect (Agent 10) is substantively involved in product planning and speaks at length here; he is not a rubber stamp and not a closing summary.
+3. CONFLICT RESOLUTION — anything unresolved between agents.
+4. THE WORKFLOW'S PRODUCTIVITY PICTURE — Agent 12 presents the four measures as given. He does not average them into one number.
+5. VOTES — every binding decision reached above is put to a vote. ADMINS ONLY vote. The CEO (Agent 11) leads, holds a DOUBLE VOTE and a VETO. Routine work distribution is NOT voted on — only product decisions, conflict resolution, and anything touching the client, or the mechanism stops meaning anything. Record each vote as: the question, who voted which way, the outcome, the date. On a TIE, the meeting decides whether to keep investigating the question, defer it, or drop it — and that resolution is itself recorded.`;
+
 const AGENDA_BUILDERS = {
-  daily_standup: (data) => `Run a brief daily standup. Each attendee gives a 1-2 sentence status based on this data:\n${JSON.stringify(data.sessionStats)}\nOpen incidents to address: ${JSON.stringify(data.openIncidents)}`,
-  weekly: (data) => `Run the weekly meeting. Review last week's metrics:\n${JSON.stringify(data.latestWeek)}\nIncidents: ${JSON.stringify(data.incidents)}\nPending suggestions (decide approve/reject for at least the root and sudo ones): ${JSON.stringify(data.suggestions)}`,
-  monthly: (data) => `Run the monthly review. Trends over the last ${data.rangeWeeks} weeks:\n${JSON.stringify(data.history)}\nRecent meetings: ${JSON.stringify(data.pastMeetings)}`,
+  daily_standup: (data) => `Run the OPENING STANDUP — forward-looking, the start of the day. The Workflow (Agent 12) dispatches: he states what is going out to whom today, presents his metrics, and names what is stuck. Each other attendee gives a 1-2 sentence status.\nSession data:\n${JSON.stringify(data.sessionStats)}\nOpen incidents to address: ${JSON.stringify(data.openIncidents)}\n${data.workflowMetrics || ''}`,
+  closing_qa_review: (data) => `Run the CLOSING QA REVIEW — backward-looking, the end of the day, on TODAY'S OUTPUT ONLY. This is not a standup and not a planning meeting: do not discuss tomorrow.\nWhat was produced today:\n${JSON.stringify(data.todaysWork)}\nSampled output:\n${JSON.stringify(data.samples)}\nQuality scores recorded today:\n${JSON.stringify(data.quality)}\nThe QA (6) reviews WORK QUALITY; the Team Lead (7) reviews the WORKER MODEL — persona consistency, behavioural drift, context gaps. Produce conclusions specific enough to be written into an agent's character file TONIGHT. The whole point of running this at the end of the day rather than at tomorrow's standup is that conclusions reach the files before the next day opens, so a vague conclusion defeats the entire arrangement.`,
+  weekly: (data) => `Run the weekly meeting. Review last week's metrics:\n${JSON.stringify(data.latestWeek)}\nIncidents: ${JSON.stringify(data.incidents)}\nPending suggestions (decide approve/reject for at least the root and sudo ones): ${JSON.stringify(data.suggestions)}\n${data.workflowMetrics || ''}\n\n${SUBSTANTIVE_AGENDA}`,
+  monthly: (data) => `Run the monthly review. Trends over the last ${data.rangeWeeks} weeks:\n${JSON.stringify(data.history)}\nRecent meetings: ${JSON.stringify(data.pastMeetings)}\n${data.workflowMetrics || ''}\n\n${SUBSTANTIVE_AGENDA}`,
   quarterly: (data) => `Run the quarterly review. Trends over the last ${data.rangeWeeks} weeks:\n${JSON.stringify(data.history)}\nDiscuss the IT Chief's quarterly equipment/network/programming optimization demands and the Architect's quarterly big-project update. Year stats: ${JSON.stringify(data.yearStats)}`,
   semi_yearly: (data) => `Run the semi-yearly review. Trends over the last ${data.rangeWeeks} weeks:\n${JSON.stringify(data.history)}\nDiscuss promotion candidates and any rivalry/relationship developments.`,
   yearly: (data) => `Run the yearly review. Full-year trends:\n${JSON.stringify(data.history)}\nYear stats: ${JSON.stringify(data.yearStats)}\nThis is the year-end meeting: discuss promotion nominations (CEO + admin majority vote), the executive summary, and recommendations for next year.`,
@@ -368,12 +492,37 @@ Respond in two parts:
   "mood_effects": [{ "agent_id": <int>, "delta": <int -20..20>, "reason": "<short reason>" }],
   "irritation_effects": [{ "agent_id": <int>, "delta": <int -2..2>, "reason": "<short reason>" }],
   "state_changes": [{ "agent_id": <int>, "field": "isHappy|isAngry|isPanic|panicLevel|isComplacent", "value": <bool|number>, "reason": "<short reason>" }],
-  "action_items": ["<short action item>", ...],
+  "action_items": [{ "agent_id": <int>, "task": "<one imperative sentence>", "delivered": "<the ARTIFACT that will exist>", "due_days": <int office-days>, "decided": <bool>, "open_question": "<if decided is false, what was left unsettled>" }],
   "config_overrides": [{ "agent_id": <int>, "overrides": { "<config_key>": <value> }, "reason": "<short reason>" }],
   "suggestion_decisions": [{ "suggestion_id": "<id or empty>", "decision": "approved|rejected", "reason": "<short reason>" }]
 }
 Then the marker ---END---.
-Every array may be empty. Keep the JSON valid and self-contained.`;
+Every array may be empty. Keep the JSON valid and self-contained.
+
+RULES FOR action_items — these are ENFORCED, and an item breaking them is DROPPED, not repaired:
+- "agent_id" is REQUIRED and must be a real staff id. If you cannot say who owns an item, DO NOT INVENT AN OWNER — omit the item. An unowned action item is not an action item.
+- "delivered" must name an ARTIFACT that will exist, not an activity. "Audit the gates" is an activity and will be dropped. "A table in findings/gate-call-audit.md with one row per gate and a CALLED/NOT-CALLED/UNPROVEN verdict" is an artifact. The test: could two people disagree about whether it exists?
+- "decided": use FALSE when the meeting did NOT settle the item, and put the unsettled part in "open_question". This is a real and expected outcome, not a failure — say so rather than manufacturing agreement. A decided:false item is recorded as NOT-READY and a person resolves it.
+- "due_days" counts OFFICE-DAYS from dispatch (a day the office is open; Saturday is not one).`;
+
+/**
+ * Meeting types that get the office's own work in their prompt.
+ *
+ * NOT every meeting. A standup is dispatch and blockers; a monthly review is
+ * where the client requirements get examined. Handing the same block to both
+ * would cost the same and mean less. Per-type, not one blob, because
+ * AGENDA_BUILDERS is already a per-type table and this follows it.
+ */
+const OFFICE_CONTEXT_MEETINGS = new Set([
+  'daily_standup', 'closing_qa_review', 'weekly', 'monthly', 'quarterly', 'semi_yearly', 'yearly',
+]);
+
+/** Meetings whose FIRST agenda item is the client requirements
+ *  (MEETING-PROTOCOL.md 4.2). Weekly and up — never the dailies, which are
+ *  about the day, and never the 1:1s. */
+const CLIENT_REQUIREMENTS_MEETINGS = new Set([
+  'weekly', 'monthly', 'quarterly', 'semi_yearly', 'yearly',
+]);
 
 function buildMeetingPrompt(meetingType, attendeeSnapshots, data, opts) {
   const meta = MEETING_TYPES[meetingType];
@@ -390,15 +539,31 @@ function buildMeetingPrompt(meetingType, attendeeSnapshots, data, opts) {
 
   const relNotes = relationshipNotesFor(attendeeSnapshots.map((s) => s.id));
 
+  // The office's own work. Empty when the switch is off, when this meeting
+  // type does not take it, or when back-office could not be read — and in the
+  // last case the caller has already logged the reason.
+  const officeBlock = OFFICE_CONTEXT_MEETINGS.has(meetingType) && opts?.officeContext?.text
+    ? opts.officeContext.text
+    : '';
+
   const systemPrompt = [
     `You are simulating a "${meta.label}" at a small IT company's office. The following personas are attendees. Roleplay all of them faithfully and consistently with their states and behavioral rules.`,
     personas,
     relNotes.length ? `Known dynamics:\n- ${relNotes.join('\n- ')}` : '',
+    officeBlock,
     DECISIONS_SCHEMA_HINT,
   ].filter(Boolean).join('\n\n');
 
   const agendaBuilder = AGENDA_BUILDERS[meetingType] || (() => 'Run a general meeting and produce decisions.');
-  const prompt = `Meeting type: ${meta.label}\nDate: ${new Date().toISOString()}\n\nAgenda data:\n${agendaBuilder(data)}`;
+
+  // The standing agenda's FIRST item (MEETING-PROTOCOL.md 4.2). Prepended
+  // rather than woven into each AGENDA_BUILDERS entry, so that adding a
+  // meeting type cannot accidentally omit it.
+  const requirementsFirst = CLIENT_REQUIREMENTS_MEETINGS.has(meetingType) && officeBlock
+    ? 'AGENDA ITEM 1 (ALWAYS FIRST, never a closing summary): Where do we stand against the client requirements listed above? Name each requirement by its REQ id, say whether its status is still accurate, and if it is not, say what it should be and why. If nothing has moved on a requirement, SAY THAT PLAINLY rather than inventing progress.\n\n'
+    : '';
+
+  const prompt = `Meeting type: ${meta.label}\nDate: ${new Date().toISOString()}\n\n${requirementsFirst}Agenda data:\n${agendaBuilder(data)}`;
 
   return { systemPrompt, prompt };
 }
@@ -439,6 +604,72 @@ function emptyDecisions() {
     config_overrides: [],
     suggestion_decisions: [],
   };
+}
+
+/* ──────────────────── Action items -> board tasks (I/O) ────────────────── */
+
+/**
+ * THE SIXTH BRANCH. Until 2026-08-07, applyMeetingEffects() consumed five of
+ * the six decision arrays and `action_items` was the one with no consumer: it
+ * was rendered into the report as markdown checkboxes and dropped. The office
+ * had been holding meetings that produced action items and discarding them.
+ *
+ * Specification: back-office campus/shared/board/DECISION-PIPELINE.md.
+ * Validation and rendering: ./meeting-decisions.js (pure, verifier-testable).
+ *
+ * back-office is code_write:false, so this is a MARKDOWN write through
+ * resolveRepoWrite() with BACKOFFICE_REPO_TOKEN — the path plan item 0.3
+ * built, and the reason it was built.
+ *
+ * Appends to a dated INBOX file rather than editing BOARD.md. Two reasons,
+ * both deliberate: BOARD.md's ID sequence is the Workflow's to allocate (its
+ * README: one writer), and IDs are never reused, so allocation cannot be done
+ * by an appending process that has not read the board. The Workflow accepts
+ * items from the inbox and assigns real OB-NNN ids — the same accept/reject
+ * step OB-022 already established for proposed tasks.
+ */
+async function writeActionItemsToBoard(env, { meetingType, items, dropped }) {
+  const dateStr = new Date().toISOString().slice(0, 10);
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+
+  const blocks = items.map((item, i) => renderBoardTask(item, {
+    id: `PROPOSED-${stamp}-${String(i + 1).padStart(2, '0')}`,
+    meetingType,
+    dateStr,
+    agentName: getAgentConfig(item.agentId)?.name || null,
+  }));
+
+  const droppedBlock = dropped.length
+    ? `\n## Dropped by the pipeline — ${dropped.length}\n\n**Not a failure to hide.** Each line is an item the meeting produced that could not become a task, with the reason. A missing owner or a roster gap surfaces HERE rather than as a guessed assignment.\n\n${dropped.map((d) => `- \`${String(JSON.stringify(d.item)).slice(0, 200)}\` — ${d.reason}`).join('\n')}\n`
+    : '\n## Dropped by the pipeline — 0\n\n_Every action item this meeting produced passed validation._\n';
+
+  const markdown = `# Proposed board tasks — ${meetingType} meeting, ${dateStr}
+
+**Classification:** private · **Generated by:** \`workers/meeting-engine.js\` action_items pipeline
+**Status:** PROPOSED. Not on the board yet.
+
+> The Workflow (Agent 12) accepts or rejects these and allocates real
+> \`OB-NNN\` ids. This file never edits \`BOARD.md\` directly — the board has
+> one writer by contract, and IDs are never reused.
+
+## Proposed tasks — ${items.length}
+
+${blocks.join('\n') || '_None. The meeting produced no action item that passed validation._'}
+${droppedBlock}`;
+
+  const path = `campus/shared/board/inbox/${dateStr}-${meetingType}-${stamp}.md`;
+  const result = await commitFileToRepo(
+    env,
+    BACKOFFICE_REPO_NAME,
+    path,
+    markdown,
+    `chore(office): ${meetingType} meeting action items -> board inbox [skip ci]`
+  );
+
+  if (!result.committed) {
+    console.warn(`[meeting-engine] action_items board write DENIED or failed: ${result.reason || result.status} (blocked=${result.blocked || 'n/a'})`);
+  }
+  return { ...result, proposed: items.length, dropped: dropped.length, path };
 }
 
 /* ────────────────────────────── Effects ───────────────────────────────── */
@@ -495,6 +726,20 @@ async function applyMeetingEffects(meetingType, attendeeSnapshots, decisions, en
     }
   }
 
+  // SIXTH BRANCH — action items become board tasks. Behind its own switch,
+  // default OFF. See actionItemsToBoardEnabled() for why it is not sharing
+  // improvement_loop_enabled.
+  if (await actionItemsToBoardEnabled(env)) {
+    const rosterIds = agentsConfig.agents.map((a) => a.id);
+    const { items, dropped } = normalizeActionItems(decisions.action_items, { rosterIds });
+    for (const d of dropped) console.warn(`[meeting-engine] action item DROPPED: ${d.reason}`);
+    if (items.length || dropped.length) {
+      await writeActionItemsToBoard(env, { meetingType, items, dropped }).catch((err) => {
+        console.warn(`[meeting-engine] action_items board write threw: ${err.message}`);
+      });
+    }
+  }
+
   // PIP session: record the outcome in `promotions` (track='pip').
   if (meetingType === 'pip_session' && env.DB) {
     const targetId = attendeeSnapshots.find((s) => s.config?.tier !== 'admin')?.id;
@@ -530,7 +775,17 @@ function renderMeetingReport(meetingType, attendeeSnapshots, transcript, decisio
     .map((e) => `| Agent ${e.agent_id} | ${e.delta >= 0 ? '+' : ''}${e.delta} | ${e.reason} |`)
     .join('\n');
 
-  const actionItems = (decisions.action_items || []).map((a) => `- [ ] ${a}`).join('\n') || '_None._';
+  // Rendered from the 2026-08-07 object schema. The old renderer was
+  // `- [ ] ${a}` over bare strings, and the checkbox was the convincing part:
+  // the report looked like a working system while nothing consumed the array.
+  const rawItems = decisions.action_items || [];
+  const actionItems = rawItems.length
+    ? rawItems.map((a) => {
+        if (typeof a === 'string') return `- [ ] WARNING ${a} _(old bare-string schema — no owner, artifact or deadline; the board pipeline DROPS this rather than repairing it)_`;
+        const undecided = a?.decided === true ? '' : ' **[NOT DECIDED — reaches the board as NOT-READY]**';
+        return `- [ ] **Agent ${a?.agent_id ?? '?'}** — ${a?.task ?? '(no task)'}${undecided}\n  - delivered: ${a?.delivered ?? '_(missing — will be dropped)_'}\n  - due: ${a?.due_days ?? '?'} office-days`;
+      }).join('\n')
+    : '_None._';
 
   const overridesList = (decisions.config_overrides || [])
     .map((o) => `- Agent ${o.agent_id}: ${JSON.stringify(o.overrides)} — ${o.reason}`)
@@ -568,34 +823,70 @@ ${overridesList}
 }
 
 /**
- * Commits a meeting report markdown file to reports/meetings/ in
- * this repo via the GitHub Contents API. No-ops if env.GITHUB_TOKEN
- * (a Worker secret, never shipped to the browser) isn't configured.
+ * Commits a meeting report markdown file to reports/meetings/.
+ *
+ * ── REWRITTEN 2026-08-07: THIS FUNCTION USED TO BYPASS THE GUARD ─────────
+ *
+ * It built its own request — `Authorization: Bearer ${env.GITHUB_TOKEN}` —
+ * against hardcoded REPO_OWNER/REPO_NAME constants, having never called
+ * resolveRepoWrite(). CLAUDE.md and plan 0.3 both stated resolveRepoWrite()
+ * was "the single entry point for every repo write". For this path that was
+ * false, and had been for every meeting report ever filed.
+ *
+ * NOTHING WAS EVER MIS-WRITTEN, and that is the interesting part. GITHUB_TOKEN
+ * is the correct credential for the public repo, so the outcome was right
+ * every time — right because two hardcoded constants happened to agree, not
+ * because any rule compared them. This project's own recorded corollary: TWO
+ * MECHANISMS AGREEING BY ACCIDENT IS NOT A GUARD. A scenario that passes for
+ * the wrong reason keeps passing until the coincidence breaks, and the break
+ * was already scheduled — writeActionItemsToBoard() above writes to
+ * BACK-OFFICE from this same file, and would have been the first caller to
+ * need a different token than the one hardcoded here.
+ *
+ * Found by the 2026-08-07 context survey while answering a different
+ * question, which is also how the 2026-08-06 fail-open hole was found.
  */
 async function commitMeetingReport(env, meetingType, markdown) {
-  if (!env.GITHUB_TOKEN) return { committed: false, reason: 'GITHUB_TOKEN not configured' };
-
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
   const path = `reports/meetings/${meetingType}-${stamp}.md`;
-  const url = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${path}`;
-
-  const res = await fetch(url, {
-    method: 'PUT',
-    headers: {
-      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-      'User-Agent': 'data-center-agent-sim',
-      Accept: 'application/vnd.github+json',
-    },
-    body: JSON.stringify({
-      message: `chore(agents): ${meetingType} meeting report ${stamp} [skip ci]`,
-      content: btoa(unescape(encodeURIComponent(markdown))),
-    }),
-  });
-
-  return { committed: res.ok, status: res.status, path };
+  return commitFileToRepo(
+    env,
+    REPO_NAME,
+    path,
+    markdown,
+    `chore(agents): ${meetingType} meeting report ${stamp} [skip ci]`
+  );
 }
 
 /* ─────────────────────────────── Orchestrator ──────────────────────────── */
+
+/**
+ * PROVIDER RULE — READ BEFORE "FIXING" THE ARCHITECT'S ROUTING.
+ *
+ * The Architect (Agent 10) participates substantively in weekly and monthly
+ * meetings as of 2026-08-07. HIS MEETING PARTICIPATION MUST NEVER USE
+ * ANTHROPIC.
+ *
+ * That budget is reserved for the Architect's own owner-directed work and for
+ * genuine data-center Q&A, inside a $4.50/mo soft-stop and a $5 hard ceiling.
+ * Office meeting participation is exactly the office flavour / persona chatter
+ * the budget rule forbids — and the rule has no exception for "but it is the
+ * Architect", because his is the one persona whose chatter would be most
+ * tempting to route there.
+ *
+ * Enforced STRUCTURALLY rather than by a check: this module calls Gemini or
+ * Groq (Cloudflare Workers AI fallback) and imports no Anthropic client.
+ * There is no Anthropic path in this file to disable. A future session must
+ * not "fix the inconsistency" by giving him one.
+ *
+ * Note what his exclusion was actually about, because it is easy to conflate:
+ * he was NEVER excluded from MEETINGS — relationships.json already seated him
+ * at monthly, quarterly, semi-yearly and yearly. He is excluded from the
+ * EMBODIMENT SHUFFLE (assignEmbodiment() in task-router.js skips him by id AND
+ * by name), which is a different mechanism, and it STAYS AS IT IS. Adding him
+ * to `weekly` on 2026-08-07 changed an attendee list and touched nothing about
+ * embodiment.
+ */
 
 /**
  * Runs a full meeting cycle and returns a summary.
@@ -615,7 +906,28 @@ export async function runMeeting(meetingType, env, opts = {}) {
   const attendeeSnapshots = await Promise.all(attendeeIds.map((id) => loadAgentSnapshot(id, env)));
 
   const data = await gatherMeetingData(meetingType, env, attendeeIds, opts);
-  const { systemPrompt, prompt } = buildMeetingPrompt(meetingType, attendeeSnapshots, data, opts);
+
+  // The office's own work. `allowFetch: true` — a meeting runs once per
+  // cycle, so it is one of the few callers permitted to spend the GitHub
+  // round-trips that refresh the cache. Null / {text:null} with the switch
+  // off, and buildMeetingPrompt() then omits the block entirely.
+  const snapshot = await getOfficeSnapshot(env, { allowFetch: true });
+  const officeContext = await getOfficeContext(env, {
+    shape: 'meeting', snapshot, projects: officeProjects.projects,
+  });
+
+  // The Workflow's four measures, computed from the SAME snapshot the context
+  // block came from — so the numbers in the agenda and the tasks in the
+  // context cannot disagree with each other.
+  if (snapshot?.board && WORKFLOW_METRICS_MEETINGS.has(meetingType)) {
+    data.workflowMetrics = renderWorkflowMetrics(computeWorkflowMetrics({
+      boardTasks: snapshot.board.tasks,
+      activityByAgent: await lastActivityByAgent(env),
+      rosterIds: agentsConfig.agents.map((a) => a.id),
+    }));
+  }
+
+  const { systemPrompt, prompt } = buildMeetingPrompt(meetingType, attendeeSnapshots, data, { ...opts, officeContext });
 
   let modelResult;
   if (GEMINI_MEETING_TYPES.has(meetingType)) {

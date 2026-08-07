@@ -77,11 +77,37 @@ check('Architect (10) is still defined (character preserved) but excluded from t
 function getActiveQaAgentsMirror() {
   // Mirrors workers/qa-engine.js getActiveQaAgents() exactly — see this
   // file's header comment for why this is a mirror, not a direct import.
-  return agentsConfig.agents.filter((a) => (a.status === 'active' || a.status === 'specified') && a.id !== 10);
+  // `in_case_rotation !== false` added 2026-08-07 with the same clause in the
+  // source; see that function's comment for why it protects Track A.
+  return agentsConfig.agents.filter(
+    (a) => (a.status === 'active' || a.status === 'specified') && a.id !== 10 && a.in_case_rotation !== false
+  );
 }
 const activeAgents = getActiveQaAgentsMirror();
-check('exactly 10 active Q&A agents (11 total minus dormant Architect)', activeAgents.length === 10, `got ${activeAgents.length}`);
+check('exactly 10 active Q&A agents (13 on roster, minus dormant Architect, minus Workflow/Cyber who are meetings-only)',
+  activeAgents.length === 10, `got ${activeAgents.length}`);
 check('Architect (10) is NOT in the active list', !activeAgents.some((a) => a.id === 10));
+
+// TRACK A REGRESSION GUARD, added 2026-08-07 with the 11→13 roster change.
+// Agents 12 and 13 were added for meetings/dispatch/review and carry
+// status 'specified', which this filter accepts — so WITHOUT the
+// in_case_rotation clause they would have been silently enrolled in the
+// daily Q&A engine, drawing questions against the live client track and the
+// shared Claude budget. This asserts the protection, not the intention.
+check('Workflow (12) is on the roster', agentsConfig.agents.some((a) => a.id === 12));
+check('Cyber Expert (13) is on the roster', agentsConfig.agents.some((a) => a.id === 13));
+check('Workflow (12) is NOT in the Q&A case rotation', !activeAgents.some((a) => a.id === 12));
+check('Cyber Expert (13) is NOT in the Q&A case rotation', !activeAgents.some((a) => a.id === 13));
+check('the pre-existing ten are unchanged by the new clause — none of 1-9,11 carries in_case_rotation',
+  agentsConfig.agents.filter((a) => a.id <= 11).every((a) => a.in_case_rotation === undefined));
+
+// FAILS-OLD: the pre-2026-08-07 filter had no in_case_rotation clause. Run it
+// against today's config and it admits 12 — which is the regression this
+// clause exists to prevent, demonstrated rather than described.
+const oldFilter = agentsConfig.agents.filter((a) => (a.status === 'active' || a.status === 'specified') && a.id !== 10);
+check('[FAILS-OLD] the pre-change filter WOULD have pulled 12 and 13 into the case rotation',
+  oldFilter.some((a) => a.id === 12) && oldFilter.some((a) => a.id === 13),
+  `old filter returned ${oldFilter.length} agents vs the new filter's ${activeAgents.length}`);
 
 for (const agent of activeAgents) {
   check(`agent ${agent.id} (${agent.name}) has topic_affinity (array)`, Array.isArray(agent.topic_affinity));

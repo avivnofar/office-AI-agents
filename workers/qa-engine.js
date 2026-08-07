@@ -71,9 +71,28 @@ function buildQuestionId(y, w, dayIndex, idNum) {
  * session's rebuild, reserved for owner-directed special tasks only. This is
  * the SAME exclusion the old crm-engine.js applied, kept unchanged — the
  * Architect was never in the routine case/question flow either way.
+ *
+ * `in_case_rotation !== false` added 2026-08-07, and it is a TRACK A
+ * PROTECTION, not a feature. Agents 12 (The Workflow) and 13 (The Cyber
+ * Expert) joined agents-config.json that day so the meeting engine could seat
+ * them — and they carry status 'specified', which this filter accepted.
+ * Without this clause, adding two agents for MEETINGS would have silently
+ * enrolled them in the DAILY Q&A ENGINE: two more agents drawing questions,
+ * consuming the shared Claude budget and the Gemini pacing slots, on the live
+ * client-work track, as an unintended side effect of a config edit.
+ *
+ * Written as `!== false` rather than `=== true` deliberately: the eleven
+ * pre-existing agents do not carry the field at all, and `!== false` leaves
+ * every one of them exactly as it was. An `=== true` test would have required
+ * touching all eleven entries, and a missed one would have quietly dropped a
+ * real case worker out of the rotation — the failure would have been silent
+ * and in the direction of doing less work, which is the direction nobody
+ * notices.
  */
 export function getActiveQaAgents() {
-  return agentsConfig.agents.filter((a) => (a.status === 'active' || a.status === 'specified') && a.id !== 10);
+  return agentsConfig.agents.filter(
+    (a) => (a.status === 'active' || a.status === 'specified') && a.id !== 10 && a.in_case_rotation !== false
+  );
 }
 
 /** Back-compat alias — agent-runner.js's public API name during the transition. */

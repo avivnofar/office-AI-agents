@@ -30,7 +30,8 @@
   "SIMULATION": {
     "phase": 1,
     "active_agents": [1, 2, 3, 4],
-    "stub_agents": [5, 6, 7, 8, 9, 10, 11],
+    "stub_agents": [5, 6, 7, 8, 9, 10, 11, 12, 13],
+    "_stub_agents_note_2026_08_07": "12 and 13 added with the agents-config.json roster change. DESCRIPTIVE ONLY — a repo-wide grep confirms no executable line reads stub_agents (only active_agents is, in workers/scheduler.js). Two consequences, stated rather than left to be discovered: (a) instantiateAgent() picks StubAgent via AGENT_CLASSES[id] || StubAgent, not from this list, so 12 and 13 already instantiate correctly without it; (b) the LIVE SIM_KV simulation-state carries the OLD seven-element list and this default cannot override it (stored values win), so production still reads [5..11] until someone rewrites that key. That divergence is recorded rather than reconciled — the field is inert, and rewriting a production KV key to fix a value nothing reads is not a trade this session was willing to make.",
     "inspection_mode": false,
     "weekly_report_day": "monday"
   },

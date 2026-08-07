@@ -18,6 +18,7 @@ import { getClaudeBudgetStatus, recordClaudeSpend, getClaudeCallsToday, CLAUDE_M
 import { checkGeminiPacingSlot } from '../workers/gemini-pacer.js';
 import { detectCapabilityGap } from '../workers/gap-reports.js';
 import { recordOfficeEvent } from '../workers/improvement-loop.js';
+import { getOfficeContext } from '../workers/office-context.js';
 
 const MOOD_MIN = 0;
 const MOOD_MAX = 100;
@@ -217,9 +218,37 @@ export class AgentBase {
    * fail loudly, not silently pick a model.
    */
 
-  /** Persona context shared by both model paths: personality + current state + behavioral rules + (placeholder) DB context. */
+  /** Persona context shared by both model paths: personality + current state + behavioral rules + (placeholder) DB context + the office's own work. */
   async _buildPersonaSystemPrompt(prompt, systemPrompt) {
     const dbContext = await this.getDbContext(prompt);
+
+    // THE OFFICE'S OWN WORK (added 2026-08-07, behind office_context_enabled,
+    // default OFF). Until this existed, an agent's entire world was its
+    // persona, its mood, and the case in front of it — the board, the client
+    // requirements and the office's projects reached no prompt anywhere.
+    //
+    // CACHE-ONLY on this path (`allowFetch` deliberately not passed). This
+    // runs on EVERY agent model call, of which there are many a day; letting
+    // it refresh would spend two GitHub round-trips per LLM call to learn
+    // nothing new. The meeting engine and the daily/weekly report renderers
+    // run once per cycle and are the ones that refresh the cache.
+    //
+    // NOTE — a deviation from the survey's plan, recorded rather than done
+    // quietly: this was going to be injected INTO getDbContext(), which is
+    // the existing inert hook. It is a separate block instead, because
+    // getDbContext()'s output is labelled "Relevant Data Center entries:" and
+    // the office's own board is not a Data Center entry. Reusing the seam
+    // would have cost one line and mislabelled the content for every future
+    // reader. getDbContext() is left exactly as it was.
+    let officeBlock = '';
+    try {
+      const office = await getOfficeContext(this.env, { shape: 'agent', agentId: this.id });
+      if (office?.text) officeBlock = office.text;
+    } catch (err) {
+      // Never let context assembly break a client answer. Track A yields to
+      // nothing, least of all an office-building feature.
+      console.warn(`[agent-${this.id}] office context unavailable: ${err.message}`);
+    }
 
     const stateLine = this.isPanic
       ? `Current state: mood=${this.mood}, panic=${this.panicLevel}/100.`
@@ -232,6 +261,7 @@ export class AgentBase {
         ? `Behavioral rules:\n- ${this.config.behavioral_rules.join('\n- ')}`
         : '',
       dbContext ? `Relevant Data Center entries:\n${dbContext}` : '',
+      officeBlock,
     ].filter(Boolean).join('\n\n');
   }
 

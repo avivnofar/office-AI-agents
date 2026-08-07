@@ -1,0 +1,45 @@
+{
+  "_meta": {
+    "written": "2026-08-07",
+    "why": "The office's agents could name their own moods and not the projects they work on. This is the list, as DATA, so adding a project is a config edit rather than a code edit — the same reasoning as config/model-routing.json.",
+    "maintenance": "This is a value represented in PROJECT-SPEC-TABLES.md. Any session that changes it updates that file in the SAME session (spec-tables maintenance rule, owner decision 2026-08-05).",
+    "scope_note": "Client projects and office infrastructure only. This is NOT the client-requirements list — requirements live in back-office docs/CLIENT-REQUIREMENTS.md and are read from there, never mirrored here."
+  },
+  "projects": [
+    {
+      "key": "data-center",
+      "name": "Data Center",
+      "role": "client project — the office's first client; daily Q&A engine (Track A) runs against it",
+      "repo": "data-center",
+      "visibility": "private"
+    },
+    {
+      "key": "notebook-x",
+      "name": "Notebook-X",
+      "role": "client project — daily Q&A engine (Track A) runs against it",
+      "repo": "Notebook-X",
+      "visibility": "private"
+    },
+    {
+      "key": "office-agents",
+      "name": "office-AI-agents",
+      "role": "the office's own operational base and public face — live Worker, reports, guides",
+      "repo": "office-AI-agents",
+      "visibility": "public"
+    },
+    {
+      "key": "back-office",
+      "name": "back-office-AI-agents",
+      "role": "the office's brain — plans, the board, client requirements, the campus, the owner channel",
+      "repo": "back-office-AI-agents",
+      "visibility": "private"
+    },
+    {
+      "key": "warehouse",
+      "name": "warehouse-office-AI-agents",
+      "role": "the workshop — the only repo where agents may write code",
+      "repo": "warehouse-office-AI-agents",
+      "visibility": "private"
+    }
+  ]
+}
