@@ -380,6 +380,40 @@ check('[new] the runner checks the fit only on the DIRECT path (routing ON has 1
   /if \(plan\.review\.mode === 'direct'\) \{[\s\S]{0,400}?estimateReviewFit\(/.test(runnerSrc));
 check('[new] the fact pack bounds BOTH of its unbounded lists',
   rp.BOARD_TASKS_IN_PACK > 0 && rp.BLOCKED_IN_PACK > 0);
+
+/* ── THE REFUSAL MUST STAY LOUD (owner instruction, 2026-08-08) ──────────
+ * "A truncated review that parses like a real one is the failure mode we've
+ * now hit in three subsystems." These checks pin the loudness itself, not
+ * just the refusal, so a later session cannot quietly downgrade it to a
+ * silent skip while leaving the mechanism nominally in place. */
+const loudFit = rp.estimateReviewFit({ factPack: bigPack, draftContent: okBody, maxOutputTokens: 1800 });
+check('[LOUD] the refusal carries a reason, never a bare false',
+  typeof loudFit.reason === 'string' && loudFit.reason.length > 80);
+check('[LOUD] the reason states BOTH numbers, so the margin is auditable from the log alone',
+  /~\d+ tokens/.test(loudFit.reason) && /8192/.test(loudFit.reason));
+check('[LOUD] the reason says WHY it refuses rather than truncating (no finish reason on this path)',
+  /reports no finish reason/.test(loudFit.reason));
+check('[LOUD] the runner console.warns the refusal — it is not a silent skip',
+  /console\.warn\(`\[report-pipeline\] \$\{fit\.reason\}`\)/.test(runnerSrc));
+check('[LOUD] and returns a named, greppable reason to its caller',
+  /reason: `review_input_exceeds_direct_context \(~\$\{fit\.estimated\}\/\$\{fit\.ceiling\}\)`/.test(runnerSrc));
+check('[LOUD] a refused review never reaches the publish path',
+  /if \(!review\.text\) return \{ ran: false, reason: `review_failed/.test(runnerSrc));
+
+/* ── AD-028: report drafting pins to Gemini when routing is enabled ──────
+ * Owner decision 2026-08-08, deliberately NOT implemented yet. These checks
+ * assert the DECISION IS RECORDED WHERE A SESSION WOULD EDIT — they must NOT
+ * be read as asserting the pin exists. When routing is enabled and the pin
+ * lands, replace them with a check that drafting resolves to gemini. */
+const pipelineSrc = read('workers/report-pipeline.js');
+check('[AD-028] the not-yet-implemented pin is recorded at pickDraftLane(), where it would be edited',
+  /AD-028[\s\S]{0,2000}?PINNED TO GEMINI/.test(pipelineSrc)
+  && /DOES NOT YET IMPLEMENT THAT/.test(pipelineSrc));
+check('[AD-028] and warns against the specific "simplification" that would undo it',
+  /Do NOT\s*\n?\s*\* "simplify" report drafting back onto the routine lane/.test(pipelineSrc)
+  && /repoint\s*\n?\s*\* `routine_volume`'s primary/.test(pipelineSrc));
+check('[AD-028] the conflict is still reported at runtime meanwhile, not merely commented',
+  rp.planReportProviders({ routingOn: true, language: 'english' }).geminiRequirementHolds === false);
 check('[new] and says so when it clips them — no silent caps',
   (() => {
     const many = Array.from({ length: 40 }, (_, i) => `OB-${i} blocked on something`);

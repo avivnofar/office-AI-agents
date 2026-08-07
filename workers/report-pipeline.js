@@ -165,22 +165,43 @@ export const DRAFT_LANE_HEBREW = 'hebrew_composition';
 export const DRAFT_LANE_OTHER = 'routine_volume';
 
 /**
- * Which lane drafts, per the session instruction: the Hebrew composition lane
- * where the report is Hebrew, the routine lane where it is not.
+ * Which lane drafts: the Hebrew composition lane where the report is Hebrew,
+ * the routine lane where it is not.
  *
- * ⚠ RECORDED TENSION, NOT RESOLVED HERE. The owner's other stated requirement
- * is that reports are "written by Gemini". The Hebrew lane's primary IS
- * Gemini; the routine lane's primary is Groq. The office's weekly and monthly
- * reports are ENGLISH (Front language is English only, owner decision
- * 2026-08-05), so with routing ON an English report would be drafted by Groq
- * and the "written by Gemini" requirement would stop holding — silently.
+ * ══════════════════════════════════════════════════════════════════════════
+ * ⚠ OWNER DECISION AD-028 (2026-08-08) — REPORT DRAFTING IS PINNED TO GEMINI,
+ *   AND THIS FUNCTION DOES NOT YET IMPLEMENT THAT. READ BEFORE EDITING.
+ * ══════════════════════════════════════════════════════════════════════════
  *
- * It does not bite today: `routing_enabled` is OFF, and the routing-off path
- * below drafts on Gemini directly, so the requirement holds exactly as stated
- * in the state this ships in. It would bite the moment routing is switched
- * on, which is an owner action, which is the right moment for him to decide
- * it. planReportProviders() reports the conflict in its return value so the
- * caller can log it rather than discover it in a published report.
+ * The requirement: **reports are drafted by Gemini.** When `routing_enabled`
+ * is switched on, the drafting call MUST resolve to Gemini regardless of what
+ * the routine lane's primary happens to be — either by giving report drafting
+ * its own lane, or by pinning the provider explicitly at the call site.
+ *
+ * What this function does today does NOT satisfy that: the routine lane's
+ * primary is Groq, and the office's reports are English (Front language is
+ * English only, owner decision 2026-08-05), so with routing ON an English
+ * report would be drafted by Groq.
+ *
+ * It does not bite yet, and that is why it is a comment rather than code.
+ * `routing_enabled` is OFF and the routing-off path drafts on Gemini
+ * directly, so the requirement holds exactly as stated in the state this
+ * ships in. The owner's instruction was explicit: **note it and let it ride
+ * until routing is enabled** — a pin written months before its first real
+ * invocation is a pin nobody has watched work, and it lands in the session
+ * that turns routing on, where it can be verified in the same breath.
+ * planReportProviders() returns `geminiRequirementHolds: false` and logs the
+ * conflict meanwhile, so it cannot pass silently.
+ *
+ * ⚠ TO A SESSION THAT READS THIS AS AN INCONSISTENCY: it is not one. Do NOT
+ * "simplify" report drafting back onto the routine lane, and do NOT repoint
+ * `routine_volume`'s primary to Gemini to satisfy it — that lane's primary is
+ * Groq by design and serves every other routine caller. Report drafting is
+ * exempt by owner decision. **The exemption is the point, not an oversight**,
+ * and the tidy-up is a one-line change that looks like a cleanup.
+ *
+ * Full reasoning, alternatives and the revisit condition:
+ * back-office-AI-agents/docs/decisions/ARCHITECTURAL-DECISIONS.md AD-028.
  */
 export function pickDraftLane(language) {
   return String(language || '').toLowerCase() === 'hebrew' ? DRAFT_LANE_HEBREW : DRAFT_LANE_OTHER;
