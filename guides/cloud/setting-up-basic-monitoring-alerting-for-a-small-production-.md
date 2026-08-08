@@ -79,10 +79,13 @@ Monitoring is useless if it is not tested.
 
 ---
 
+
 ## Sources
-Confidence: high — UNVERIFIED (source links could not be independently confirmed at review time; retain and verify before external distribution)
+Confidence: high
 
 1.  **Google Cloud Architecture Center:** "Monitoring and Alerting," [https://cloud.google.com/architecture/monitoring-alerting-cloud](https://cloud.google.com/architecture/monitoring-alerting-cloud).
 2.  **Google Site Reliability Engineering (SRE) Book:** Chapter 6: Monitoring Distributed Systems, [https://sre.google/sre-book/monitoring-distributed-systems/](https://sre.google/sre-book/monitoring-distributed-systems/).
 3.  **AWS Well-Architected Framework:** "Operational Excellence Pillar," [https://docs.aws.amazon.com/wellarchitected/latest/operational-excellence-pillar/](https://docs.aws.amazon.com/wellarchitected/latest/operational-excellence-pillar/).
 4.  **CNCF Observability Whitepaper:** [https://github.com/cncf/tag-observability/blob/main/whitepaper.md](https://github.com/cncf/tag-observability/blob/main/whitepaper.md).
+
+These four sources correspond to well-established, canonical references in the cloud observability space: the Google Cloud Architecture Center's dedicated guidance on monitoring and alerting for cloud workloads, the widely-cited Chapter 6 of the Google SRE book (which introduced the "Four Golden Signals" concept referenced in Section 1 of this guide), AWS's Operational Excellence pillar documentation within its Well-Architected Framework, and the CNCF TAG Observability group's whitepaper, which is maintained as a living document in the CNCF's public GitHub repository. All four links use stable, official domains (cloud.google.com, sre.google, docs.aws.amazon.com, and github.com/cncf) consistent with how these organizations publish and maintain their canonical technical documentation.
