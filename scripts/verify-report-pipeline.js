@@ -927,8 +927,30 @@ section('§8b  reports/LATEST.md — an index, not an archive');
 const seedIndex = rp.renderLatestIndex([]);
 check('[new] an empty index says so rather than rendering a bare header',
   /No reviewed reports have been published yet/.test(seedIndex));
-check('[new] the shipped seed file matches what the code renders (no drift on the first publish)',
-  read('reports/LATEST.md').trim() === seedIndex.trim());
+// WAS: `read('reports/LATEST.md') === seedIndex` — "the shipped seed matches
+// what the code renders, so there is no drift on the first publish". That
+// check expired the moment it succeeded: the first publish landed 2026-08-09
+// and the live index now carries a real entry, so the assertion started
+// failing for the exact reason it was written to allow.
+//
+// Replaced with the property that holds for the file's whole life rather than
+// only before its first write: whatever `reports/LATEST.md` currently contains,
+// the parser reads it and the renderer reproduces it. That catches drift
+// between the committed file and the code on every future publish, not just
+// the first.
+{
+  // Line endings are normalised on both sides. The Worker writes LF through the
+  // GitHub API; a Windows checkout with core.autocrlf brings it back as CRLF.
+  // That is a property of whoever ran `git clone`, not of the pipeline, and a
+  // verifier that fails on it would be reporting the developer's git config.
+  const lf = (s) => String(s).replace(/\r\n/g, '\n').trim();
+  const liveIndex = read('reports/LATEST.md');
+  const parsed = rp.parseLatestIndex(liveIndex);
+  check('[new] the live index round-trips through the parser and renderer (drift check, every publish)',
+    lf(rp.renderLatestIndex(parsed)) === lf(liveIndex));
+  check('[new] and it is no longer the empty seed — the pipeline has actually published',
+    parsed.length > 0 && lf(liveIndex) !== lf(seedIndex));
+}
 
 const e1 = { title: 'Weekly report — week-07', path: '/reports/weekly/week-07-report.md', reportType: 'weekly', dateStr: '2026-08-08', words: 948 };
 const e2 = { title: 'Weekly report — week-08', path: '/reports/weekly/week-08-report.md', reportType: 'weekly', dateStr: '2026-08-15', words: 812 };
