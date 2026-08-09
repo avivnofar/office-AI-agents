@@ -212,22 +212,15 @@ check('[new] routing OFF: the owner requirement "reports are written by Gemini" 
 check('[new] routing OFF: the plan is a degradation, not a failure (both calls have a path)',
   !!planOff.draft.path && !!planOff.review.path);
 
-const planOnEn = rp.planReportProviders({ routingOn: true, language: 'english' });
-check('[new] routing ON + English: drafting resolves to the routine lane, per the session instruction',
-  planOnEn.draft.lane === 'routine_volume');
+const planOnEn = rp.planReportProviders({ routingOn: true, language: 'english', draftLanePrimary: 'gemini' });
 check('[new] routing ON: review resolves to the judgment lane',
   planOnEn.review.lane === 'judgment');
-check('[new] routing ON + English: the Gemini requirement is reported as NOT holding, loudly, rather than quietly broken',
-  planOnEn.geminiRequirementHolds === false && planOnEn.notes.some((n) => /written by Gemini/.test(n)));
-
-const planOnHe = rp.planReportProviders({ routingOn: true, language: 'hebrew' });
-check('[new] routing ON + Hebrew: drafting resolves to the Hebrew composition lane',
-  planOnHe.draft.lane === 'hebrew_composition' && planOnHe.geminiRequirementHolds === true);
 
 check('[new] every lane the planner names exists in config/model-routing.json',
-  ['routine_volume', 'hebrew_composition', 'judgment'].every((l) => l in routing.lanes));
+  ['report_drafting', 'routine_volume', 'hebrew_composition', 'judgment'].every((l) => l in routing.lanes));
 check('[new] the planner never names the architect lane (Anthropic is unreachable from here)',
-  ![planOnEn, planOnHe, planOff].some((p) => p.draft.lane === 'architect' || p.review.lane === 'architect'));
+  ![planOnEn, rp.planReportProviders({ routingOn: true, language: 'hebrew', draftLanePrimary: 'gemini' }), planOff]
+    .some((p) => p.draft.lane === 'architect' || p.review.lane === 'architect'));
 check('[new] report-pipeline.js imports no provider client and no Anthropic client',
   !/from '\.\/(cerebras|mistral|cohere|claude|groq|gemini)-client\.js'/.test(read('workers/report-pipeline.js')));
 
@@ -332,7 +325,7 @@ check('[new] naming one project is enough (a project with nothing to say is not 
 check('[new] the gate is inert when the office has no project list (no false failure)',
   rp.validateReportBody(okBody, { factPack: FACTS_WITH_MARKER, due: '2026-09-07', projectNames: [] }).ok === true);
 check('[new] the runner passes the real project names to the gate',
-  /projectNames: officeProjects\.projects\.map\(\(p\) => p\.name\)/.test(runnerSrc));
+  /factPack, due, projects: officeProjects\.projects,/.test(runnerSrc));
 check('[new] the draft prompt requires section 4 to name the projects',
   /NAME the projects the office is responsible for/.test(rp.buildDraftPrompt('facts', { reportType: 'weekly', periodLabel: 'week-07' })));
 check('[new] the fact pack has a "what the office produced" section',
@@ -368,25 +361,180 @@ section('§5b  The routing-off context ceiling — refuse, never send-and-hope')
 
 const bigPack = 'FACT '.repeat(6000);      // ~6,000 tokens of facts
 const smallPack = 'FACT '.repeat(400);     // ~400 tokens
+const SYS = rp.REVIEW_SYSTEM;
 check('[new] a fact pack that would overrun the routing-off reviewer is REFUSED',
-  rp.estimateReviewFit({ factPack: bigPack, draftContent: okBody, maxOutputTokens: 1800 }).fits === false);
+  rp.estimateReviewFit({ factPack: bigPack, draftContent: okBody, systemPrompt: SYS, maxOutputTokens: 1800 }).fits === false);
 check('[new] the refusal names the ceiling AND the fix (enabling routing removes it)',
-  /131,000|judgment lane/.test(rp.estimateReviewFit({ factPack: bigPack, draftContent: okBody, maxOutputTokens: 1800 }).reason || ''));
+  /131,000|judgment lane/.test(rp.estimateReviewFit({ factPack: bigPack, draftContent: okBody, systemPrompt: SYS, maxOutputTokens: 1800 }).reason || ''));
 check('[new] a realistic pack fits and is NOT refused',
-  rp.estimateReviewFit({ factPack: smallPack, draftContent: okBody, maxOutputTokens: 1800 }).fits === true);
+  rp.estimateReviewFit({ factPack: smallPack, draftContent: okBody, systemPrompt: SYS, maxOutputTokens: 1800 }).fits === true);
 check('[new] the completion budget counts against the ceiling, not just the prompt',
-  rp.estimateReviewFit({ factPack: smallPack, draftContent: okBody, maxOutputTokens: 7500 }).fits === false);
+  rp.estimateReviewFit({ factPack: smallPack, draftContent: okBody, systemPrompt: SYS, maxOutputTokens: 7500 }).fits === false);
 check('[new] the runner checks the fit only on the DIRECT path (routing ON has 131K and does not bind)',
-  /if \(plan\.review\.mode === 'direct'\) \{[\s\S]{0,400}?estimateReviewFit\(/.test(runnerSrc));
+  /if \(plan\.review\.mode !== 'direct'\) \{\s*\n\s*return callReportModel\(env, plan\.review, \{/.test(runnerSrc)
+  && runnerSrc.indexOf('const fit = estimateReviewFit(') > runnerSrc.indexOf("if (plan.review.mode !== 'direct')"));
 check('[new] the fact pack bounds BOTH of its unbounded lists',
   rp.BOARD_TASKS_IN_PACK > 0 && rp.BLOCKED_IN_PACK > 0);
+
+/* ── THE GUARD MEASURED THE WRONG STRING (fixed 2026-08-09) ──────────────
+ * estimateReviewFit()'s systemPrompt defaulted to REVIEW_SYSTEM. REVIEW_SYSTEM
+ * is never sent: agent-base.js queryGroqRouted() sends
+ * _buildPersonaSystemPrompt(), which appends the state line, the behavioral
+ * rules, the DB context and the office-context block (agent-base.js:266-274).
+ * The live run measured 8,347 tokens against the 8,192 ceiling — the request
+ * overran and the guard said it fit, because the guard was measuring a
+ * different string. Only the estimator's over-estimating bias (length/3
+ * against a real ~length/4) kept the overrun from being worse.
+ *
+ * The scenarios below are run against the OLD signature (a REVIEW_SYSTEM
+ * default) and the NEW one (assembled prompt required). The old one passes the
+ * call. That is the bug. */
+section('§5c  The fit guard measures what is actually sent, not REVIEW_SYSTEM');
+
+/** A stand-in for what _buildPersonaSystemPrompt() actually returns: the given
+ *  system prompt PLUS the state line, the QA's behavioral rules and the office
+ *  context block. Sized from the live measurement — the assembly added roughly
+ *  a thousand tokens on top of REVIEW_SYSTEM. */
+const ASSEMBLED = `${rp.REVIEW_SYSTEM}\n\nCurrent state: mood=NEUTRAL, irritation=1/5, angry=false.\n\nBehavioral rules:\n- ${'checks every figure against its source. '.repeat(20)}\n\n${'The office board: OB-0xx [READY] Agent 12 — a task title long enough to matter. '.repeat(60)}`;
+
+/** VERBATIM transcription of the pre-change signature: systemPrompt defaults
+ *  to REVIEW_SYSTEM and the caller passes nothing. */
+function oldEstimateReviewFit({ factPack, draftContent, systemPrompt = rp.REVIEW_SYSTEM, maxOutputTokens }) {
+  const est = (t) => (t ? Math.ceil(String(t).length / 3) : 0);
+  const estimated = est(factPack) + est(draftContent) + est(systemPrompt) + maxOutputTokens + 400;
+  return { fits: estimated <= 8192, estimated };
+}
+
+// A pack sized so the call fits when the un-assembled prompt is measured and
+// overruns when the real one is — which is precisely the live 8,347-vs-8,192
+// case, reproduced in miniature.
+const EDGE_PACK = 'FACT '.repeat(1900);
+const oldFit = oldEstimateReviewFit({ factPack: EDGE_PACK, draftContent: okBody, maxOutputTokens: 1600 });
+const newFit = rp.estimateReviewFit({ factPack: EDGE_PACK, draftContent: okBody, systemPrompt: ASSEMBLED, maxOutputTokens: 1600 });
+console.log(`        old guard (measuring REVIEW_SYSTEM):     ~${oldFit.estimated} tokens -> fits=${oldFit.fits}`);
+console.log(`        new guard (measuring what is sent):      ~${newFit.estimated} tokens -> fits=${newFit.fits}`);
+check('[FAILS-OLD] the old guard passed a call that overruns the ceiling',
+  oldFit.fits === true && newFit.fits === false);
+check('[FAILS-OLD] the difference is the assembly the old guard never counted',
+  newFit.estimated - oldFit.estimated > 700);
+check('[new] omitting the system prompt is REFUSED, not estimated optimistically (fail-closed on a missing input)',
+  (() => {
+    const f = rp.estimateReviewFit({ factPack: smallPack, draftContent: okBody, maxOutputTokens: 500 });
+    return f.fits === false && /_buildPersonaSystemPrompt/.test(f.reason || '');
+  })());
+check('[new] the runner passes the ASSEMBLED prompt, not REPORT_REVIEW_SYSTEM',
+  /const assembledSystemPrompt = await reviewer\.buildAssembledSystemPrompt\(reviewPrompt, REPORT_REVIEW_SYSTEM\);/.test(runnerSrc)
+  && /estimateReviewFit\(\{[\s\S]{0,160}?systemPrompt: assembledSystemPrompt,/.test(runnerSrc));
+check('[new] agent-base.js exposes the assembled prompt without making a call',
+  /async buildAssembledSystemPrompt\(prompt, systemPrompt\) \{\s*\n\s*return this\._buildPersonaSystemPrompt\(prompt, systemPrompt\);/.test(read('agents/agent-base.js')));
+check('[new] and it is assembled ONCE — the same string is handed to the call it was measured for',
+  /opts\.assembledSystemPrompt\s*\n?\s*\?\? await this\._buildPersonaSystemPrompt\(prompt, systemPrompt\);/.test(read('agents/agent-base.js'))
+  && /agent: reviewer,\s*\n\s*assembledSystemPrompt,/.test(runnerSrc));
+check('[new] every pre-existing queryGroqRouted() caller is unaffected (the option defaults to absent)',
+  /opts\.assembledSystemPrompt\s*\n?\s*\?\?/.test(read('agents/agent-base.js')));
+
+/* ── THE STRUCTURAL REFUSAL LEAVES AN ARTIFACT (fixed 2026-08-09) ────────
+ * agent-runner.js returned before commitFileToRepo() and before
+ * updateReportRow() on this path, so the whole failure class left evidence in
+ * one console line — and Cloudflare no longer retains those. It did not even
+ * persist which provider answered. Rule 3 governed the REJECT branch only. */
+section('§5d  A structurally refused report is SAVED, not merely logged');
+
+const refusalBlock = runnerSrc.slice(
+  runnerSrc.indexOf('APPROVE refused structurally'),
+  runnerSrc.indexOf("reason: 'approve_failed_structural_check'")
+);
+check('[FAILS-OLD] the refusal path now commits a file before it returns',
+  /commitFileToRepo\(/.test(refusalBlock) && /rejectedReportPath\(reportType, periodLabel\)/.test(refusalBlock));
+check('[FAILS-OLD] with the structural reasons in it, via the existing renderer',
+  /renderRejectedReportFile\(\{/.test(refusalBlock) && /structuralReasons: structural\.reasons,/.test(refusalBlock));
+check('[FAILS-OLD] and persists the provider that answered, which was previously lost entirely',
+  /updateReportRow\(env, row\.id, \{\s*\n\s*reviewerProvider: review\.provider,/.test(refusalBlock));
+check('[new] the row still stays "drafted" — a refusal is not a rejection and must retry cleanly',
+  !/status: '(rejected|approved)'/.test(refusalBlock));
+check('[new] the saved file does NOT claim the reviewer rejected a report it approved',
+  /headline: `STRUCTURALLY REFUSED/.test(refusalBlock));
+check('[new] renderRejectedReportFile() honours that headline and still defaults to REJECTED',
+  (() => {
+    const args = {
+      reportType: 'weekly', periodLabel: 'week-07', dateStr: '2026-08-09',
+      draftContent: 'draft', reviewNotes: 'the gate refused', drafterName: 'The Workflow', reviewerName: 'The QA',
+      structuralReasons: ['a marker was dropped'],
+    };
+    const structuralFile = rp.renderRejectedReportFile({ ...args, headline: 'STRUCTURALLY REFUSED WEEKLY REPORT' });
+    const rejectFile = rp.renderRejectedReportFile(args);
+    return /^# STRUCTURALLY REFUSED WEEKLY REPORT — week-07/.test(structuralFile)
+      && /Structural refusals/.test(structuralFile)
+      && /a marker was dropped/.test(structuralFile)
+      && /^# REJECTED WEEKLY REPORT — week-07/.test(rejectFile);
+  })());
+
+/* ── THE MARKER CONTRACT IS THE LITERAL TOKEN (settled 2026-08-09) ───────
+ * The first live draft did not disobey. DRAFT_SYSTEM demanded the markers "in
+ * those words" while the fact-pack lines told the writer to report the same
+ * facts as prose ("report this as a DEFECT in section 1", and a DISPATCHED
+ * value that read as a sentence to copy). The draft kept the meaning and lost
+ * the word; countUnverified() matches the word and fired correctly.
+ *
+ * The contract chosen is the LITERAL TOKEN, because it is the only half that
+ * can be checked. These scenarios assert that every instruction site now says
+ * the same thing, and they are run against the transcribed old strings, which
+ * do not. */
+section('§5e  The marker instruction conflict — one contract, stated the same way everywhere');
+
+const OLD_DUE_INSTRUCTION = 'Commitment due date: UNVERIFIED — could not be parsed from docs/CLIENT-REQUIREMENTS.md. Report this as a DEFECT in section 1, in those words. Do not write that there is no deadline.';
+const OLD_DISPATCH_INSTRUCTION = 'DISPATCHED: UNVERIFIED — the office does not yet record dispatch, so "READY" means ready to be dispatched, not started.';
+/** Does this instruction demand the LITERAL token, or merely a report of the
+ *  fact? "Contains the word UNVERIFIED as a value" is not the same as "tells
+ *  the writer to carry the word" — the first is what both old lines did. */
+const demandsLiteralToken = (s) => /literal word (UNVERIFIED|UNREADABLE)|that same literal word/i.test(s);
+
+check('[FAILS-OLD] the old due-date instruction never demanded the literal token — it asked for prose',
+  demandsLiteralToken(OLD_DUE_INSTRUCTION) === false);
+check('[FAILS-OLD] nor did the old DISPATCHED line, whose value doubled as the sentence to copy',
+  demandsLiteralToken(OLD_DISPATCH_INSTRUCTION) === false);
+
+const unreadableDuePack = rp.buildFactPack({
+  reportType: 'weekly', periodLabel: 'week-07', dateStr: '2026-08-09',
+  requirements: { requirements: [{ id: 'REQ-001', title: 'x', status: 'in progress', urgent: true }], due: null },
+  board: { counts: { total: 1, READY: 1 }, tasks: [{ id: 'OB-001', state: 'READY', assignee: 'Agent 12', title: 't' }] },
+});
+check('[FAILS-OLD] the due-date line now demands the literal token',
+  demandsLiteralToken(unreadableDuePack.split('\n').find((l) => /Commitment due date: UNVERIFIED/.test(l))));
+check('[FAILS-OLD] and the DISPATCHED fact carries its instruction as a SEPARATE line from its value',
+  /^DISPATCHED: UNVERIFIED/m.test(unreadableDuePack)
+  && demandsLiteralToken(unreadableDuePack.split('\n').find((l) => /satisfy the marker rule/.test(l) && /dispatch/.test(l))));
+check('[new] the rule is stated ONCE at the top of every fact pack, not re-derived per line',
+  /^MARKER RULE — READ FIRST/m.test(unreadableDuePack) && demandsLiteralToken(rp.MARKER_RULE));
+check('[new] the drafter\'s system prompt agrees with it',
+  /literal word/.test(rp.DRAFT_SYSTEM) && /an automated check looks for the word itself/.test(rp.DRAFT_SYSTEM));
+check('[new] the draft prompt agrees with it',
+  /literal word UNVERIFIED/.test(rp.buildDraftPrompt('facts', { reportType: 'weekly', periodLabel: 'week-07' })));
+check('[new] the reviewer is asked to check for the same thing (a paraphrase is a dropped marker)',
+  /as that literal word/.test(rp.REVIEW_SYSTEM) && /A paraphrase that conveys the same meaning is a DROPPED marker/.test(rp.REVIEW_SYSTEM));
+// The runner's meeting-decisions text was REPLACED wholesale by OB-028 (§9b) —
+// it asserted the office persisted no decisions, which was false. What survives
+// of the marker fix at that site is that every UNVERIFIED branch there still
+// demands the literal token, which §9b asserts directly. The paraphrase that
+// originally failed is pinned against the CHECKER instead, above, where it
+// cannot go stale when the surrounding prose is rewritten again.
+check('[new] every meeting-decisions branch that reports UNVERIFIED demands the literal token',
+  /the meetings table could not be read this cycle[\s\S]{0,220}?literal word UNVERIFIED/.test(runnerSrc)
+  && /EVERY one recorded an empty decision block[\s\S]{0,700}?literal word UNVERIFIED/.test(runnerSrc));
+check('[new] the checker was already right and is unchanged — it matches the token it is now promised',
+  rp.countUnverified('the due date is UNVERIFIED and the board was UNREADABLE') === 2);
+check('[FAILS-OLD] the exact sentence the first live draft wrote does NOT satisfy the checker',
+  rp.countUnverified('This section is a gap in the office\'s own record-keeping. As the office does not yet record dispatch, READY means ready to be dispatched.') === 0);
+check('[new] and the gate\'s refusal message names which half of the contract it enforces',
+  rp.validateReportBody(goodReport({ markers: false }), { factPack: FACTS_WITH_MARKER, due: '2026-09-07' })
+    .reasons.some((r) => /the literal word, not the conveyed meaning/.test(r)));
 
 /* ── THE REFUSAL MUST STAY LOUD (owner instruction, 2026-08-08) ──────────
  * "A truncated review that parses like a real one is the failure mode we've
  * now hit in three subsystems." These checks pin the loudness itself, not
  * just the refusal, so a later session cannot quietly downgrade it to a
  * silent skip while leaving the mechanism nominally in place. */
-const loudFit = rp.estimateReviewFit({ factPack: bigPack, draftContent: okBody, maxOutputTokens: 1800 });
+const loudFit = rp.estimateReviewFit({ factPack: bigPack, draftContent: okBody, systemPrompt: ASSEMBLED, maxOutputTokens: 1800 });
 check('[LOUD] the refusal carries a reason, never a bare false',
   typeof loudFit.reason === 'string' && loudFit.reason.length > 80);
 check('[LOUD] the reason states BOTH numbers, so the margin is auditable from the log alone',
@@ -401,25 +549,200 @@ check('[LOUD] a refused review never reaches the publish path',
   /if \(!review\.text\) return \{ ran: false, reason: `review_failed/.test(runnerSrc));
 
 /* ── AD-028: report drafting pins to Gemini when routing is enabled ──────
- * Owner decision 2026-08-08, deliberately NOT implemented yet. These checks
- * assert the DECISION IS RECORDED WHERE A SESSION WOULD EDIT — they must NOT
- * be read as asserting the pin exists. When routing is enabled and the pin
- * lands, replace them with a check that drafting resolves to gemini. */
+ * Owner decision 2026-08-08, IMPLEMENTED 2026-08-09 as a lane rather than a
+ * call-site constant. The old checks here asserted the decision was RECORDED;
+ * these assert it HOLDS. The pre-change behaviour is transcribed so the
+ * scenarios fail against it. */
+section('§5f  AD-028 — report drafting resolves to Gemini, and the pin is checked against the live table');
+
 const pipelineSrc = read('workers/report-pipeline.js');
-check('[AD-028] the not-yet-implemented pin is recorded at pickDraftLane(), where it would be edited',
-  /AD-028[\s\S]{0,2000}?PINNED TO GEMINI/.test(pipelineSrc)
-  && /DOES NOT YET IMPLEMENT THAT/.test(pipelineSrc));
-check('[AD-028] and warns against the specific "simplification" that would undo it',
+
+/** VERBATIM transcription of pickDraftLane() before the pin landed. */
+const oldPickDraftLane = (language) =>
+  (String(language || '').toLowerCase() === 'hebrew' ? 'hebrew_composition' : 'routine_volume');
+
+check('[FAILS-OLD] an English report used to resolve to a lane whose primary is NOT Gemini',
+  routing.lanes[oldPickDraftLane('english')].primary !== 'gemini'
+  && routing.lanes[oldPickDraftLane('english')].primary === 'groq');
+check('[FAILS-OLD] it now resolves to a lane whose primary IS Gemini',
+  routing.lanes[rp.pickDraftLane('english')].primary === 'gemini');
+check('[new] and so does Hebrew — the pin is language-independent, with no path where it stops holding',
+  rp.pickDraftLane('hebrew') === rp.pickDraftLane('english')
+  && rp.pickDraftLane(null) === rp.DRAFT_LANE_REPORT);
+check('[new] the requirement is reported as HOLDING when the table really does say gemini',
+  rp.planReportProviders({ routingOn: true, language: 'english', draftLanePrimary: 'gemini' }).geminiRequirementHolds === true);
+check('[new] and as NOT holding the moment someone repoints the lane — the check is on the resolved value',
+  (() => {
+    const p = rp.planReportProviders({ routingOn: true, language: 'english', draftLanePrimary: 'groq' });
+    return p.geminiRequirementHolds === false && p.notes.some((n) => /"groq" and NOT Gemini/.test(n));
+  })());
+check('[new] a caller that does not look is reported as NOT holding, never as holding by default',
+  (() => {
+    const p = rp.planReportProviders({ routingOn: true, language: 'english' });
+    return p.geminiRequirementHolds === false && p.notes.some((n) => /could not be verified/.test(n));
+  })());
+check('[new] the runner reads the primary from the live lane table rather than assuming it',
+  /resolveTaskLane\(pickDraftLane\('english'\)\)\.candidates\?\.\[0\]/.test(runnerSrc)
+  && /planReportProviders\(\{ routingOn, language: 'english', draftLanePrimary \}\)/.test(runnerSrc));
+check('[new] routine_volume was NOT repointed to satisfy the pin (it serves every other routine caller)',
+  routing.lanes.routine_volume.primary === 'groq');
+check('[new] the lane records the decision as data, where a session would edit it',
+  /AD-028/.test(routing.lanes.report_drafting._why)
+  && /routine_volume/.test(routing.lanes.report_drafting._do_not));
+check('[AD-028] and the code still warns against the specific "simplification" that would undo it',
   /Do NOT\s*\n?\s*\* "simplify" report drafting back onto the routine lane/.test(pipelineSrc)
   && /repoint\s*\n?\s*\* `routine_volume`'s primary/.test(pipelineSrc));
-check('[AD-028] the conflict is still reported at runtime meanwhile, not merely commented',
-  rp.planReportProviders({ routingOn: true, language: 'english' }).geminiRequirementHolds === false);
+check('[new] the report_drafting lane is a chat lane with a real backup',
+  routing.lanes.report_drafting.kind === 'chat' && !!routing.lanes.report_drafting.backup);
 check('[new] and says so when it clips them — no silent caps',
   (() => {
     const many = Array.from({ length: 40 }, (_, i) => `OB-${i} blocked on something`);
     const pack = rp.buildFactPack({ reportType: 'weekly', periodLabel: 'week-07', blocked: many });
     return new RegExp(`showing ${rp.BLOCKED_IN_PACK} of 40`).test(pack);
   })());
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * §5g  THE FIRST PUBLISHED REPORT'S TWO DEFECTS
+ *
+ * week-07 published on 2026-08-09 and said, in section 4:
+ *
+ *   "nothing moved on Data Center, Notebook-X, office-AI-agents,
+ *    back-office-AI-agents, or warehouse-office-AI-agents this period, as the
+ *    office focused on clearing internal administrative tasks and
+ *    capability-gap reporting."
+ *
+ * while section 5 credited three approved guides and ten gap findings — three
+ * against Data Center, seven against Notebook-X — from the same fact pack.
+ * The QA read both and approved. Both checks therefore live in the GATE.
+ *
+ * The sentences below are the real ones, quoted from the published file.
+ * ═════════════════════════════════════════════════════════════════════════ */
+section('§5g  Consistency and fabrication — the two defects the reviewer passed');
+
+const PROJECT_BODY = okBody.replace(
+  '## 4. Productivity',
+  '## 4. Productivity\n\nNotebook-X and Data Center both took gap findings this period.\n\n### Productivity'
+);
+const PROJECT_OBJS = [
+  { key: 'data-center', name: 'Data Center' },
+  { key: 'notebook-x', name: 'Notebook-X' },
+  { key: 'office-AI-agents', name: 'office-AI-agents' },
+];
+const PACK_WITH_OUTPUT = [
+  '=== 5. WHAT THE OFFICE ACTUALLY PRODUCED THIS PERIOD (section 5 OPENS with this) ===',
+  '- Guides: 3 approved, 2 rejected.',
+  '- Capability-gap findings filed against data-center: 3, digested to reports/gaps/data-center/.',
+  '- Capability-gap findings filed against notebook-x: 7, digested to reports/gaps/notebook-x/.',
+  '',
+  '=== 6. BLOCKED WORK ===',
+  '- OB-003 blocked',
+].join('\n');
+
+check('[new] the fact pack\'s attribution is read by project KEY as well as display name',
+  (() => {
+    const out = rp.projectsWithOutput(PACK_WITH_OUTPUT, PROJECT_OBJS).map((p) => p.name);
+    return out.includes('Data Center') && out.includes('Notebook-X') && !out.includes('office-AI-agents');
+  })());
+check('[new] a project merely NAMED in the roster is not credited with output',
+  rp.projectsWithOutput('=== 4b. PROJECTS ===\n- Data Center (private) — client project\n=== 6. BLOCKED WORK ===', PROJECT_OBJS).length === 0);
+check('[new] a zero count is not output',
+  rp.projectsWithOutput('=== 5. PRODUCED ===\n- Capability-gap findings filed against data-center: 0.\n=== 6. BLOCKED WORK ===', PROJECT_OBJS).length === 0);
+
+/** The published sentence, verbatim. */
+const REAL_NO_MOVEMENT = 'Regarding the office projects: nothing moved on Data Center, Notebook-X, office-AI-agents, back-office-AI-agents, or warehouse-office-AI-agents this period, as the office focused on clearing internal administrative tasks and capability-gap reporting.';
+const bodyWithDefects = PROJECT_BODY.replace('## 4. Productivity', `## 4. Productivity\n\n${REAL_NO_MOVEMENT}\n\n### Productivity`);
+const defectResult = rp.validateReportBody(bodyWithDefects, {
+  factPack: `${FACTS_WITH_MARKER}\n${PACK_WITH_OUTPUT}`, due: '2026-09-07', projects: PROJECT_OBJS,
+});
+check('[FAILS-OLD] the sentence that published on 2026-08-09 is now REFUSED',
+  defectResult.ok === false);
+check('[FAILS-OLD] refused for the contradiction — no movement claimed on projects the facts credit',
+  defectResult.reasons.some((r) => /claims no movement on Data Center, Notebook-X/.test(r)));
+check('[FAILS-OLD] AND for the invented motive, as a separate reason',
+  defectResult.reasons.some((r) => /asserts a motive for the office's own actions/.test(r)));
+check('[new] the two are distinct classes, not one reason counted twice',
+  defectResult.reasons.filter((r) => /no movement|motive/.test(r)).length === 2);
+
+check('[new] "nothing moved" stays legal when the facts record no output for that project',
+  rp.validateReportBody(
+    PROJECT_BODY.replace('## 4. Productivity', '## 4. Productivity\n\nNothing moved on office-AI-agents this period.\n\n### Productivity'),
+    { factPack: `${FACTS_WITH_MARKER}\n${PACK_WITH_OUTPUT}`, due: '2026-09-07', projects: PROJECT_OBJS }
+  ).ok === true);
+check('[new] the check is SENTENCE-scoped — crediting one project and clearing another in one report is fine',
+  rp.validateReportBody(
+    PROJECT_BODY.replace('## 4. Productivity', '## 4. Productivity\n\nNotebook-X took seven gap findings. Nothing moved on office-AI-agents.\n\n### Productivity'),
+    { factPack: `${FACTS_WITH_MARKER}\n${PACK_WITH_OUTPUT}`, due: '2026-09-07', projects: PROJECT_OBJS }
+  ).ok === true);
+check('[new] an inference FROM the facts is not a motive claim (the check is narrow on purpose)',
+  !/motive/.test((rp.validateReportBody(
+    PROJECT_BODY.replace('## 6. Blocked', '## 6. Blocked\n\nNeither task has a stamped deadline, so neither can be reported as late.\n\n### Blocked'),
+    { factPack: FACTS_WITH_MARKER, due: '2026-09-07', projects: PROJECT_OBJS }
+  ).reasons || []).join(' ')));
+check('[new] other motive phrasings are caught too, not just the one that shipped',
+  ['because the team prioritised the board', 'since we deliberately chose the smaller items', 'the office decided to focus on internal work, as they preferred it']
+    .every((s) => rp.validateReportBody(`${PROJECT_BODY}\n\n${s}.`, { factPack: FACTS_WITH_MARKER, due: '2026-09-07', projects: PROJECT_OBJS })
+      .reasons.some((r) => /asserts a motive/.test(r))));
+check('[new] the drafter is told both rules too — the gate enforces, the prompt explains',
+  (() => {
+    const p = rp.buildDraftPrompt('facts', { reportType: 'weekly', periodLabel: 'week-07' });
+    return /Never say a project did not move/.test(p) && /do not explain WHY the office did it/.test(p);
+  })());
+check('[new] the gate takes full project objects from the runner, keys included',
+  /factPack, due, projects: officeProjects\.projects,/.test(runnerSrc));
+check('[new] projectNames still works for callers that pass only names (no silent loss of the naming check)',
+  rp.validateReportBody(okBody, { factPack: FACTS_WITH_MARKER, due: '2026-09-07', projectNames: PROJECT_NAMES }).ok === false);
+
+/* ── Section 5's running order ───────────────────────────────────────── */
+section('§5h  Section 5 leads with output, not with a mood list');
+
+const orderedPack = rp.buildFactPack({
+  reportType: 'weekly', periodLabel: 'week-07',
+  artifacts: ['Guides: 3 approved.'], gapSummary: '- data-center: 3 gaps',
+  agentRows: [{ agentId: 1, name: 'The Perfectionist', weeklyCases: 2, mood: 'HAPPY', irritation: 0 }],
+});
+check('[FAILS-OLD] the produced-output block now comes BEFORE the agent-state block in the pack',
+  orderedPack.indexOf('WHAT THE OFFICE ACTUALLY PRODUCED') < orderedPack.indexOf('AGENT STATE AND THE IMPROVEMENT LOOP'));
+check('[new] and the pack says so explicitly rather than relying on order alone',
+  /section 5 OPENS with this/.test(orderedPack)
+  && /Do NOT open section 5 with a per-agent mood list/.test(orderedPack));
+check('[new] the section heading names output first',
+  rp.REQUIRED_SECTIONS[4].heading === '## 5. What the office produced, and agent state');
+check('[new] the structural match is no weaker — the key is unchanged and renumbering still fails',
+  rp.REQUIRED_SECTIONS[4].key === 'Agent state'
+  && rp.validateReportBody(okBody.replace('## 5. Agent state', '## 7. Agent state'), { factPack: FACTS_WITH_MARKER, due: '2026-09-07' }).ok === false);
+check('[new] a report using the OLD section-5 wording still passes (a reviewer may sharpen a heading)',
+  rp.validateReportBody(okBody, { factPack: FACTS_WITH_MARKER, due: '2026-09-07' }).ok === true);
+
+/* ── The silent lane substitution ────────────────────────────────────── */
+section('§5i  A fallback nobody notices is a measurement nobody can trust');
+
+check('[FAILS-OLD] the byline used to name only the provider that answered, with no sign one was planned',
+  rp.providerLabel(null, 'cloudflare-fallback') === 'cloudflare-fallback');
+check('[FAILS-OLD] it now says so when the planned provider did not answer',
+  /SUBSTITUTED, groq was planned/.test(rp.providerLabel('groq', 'cloudflare-fallback')));
+check('[new] and stays quiet when the plan held',
+  rp.providerLabel('gemini', 'gemini') === 'gemini');
+check('[new] a missing provider is named as missing, not blanked',
+  /NO PROVIDER RECORDED/.test(rp.providerLabel('groq', null)));
+check('[new] the byline carries it into the published file',
+  /SUBSTITUTED, groq was planned/.test(rp.renderReportFile({
+    reportType: 'weekly', periodLabel: 'week-07', dateStr: '2026-08-09', finalReport: okBody,
+    drafterName: 'The Workflow', drafterProvider: 'gemini', drafterPlanned: 'gemini',
+    reviewerName: 'The QA', reviewerProvider: 'cloudflare-fallback', reviewerPlanned: 'groq',
+  })));
+check('[new] the runner warns, records the substitution, and returns it to its caller',
+  /function noteProviderSubstitution\(role, planned, actual, sink\)/.test(runnerSrc)
+  && /PROVIDER SUBSTITUTED on the \$\{role\} call/.test(runnerSrc)
+  && /providerSubstitutions: substitutions/.test(runnerSrc));
+check('[new] every model call in the pipeline is checked, not just the first',
+  (runnerSrc.match(/noteProviderSubstitution\('/g) || []).length === 4);
+check('[new] it reaches the D1 row too',
+  /PROVIDER SUBSTITUTIONS: \$\{substitutions\.map/.test(runnerSrc));
+check('[new] but NOT the revision prompt — an operations fact is not a note about the prose',
+  /priorDraft: \{ draftContent: row\.draft_content, reviewNotes: noteWithEdits\(decision\) \}/.test(runnerSrc));
+check('[new] the "- None." bullet that published on 2026-08-09 is now read as no edits',
+  ['- None.', '- none', '* N/A', '• nothing'].every(
+    (v) => rp.parseReportReviewDecision(`DECISION: APPROVE\nNOTES: fine\nEDITS:\n${v}`).edits === ''));
 
 /* ══════════════════════════════════════════════════════════════════════════
  * §6  DECISION PARSING — the failure direction is the safe one
@@ -430,15 +753,92 @@ check('[new] an unparseable response is a REJECT',
   rp.parseReportReviewDecision('the model wandered off').decision === 'REJECT');
 check('[new] an empty response is a REJECT',
   rp.parseReportReviewDecision('').decision === 'REJECT');
-check('[new] APPROVE with no ---REPORT--- marker yields an empty body (then refused by §5)',
+check('[new] a decision and a note parse cleanly',
   (() => {
-    const d = rp.parseReportReviewDecision('DECISION: APPROVE\nNOTES: looks good to me');
-    return d.decision === 'APPROVE' && d.finalReport === '';
+    const d = rp.parseReportReviewDecision('DECISION: APPROVE\nNOTES: leads on the requirements and finishes.');
+    return d.decision === 'APPROVE' && /leads on the requirements/.test(d.notes);
   })());
-check('[new] a REVISE never carries a publishable body',
-  rp.parseReportReviewDecision(`DECISION: REVISE\nNOTES: section 1 is missing\n---REPORT---\n${okBody}`).finalReport === '');
-check('[new] a well-formed APPROVE round-trips its body intact',
-  rp.parseReportReviewDecision(`DECISION: APPROVE\nNOTES: fine\n---REPORT---\n${okBody}`).finalReport.trim() === okBody.trim());
+check('[new] an EDITS block parses and does not leak into the note',
+  (() => {
+    const d = rp.parseReportReviewDecision('DECISION: REVISE\nNOTES: section 4 is thin.\nEDITS:\n- name the projects in section 4\n- cut the last paragraph');
+    return /section 4 is thin/.test(d.notes) && !/name the projects/.test(d.notes)
+      && /name the projects/.test(d.edits) && /cut the last paragraph/.test(d.edits);
+  })());
+check('[new] an EDITS block that says "none" is treated as no edits',
+  ['none', 'None.', 'N/A', '-', 'no changes needed'].every(
+    (v) => rp.parseReportReviewDecision(`DECISION: APPROVE\nNOTES: fine\nEDITS:\n${v}`).edits === ''));
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * §6b  THE RE-EMIT CONTRACT — the design cause of the first live failure
+ *
+ * The published artifact used to be sourced from the reviewer's re-emission of
+ * a body it had just been handed. The routing-off reviewer (Groq
+ * llama3-8b-8192) emitted DECISION and NOTES and never emitted the
+ * ---REPORT--- marker, so the parse returned an empty string and the
+ * structural gate refused it. Safe, and it produced nothing.
+ *
+ * §6b transcribes the OLD parser verbatim and runs the SAME scenarios against
+ * both. The old one fails them. That is what makes this a caught bug and not a
+ * description of one.
+ * ═════════════════════════════════════════════════════════════════════════ */
+section('§6b  The re-emit contract — new assertions run against the transcribed pre-change parser');
+
+/** VERBATIM transcription of parseReportReviewDecision() as it stood before
+ *  2026-08-09. Do not "fix" it — its job here is to fail. */
+function oldParseReportReviewDecision(text) {
+  const raw = String(text || '');
+  const decisionMatch = raw.match(/DECISION:\s*(APPROVE|REVISE|REJECT)/i);
+  const decision = decisionMatch ? decisionMatch[1].toUpperCase() : 'REJECT';
+  const splitIndex = raw.indexOf('---REPORT---');
+  const notesBlock = splitIndex >= 0 ? raw.slice(0, splitIndex) : raw;
+  const notesMatch = notesBlock.match(/NOTES:\s*([\s\S]*)$/);
+  const notes = notesMatch ? notesMatch[1].trim() : '';
+  const finalReport = splitIndex >= 0 ? raw.slice(splitIndex + '---REPORT---'.length).trim() : '';
+  return { decision, notes, finalReport: decision === 'APPROVE' ? finalReport : '' };
+}
+
+// The response the live reviewer actually returned: a decision and a note, no
+// marker, no re-typed report.
+const REAL_8B_REVIEW = 'DECISION: APPROVE\nNOTES: The report leads on the client requirements with the due date visible and every figure traces to the FACTS.';
+const GATE_OPTS = { factPack: FACTS_WITH_MARKER, due: '2026-09-07', projectNames: PROJECT_NAMES };
+
+check('[FAILS-OLD] the pre-change path produced NOTHING publishable from a real reviewer response',
+  rp.validateReportBody(oldParseReportReviewDecision(REAL_8B_REVIEW).finalReport, GATE_OPTS).ok === false);
+check('[FAILS-OLD] and it failed for the CHARACTERISTIC reason — an empty body under the char floor',
+  rp.validateReportBody(oldParseReportReviewDecision(REAL_8B_REVIEW).finalReport, GATE_OPTS)
+    .reasons.some((r) => /under the 1200-char floor|missing or truncated/.test(r)));
+check('[FAILS-OLD] the SAME reviewer response now publishes the stored draft through the SAME gate',
+  (() => {
+    const d = rp.parseReportReviewDecision(REAL_8B_REVIEW);
+    return d.decision === 'APPROVE' && rp.validateReportBody(PROJECT_BODY, GATE_OPTS).ok === true;
+  })());
+
+// The tidy-up guard. A future session that reintroduces the re-emit contract
+// as a cleanup has to delete these two checks to do it.
+check('[new] the parser exposes NO finalReport field — the publish path cannot read one',
+  !('finalReport' in rp.parseReportReviewDecision(REAL_8B_REVIEW)));
+check('[new] the publish path reads the STORED DRAFT, not the reviewer\'s output',
+  /const finalReport = row\.draft_content \|\| '';/.test(runnerSrc)
+  && /const structural = validateReportBody\(finalReport, \{/.test(runnerSrc));
+check('[new] and the gate it goes through is the identical one — every check still runs',
+  /validateReportBody\(finalReport, \{[\s\S]{0,500}?factPack, due, projects: officeProjects\.projects,/.test(runnerSrc));
+check('[new] the review contract no longer asks the reviewer for the report',
+  !/---REPORT---/.test(rp.REVIEW_SYSTEM) && /You do not rewrite it and you do not reproduce it/.test(rp.REVIEW_SYSTEM));
+check('[new] a reviewer that re-emits the report ANYWAY has that text discarded, not published',
+  (() => {
+    const d = rp.parseReportReviewDecision(`DECISION: APPROVE\nNOTES: fine\n---REPORT---\n${okBody}`);
+    return d.reEmitted === true && !/At a glance/.test(d.notes) && !/At a glance/.test(d.edits || '');
+  })());
+check('[new] and the runner says so in the log rather than absorbing it silently',
+  /decision\.reEmitted[\s\S]{0,200}?DISCARDED/.test(runnerSrc));
+check('[new] EDITS are RECORDED, NEVER APPLIED — nothing rewrites the draft between decision and commit',
+  /RECORDED, NOT APPLIED/.test(rp.renderReportFile({
+    reportType: 'weekly', periodLabel: 'week-07', dateStr: '2026-08-09', finalReport: okBody,
+    drafterName: 'The Workflow', drafterProvider: 'gemini', reviewerName: 'The QA', reviewerProvider: 'groq',
+    reviewerEdits: '- tighten section 3',
+  })));
+check('[new] the review output budget dropped now that no report is re-emitted (the other half of the fit fix)',
+  /const REPORT_REVIEW_MAX_TOKENS = 500;/.test(runnerSrc));
 
 /* ══════════════════════════════════════════════════════════════════════════
  * §7  THE PIPELINE CONTRACT IN THE RUNNER
@@ -456,7 +856,7 @@ check('[new] the self-QA check runs against the provider that ANSWERED, not the 
 check('[new] the pipeline never opens a GitHub Issue and never emails the owner',
   !/runReportPipeline[\s\S]{0,9000}?(createIssue|sendEmail|resend)/i.test(runnerSrc));
 check('[new] gemini-pacer refusal makes the report WAIT — it does not fall through to another provider',
-  /if \(!pacing\.allowed\) return \{ text: null, provider: null, reason: 'gemini_pacing' \}/.test(runnerSrc));
+  /if \(!pacing\.allowed\) return \{ text: null, provider: null, planned: plan\.provider, reason: 'gemini_pacing' \}/.test(runnerSrc));
 check('[new] the weekly summary never lets a failed report break the block',
   /try \{[\s\S]{0,600}?runReportPipeline\(env, \{[\s\S]{0,400}?reportType: 'weekly'[\s\S]{0,400}?\}\);[\s\S]{0,200}?\} catch/.test(runnerSrc));
 check('[new] the monthly report runs AFTER the monthly meeting, so the meeting reaches the fact pack',
@@ -596,11 +996,60 @@ check('[new] the fact pack says "no decisions" plainly rather than omitting the 
  * discriminator: never-recorded and none-this-period must not collapse. */
 check('[new] "we could not look" is seeded as UNVERIFIED, never as an empty result',
   /let decisions = \['UNVERIFIED/.test(runnerSrc));
-check('[new] the never-recorded case is distinguished from the none-this-period case',
-  /const everRecorded = \(everRow\?\.n \?\? 0\) > 0;/.test(runnerSrc)
-  && /if \(!decisions\.length && !everRecorded\)/.test(runnerSrc));
-check('[new] and the never-recorded case names its cause rather than reporting silence',
-  /does not persist meeting decisions or votes to a queryable store/.test(runnerSrc));
+
+/* ── OB-028: the decisions query read the WRONG TABLE ────────────────────
+ * meeting-engine.js persistMeeting() has always inserted into `meetings`
+ * (id, type, attendees, transcript, decisions). The fact pack queried
+ * `reports`, which has never carried a meeting row, and published the zero as
+ * "the office does not persist meeting decisions or votes to a queryable
+ * store". Measured live 2026-08-09: 43 meeting rows, 6 weekly, most recent
+ * two days before the report that said they did not exist. */
+section('§9b  OB-028 — meeting decisions were queried from the wrong table');
+
+check('[FAILS-OLD] the old query read `reports`, which carries no meeting row',
+  !/FROM reports\s+WHERE type IN \('meeting'/.test(runnerSrc));
+check('[FAILS-OLD] and the false claim it published is gone from the source',
+  !/does not persist meeting decisions or votes to a queryable store/.test(runnerSrc));
+check('[FAILS-OLD] the decisions now come from the table meeting-engine.js actually writes',
+  /SELECT type, decisions, created_at FROM meetings/.test(runnerSrc)
+  && /INSERT INTO meetings \(id, type, attendees, transcript, decisions, created_at\)/.test(read('workers/meeting-engine.js')));
+check('[new] THREE states are distinguished, not two — the third is the one the office is in',
+  /EVERY one recorded an empty decision block/.test(runnerSrc)
+  && /no meeting has ever been recorded/.test(runnerSrc)
+  && /the meetings table could not be read/.test(runnerSrc));
+check('[new] an empty extraction is named as a defect in the extractor, not as a quiet meeting',
+  /defect in the office\\'s decision extraction/.test(runnerSrc)
+  && /NOT evidence that nothing was decided/.test(runnerSrc));
+check('[new] partial extraction failure is counted and surfaced alongside the real decisions',
+  /further meeting\(s\) this period recorded an EMPTY decision block/.test(runnerSrc));
+check('[new] a genuinely quiet period still says so plainly (the empty array reaches the fact pack)',
+  /decisions = \[\];\s+\/\/ genuinely quiet period/.test(runnerSrc));
+check('[new] and every UNVERIFIED branch asks for the literal token, per §5e',
+  (runnerSrc.match(/literal word UNVERIFIED/g) || []).length >= 3);
+
+/* ── OB-031: a 24-hour figure under a `weekly_cases` header ──────────────
+ * Left in place deliberately. Widening the window would change what an
+ * existing column MEANS without changing its name, putting a step change into
+ * a series a reader compares across weeks — a false trend is worse than a
+ * stable wrong number. Fixed additively instead. */
+section('§9c  OB-031 — fixed by adding a column, not by moving a series');
+
+check('[new] the misnamed function is UNCHANGED, so no archived row changes meaning',
+  /const since = new Date\(Date\.now\(\) - 24 \* 60 \* 60 \* 1000\)\.toISOString\(\);/.test(runnerSrc));
+check('[new] and is now labelled as misnamed where someone would "fix" it',
+  /MISNAMED, AND DELIBERATELY LEFT THAT WAY/.test(runnerSrc));
+check('[FAILS-OLD] a correct windowed count exists alongside it, with the window in the parameter',
+  /async function getCasesHandledOverDays\(env, agentId, days = 7\)/.test(runnerSrc));
+check('[FAILS-OLD] the CSV carries BOTH columns — the old series is not rewritten',
+  /'agent_id,name,weekly_cases,cases_7d,mood,irritation'/.test(runnerSrc));
+check('[new] an unreadable count is UNVERIFIED in the CSV, never 0',
+  /r\.cases7d \?\? 'UNVERIFIED'/.test(runnerSrc)
+  && /return row \? \(row\.total \|\| 0\) : null;/.test(runnerSrc));
+check('[new] the summary explains the discontinuity in words, so the new column is not read as a jump',
+  /Two case columns, and why \(OB-031/.test(runnerSrc)
+  && /that never\s*\n?> happened/.test(runnerSrc));
+check('[new] the rename is boarded rather than taken — it would break any header consumer',
+  /Renaming `weekly_cases` to what it actually holds is\s*\n \* the right end state and is an owner decision/.test(runnerSrc));
 check('[new] the fact pack\'s empty branch states that the record is known to be working',
   /the record is known to be working/.test(rp.buildFactPack({ reportType: 'weekly', periodLabel: 'week-07', decisions: [] })));
 check('[new] report_pipeline is declared in database/schema.sql',

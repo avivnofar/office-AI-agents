@@ -79,7 +79,7 @@ import {
   parseReportReviewDecision, validateReportBody, renderReportFile, renderRejectedReportFile,
   reportPath, rejectedReportPath, periodLabelFor, daysUntil,
   getPendingReportRow, getLatestReportRow, insertReportRow, updateReportRow,
-  DRAFTER_AGENT_ID, REVIEWER_AGENT_ID, REPORT_TYPES, estimateReviewFit,
+  DRAFTER_AGENT_ID, REVIEWER_AGENT_ID, REPORT_TYPES, estimateReviewFit, pickDraftLane,
   LATEST_INDEX_PATH, parseLatestIndex, renderLatestIndex, addToLatestIndex, wordCount,
 } from './report-pipeline.js';
 
@@ -828,12 +828,17 @@ async function reportPipelineOn(env) {
  * 8,192-token context (see report-pipeline.js estimateReviewFit()).
  */
 const REPORT_DRAFT_MAX_TOKENS = 1800;
-// 1,600 rather than 1,800: a 950-word report plus its DECISION/NOTES header is
-// ~1,350 tokens, and every token reserved here is a token the fact pack and the
-// draft cannot have inside the routing-off reviewer's 8,192-token total. The
-// remaining slack is real but small; a response that does overrun loses its
-// sentinel and is refused rather than published.
-const REPORT_REVIEW_MAX_TOKENS = 1600;
+// 500, down from 1,600 (2026-08-09). The old figure had to hold a whole
+// re-emitted report, because the review contract asked for one; the reviewer
+// now returns a DECISION, a NOTE and an optional EDITS list, which is ~200-350
+// tokens, and 500 is headroom on that rather than a whole document's budget.
+//
+// This is not a saving, it is the fix's other half. Every token reserved here
+// is a token the fact pack, the draft and the ASSEMBLED persona prompt cannot
+// have inside the routing-off reviewer's 8,192-token TOTAL context — and the
+// first live run measured 8,347 against that ceiling. Releasing 1,100 tokens
+// is what puts the corrected measurement back under it.
+const REPORT_REVIEW_MAX_TOKENS = 500;
 
 /**
  * Assembles the fact pack: everything the drafter is allowed to state.
@@ -871,32 +876,91 @@ async function buildReportFacts(env, { reportType, periodLabel, dateStr, agentRo
   // meeting row has ever existed, the section is UNVERIFIED with its cause
   // named; if rows exist historically and none fall in this window, then
   // "none this period" is genuine and is said plainly.
-  const DECISION_TYPES = "('meeting', 'meeting_report', 'decision', 'meeting_decision')";
   // Seeded with the no-database case rather than with [], so that "we could
   // not look" never renders as "we looked and found nothing".
   let decisions = ['UNVERIFIED — no database binding was available, so this period\'s decisions could not be read at all.'];
   let gapSummary = null;
   let captureSummary = null;
   if (env.DB) {
-    const everRow = await env.DB.prepare(
-      `SELECT COUNT(*) AS n FROM reports WHERE type IN ${DECISION_TYPES}`
+    // ── OB-028, CORRECTED 2026-08-09: THIS QUERIED THE WRONG TABLE ─────
+    //
+    // What was written here on 2026-08-08, and published in week-07 as fact:
+    // "the office does not persist meeting decisions or votes to a queryable
+    // store ... the decision arrays are applied in memory without a row."
+    //
+    // That is FALSE. meeting-engine.js persistMeeting() has always inserted
+    // into a `meetings` table (id, type, attendees, transcript, decisions) —
+    // 43 rows on 2026-08-09, 6 of them weekly, the most recent two days
+    // before the report that said they did not exist. The query looked in
+    // `reports`, which has never carried a meeting row, got zero, and the
+    // zero was read as a fact about the office instead of a fact about the
+    // query. Same family as the defects it was written to avoid, one level
+    // up: not "a value nothing produces", but "a value produced somewhere
+    // else, read from the wrong place".
+    //
+    // THREE STATES, NOT TWO. The 2026-08-08 version distinguished "never
+    // recorded" from "none this period". There is a third, and it is the one
+    // the office is actually in: meetings ran, rows exist, and the decisions
+    // block came back EMPTY for 27 of the 43 — the model's JSON block fails
+    // to parse or is omitted, and meeting-engine.js falls back to
+    // emptyDecisions() (its line 591). "The extractor produced nothing" is
+    // not "nobody decided anything", and collapsing them is how the first
+    // version of this got published.
+    const meetingsEver = await env.DB.prepare(
+      'SELECT COUNT(*) AS n FROM meetings'
     ).first().catch(() => null);
-    const everRecorded = (everRow?.n ?? 0) > 0;
 
-    const decisionRows = await env.DB.prepare(
-      `SELECT title, severity FROM reports
-        WHERE type IN ${DECISION_TYPES} AND created_at >= ?
-        ORDER BY created_at ASC LIMIT 25`
+    const meetingRows = meetingsEver === null ? null : await env.DB.prepare(
+      `SELECT type, decisions, created_at FROM meetings
+        WHERE created_at >= ? ORDER BY created_at ASC LIMIT 25`
     ).bind(sinceIso).all().catch(() => null);
-    decisions = (decisionRows?.results || []).map((r) => `${r.title}${r.severity ? ` (${r.severity})` : ''}`);
 
-    if (!decisions.length && !everRecorded) {
+    if (meetingsEver === null || meetingRows === null) {
       decisions = [
-        'UNVERIFIED — the office does not persist meeting decisions or votes to a queryable store. '
-        + 'Meeting output is committed as markdown to reports/meetings/ and the decision arrays are applied in memory without a row. '
-        + 'This section therefore cannot be answered from data, and its emptiness is NOT evidence that nothing was decided. '
-        + 'Report it as a gap in the office\'s own record-keeping, in those words.',
+        'UNVERIFIED — the meetings table could not be read this cycle, so this period\'s decisions are unknown. '
+        + 'Say so using the literal word UNVERIFIED; this is not evidence that nothing was decided.',
       ];
+    } else {
+      const rows = meetingRows.results || [];
+      const lines = [];
+      let emptyBlocks = 0;
+      for (const r of rows) {
+        let d = null;
+        try { d = JSON.parse(r.decisions || '{}'); } catch { d = null; }
+        const items = [
+          d?.summary ? `summary: ${d.summary}` : '',
+          (d?.action_items || []).length ? `${d.action_items.length} action item(s)` : '',
+          (d?.suggestion_decisions || []).length ? `${d.suggestion_decisions.length} suggestion decision(s)` : '',
+          (d?.config_overrides || []).length ? `${d.config_overrides.length} config override(s)` : '',
+        ].filter(Boolean);
+        if (!items.length) { emptyBlocks += 1; continue; }
+        lines.push(`${r.created_at} ${r.type}: ${items.join('; ')}`);
+      }
+
+      if (lines.length) {
+        decisions = lines;
+        if (emptyBlocks) {
+          decisions.push(
+            `NOTE: ${emptyBlocks} further meeting(s) this period recorded an EMPTY decision block. `
+            + 'That is a failure of the office\'s own decision extraction, not a quiet meeting.'
+          );
+        }
+      } else if (rows.length) {
+        decisions = [
+          `UNVERIFIED — ${rows.length} meeting(s) were held this period and EVERY one recorded an empty decision block. `
+          + 'The meetings table holds their transcripts, so the meetings happened; the structured decisions block that '
+          + 'meeting-engine.js parses out of the model\'s reply came back empty and it fell back to an empty record. '
+          + 'This is a defect in the office\'s decision extraction, and it is NOT evidence that nothing was decided. '
+          + 'Report it using the literal word UNVERIFIED.',
+        ];
+      } else if ((meetingsEver.n ?? 0) > 0) {
+        decisions = [];   // genuinely quiet period; buildFactPack says so plainly
+      } else {
+        decisions = [
+          'UNVERIFIED — no meeting has ever been recorded, so there is no baseline against which "none this period" '
+          + 'could mean anything. Say so using the literal word UNVERIFIED.',
+        ];
+      }
     }
 
     const gapRows = await env.DB.prepare(
@@ -1018,7 +1082,7 @@ async function buildReportFacts(env, { reportType, periodLabel, dateStr, agentRo
  *
  * @returns {{text: string|null, provider: string|null, reason: string|null}}
  */
-async function callReportModel(env, plan, { prompt, systemPrompt, maxTokens }) {
+async function callReportModel(env, plan, { prompt, systemPrompt, maxTokens, agent: preloadedAgent = null, assembledSystemPrompt = null }) {
   if (plan.mode === 'routed') {
     const routed = await routeTaskTypeCall(env, plan.lane, {
       prompt, systemPrompt, maxTokens,
@@ -1026,12 +1090,20 @@ async function callReportModel(env, plan, { prompt, systemPrompt, maxTokens }) {
       geminiEndpoint: simulationConfig.GEMINI?.api_endpoint,
       agentId: `report-${plan.lane}`,
     });
-    if (!routed.ok) return { text: null, provider: routed.provider || null, reason: routed.reason || 'routed_call_failed' };
-    return { text: routed.result?.text ?? null, provider: routed.provider, reason: null };
+    if (!routed.ok) return { text: null, provider: routed.provider || null, planned: null, reason: routed.reason || 'routed_call_failed' };
+    // The router already reports its own degradation in `attempts`; the first
+    // attempt is the lane's primary, i.e. what was planned.
+    const plannedProvider = routed.attempts?.[0]?.provider ?? null;
+    return { text: routed.result?.text ?? null, provider: routed.provider, planned: plannedProvider, reason: null };
   }
 
-  const agent = instantiateAgent(plan.agentId, env);
-  await agent.loadState();
+  // The caller may hand in an agent it already instantiated and loaded — the
+  // review path does, because it has to build that agent's assembled system
+  // prompt to size the request before deciding whether to send it at all.
+  // Re-instantiating here would re-read the Durable Object to reach the same
+  // state and re-assemble the same prompt.
+  const agent = preloadedAgent || instantiateAgent(plan.agentId, env);
+  if (!preloadedAgent) await agent.loadState();
 
   if (plan.path === 'queryGeminiDirect') {
     // The pacer governs THIS automation's Gemini calls. If it refuses, the
@@ -1039,13 +1111,35 @@ async function callReportModel(env, plan, { prompt, systemPrompt, maxTokens }) {
     // to another provider. Report generation is new load on a quota the
     // office can only partially observe (workers/gemini-pacer.js header).
     const pacing = await checkGeminiPacingSlot(env);
-    if (!pacing.allowed) return { text: null, provider: null, reason: 'gemini_pacing' };
+    if (!pacing.allowed) return { text: null, provider: null, planned: plan.provider, reason: 'gemini_pacing' };
     const text = await agent.queryGeminiDirect(prompt, systemPrompt, { maxTokens, reportType: 'report-pipeline' });
-    return { text, provider: agent.lastModelSource || 'gemini', reason: null };
+    return { text, provider: agent.lastModelSource || 'gemini', planned: plan.provider, reason: null };
   }
 
-  const text = await agent.queryGroqRouted(prompt, systemPrompt, { maxTokens });
-  return { text, provider: agent.lastModelSource || 'groq', reason: null };
+  const text = await agent.queryGroqRouted(prompt, systemPrompt, { maxTokens, assembledSystemPrompt });
+  // `planned` is what planReportProviders() said would answer. On the direct
+  // review path that is 'groq', and queryGroqRouted() degrades to Cloudflare
+  // Workers AI without telling anyone — see report-pipeline.js providerLabel().
+  return { text, provider: agent.lastModelSource || 'groq', planned: plan.provider, reason: null };
+}
+
+/**
+ * Records, once, that a lane answered from somewhere other than its plan.
+ *
+ * Loud by construction: a console warning naming both providers, a line in the
+ * published byline, and a field on the pipeline's return value that the
+ * supervised trigger echoes back. A silent substitution is how an office
+ * measures the wrong model for a month.
+ */
+function noteProviderSubstitution(role, planned, actual, sink) {
+  if (!planned || !actual || planned === actual) return false;
+  console.warn(
+    `[report-pipeline] PROVIDER SUBSTITUTED on the ${role} call: planned "${planned}", answered "${actual}". `
+    + 'The call succeeded and the pipeline is unaffected, but the planned provider did not respond — '
+    + 'check its credentials and quota before trusting any embodiment figure that names it.'
+  );
+  sink.push({ role, planned, actual });
+  return true;
 }
 
 /**
@@ -1068,8 +1162,21 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
   }
 
   const routingOn = await routingEnabledForReports(env);
-  const plan = planReportProviders({ routingOn, language: 'english' });
+  // AD-028 is checked against the LANE TABLE, not against the lane's name:
+  // resolveTaskLane() returns the ordered candidates from the live
+  // config/model-routing.json, and candidates[0] is the primary that would
+  // actually answer. Reading it here is the only reason the pin can fail
+  // loudly if someone repoints the lane. Only meaningful with routing on —
+  // the routing-off path calls Gemini directly and consults no lane at all.
+  const draftLanePrimary = routingOn
+    ? (resolveTaskLane(pickDraftLane('english')).candidates?.[0] ?? null)
+    : null;
+  const plan = planReportProviders({ routingOn, language: 'english', draftLanePrimary });
   for (const note of plan.notes) console.warn(`[report-pipeline] ${note}`);
+
+  // Every lane substitution this run made. Surfaced in the byline, the D1 row
+  // and the trigger's response — see noteProviderSubstitution().
+  const substitutions = [];
 
   // ── Draft (or recover an unreviewed one) ──────────────────────────────
   let row = await getPendingReportRow(env, reportType, periodLabel);
@@ -1091,6 +1198,7 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
       maxTokens: REPORT_DRAFT_MAX_TOKENS,
     });
     if (!draft.text) return { ran: false, reason: `draft_failed: ${draft.reason || 'no text returned'}` };
+    noteProviderSubstitution('draft', draft.planned, draft.provider, substitutions);
 
     const id = await insertReportRow(env, {
       date: dateStr, reportType, periodLabel, status: 'drafted', factPack,
@@ -1112,22 +1220,56 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
   // never binds — hence the mode check.
   const runReview = async (draftContent, isSecondPass) => {
     const reviewPrompt = buildReportReviewPrompt(factPack, draftContent, { reportType, periodLabel, isSecondPass });
-    if (plan.review.mode === 'direct') {
-      const fit = estimateReviewFit({ factPack, draftContent, maxOutputTokens: REPORT_REVIEW_MAX_TOKENS });
-      if (!fit.fits) {
-        console.warn(`[report-pipeline] ${fit.reason}`);
-        return { text: null, provider: null, reason: `review_input_exceeds_direct_context (~${fit.estimated}/${fit.ceiling})` };
-      }
+    if (plan.review.mode !== 'direct') {
+      return callReportModel(env, plan.review, {
+        prompt: reviewPrompt,
+        systemPrompt: REPORT_REVIEW_SYSTEM,
+        maxTokens: REPORT_REVIEW_MAX_TOKENS,
+      });
     }
+
+    // ── MEASURE WHAT IS ACTUALLY SENT (fixed 2026-08-09) ────────────────
+    //
+    // This guard used to size the request against REPORT_REVIEW_SYSTEM. That
+    // string never reaches a provider: queryGroqRouted() sends
+    // _buildPersonaSystemPrompt(), which appends the agent's state line, its
+    // behavioral rules, its DB context and the office-context block
+    // (agent-base.js:266-274). Measured on the first live run, the real total
+    // was 8,347 tokens against an 8,192 ceiling — the call overran, and the
+    // only reason the guard stayed quiet was its own over-estimating bias
+    // pointing the wrong way. A guard that is wrong and happens not to bite
+    // is a guard this project has now written down three times.
+    //
+    // So the reviewer is instantiated HERE, its assembled prompt is built
+    // once, that prompt is what gets measured, and the same object and the
+    // same string are handed to the call so nothing is assembled twice.
+    const reviewer = instantiateAgent(plan.review.agentId, env);
+    await reviewer.loadState();
+    const assembledSystemPrompt = await reviewer.buildAssembledSystemPrompt(reviewPrompt, REPORT_REVIEW_SYSTEM);
+
+    const fit = estimateReviewFit({
+      factPack, draftContent,
+      systemPrompt: assembledSystemPrompt,
+      maxOutputTokens: REPORT_REVIEW_MAX_TOKENS,
+    });
+    if (!fit.fits) {
+      console.warn(`[report-pipeline] ${fit.reason}`);
+      return { text: null, provider: null, reason: `review_input_exceeds_direct_context (~${fit.estimated}/${fit.ceiling})` };
+    }
+    console.log(`[report-pipeline] review fits: ~${fit.estimated}/${fit.ceiling} tokens (assembled system prompt measured, not REPORT_REVIEW_SYSTEM)`);
+
     return callReportModel(env, plan.review, {
       prompt: reviewPrompt,
       systemPrompt: REPORT_REVIEW_SYSTEM,
       maxTokens: REPORT_REVIEW_MAX_TOKENS,
+      agent: reviewer,
+      assembledSystemPrompt,
     });
   };
 
   let review = await runReview(row.draft_content, false);
   if (!review.text) return { ran: false, reason: `review_failed: ${review.reason || 'no text returned'}` };
+  noteProviderSubstitution('review', review.planned, review.provider, substitutions);
 
   // RULE 1, checked against the providers that ANSWERED. A review by the same
   // model that drafted is not a review; the row stays 'drafted' for a retry
@@ -1143,13 +1285,33 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
 
   let decision = parseReportReviewDecision(review.text);
   let revisionCount = row.revision_count || 0;
+  // Visible, not silent: a reviewer emitting a report body means something is
+  // still asking it to, and the only way that becomes known is a log line.
+  if (decision.reEmitted) {
+    console.warn('[report-pipeline] the reviewer emitted a ---REPORT--- section; it was DISCARDED. What publishes is the stored draft.');
+  }
+
+  // The reviewer's EDITS go back to the WRITER on a REVISE. They are never
+  // applied to the draft by the pipeline itself — see report-pipeline.js's
+  // header on why nothing edits the report between the decision and the commit.
+  const noteWithEdits = (d) => [d.notes, d.edits ? `Requested edits:\n${d.edits}` : ''].filter(Boolean).join('\n\n');
+  // What goes on the D1 row. Deliberately NOT what goes back to the writer on a
+  // revision — a substitution is an operations fact, not a note about the prose,
+  // and threading it into the revision prompt would put provider noise in front
+  // of the drafter.
+  const notesForRow = (d) => [
+    noteWithEdits(d),
+    substitutions.length
+      ? `PROVIDER SUBSTITUTIONS: ${substitutions.map((s) => `${s.role} planned ${s.planned}, answered ${s.actual}`).join('; ')}`
+      : '',
+  ].filter(Boolean).join('\n\n');
 
   // ── One revision round. Exactly one. ──────────────────────────────────
   if (decision.decision === 'REVISE' && revisionCount < 1) {
     const revised = await callReportModel(env, plan.draft, {
       prompt: buildReportDraftPrompt(factPack, {
         reportType, periodLabel,
-        priorDraft: { draftContent: row.draft_content, reviewNotes: decision.notes },
+        priorDraft: { draftContent: row.draft_content, reviewNotes: noteWithEdits(decision) },
       }),
       systemPrompt: REPORT_DRAFT_SYSTEM,
       maxTokens: REPORT_DRAFT_MAX_TOKENS,
@@ -1159,8 +1321,10 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
     await updateReportRow(env, row.id, { draftContent: nextDraft, revisionCount });
     row = { ...row, draft_content: nextDraft, revision_count: 1 };
 
+    noteProviderSubstitution('revision-draft', revised.planned, revised.provider, substitutions);
     review = await runReview(nextDraft, true);
     if (!review.text) return { ran: false, reason: `revision_review_failed: ${review.reason || 'no text returned'}` };
+    noteProviderSubstitution('revision-review', review.planned, review.provider, substitutions);
     decision = parseReportReviewDecision(review.text);
     // A second REVISE is a REJECT. There is no third round.
     if (decision.decision === 'REVISE') decision = { ...decision, decision: 'REJECT' };
@@ -1168,29 +1332,95 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
     decision = { ...decision, decision: 'REJECT' };
   }
 
-  // ── An APPROVE with a missing or truncated body is not a decision ─────
+  // ── An APPROVE over a missing or truncated body is not a decision ─────
   if (decision.decision === 'APPROVE') {
-    const structural = validateReportBody(decision.finalReport, {
-      factPack, due, projectNames: officeProjects.projects.map((p) => p.name),
+    // ── WHAT PUBLISHES IS THE STORED DRAFT (fixed 2026-08-09) ──────────
+    //
+    // Not `decision.finalReport` — that field no longer exists, and its
+    // removal is the fix. The published artifact used to be sourced from the
+    // reviewer's re-emission of a body it had just been handed; the
+    // routing-off reviewer emitted DECISION and NOTES, never emitted the
+    // marker, and an empty string reached this gate. The gate refused it
+    // correctly, which is why the failure was safe and also why it produced
+    // nothing.
+    //
+    // The gate below is UNCHANGED and every check in it still runs — it is
+    // now simply pointed at the text the drafter actually wrote.
+    const finalReport = row.draft_content || '';
+    const structural = validateReportBody(finalReport, {
+      // Full project objects, not just names: the consistency check matches the
+      // fact pack's attribution (by key, `notebook-x`) against the report's
+      // prose (by name, `Notebook-X`), and names alone cannot do that.
+      factPack, due, projects: officeProjects.projects,
     });
     if (!structural.ok) {
       console.warn(`[report-pipeline] APPROVE refused structurally: ${structural.reasons.join(' | ')}`);
-      // Row stays 'drafted' — a re-trigger retries cleanly against the same
-      // draft. Deliberately NOT downgraded to a rejection: the reviewer's
-      // judgement was not the problem, its output was.
-      return { ran: false, reason: 'approve_failed_structural_check', structural: structural.reasons, notes: (decision.notes || '').slice(0, 300) };
+
+      // ── THE REFUSAL IS SAVED, NOT JUST LOGGED (fixed 2026-08-09) ─────
+      //
+      // This path used to return here, before commitFileToRepo() and before
+      // updateReportRow(). Rule 3 — a report that did not publish is saved
+      // with the reason — governed the REJECT branch only, so this failure
+      // class left evidence in a console line and nowhere else, and
+      // Cloudflare no longer retains those. It did not even persist which
+      // provider answered.
+      //
+      // The file is headed as a STRUCTURAL REFUSAL rather than a rejection,
+      // because the reviewer approved: writing "REJECTED" over an approving
+      // reviewer's own note would make the artifact misreport the event.
+      const drafterCfg = getAgentConfig(row.drafter_agent_id);
+      const reviewerCfg = getAgentConfig(plan.review.agentId);
+      const refusalNote = [
+        `The reviewer returned APPROVE. The structural gate refused to publish anyway, so this report did NOT ship.`,
+        `The row stays \`drafted\` — re-triggering the block retries this same draft cleanly, and nothing here was rejected by a persona.`,
+        decision.notes ? `\n**Reviewer's note (an APPROVE):**\n\n${decision.notes}` : '',
+        decision.edits ? `\n**Reviewer's edits (recorded, never applied):**\n\n${decision.edits}` : '',
+      ].filter(Boolean).join('\n\n');
+      const refusalPath = rejectedReportPath(reportType, periodLabel);
+      const refusalCommit = await commitFileToRepo(
+        env, REPO_NAME, refusalPath,
+        renderRejectedReportFile({
+          reportType, periodLabel, dateStr,
+          headline: `STRUCTURALLY REFUSED ${reportType.toUpperCase()} REPORT`,
+          draftContent: finalReport,
+          reviewNotes: refusalNote,
+          structuralReasons: structural.reasons,
+          drafterName: drafterCfg?.name || `Agent ${row.drafter_agent_id}`,
+          reviewerName: reviewerCfg?.name || `Agent ${plan.review.agentId}`,
+        }),
+        `chore(agents): ${reportType} report refused by the structural gate — ${periodLabel} [skip ci]`
+      );
+      // Status deliberately NOT patched: the row stays 'drafted' for a clean
+      // retry. The reviewer's judgement was not the problem, so this is not a
+      // rejection — but the provider that answered and the reasons it was
+      // refused are now on the row instead of only in a log.
+      await updateReportRow(env, row.id, {
+        reviewerProvider: review.provider,
+        reviewNotes: [decision.notes, `STRUCTURAL REFUSAL: ${structural.reasons.join(' | ')}`].filter(Boolean).join('\n\n'),
+        revisionCount,
+      });
+
+      return {
+        ran: false, reason: 'approve_failed_structural_check', structural: structural.reasons, providerSubstitutions: substitutions,
+        path: refusalPath, committed: refusalCommit.committed,
+        reviewerProvider: review.provider, revisionCount,
+        notes: (decision.notes || '').slice(0, 300),
+      };
     }
 
     const drafterConfig = getAgentConfig(row.drafter_agent_id);
     const reviewerConfig = getAgentConfig(plan.review.agentId);
     const finalMarkdown = renderReportFile({
       reportType, periodLabel, dateStr,
-      finalReport: decision.finalReport,
+      finalReport,
       drafterName: drafterConfig?.name || `Agent ${row.drafter_agent_id}`,
       drafterProvider: row.drafter_provider,
       reviewerName: reviewerConfig?.name || `Agent ${plan.review.agentId}`,
       reviewerProvider: review.provider,
       revisionCount,
+      reviewerEdits: decision.edits,
+      drafterPlanned: plan.draft.provider,
+      reviewerPlanned: plan.review.provider,
     });
     const path = reportPath(reportType, periodLabel);
     const commit = await commitFileToRepo(
@@ -1198,7 +1428,7 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
       `chore(agents): ${reportType} report — ${periodLabel} (reviewed) [skip ci]`
     );
     await updateReportRow(env, row.id, {
-      status: 'approved', finalContent: finalMarkdown, reviewNotes: decision.notes,
+      status: 'approved', finalContent: finalMarkdown, reviewNotes: notesForRow(decision),
       reviewerProvider: review.provider, revisionCount,
     });
 
@@ -1216,7 +1446,7 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
           path: `/${path}`,
           reportType,
           dateStr,
-          words: wordCount(decision.finalReport),
+          words: wordCount(finalReport),
         });
         const idx = await commitFileToRepo(
           env, REPO_NAME, LATEST_INDEX_PATH, renderLatestIndex(next),
@@ -1230,7 +1460,7 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
       }
     }
 
-    return { ran: true, decision: 'APPROVE', path, committed: commit.committed, indexed, revisionCount, drafterProvider: row.drafter_provider, reviewerProvider: review.provider };
+    return { ran: true, decision: 'APPROVE', path, committed: commit.committed, indexed, revisionCount, drafterProvider: row.drafter_provider, reviewerProvider: review.provider, providerSubstitutions: substitutions };
   }
 
   // ── REJECT: saved with its note, and the pipeline moves on. ───────────
@@ -1238,7 +1468,7 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
   const reviewerConfig = getAgentConfig(plan.review.agentId);
   const rejectedMarkdown = renderRejectedReportFile({
     reportType, periodLabel, dateStr,
-    draftContent: row.draft_content, reviewNotes: decision.notes,
+    draftContent: row.draft_content, reviewNotes: noteWithEdits(decision),
     drafterName: drafterConfig?.name || `Agent ${row.drafter_agent_id}`,
     reviewerName: reviewerConfig?.name || `Agent ${plan.review.agentId}`,
   });
@@ -1248,9 +1478,9 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
     `chore(agents): ${reportType} report rejected — ${periodLabel} [skip ci]`
   );
   await updateReportRow(env, row.id, {
-    status: 'rejected', reviewNotes: decision.notes, reviewerProvider: review.provider, revisionCount,
+    status: 'rejected', reviewNotes: notesForRow(decision), reviewerProvider: review.provider, revisionCount,
   });
-  return { ran: true, decision: 'REJECT', path, committed: commit.committed, revisionCount };
+  return { ran: true, decision: 'REJECT', path, committed: commit.committed, revisionCount, providerSubstitutions: substitutions };
 }
 
 /** Thin wrapper so the pipeline reads the routing flag through one name that
@@ -1884,11 +2114,17 @@ async function generateWeeklySummary(env, yearState, weekNumber) {
     const agent = instantiateAgent(config.id, env);
     await agent.loadState();
     const weeklyCases = await getWeeklyCasesHandled(env, config.id);
-    agentRows.push({ agentId: config.id, name: agent.name, weeklyCases, mood: agent.mood, irritation: agent.irritation });
+    const cases7d = await getCasesHandledOverDays(env, config.id, 7);
+    agentRows.push({ agentId: config.id, name: agent.name, weeklyCases, cases7d, mood: agent.mood, irritation: agent.irritation });
   }
 
-  const csv = ['agent_id,name,weekly_cases,mood,irritation']
-    .concat(agentRows.map((r) => `${r.agentId},${r.name},${r.weeklyCases},${r.mood},${r.irritation}`))
+  // OB-031. `weekly_cases` keeps its exact meaning — a 24-hour figure, as it
+  // has always been — so no archived row changes and no false trend appears.
+  // `cases_7d` is the number the header always implied. See
+  // getWeeklyCasesHandled()'s comment for why the fix is a second column
+  // rather than a widened window. An unreadable count is UNVERIFIED, not 0.
+  const csv = ['agent_id,name,weekly_cases,cases_7d,mood,irritation']
+    .concat(agentRows.map((r) => `${r.agentId},${r.name},${r.weeklyCases},${r.cases7d ?? 'UNVERIFIED'},${r.mood},${r.irritation}`))
     .join('\n') + '\n';
 
   const pipelineLines = (board.items || [])
@@ -1918,7 +2154,17 @@ Week ${weekNumber} of the data-center office simulation, ${agentRows.length} age
 
 ## Case Volume & Categories
 
-${agentRows.map((r) => `- Agent ${r.agentId} (${r.name}): ${r.weeklyCases} cases this week`).join('\n')}
+${agentRows.map((r) => `- Agent ${r.agentId} (${r.name}): ${r.cases7d ?? 'UNVERIFIED'} cases over the last 7 days (24h figure: ${r.weeklyCases})`).join('\n')}
+
+> **Two case columns, and why (OB-031, from week ${weekNumber}).** The
+> \`weekly_cases\` column in this week's CSV holds a **24-hour** figure and always
+> has — the function behind it looks back one day despite its name, so every
+> archived week under that header is a one-day number. It is left exactly as it
+> is: widening it in place would change what the column means without changing
+> its name, and week ${weekNumber} would show a jump against week ${weekNumber - 1} that never
+> happened. \`cases_7d\` is the real seven-day figure and starts here. Earlier
+> weeks have no \`cases_7d\` value because it was not measured, which is a
+> different thing from it being zero.
 
 ## Agent Performance & Mood
 
@@ -2635,6 +2881,31 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
 
 /* ─────────────────────────── Weekly reset cycle ─────────────────────────── */
 
+/**
+ * ⚠ MISNAMED, AND DELIBERATELY LEFT THAT WAY. Reads TWENTY-FOUR HOURS.
+ *
+ * OB-031. Every value this has ever returned is a one-day figure, and the
+ * weekly CSV has published it under a `weekly_cases` header since the CSV
+ * existed. Measured 2026-08-08: this returned 0 for a week in which the office
+ * handled 167 cases.
+ *
+ * It is NOT widened in place, and that is the whole judgement. Changing what
+ * this returns would change what the `weekly_cases` column MEANS without
+ * changing its name, so week 7 would read 167 against week 6's 0 — a step
+ * change that never happened, in a series a reader is entitled to compare
+ * across weeks. Fixing a wrong number by manufacturing a false trend is worse
+ * than the wrong number, because the wrong number is at least stable.
+ *
+ * Nor are the archives rewritten: what was published stays published.
+ *
+ * Instead the CSV gains a SECOND column, `cases_7d`, carrying the real
+ * seven-day figure from getCasesHandledOverDays() below, and the weekly
+ * summary says in words why two columns exist and where the new one starts.
+ * A column that appears at week N reads as "this is when we began measuring
+ * it", which is true. Renaming `weekly_cases` to what it actually holds is
+ * the right end state and is an owner decision, not a session's to take: it
+ * breaks any consumer reading the header. Boarded, not done here.
+ */
 async function getWeeklyCasesHandled(env, agentId) {
   if (!env.DB) return 0;
   const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
@@ -2642,6 +2913,20 @@ async function getWeeklyCasesHandled(env, agentId) {
     `SELECT COALESCE(SUM(cases_handled), 0) AS total FROM agent_sessions WHERE agent_id = ? AND started_at >= ?`
   ).bind(agentId, since).first();
   return row?.total || 0;
+}
+
+/** The figure `weekly_cases` was always supposed to hold. Window is explicit
+ *  in the parameter rather than baked into the name, which is how the one
+ *  above came to say "weekly" and mean "daily". */
+async function getCasesHandledOverDays(env, agentId, days = 7) {
+  if (!env.DB) return null;
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const row = await env.DB.prepare(
+    `SELECT COALESCE(SUM(cases_handled), 0) AS total FROM agent_sessions WHERE agent_id = ? AND started_at >= ?`
+  ).bind(agentId, since).first().catch(() => null);
+  // null, not 0 — "could not read" and "read zero" are different facts, which
+  // is the same rule the rest of this pipeline runs on.
+  return row ? (row.total || 0) : null;
 }
 
 async function writeWeeklyAnalytics(env, summary) {
@@ -3044,7 +3329,16 @@ export default {
             // refresh the office-context cache, same as office_context_status.
             const flagOn = await reportPipelineEnabled(env);
             const routingOn = await routingEnabledForReports(env);
-            const plan = planReportProviders({ routingOn, language: 'english' });
+            // AD-028 is checked against the LANE TABLE, not against the lane's name:
+  // resolveTaskLane() returns the ordered candidates from the live
+  // config/model-routing.json, and candidates[0] is the primary that would
+  // actually answer. Reading it here is the only reason the pin can fail
+  // loudly if someone repoints the lane. Only meaningful with routing on —
+  // the routing-off path calls Gemini directly and consults no lane at all.
+  const draftLanePrimary = routingOn
+    ? (resolveTaskLane(pickDraftLane('english')).candidates?.[0] ?? null)
+    : null;
+  const plan = planReportProviders({ routingOn, language: 'english', draftLanePrimary });
             let rows = null;
             if (env.DB) {
               const probe = await env.DB.prepare(

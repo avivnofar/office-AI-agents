@@ -59,11 +59,46 @@
  * `{text, source}` and nothing else — so that check is not available on this
  * path and pretending otherwise would be worse than saying so.
  *
- * Truncation is therefore detected STRUCTURALLY: the reviewer is required to
- * end the report with a literal sentinel line, and a report missing the
- * sentinel or any required heading is refused. A response cut off at the
- * ceiling loses its tail, which is exactly where the sentinel is. This is
- * weaker than a provider-reported stop reason and is written down as such.
+ * Truncation is therefore detected STRUCTURALLY: the DRAFT is required to end
+ * with a literal sentinel line, and a draft missing the sentinel or any
+ * required heading is refused. A response cut off at the ceiling loses its
+ * tail, which is exactly where the sentinel is. This is weaker than a
+ * provider-reported stop reason and is written down as such.
+ *
+ * ── THE REVIEWER JUDGES. IT DOES NOT REWRITE. (fixed 2026-08-09) ─────────
+ *
+ * The first live run failed here, and the cause was the review CONTRACT, not
+ * the reviewer. The contract asked for `DECISION`, `NOTES`, and then the
+ * COMPLETE finalized report again after a `---REPORT---` marker, and the
+ * published artifact was sourced from that re-emission. The routing-off
+ * reviewer (Groq llama3-8b-8192) emitted DECISION and NOTES and stopped;
+ * parseReportReviewDecision() returned an empty body and the structural gate
+ * refused it. That is not truncation — it is an 8B model declining to
+ * re-type 792 words verbatim, which is a reasonable thing for it to decline.
+ *
+ * So the contract no longer asks. The reviewer returns DECISION + NOTES +
+ * optional EDITS, and what publishes is `report_pipeline.draft_content` —
+ * the stored draft, byte for byte, through the same validation gate. The
+ * reviewer's judgement gates the text; it never becomes the text.
+ *
+ * Two consequences worth naming, because both are load-bearing:
+ *   - EDITS are RECORDED, NEVER APPLIED. On a REVISE they are handed back to
+ *     the writer, who rewrites. On an APPROVE they are filed in the byline
+ *     and the D1 row. Nothing between the decision and the commit edits the
+ *     report — a pipeline that patches its own output is a pipeline whose
+ *     checks have stopped meaning anything, and that rule already governs
+ *     validateReportBody().
+ *   - The review's output budget collapses from a whole report (~1,600
+ *     tokens) to a decision and a note (~500). That is most of the headroom
+ *     the routing-off reviewer's 8,192-token TOTAL context did not have.
+ *
+ * ⚠ TO A SESSION THAT WANTS TO TIDY THIS UP: re-emitting the report from the
+ * reviewer looks like it saves a round trip and lets the reviewer polish as
+ * it approves. It does neither. It cost this pipeline its first live run and
+ * it cost the guides pipeline a byline-only committed file on 2026-08-01 —
+ * two subsystems, same mechanism. Do not reintroduce a `---REPORT---`
+ * section. parseReportReviewDecision() actively DISCARDS one if a reviewer
+ * emits it anyway.
  *
  * ── NO JSON IMPORTS, NO CONFIG IMPORTS, NO PROVIDER IMPORTS ──────────────
  *
@@ -111,9 +146,11 @@ export const REVIEWER_AGENT_ID = 6;
  *  rule 1. */
 export const DRAFTER_AGENT_ID = 12;
 
-/** Ends every published report. A response truncated at the token ceiling
- *  loses its tail, and the tail is this line. See the header's honest note on
- *  why a structural check is doing a provider's job here. */
+/** Ends every published report. A DRAFT truncated at the token ceiling loses
+ *  its tail, and the tail is this line. See the header's honest note on why a
+ *  structural check is doing a provider's job here. Since 2026-08-09 this
+ *  guards the DRAFT call's output, which is the only call that emits report
+ *  text — the reviewer emits a decision and a note, never a report. */
 export const REPORT_SENTINEL = '<!-- END OF REPORT -->';
 
 /**
@@ -134,7 +171,13 @@ export const REQUIRED_SECTIONS = Object.freeze([
   { n: 2, key: 'Product decisions', heading: '## 2. Product decisions and the vote record' },
   { n: 3, key: 'Conflicts', heading: '## 3. Conflicts raised and how they resolved' },
   { n: 4, key: 'Productivity', heading: '## 4. Productivity — what sat, who was idle, what ran late' },
-  { n: 5, key: 'Agent state', heading: '## 5. Agent state and the improvement loop' },
+  // Heading reordered 2026-08-09: what the office PRODUCED comes before agent
+  // state. The first published report opened this section with thirteen lines
+  // of mood and irritation and reached its real output — three guides, ten gap
+  // findings, fifty notes — only afterwards. That is the case-log shape leaking
+  // back into the one section that carries what the client actually asked for.
+  // The `key` is unchanged, so the structural match is exactly as strict.
+  { n: 5, key: 'Agent state', heading: '## 5. What the office produced, and agent state' },
   { n: 6, key: 'Blocked', heading: '## 6. Blocked, and on whom' },
 ]);
 
@@ -163,35 +206,34 @@ export const TARGET_WORDS = Object.freeze({ min: 550, max: 950 });
 export const REVIEW_LANE = 'judgment';
 export const DRAFT_LANE_HEBREW = 'hebrew_composition';
 export const DRAFT_LANE_OTHER = 'routine_volume';
+/** AD-028's lane. See pickDraftLane(). */
+export const DRAFT_LANE_REPORT = 'report_drafting';
 
 /**
- * Which lane drafts: the Hebrew composition lane where the report is Hebrew,
- * the routine lane where it is not.
+ * Which lane drafts a report. Always `report_drafting`, in every language.
  *
  * ══════════════════════════════════════════════════════════════════════════
- * ⚠ OWNER DECISION AD-028 (2026-08-08) — REPORT DRAFTING IS PINNED TO GEMINI,
- *   AND THIS FUNCTION DOES NOT YET IMPLEMENT THAT. READ BEFORE EDITING.
+ * OWNER DECISION AD-028 (2026-08-08) — REPORT DRAFTING IS PINNED TO GEMINI.
+ * IMPLEMENTED 2026-08-09. READ BEFORE EDITING.
  * ══════════════════════════════════════════════════════════════════════════
  *
- * The requirement: **reports are drafted by Gemini.** When `routing_enabled`
- * is switched on, the drafting call MUST resolve to Gemini regardless of what
- * the routine lane's primary happens to be — either by giving report drafting
- * its own lane, or by pinning the provider explicitly at the call site.
+ * The requirement: **reports are drafted by Gemini.** With `routing_enabled`
+ * on, the drafting call must resolve to Gemini whatever the routine lane's
+ * primary happens to be.
  *
- * What this function does today does NOT satisfy that: the routine lane's
- * primary is Groq, and the office's reports are English (Front language is
- * English only, owner decision 2026-08-05), so with routing ON an English
- * report would be drafted by Groq.
+ * Until 2026-08-09 this function returned `routine_volume` for a non-Hebrew
+ * report, and the office's reports are English (Front language is English
+ * only, owner decision 2026-08-05). The routine lane's primary is Groq. So
+ * the requirement would have broken the moment routing was switched on, and
+ * broken silently — nothing at runtime compared the lane's primary against
+ * the decision. It was recorded and left unimplemented deliberately, to land
+ * in the session that turns routing on; it landed one session earlier
+ * instead, in the session that was already rewriting this pipeline.
  *
- * It does not bite yet, and that is why it is a comment rather than code.
- * `routing_enabled` is OFF and the routing-off path drafts on Gemini
- * directly, so the requirement holds exactly as stated in the state this
- * ships in. The owner's instruction was explicit: **note it and let it ride
- * until routing is enabled** — a pin written months before its first real
- * invocation is a pin nobody has watched work, and it lands in the session
- * that turns routing on, where it can be verified in the same breath.
- * planReportProviders() returns `geminiRequirementHolds: false` and logs the
- * conflict meanwhile, so it cannot pass silently.
+ * The pin is a LANE (`config/model-routing.json` → `report_drafting`), not a
+ * call-site constant, so which provider drafts a report stays a config edit.
+ * It is language-independent on purpose: a pin conditional on language is a
+ * pin with a path where it does not hold.
  *
  * ⚠ TO A SESSION THAT READS THIS AS AN INCONSISTENCY: it is not one. Do NOT
  * "simplify" report drafting back onto the routine lane, and do NOT repoint
@@ -203,8 +245,8 @@ export const DRAFT_LANE_OTHER = 'routine_volume';
  * Full reasoning, alternatives and the revisit condition:
  * back-office-AI-agents/docs/decisions/ARCHITECTURAL-DECISIONS.md AD-028.
  */
-export function pickDraftLane(language) {
-  return String(language || '').toLowerCase() === 'hebrew' ? DRAFT_LANE_HEBREW : DRAFT_LANE_OTHER;
+export function pickDraftLane(_language) {
+  return DRAFT_LANE_REPORT;
 }
 
 /**
@@ -221,9 +263,16 @@ export function pickDraftLane(language) {
  * @param {object} opts
  * @param {boolean} opts.routingOn   result of routingEnabled(env)
  * @param {string}  opts.language    'english' | 'hebrew'
+ * @param {string|null} opts.draftLanePrimary  the provider the draft lane
+ *   ACTUALLY resolves to, read from the live table by the caller
+ *   (model-router.js resolveTaskLane). This module imports no config — see the
+ *   header — so it cannot read the lane itself, and AD-028 is worth more than
+ *   an assumption: the check is against the resolved value, not against the
+ *   lane's name. Omitted means "the caller did not look", which is reported as
+ *   NOT holding rather than assumed to hold.
  * @returns {{draft: object, review: object, geminiRequirementHolds: boolean, notes: string[]}}
  */
-export function planReportProviders({ routingOn, language = 'english' } = {}) {
+export function planReportProviders({ routingOn, language = 'english', draftLanePrimary = null } = {}) {
   const notes = [];
 
   if (!routingOn) {
@@ -237,11 +286,15 @@ export function planReportProviders({ routingOn, language = 'english' } = {}) {
   }
 
   const lane = pickDraftLane(language);
-  const geminiRequirementHolds = lane === DRAFT_LANE_HEBREW;
+  const geminiRequirementHolds = draftLanePrimary === 'gemini';
   if (!geminiRequirementHolds) {
     notes.push(
-      `routing_enabled is on and this report is ${language}, so drafting resolves to the "${lane}" lane, whose primary is NOT Gemini. `
-      + 'The owner requirement "reports are written by Gemini" does not hold in this configuration. This is recorded, not worked around — see pickDraftLane().'
+      draftLanePrimary === null
+        ? `routing_enabled is on and drafting resolves to the "${lane}" lane, but that lane's primary provider was not read from the table, `
+          + 'so AD-028 ("reports are written by Gemini") could not be verified for this run. Reported as NOT holding rather than assumed — '
+          + 'the caller must pass draftLanePrimary from model-router.js resolveTaskLane().'
+        : `routing_enabled is on and drafting resolves to the "${lane}" lane, whose primary is "${draftLanePrimary}" and NOT Gemini. `
+          + 'The owner requirement "reports are written by Gemini" does not hold in this configuration. This is recorded, not worked around — see pickDraftLane().'
     );
   }
 
@@ -346,9 +399,39 @@ function estimateTokens(text) {
 /**
  * Does the review call fit the routing-off reviewer's total context?
  *
- * @returns {{fits: boolean, estimated: number, ceiling: number, reason: string|null}}
+ * ── `systemPrompt` IS REQUIRED, AND IT IS NOT REVIEW_SYSTEM (fixed 2026-08-09)
+ *
+ * This parameter defaulted to REVIEW_SYSTEM, and REVIEW_SYSTEM is not what
+ * gets sent. agent-base.js queryGroqRouted() sends
+ * `_buildPersonaSystemPrompt(...)`, which takes the system prompt it is given
+ * and APPENDS the agent's state line, its behavioral rules and the office
+ * context block (agent-base.js:266-274). Measured on the first live run:
+ * 8,347 tokens against an 8,192 ceiling. The call overran, and the only thing
+ * that stopped the guard from saying so was its own over-estimating bias
+ * (length/3 against a real ~length/4) pointing the other way.
+ *
+ * A guard that measures the wrong string and happens not to bite is the exact
+ * shape this project has now named in three subsystems. So the caller must
+ * pass the ASSEMBLED prompt — the one the provider will actually receive —
+ * and a call that omits it is REFUSED rather than estimated optimistically.
+ * Fail-closed on a missing input, because the asymmetry is unchanged:
+ * over-estimating costs a skipped review, under-estimating publishes a
+ * truncated one.
+ *
+ * @returns {{fits: boolean, estimated: number|null, ceiling: number, reason: string|null}}
  */
-export function estimateReviewFit({ factPack, draftContent, systemPrompt = REVIEW_SYSTEM, maxOutputTokens }) {
+export function estimateReviewFit({ factPack, draftContent, systemPrompt, maxOutputTokens }) {
+  if (typeof systemPrompt !== 'string' || !systemPrompt.length) {
+    return {
+      fits: false,
+      estimated: null,
+      ceiling: DIRECT_REVIEW_CONTEXT_TOKENS,
+      reason: 'estimateReviewFit() was called without the system prompt that will actually be sent. '
+        + 'It must be the ASSEMBLED persona prompt (agent-base.js _buildPersonaSystemPrompt), not REVIEW_SYSTEM — '
+        + 'the assembly appends the state line, the behavioral rules and the office-context block, and measuring the '
+        + 'un-assembled string under-reports the request by roughly a thousand tokens. Refused rather than guessed.',
+    };
+  }
   const estimated = estimateTokens(factPack) + estimateTokens(draftContent)
     + estimateTokens(systemPrompt) + maxOutputTokens + CONTEXT_SAFETY_MARGIN;
   const fits = estimated <= DIRECT_REVIEW_CONTEXT_TOKENS;
@@ -376,9 +459,41 @@ export function estimateReviewFit({ factPack, draftContent, systemPrompt = REVIE
  * worked example: a null rendered as nothing, and a commitment window with no
  * end date read exactly like a healthy one for a full day.
  *
+ * ── THE MARKER CONTRACT IS THE LITERAL TOKEN (settled 2026-08-09) ────────
+ *
+ * The first live draft was refused for dropping a marker, and it had not
+ * disobeyed: DRAFT_SYSTEM said to keep the marker "in those words", while the
+ * lines below told the writer to report the same fact as prose — "report this
+ * as a DEFECT in section 1", and a DISPATCHED value whose text reads as a
+ * sentence to copy. The writer kept the MEANING ("This section is a gap in
+ * the office's own record-keeping", "As the office does not yet record
+ * dispatch") and lost the WORD. countUnverified() matches the word, and fired
+ * correctly by its own definition. Two instruction sites contradicted; the
+ * checker agreed with one of them.
+ *
+ * The contract is now the LITERAL TOKEN, everywhere, and the reason is that
+ * it is the only half of the choice that can be checked. "Conveys the same
+ * status" is a judgement, and a rule no program can evaluate is a rule the
+ * pipeline cannot enforce — rule 5 exists precisely so a dropped marker is
+ * caught mechanically rather than noticed. So: MARKER_RULE below states it
+ * once, the DISPATCHED and due-date lines no longer ask for a paraphrase,
+ * DRAFT_SYSTEM and buildDraftPrompt() say the same thing, REVIEW_SYSTEM
+ * checks for the same thing, and countUnverified() is unchanged because it
+ * was already right.
+ *
  * @param {object} f
  * @returns {string}
  */
+
+/** Stated once, at the top of every fact pack, because it governs every
+ *  section below it and repeating it per-line is how the two sites drifted
+ *  apart in the first place. */
+export const MARKER_RULE =
+  'MARKER RULE — READ FIRST. Any line below containing the word UNVERIFIED or UNREADABLE marks a fact the office '
+  + 'could not establish. Where your report states such a fact, your sentence must contain that same literal word, '
+  + 'spelled exactly. Conveying the same meaning in other words does NOT satisfy this rule: an automated check looks '
+  + 'for the word itself, and a report that carries the meaning without the word is refused and never published.';
+
 export function buildFactPack(f = {}) {
   const lines = [];
   const push = (s) => lines.push(s);
@@ -387,6 +502,8 @@ export function buildFactPack(f = {}) {
   push(`PERIOD: ${f.periodLabel || 'unknown'}`);
   push(`GENERATED: ${f.dateStr || 'unknown'}`);
   push('');
+  push(MARKER_RULE);
+  push('');
 
   push('=== 1. CLIENT REQUIREMENTS (source: back-office docs/CLIENT-REQUIREMENTS.md) ===');
   if (f.requirements?.requirements?.length) {
@@ -394,7 +511,8 @@ export function buildFactPack(f = {}) {
       f.requirements.due
         ? `Commitment due date: ${f.requirements.due}. This date MUST appear in section 1 of the report.`
         : 'Commitment due date: UNVERIFIED — could not be parsed from docs/CLIENT-REQUIREMENTS.md. '
-          + 'Report this as a DEFECT in section 1, in those words. Do not write that there is no deadline.'
+          + 'Section 1 must report this as a defect AND must contain the literal word UNVERIFIED when it does. '
+          + 'Do not write that there is no deadline.'
     );
     if (f.daysRemaining != null) push(`Days remaining to the commitment date: ${f.daysRemaining}.`);
     for (const r of f.requirements.requirements) {
@@ -424,7 +542,17 @@ export function buildFactPack(f = {}) {
   if (f.board?.counts) {
     const c = f.board.counts;
     push(`Board totals: ${c.total} tasks — ${['READY', 'IN-PROGRESS', 'BLOCKED', 'NOT-READY', 'DONE'].filter((s) => c[s]).map((s) => `${c[s]} ${s}`).join(' · ')}.`);
-    push(`DISPATCHED: ${f.dispatchedCount ?? 'UNVERIFIED — the office does not yet record dispatch, so "READY" means ready to be dispatched, not started.'}`);
+    // The old form of this line was `DISPATCHED: ${count ?? '<a sentence>'}`,
+    // and the sentence read as prose to reuse rather than a marked fact. The
+    // first live draft duly wrote "As the office does not yet record
+    // dispatch…" and lost the word. Split, so the VALUE and the INSTRUCTION
+    // are not the same string.
+    if (f.dispatchedCount != null) {
+      push(`DISPATCHED: ${f.dispatchedCount}.`);
+    } else {
+      push('DISPATCHED: UNVERIFIED — the office does not yet record dispatch, so "READY" means ready to be dispatched, not started.');
+      push('  ^ When section 4 states this, the sentence must contain the literal word UNVERIFIED. Writing "the office does not yet record dispatch" without that word does not satisfy the marker rule.');
+    }
     for (const t of (f.board.tasks || []).slice(0, BOARD_TASKS_IN_PACK)) {
       const waiting = t.blockedBy && t.blockedBy !== 'nothing' ? ` — waiting on: ${clip(t.blockedBy)}` : '';
       push(`- ${t.id} [${t.state}] ${t.assignee || 'unassigned'} — ${t.title}${waiting}`);
@@ -457,31 +585,41 @@ export function buildFactPack(f = {}) {
   }
   push('');
 
-  push('=== 5. AGENT STATE AND THE IMPROVEMENT LOOP ===');
+  // ── ORDER IS THE POINT HERE (reordered 2026-08-09) ──────────────────
+  //
+  // This block was added 2026-08-08 after judging the first sample: the pack
+  // described the office's STATE — requirements, board, moods — and not one
+  // thing the office had PRODUCED, so a report built from it could answer
+  // "where do we stand" and not "what did you do", and the client asked the
+  // second question.
+  //
+  // It was added LAST, as 5c, after the agent-state block. The first published
+  // report duly opened section 5 with thirteen lines of mood and irritation and
+  // reached the three guides and ten gap findings afterwards — a fact pack's
+  // running order becomes a report's running order, and the case-log shape came
+  // back in through the ordering. Output now comes first, and section 5b's
+  // agent state is explicitly labelled as the tail of the section.
+  push('=== 5. WHAT THE OFFICE ACTUALLY PRODUCED THIS PERIOD (section 5 OPENS with this) ===');
+  if (f.artifacts?.length) {
+    for (const a of f.artifacts) push(`- ${a}`);
+  } else {
+    push('UNVERIFIED — no record of produced artifacts was passed to this report. Do not write that the office produced nothing.');
+  }
+  push('');
+
+  push('=== 5a. CAPABILITY GAPS FLAGGED THIS PERIOD (the Q&A engine\'s findings against the two client AI systems) ===');
+  if (f.gapSummary) push(f.gapSummary);
+  else push('No capability-gap figures were passed to this report.');
+  push('');
+
+  push('=== 5b. AGENT STATE AND THE IMPROVEMENT LOOP (this comes AFTER the output above, and is the shorter half) ===');
   if (f.agentRows?.length) {
     for (const a of f.agentRows) push(`- Agent ${a.agentId} (${a.name}): ${a.weeklyCases} case(s) this period, mood ${a.mood}, irritation ${a.irritation}/5`);
   } else {
     push('No per-agent rows available this cycle.');
   }
   push(f.captureSummary || 'Improvement-loop capture: UNVERIFIED — no event counts were passed to this report.');
-  push('');
-
-  push('=== 5b. CAPABILITY GAPS FLAGGED THIS PERIOD (the Q&A engine\'s findings against the two client AI systems) ===');
-  if (f.gapSummary) push(f.gapSummary);
-  else push('No capability-gap figures were passed to this report.');
-  push('');
-
-  // ADDED 2026-08-08 after judging the first sample. The pack described the
-  // office's STATE — requirements, board, moods — and not one thing the
-  // office had PRODUCED, so a report built from it could answer "where do we
-  // stand" and not "what did you do". Those are different questions and the
-  // client asked the second one.
-  push('=== 5c. WHAT THE OFFICE ACTUALLY PRODUCED THIS PERIOD ===');
-  if (f.artifacts?.length) {
-    for (const a of f.artifacts) push(`- ${a}`);
-  } else {
-    push('UNVERIFIED — no record of produced artifacts was passed to this report. Do not write that the office produced nothing.');
-  }
+  push('Do NOT open section 5 with a per-agent mood list. Mood and irritation are the office\'s internal weather; the client asked what was produced.');
   push('');
 
   push('=== 6. BLOCKED WORK ===');
@@ -513,7 +651,7 @@ The report is read by the office's client. He has said, in these words, that the
 
 Absolute rules:
 - Use ONLY the facts in the FACTS block. Invent no number, no name, no date, no decision. If a fact is not there, the report does not claim it.
-- A fact marked UNVERIFIED or UNREADABLE stays marked in your text, in those words. Never tidy one away — it changes a claim's status without changing the claim.
+- A fact the FACTS mark UNVERIFIED or UNREADABLE keeps that literal word in your own sentence. Writing something that means the same thing is NOT enough: an automated check looks for the word itself, and a report that conveys the status without the word is refused. Never tidy one away — it changes a claim's status without changing the claim.
 - Say "nothing moved" plainly when nothing moved. Dressing an empty period up as progress is worse than an empty period.
 - English only.`;
 
@@ -534,10 +672,13 @@ ${structure}
 
 Rules on the structure:
 - "${SUMMARY_HEADING}" comes first and is 3-5 bullets: the most consequential thing, the most urgent thing, and what a reader must not miss. Someone who reads only this section should know how the office is doing.
-- Section 1 is first among the numbered sections, always. It names each requirement by its REQ id, states its status, and puts the commitment due date in the text. If the due date is UNVERIFIED in the FACTS, say that it is a defect in those words.
+- Section 1 is first among the numbered sections, always. It names each requirement by its REQ id, states its status, and puts the commitment due date in the text. If the due date is UNVERIFIED in the FACTS, section 1 says so using the literal word UNVERIFIED.
+- Every UNVERIFIED or UNREADABLE fact you report carries that literal word into your sentence. This is checked mechanically; a paraphrase fails it.
 - Sections 2 and 3 report decisions and conflicts. If there were none, say so in one line and move on.
 - Section 4 reports the four productivity measures SEPARATELY. Do not average them into a score. It must also NAME the projects the office is responsible for and say what moved on each — a report that never names the office's projects has failed its reader, and that is the specific complaint this report exists to answer.
-- Section 5 covers agent state, what the office actually PRODUCED this period, and what the improvement loop found. "What we produced" is a different question from "how we are doing" and the client asked the first one.
+- Section 5 OPENS with what the office actually PRODUCED this period — guides, findings, notes, anything shipped — then the improvement loop, then agent state LAST and briefly. "What we produced" is a different question from "how we are doing" and the client asked the first one. Do not lead this section with a per-agent mood list.
+- Never say a project did not move if these FACTS credit that project with output. Saying "nothing moved" is right when nothing moved and false when the same FACTS record work against it.
+- State what happened; do not explain WHY the office did it. These FACTS record events, never motives, so any sentence about what the office focused on, prioritised or chose is invented — it is refused even when the events it connects are real.
 - Section 6 names what is blocked AND on whom or on what. "Blocked" with no owner is not a finding.
 
 Length and readability — this is judged:
@@ -566,10 +707,12 @@ Rewrite the report to fully address the reviewer's note. Keep the structure abov
 
 export const REVIEW_SYSTEM = `You are the QA. You are the LAST check before this report is published where the client can read it. There is no owner review step behind you — internal review is the entire quality control.
 
+You JUDGE the report. You do not rewrite it and you do not reproduce it. The text that publishes is the writer's draft exactly as written; your decision is what gates it. Do not output the report, any part of the report, or a corrected version of it — there is no section in your reply for that, and any report text you emit is discarded.
+
 You have the FACTS the writer was given and the report they wrote. Check, in this order:
 
 1. Does every claim in the report trace to a line in the FACTS? A number that is not in the FACTS is a fabrication, and it is a REJECT, not a REVISE.
-2. Did the writer keep every UNVERIFIED and UNREADABLE marker? Silently dropping one is a REJECT — it changes a claim's status without changing the claim.
+2. Did the writer keep every UNVERIFIED and UNREADABLE marker as that literal word? A paraphrase that conveys the same meaning is a DROPPED marker, not a kept one — it changes a claim's status without changing the claim.
 3. Does section 1 lead on the client requirements, with the commitment due date visible?
 4. Does the report say what actually happened, or does it summarise cases and moods? A case tally is exactly what this pipeline exists to stop.
 5. Is it short enough that someone would finish it, and structured so they could?
@@ -578,10 +721,13 @@ Respond in EXACTLY this format, nothing before or after:
 
 DECISION: APPROVE | REVISE | REJECT
 NOTES: <your reasoning — required and specific for REVISE/REJECT, one or two sentences for APPROVE>
----REPORT---
-<the finalized report markdown, ONLY when DECISION is APPROVE — omit this section entirely for REVISE and REJECT>
+EDITS:
+- <optional. One bullet per change you want, naming the section. Leave this section out entirely if you want none.>
 
-An APPROVE MUST be followed by the ---REPORT--- marker and the COMPLETE finalized report, ending with its sentinel line. The text you output there is exactly what gets published: never reply APPROVE with only notes, a summary, or a pointer back to the draft. You may edit the report as you publish it — that is expected — but you may not shorten it past its required sections. Keep NOTES to one or two sentences on APPROVE so the report itself gets your output budget.`;
+Rules on your reply:
+- APPROVE means "publish this text as it stands". If you want any wording changed, the decision is REVISE and the changes go in EDITS, where the writer will act on them.
+- EDITS on an APPROVE are recorded as observations and are NOT applied. Nothing rewrites the report between your decision and its publication.
+- Keep the whole reply short. You are writing a decision, not a document.`;
 
 export function buildReviewPrompt(factPack, draftContent, { reportType, periodLabel, isSecondPass } = {}) {
   const secondPass = isSecondPass
@@ -600,32 +746,168 @@ ${draftContent}
 """${secondPass}`;
 }
 
-/** Parses the reviewer's structured response. Mirrors guide-engine.js
- *  parseReviewDecision() — an unparseable response is a REJECT, never an
- *  APPROVE, because the failure direction has to be the safe one. */
+/** Empty-ish EDITS. An 8B reviewer told a section is optional will frequently
+ *  emit the header with "none" under it rather than omitting it. */
+/** Leading bullet stripped first: the live reviewer answered `- None.` under
+ *  the EDITS header, which the un-bulleted form missed and which then rendered
+ *  into a published byline as "RECORDED, NOT APPLIED — - None." */
+const NO_EDITS_RE = /^(?:[-*•]\s*)?(none|n\/?a|-+|—|no edits|nothing|no changes( needed)?)[.!]?$/i;
+
+/**
+ * Parses the reviewer's structured response into a DECISION, a NOTE and an
+ * optional EDITS list. Mirrors guide-engine.js parseReviewDecision() — an
+ * unparseable response is a REJECT, never an APPROVE, because the failure
+ * direction has to be the safe one.
+ *
+ * ⚠ THERE IS DELIBERATELY NO `finalReport` HERE. It is not an oversight and it
+ * is not a field waiting to be re-added. What publishes is
+ * `report_pipeline.draft_content`; sourcing the published artifact from the
+ * reviewer's own output is the mechanism that failed this pipeline's first
+ * live run and the guides pipeline's first supervised run. See the header.
+ *
+ * A reviewer that emits a `---REPORT---` section anyway — an older prompt in
+ * a cache, a model pattern-matching on the old contract — has that text
+ * DISCARDED, not published and not folded into the notes. `reEmitted` says so
+ * to the caller so the drift is visible in the log instead of silent.
+ */
 export function parseReportReviewDecision(text) {
   const raw = String(text || '');
-  const decisionMatch = raw.match(/DECISION:\s*(APPROVE|REVISE|REJECT)/i);
+
+  // Cut any re-emitted report off the front-matter before parsing anything, so
+  // a stray report body can never be mistaken for a NOTE or an EDIT.
+  const strayIndex = raw.indexOf('---REPORT---');
+  const head = strayIndex >= 0 ? raw.slice(0, strayIndex) : raw;
+
+  const decisionMatch = head.match(/DECISION:\s*(APPROVE|REVISE|REJECT)/i);
   const decision = decisionMatch ? decisionMatch[1].toUpperCase() : 'REJECT';
 
-  const splitIndex = raw.indexOf('---REPORT---');
-  const notesBlock = splitIndex >= 0 ? raw.slice(0, splitIndex) : raw;
-  const notesMatch = notesBlock.match(/NOTES:\s*([\s\S]*)$/);
+  const editsIndex = head.search(/^[ \t]*EDITS:/im);
+  const notesRegion = editsIndex >= 0 ? head.slice(0, editsIndex) : head;
+  const notesMatch = notesRegion.match(/NOTES:\s*([\s\S]*)$/i);
   const notes = notesMatch ? notesMatch[1].trim() : '';
 
-  const finalReport = splitIndex >= 0 ? raw.slice(splitIndex + '---REPORT---'.length).trim() : '';
+  let edits = '';
+  if (editsIndex >= 0) {
+    edits = head.slice(editsIndex).replace(/^[ \t]*EDITS:/i, '').trim();
+    if (NO_EDITS_RE.test(edits)) edits = '';
+  }
 
-  return { decision, notes, finalReport: decision === 'APPROVE' ? finalReport : '' };
+  return { decision, notes, edits, reEmitted: strayIndex >= 0 };
 }
 
 /* ────────────────────────────── Validation ─────────────────────────────── */
 
-/** Counts UNVERIFIED / UNREADABLE markers. Used to prove the reviewer did not
- *  quietly remove one on its way to publication (rule 5). */
+/**
+ * Counts UNVERIFIED / UNREADABLE markers. Used to prove a marker in the facts
+ * survived into the published text (rule 5).
+ *
+ * THIS MATCHES THE LITERAL TOKEN, AND THAT IS THE CONTRACT — not an accident
+ * of implementation, and not a strictness to relax the next time a draft is
+ * refused for a paraphrase. See buildFactPack()'s marker-contract note: the
+ * literal token was chosen over "conveys the same status" because only one of
+ * the two can be checked, and rule 5 is worth nothing unchecked. Every
+ * instruction site (MARKER_RULE, DRAFT_SYSTEM, buildDraftPrompt(),
+ * REVIEW_SYSTEM) now asks for exactly what this function measures.
+ */
 export function countUnverified(text) {
   const m = String(text || '').match(/\b(UNVERIFIED|UNREADABLE)\b/g);
   return m ? m.length : 0;
 }
+
+/* ── TWO CHECKS ADDED 2026-08-09, AFTER THE FIRST PUBLISHED REPORT ───────
+ *
+ * The first report to clear this gate said, in section 4:
+ *
+ *   "nothing moved on Data Center, Notebook-X, office-AI-agents,
+ *    back-office-AI-agents, or warehouse-office-AI-agents this period, as the
+ *    office focused on clearing internal administrative tasks and
+ *    capability-gap reporting."
+ *
+ * The section below it then listed three approved guides and ten capability-gap
+ * findings — three against Data Center, seven against Notebook-X. Both claims
+ * came from the same fact pack. The QA read both and approved.
+ *
+ * BOTH CHECKS LIVE HERE AND NOT IN THE REVIEW PROMPT. The reviewer had the
+ * facts, had the draft, had a checklist item for exactly this ("does the report
+ * say what actually happened"), and passed it. Asking it more loudly is the
+ * move this project has already learned does not work; the gate is where a
+ * rule becomes enforcement.
+ */
+
+/** Phrases that assert a project did not move. The drafter is DELIBERATELY
+ *  told to say "nothing moved" plainly when nothing moved (DRAFT_SYSTEM), so
+ *  this is not a banned phrase — it is a phrase that must not contradict the
+ *  facts the sentence is drawn from. */
+const NO_MOVEMENT_RE = /\b(nothing (?:moved|progressed|changed|happened|shipped)|no (?:movement|progress|activity|work|change)\b|did ?n[o']t move|made no progress|saw no (?:movement|progress|activity))/i;
+
+/**
+ * Which projects does the fact pack attribute PRODUCED OUTPUT to?
+ *
+ * Scoped to the produced/gap sections rather than the whole pack on purpose:
+ * every project is NAMED in section 4b (the roster) and most appear in the
+ * board, and neither of those is output. Only a positive count inside the
+ * sections that record what the office made counts as movement.
+ *
+ * Matching is on both the project's key (`notebook-x` — how the gap rows are
+ * attributed) and its display name (`Notebook-X` — how the report writes it),
+ * because the fact pack carries the first and the report carries the second.
+ */
+export function projectsWithOutput(factPack, projects = []) {
+  const pack = String(factPack || '');
+  const start = pack.search(/^=== 5[ab]?\./m);
+  const end = pack.search(/^=== 6\./m);
+  if (start < 0) return [];
+  const region = pack.slice(start, end > start ? end : undefined);
+
+  const withOutput = [];
+  for (const p of projects) {
+    const aliases = [p?.key, p?.name].filter(Boolean).map((a) => String(a));
+    if (!aliases.length) continue;
+    const hit = region.split('\n').some((line) => {
+      if (!aliases.some((a) => line.toLowerCase().includes(a.toLowerCase()))) return false;
+      // A positive integer on the line. "0 findings" and "none" are not output.
+      const nums = line.match(/\b(\d+)\b/g) || [];
+      return nums.some((n) => Number(n) > 0);
+    });
+    if (hit) withOutput.push(p);
+  }
+  return withOutput;
+}
+
+/**
+ * A motive attributed to the office or its agents.
+ *
+ * ── WHY THIS IS NARROWER THAN "AN UNSUPPORTED CAUSAL CLAIM" ──────────────
+ *
+ * The general rule — "a causal claim not present in the facts is a
+ * fabrication" — is correct and is NOT mechanically checkable. A report may
+ * legitimately reason FROM the facts ("neither has a stamped deadline yet, so
+ * neither can be reported as late"), and no regular expression separates a
+ * sound inference from an invented one. A check that tried would be wrong in
+ * both directions, and a guard that is wrong and happens not to bite is the
+ * exact thing this session was convened to fix. Writing one would have been
+ * worse than writing none.
+ *
+ * What IS checkable is the specific class the live failure belongs to: a
+ * claim about why the OFFICE acted — its focus, its priorities, its choices.
+ * The fact pack records what happened and never why anyone did it, so there is
+ * no line in it that could ground such a claim, whatever it says. That makes
+ * the refusal sound rather than heuristic: the source material cannot support
+ * this shape of sentence at all.
+ *
+ * The narrower scope is recorded rather than quietly taken. A report that
+ * invents a cause NOT about the office's own motives still gets past this, and
+ * the reviewer remains the only thing looking for it.
+ */
+const MOTIVE_CLAIM_RE = new RegExp(
+  // a causal connective …
+  '\\b(?:as|because|since|due to|owing to|thanks to|driven by|in order to|so as to|the reason(?:\\s+\\w+){0,3}\\s+is)\\b'
+  // … then, close by, the office or its people …
+  + '[^.!?\\n]{0,60}?\\b(?:the office|the team|the agents?|we|they|management|the personas?)\\b'
+  // … doing something volitional.
+  + '[^.!?\\n]{0,60}?\\b(?:focus(?:ed|es|ing)?|prioriti[sz](?:ed|es|ing)?|chose|choos(?:e|ing)|decid(?:ed|es|ing)|opted?|elect(?:ed|s)?|prefer(?:red|s)?|intend(?:ed|s)?|deliberately|intentionally|aimed?|sought|wanted|tried)\\b',
+  'i'
+);
 
 /**
  * Structural gate on an APPROVE body. Everything here is a REFUSAL that
@@ -633,9 +915,15 @@ export function countUnverified(text) {
  * deliberately: a pipeline that patches its own output is a pipeline whose
  * checks have stopped meaning anything.
  *
+ * `projects` (full `{key, name}` objects) supersedes `projectNames`; the older
+ * parameter still works so no existing caller silently loses its naming check.
+ * The consistency check needs the keys, which names alone do not carry.
+ *
  * @returns {{ok: boolean, reasons: string[]}}
  */
-export function validateReportBody(finalReport, { factPack = '', due = null, projectNames = [] } = {}) {
+export function validateReportBody(finalReport, { factPack = '', due = null, projectNames = [], projects = [] } = {}) {
+  const projectList = projects.length ? projects : projectNames.map((name) => ({ key: null, name }));
+  projectNames = projectList.map((p) => p.name).filter(Boolean);
   const reasons = [];
   const body = String(finalReport || '');
   const trimmed = body.trim();
@@ -675,14 +963,53 @@ export function validateReportBody(finalReport, { factPack = '', due = null, pro
   // has projects and the report names none of them, it is the case log this
   // pipeline exists to replace. One name is enough — a project with genuinely
   // nothing to report should not force a sentence about itself.
-  if (projectNames.length && !projectNames.some((n) => n && finalReport.includes(n))) {
+  if (projectNames.length && !projectNames.some((n) => n && body.includes(n))) {
     reasons.push(`the report names none of the office's ${projectNames.length} projects (${projectNames.join(', ')}) — that is a case log, not an office report`);
+  }
+
+  // ── CONSISTENCY: "nothing moved" against output the facts attribute ──
+  //
+  // Sentence-scoped, not report-scoped. A report may legitimately say nothing
+  // moved on project A in the same paragraph that credits project B — what it
+  // may not do is say nothing moved on a project the facts credit with output.
+  const produced = projectsWithOutput(factPack, projectList);
+  if (produced.length) {
+    for (const sentence of body.split(/(?<=[.!?])\s+|\n/)) {
+      if (!NO_MOVEMENT_RE.test(sentence)) continue;
+      const contradicted = produced.filter((p) => p.name && sentence.includes(p.name));
+      if (contradicted.length) {
+        reasons.push(
+          `the report claims no movement on ${contradicted.map((p) => p.name).join(', ')} `
+          + `while the facts credit ${contradicted.length > 1 ? 'those projects' : 'that project'} with output this period `
+          + `("${sentence.trim().slice(0, 140)}…"). Saying "nothing moved" is correct when nothing moved; `
+          + 'it is a false claim when the same fact pack records work produced against that project.'
+        );
+        break;
+      }
+    }
+  }
+
+  // ── FABRICATION: a motive attributed to the office ───────────────────
+  //
+  // Not "an unsupported causal claim" — see MOTIVE_CLAIM_RE for why the
+  // general form is not checkable and why this narrower one is sound.
+  const motive = body.split(/(?<=[.!?])\s+|\n/).find((s) => MOTIVE_CLAIM_RE.test(s));
+  if (motive) {
+    reasons.push(
+      `the report asserts a motive for the office's own actions ("${motive.trim().slice(0, 140)}…"). `
+      + 'The fact pack records what happened and never why anyone did it, so no line in it can ground a claim of this shape — '
+      + 'it is a fabrication even when the facts it connects are real. State what happened; do not explain why it happened.'
+    );
   }
 
   const packMarkers = countUnverified(factPack);
   const bodyMarkers = countUnverified(body);
   if (packMarkers > 0 && bodyMarkers < 1) {
-    reasons.push(`the facts carried ${packMarkers} UNVERIFIED/UNREADABLE marker(s) and the report carries none — a marker was dropped`);
+    reasons.push(
+      `the facts carried ${packMarkers} UNVERIFIED/UNREADABLE marker(s) and the report carries none — a marker was dropped. `
+      + 'The contract is the literal word, not the conveyed meaning (see countUnverified()); a sentence that means '
+      + '"we could not establish this" without containing UNVERIFIED or UNREADABLE does not satisfy it.'
+    );
   }
 
   return { ok: reasons.length === 0, reasons };
@@ -708,14 +1035,42 @@ export function wordCount(text) {
  * a measurement instrument (config/model-routing.json `_why_random`), and a
  * report that does not say who wrote it cannot feed it.
  */
+/**
+ * A provider that answered when a different one was planned.
+ *
+ * ── A FALLBACK NOBODY NOTICES IS A MEASUREMENT NOBODY CAN TRUST ─────────
+ *
+ * Both of the first two live runs planned Groq for the review and were
+ * answered by Cloudflare Workers AI. Nothing said so. The degradation is
+ * correct behaviour — it is exactly what the fallback exists for — but the
+ * byline is the embodiment record (config/model-routing.json `_why_random`),
+ * and a record that names the planned provider instead of the one that
+ * answered is measuring the wrong thing. The cause, found 2026-08-09, was a
+ * dead GROQ_API_KEY returning HTTP 401 on every call.
+ */
+export function providerLabel(planned, actual) {
+  if (!actual) return `${planned || 'provider'} — NO PROVIDER RECORDED`;
+  if (!planned || planned === actual) return actual;
+  return `${actual} — SUBSTITUTED, ${planned} was planned and did not answer`;
+}
+
 export function renderReportFile({
   reportType, periodLabel, dateStr, finalReport,
-  drafterName, drafterProvider, reviewerName, reviewerProvider, revisionCount = 0,
+  drafterName, drafterProvider, reviewerName, reviewerProvider, revisionCount = 0, reviewerEdits = '',
+  drafterPlanned = null, reviewerPlanned = null,
 }) {
+  // Recorded, never applied. The line exists so an edit the reviewer wanted is
+  // visible in the artifact rather than living only in a D1 column — and so
+  // the difference between "asked for" and "applied" is on the page.
+  const edits = String(reviewerEdits || '').trim();
+  const editsLine = edits
+    ? `Reviewer's edits: RECORDED, NOT APPLIED — ${clip(edits.replace(/\s+/g, ' '), 400)}\n`
+    : '';
   return `<!--
-Drafted by: ${drafterName} (${drafterProvider || 'provider not recorded'})
-Reviewed and published by: ${reviewerName} (${reviewerProvider || 'provider not recorded'})
-Report type: ${reportType} · Period: ${periodLabel} · Date: ${dateStr}
+Drafted by: ${drafterName} (${providerLabel(drafterPlanned, drafterProvider)})
+Reviewed by: ${reviewerName} (${providerLabel(reviewerPlanned, reviewerProvider)})
+Published text: the draft above, as written. The reviewer judged it; it did not rewrite it.
+${editsLine}Report type: ${reportType} · Period: ${periodLabel} · Date: ${dateStr}
 Revision rounds: ${revisionCount} of 1 permitted
 Words: ${wordCount(finalReport)}
 Pipeline: workers/report-pipeline.js — drafted, reviewed, published. Not a template.
@@ -725,15 +1080,25 @@ ${String(finalReport).trim()}
 `;
 }
 
-/** A rejected report is SAVED with its rejection note and the pipeline moves
- *  on. It is never sent to the owner — same posture as a rejected guide. */
+/**
+ * A report that did not publish is SAVED with the reason it did not. It is
+ * never sent to the owner — same posture as a rejected guide.
+ *
+ * `headline` exists because there are now TWO ways not to publish and they are
+ * not the same event. A REJECT is the reviewer's judgement. A structural
+ * refusal is the gate overruling an APPROVE, which means the reviewer said
+ * yes — and a file headed "REJECTED" over an approving reviewer's note would
+ * be the artifact lying about what happened. Default stays REJECTED so the
+ * pre-existing call site is unchanged.
+ */
 export function renderRejectedReportFile({
-  reportType, periodLabel, dateStr, draftContent, reviewNotes, drafterName, reviewerName, structuralReasons = [],
+  reportType, periodLabel, dateStr, draftContent, reviewNotes, drafterName, reviewerName,
+  structuralReasons = [], headline = null,
 }) {
   const structural = structuralReasons.length
     ? `\n**Structural refusals:**\n\n${structuralReasons.map((r) => `- ${r}`).join('\n')}\n`
     : '';
-  return `# REJECTED ${reportType.toUpperCase()} REPORT — ${periodLabel}
+  return `# ${headline || `REJECTED ${reportType.toUpperCase()} REPORT`} — ${periodLabel}
 
 **Drafted by:** ${drafterName} · **Reviewed by:** ${reviewerName} · **Date:** ${dateStr}
 

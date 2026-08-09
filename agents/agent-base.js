@@ -274,9 +274,33 @@ export class AgentBase {
     ].filter(Boolean).join('\n\n');
   }
 
+  /**
+   * The assembled persona system prompt, WITHOUT making a model call.
+   *
+   * Added 2026-08-09 for the report pipeline's context-fit guard. That guard
+   * was sizing the review request against REPORT_REVIEW_SYSTEM, which is not
+   * what goes over the wire — `_buildPersonaSystemPrompt()` appends the state
+   * line, the behavioral rules, the DB context and the office-context block
+   * before either provider sees it, and the difference measured ~1,000 tokens
+   * against an 8,192-token total ceiling.
+   *
+   * A caller that must size a request has no way to measure what is actually
+   * sent unless it can build it, so it can. Pass the result straight back in
+   * as `opts.assembledSystemPrompt` to avoid assembling it twice — the second
+   * assembly would re-run getDbContext() and cost real subrequests to produce
+   * the same string.
+   */
+  async buildAssembledSystemPrompt(prompt, systemPrompt) {
+    return this._buildPersonaSystemPrompt(prompt, systemPrompt);
+  }
+
   /** Routine persona-flavor calls: Groq first, Cloudflare Workers AI fallback. NOT Gemini — see section comment. */
   async queryGroqRouted(prompt, systemPrompt, opts = {}) {
-    const fullSystemPrompt = await this._buildPersonaSystemPrompt(prompt, systemPrompt);
+    // opts.assembledSystemPrompt: a prompt this caller ALREADY assembled via
+    // buildAssembledSystemPrompt(), reused rather than rebuilt. Absent for
+    // every pre-existing caller, so their behaviour is byte-unchanged.
+    const fullSystemPrompt = opts.assembledSystemPrompt
+      ?? await this._buildPersonaSystemPrompt(prompt, systemPrompt);
 
     if (opts.forceFallback) {
       const result = await callCloudflareFallback({
