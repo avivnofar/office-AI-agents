@@ -336,8 +336,12 @@ export function assertDistinctReviewer({ draftProvider, reviewProvider, draftAge
  * ── THE CONTEXT CEILING, AND WHY THESE TWO NUMBERS EXIST ─────────────────
  *
  * The REVIEW call is the constrained one, and only in the routing-off state.
- * With routing off the reviewer is Groq's `llama3-8b-8192`, whose 8,192
- * tokens are TOTAL — prompt plus completion, not input alone. The review
+ * With routing off the reviewer was Groq's `llama3-8b-8192`, whose 8,192
+ * tokens are TOTAL — prompt plus completion, not input alone. (That model was
+ * decommissioned; see DIRECT_REVIEW_CONTEXT_TOKENS below for why the number
+ * stayed anyway. The reasoning here is preserved as written because it is what
+ * produced the two measures, and both remain correct under a larger ceiling.)
+ * The review
  * prompt carries the whole fact pack AND the whole draft, so the first real
  * fact pack (10,605 characters, ~3,535 tokens, measured 2026-08-08 against
  * the live 27-task board) put the call within a few hundred tokens of the
@@ -376,7 +380,30 @@ export const BOARD_TASKS_IN_PACK = 18;
 export const BLOCKED_IN_PACK = 12;
 const BLOCKED_BY_MAX_CHARS = 150;
 
-/** Total context of the routing-off reviewer (Groq llama3-8b-8192). */
+/**
+ * Total context of the routing-off reviewer.
+ *
+ * ⚠ **STALE-BY-CHOICE SINCE 2026-08-09, AND LEFT THAT WAY DELIBERATELY.**
+ * This 8,192 was the TOTAL context of Groq's `llama3-8b-8192`. That model was
+ * found decommissioned on 2026-08-09 (shut down 2025-08-30) and the client now
+ * sends `llama-3.1-8b-instant`, whose context is **131,072** — sixteen times
+ * this number. So the value below is no longer the reviewer's real ceiling; it
+ * is now deliberate under-use of a limit that has stopped binding.
+ *
+ * **Not raised in the session that found it, on purpose.** Raising it would
+ * relax `BOARD_TASKS_IN_PACK` and `BLOCKED_IN_PACK` above and change what every
+ * report is built from — a behavioural change to the live report pipeline, made
+ * on the same day and in the same breath as a provider fix, with no supervised
+ * run behind it. Over-estimating the constraint costs nothing but a smaller
+ * fact pack; under-estimating it publishes a truncated review. The safe
+ * direction is the one already in place.
+ *
+ * The owner decides whether to raise it. Two facts for that decision: routing's
+ * judgment lane (Cerebras, 131,000 input) removes the ceiling anyway, and the
+ * corrected Groq model now removes it on the degraded path too — the constraint
+ * this whole section was written to manage has quietly stopped existing on
+ * BOTH paths.
+ */
 export const DIRECT_REVIEW_CONTEXT_TOKENS = 8192;
 /** Headroom for the estimate itself being wrong in the cheap direction.
  *  estimateTokens over-estimates by design (length/3), which is the right
@@ -1045,8 +1072,25 @@ export function wordCount(text) {
  * correct behaviour — it is exactly what the fallback exists for — but the
  * byline is the embodiment record (config/model-routing.json `_why_random`),
  * and a record that names the planned provider instead of the one that
- * answered is measuring the wrong thing. The cause, found 2026-08-09, was a
- * dead GROQ_API_KEY returning HTTP 401 on every call.
+ * answered is measuring the wrong thing.
+ *
+ * ── THE CAUSE, CORRECTED 2026-08-09 ──────────────────────────────────────
+ *
+ * This comment previously read: *"The cause, found 2026-08-09, was a dead
+ * GROQ_API_KEY returning HTTP 401 on every call."* **That was wrong**, and it
+ * is left visible here rather than quietly overwritten, because the error is
+ * more instructive than the fact.
+ *
+ * The real cause, captured the same day from `wrangler tail` during a live
+ * call, was **HTTP 400 `model_decommissioned`**: `llama3-8b-8192` was shut
+ * down by Groq on 2025-08-30. The key was never dead — it authenticated on
+ * every one of those calls, and Groq's own dashboard showed the usage.
+ *
+ * Nobody had read the response body. The symptom — every Groq call silently
+ * answered by someone else — is identical under a dead key and a dead model,
+ * and "the key expired" is the cheaper story. Acting on it would have meant
+ * rotating a working credential across four places, with four confusably-named
+ * Groq keys in play. See AD-030 in back-office-AI-agents.
  */
 export function providerLabel(planned, actual) {
   if (!actual) return `${planned || 'provider'} — NO PROVIDER RECORDED`;
@@ -1057,7 +1101,7 @@ export function providerLabel(planned, actual) {
 export function renderReportFile({
   reportType, periodLabel, dateStr, finalReport,
   drafterName, drafterProvider, reviewerName, reviewerProvider, revisionCount = 0, reviewerEdits = '',
-  drafterPlanned = null, reviewerPlanned = null,
+  drafterPlanned = null, reviewerPlanned = null, workerVersion = null,
 }) {
   // Recorded, never applied. The line exists so an edit the reviewer wanted is
   // visible in the artifact rather than living only in a D1 column — and so
@@ -1073,6 +1117,7 @@ Published text: the draft above, as written. The reviewer judged it; it did not 
 ${editsLine}Report type: ${reportType} · Period: ${periodLabel} · Date: ${dateStr}
 Revision rounds: ${revisionCount} of 1 permitted
 Words: ${wordCount(finalReport)}
+Worker version: ${workerVersion || 'UNRECORDED — no version_metadata binding on this deploy'}
 Pipeline: workers/report-pipeline.js — drafted, reviewed, published. Not a template.
 -->
 

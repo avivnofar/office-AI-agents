@@ -200,6 +200,29 @@ function pad(n, len) {
   return String(n).padStart(len, '0');
 }
 
+/**
+ * The version of THIS Worker bundle, from the `version_metadata` binding.
+ *
+ * ── WHY THIS EXISTS ──────────────────────────────────────────────────────
+ *
+ * On 2026-08-09 a report was generated 34 seconds after a deploy, was served
+ * by the PREVIOUS bundle, and produced a defective report. Every signal said
+ * success — 200 from the trigger, `ok` from the pipeline, a committed file.
+ * The stale bundle was worked out afterwards by comparing timestamps, which
+ * only worked because someone thought to be suspicious.
+ *
+ * Returns null rather than throwing when the binding is absent, so a deploy
+ * that predates the binding degrades to "UNRECORDED" instead of failing. That
+ * is the honest state: **absent means unknown, not current** — the same rule
+ * this project applies to a null free-tier cap.
+ */
+function workerVersion(env) {
+  const id = env?.CF_VERSION_METADATA?.id;
+  if (!id) return null;
+  const tag = env.CF_VERSION_METADATA.tag;
+  return tag ? `${id} (${tag})` : id;
+}
+
 /* ──────────────────────────── Status / read APIs ───────────────────────── */
 
 /**
@@ -1421,6 +1444,7 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
       reviewerEdits: decision.edits,
       drafterPlanned: plan.draft.provider,
       reviewerPlanned: plan.review.provider,
+      workerVersion: workerVersion(env),
     });
     const path = reportPath(reportType, periodLabel);
     const commit = await commitFileToRepo(
@@ -3484,7 +3508,12 @@ export default {
           default:
             return json({ error: 'invalid_trigger_type' }, 400, origin);
         }
-        return json({ ok: true, type: body.type, result }, 200, origin);
+        // `worker_version` on EVERY trigger response, not just the report ones.
+        // A supervised test that cannot say which bundle answered it is a test
+        // of an unknown thing — and the 2026-08-09 stale-bundle run looked
+        // exactly like a successful one from here. Costs nothing: the value is
+        // already in the environment.
+        return json({ ok: true, type: body.type, worker_version: workerVersion(env), result }, 200, origin);
       }
       if (request.method === 'GET' && url.pathname === '/api/simulation') {
         return json(await getSimulationState(env), 200, origin);

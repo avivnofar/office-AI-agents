@@ -79,6 +79,52 @@ one of the two options below.
    `ADMIN_TOKEN`.
 6. Click **Deploy**.
 
+## ⚠️ FIRST: confirm you are talking to the bundle you just deployed
+
+**Do not run anything against the Worker until this check passes.** `wrangler
+deploy` returning a version ID means the upload succeeded. It does **not** mean
+the next request you send will be served by it.
+
+**The incident this exists for, 2026-08-09.** A report was generated **34
+seconds after a deploy**, was served by the **previous** bundle, and produced a
+defective report. Every signal reported success: HTTP 200 from the trigger,
+`ok` from the pipeline, a committed file in git. Nothing in the system could
+say which code had run — the stale bundle was worked out afterwards by
+comparing timestamps, and only because someone thought to be suspicious.
+
+`wrangler deploy` prints the version it uploaded:
+
+```
+Current Version ID: 5bb8ef5c-b10a-4ba0-8971-915828a62f40
+```
+
+Every `/api/agents/trigger` response now carries `worker_version`. **Compare
+them, and do not proceed until they match:**
+
+```powershell
+$tok = ((Get-Content .env | Where-Object { $_ -match '^ADMIN_TOKEN=' }) -replace '^ADMIN_TOKEN=','').Trim()
+$h = @{ "X-Admin-Token" = $tok }
+$b = '{"type":"routing_status"}'   # any cheap trigger; this one makes no model call
+(Invoke-RestMethod -Uri "https://data-center-agents.avivnofar.workers.dev/api/agents/trigger" `
+  -Method POST -Headers $h -ContentType "application/json" -Body $b).worker_version
+```
+
+- **Matches the deploy output** → you are on the new bundle. Proceed.
+- **Different ID** → propagation is still in flight. Wait and re-check. Do not
+  interpret any result produced in the meantime.
+- **`null`** → the deploy predates the `version_metadata` binding (added
+  2026-08-09). **Absent means UNKNOWN, not current** — the same rule this
+  project applies to a null free-tier cap. Redeploy from a tree that has the
+  binding before trusting anything.
+
+Published reports carry the same value in their byline (`Worker version:`), so
+a stale-bundle run is identifiable **after the fact** rather than inferred.
+
+> **Why a version probe and not "wait 60 seconds".** A fixed wait is a guess
+> that is either wasteful or wrong, and it fails silently in the direction that
+> matters — you cannot tell a wait that was long enough from one that merely
+> happened not to bite. The probe answers the actual question.
+
 ## Verify it's working
 
 ```bash

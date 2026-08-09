@@ -402,8 +402,24 @@ check('providers.gemini agrees with notebook_x_gemini_pacing spacing (pacing sta
   providers.gemini?.min_spacing_ms_between_notebook_x_calls === tokenEconomy.notebook_x_gemini_pacing?.min_spacing_ms_between_calls);
 check('shared_claude_budget is untouched at $4.50', tokenEconomy.shared_claude_budget?.cap_usd_per_month === 4.5);
 check('guides_claude_budget is untouched at $4.50', tokenEconomy.guides_claude_budget?.cap_usd_per_month === 4.5);
-check('primary_case_model is untouched (groq stays the routine-volume primary)',
-  tokenEconomy.primary_case_model === 'groq/llama3-8b-8192');
+// The PROVIDER half is what this check has always been about — "groq stays the
+// routine-volume primary". The MODEL half moved on 2026-08-09 when llama3-8b-8192
+// was found decommissioned, so pinning the whole string would make a correct
+// model rotation look like a regression. Provider pinned, model checked for
+// agreement with the code below rather than frozen.
+check('primary_case_model still names groq as the routine-volume primary',
+  String(tokenEconomy.primary_case_model || '').startsWith('groq/'));
+check('primary_case_model no longer names the decommissioned llama3-8b-8192',
+  !String(tokenEconomy.primary_case_model || '').includes('llama3-8b-8192'));
+// CONFIG-VS-CODE DRIFT. token-economy.json documents the model; groq-client.js
+// is what actually gets sent. They disagreed for no one's benefit before, and a
+// verifier that reads only the config would have stayed green through it.
+{
+  const codeModel = (groqSrc.match(/^const GROQ_MODEL = '([^']+)'/m) || [])[1];
+  const configModel = String(tokenEconomy.primary_case_model || '').replace(/^groq\//, '');
+  check(`groq-client.js GROQ_MODEL ("${codeModel}") matches token-economy primary_case_model ("${configModel}")`,
+    Boolean(codeModel) && codeModel === configModel);
+}
 check('routing_model is untouched (Cloudflare stays the classification primary)',
   tokenEconomy.routing_model === 'cloudflare/@cf/meta/llama-3.1-8b-instruct-fp8');
 check('report_model is untouched (Gemini 3.1 Flash-Lite)', tokenEconomy.report_model === 'google/gemini-3.1-flash-lite');
