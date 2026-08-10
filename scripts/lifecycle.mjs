@@ -498,7 +498,14 @@ function main(argv) {
 
   const out = commands[cmd](argv, ctx);
   console.log(JSON.stringify(out, null, 2));
-  return out?.refused ? 3 : 0;
+  // `=== true` and not truthy — cmdIngest()'s `refused` field is an ARRAY of
+  // per-file refusals (empty on full success), a different shape than the
+  // boolean `{refused: true, reason}` refuse() returns for init/advance/
+  // refusal. A bare truthy check treated `refused: []` as a failure, so a
+  // fully successful ingest (found live, 2026-08-11: 2 applied, 0 refused)
+  // still exited 3 — silently misreporting success as failure to anything
+  // reading the exit code rather than the JSON body.
+  return out?.refused === true ? 3 : 0;
 }
 
 process.exit(main(process.argv.slice(2)));

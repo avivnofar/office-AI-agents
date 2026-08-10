@@ -4552,6 +4552,30 @@ export default {
             if (result?.provenance) result.provenance = `[${result.provenance.length} chars — written to ${result.provenancePath}]`;
             break;
           }
+          case 'warehouse_write': {
+            // THE MISSING CALL SITE, closed 2026-08-11. WAREHOUSE_REPO_NAME has
+            // been imported into this file since repo-write.js was split out
+            // (2026-08-07) but no call site ever passed it to commitFileToRepo()
+            // — every one of the ~30 existing call sites targets REPO_NAME or
+            // BACKOFFICE_REPO_NAME. So `code-write-warehouse` in
+            // CAPABILITY-TOOLBOX.md stayed the "deliberately locked twice"
+            // capability (code rule + absent token) right up to the day
+            // WAREHOUSE_REPO_TOKEN was set — and past it, silently, because a
+            // resolved permission with no caller is not a working permission.
+            // This is that caller: narrow, supervised, mirroring design_asset's
+            // shape. Agent 10 (the Architect) is the only agent
+            // capability-manifest.json lists against this capability, and the
+            // Architect is dormant except for owner-directed sessions — this
+            // endpoint is for exactly that, not for autonomous cron dispatch.
+            // Body: { path, content, message, explicitCodeTask? }
+            if (!body.path || typeof body.content !== 'string' || !body.message) {
+              return json({ error: 'warehouse_write_requires_path_content_message' }, 400, origin);
+            }
+            result = await commitFileToRepo(env, WAREHOUSE_REPO_NAME, body.path, body.content, body.message, {
+              explicitCodeTask: body.explicitCodeTask !== false,
+            });
+            break;
+          }
           case 'guide_block': {
             // Supervised Guides test: runs ONE guide handler directly — the
             // SAME functions the cron path dispatches — with the

@@ -368,7 +368,7 @@
         "kind": "module",
         "ref": "workers/permission-guard.js",
         "symbol": "checkCodeWriteAllowed",
-        "caveat": "DELIBERATELY LOCKED, twice. The code rule now reads the destination's own `code_write: true`, so the warehouse exception is enforceable — and WAREHOUSE_REPO_TOKEN is mapped and deliberately UNSET, so the write passes the code rule and is then denied for want of a token. Not a gap. Do not 'fix' it."
+        "caveat": "BOTH LOCKS OPEN 2026-08-11 — the owner set WAREHOUSE_REPO_TOKEN himself. Proved with a real write, not only a resolved permission: workers/agent-runner.js's new `warehouse_write` admin trigger (the first call site that ever passed WAREHOUSE_REPO_NAME to commitFileToRepo() — the import had existed unused since 2026-08-07) committed a real one-line fix to warehouse-office-AI-agents/tasks/office-site/app.js, read back from GitHub as 56e099b. This capability's SUPPLIED verdict was already correct before this date — the audit checks the guard's decision logic and its verifier, not live secret state or the presence of a calling site — so the verdict itself did not change; this caveat is the part that was stale."
       },
       "exercised_by": "scripts/verify-permissions.js",
       "cost": "none",

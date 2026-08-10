@@ -25,20 +25,31 @@
  * nobody can check is a prohibition that decays, and the daily report is where
  * the owner would notice.
  *
- * ── WHAT THIS CANNOT SEE, SAID OUT LOUD ──────────────────────────────────
+ * ── WHAT THIS COULD NOT SEE, 2026-08-06..2026-08-10 ──────────────────────
  *
- * The warehouse. `WAREHOUSE_REPO_TOKEN` is deliberately unset and stays unset
- * (repo-write.js, plan 4.1), so the Worker cannot read that repo at all — and
- * the warehouse is where the night run does most of its building, which makes
- * it the repo most likely to accumulate branches.
+ * The warehouse. `WAREHOUSE_REPO_TOKEN` was deliberately unset (repo-write.js,
+ * plan 4.1), so the Worker could not read that repo at all — and the warehouse
+ * is where the night run does most of its building, which made it the repo
+ * most likely to accumulate branches unseen.
  *
- * That is a REPORTED GAP, not a silent one. `fetchOpenBranches()` returns an
- * explicit `unreadable` entry for it, `renderBranchSection()` prints it, and
+ * That was a REPORTED GAP, not a silent one: `fetchOpenBranches()` returned an
+ * explicit `unreadable` entry for it, `renderBranchSection()` printed it, and
  * `scripts/report-watchdog.mjs` — which runs on the owner's machine with all
- * three checkouts — covers it from the other side. Two mechanisms, each seeing
- * what the other cannot, and each saying which is which. A section that simply
- * omitted the warehouse would read as "the warehouse has no open branches",
- * which is the single most misleading thing this feature could publish.
+ * three checkouts — covered it from the other side. A section that simply
+ * omitted the warehouse would have read as "the warehouse has no open
+ * branches", the single most misleading thing this feature could publish.
+ *
+ * **CORRECTED 2026-08-11 (appended, not edited in place — A15):** the owner
+ * set `WAREHOUSE_REPO_TOKEN` this session — the second lock on the warehouse
+ * code-write exception opening (`config/project-permissions.json`
+ * `code_write_warehouse_2026-08`). `fetchOpenBranches()` reads the token's
+ * presence at request time (`WATCHED_REPOS`'s `expectedUnreadable` field
+ * below), so this repo is now read LIVE, exactly like the other two, with no
+ * code change required — the gap this section described closed itself the
+ * moment the secret was set. `report-watchdog.mjs` remains a second,
+ * independent path (owner's machine, all three checkouts) rather than the
+ * warehouse's only coverage; the two are now redundant on this repo instead
+ * of complementary, which is a safe direction for two mechanisms to drift in.
  *
  * PURE render, network only in `fetchOpenBranches()` — so the verifier can
  * exercise every shape without a token.
@@ -60,9 +71,16 @@ export const WATCHED_REPOS = Object.freeze([
     repo: 'warehouse-office-AI-agents',
     tokenSecret: 'WAREHOUSE_REPO_TOKEN',
     why: 'the workshop — where the night run builds',
-    // Not a bug and not a TODO. The token is unset ON PURPOSE and this field
-    // says so, so a later session does not "fix" it by setting one.
-    expectedUnreadable: 'WAREHOUSE_REPO_TOKEN is deliberately unset (plan 4.1, owner action) and stays unset. Covered instead by scripts/report-watchdog.mjs, which runs on the owner\'s machine.',
+    // CORRECTED 2026-08-11 (appended, not silently edited — A15): the owner
+    // set WAREHOUSE_REPO_TOKEN this session (the second lock on the code-write
+    // exception opening), so `env?.[spec.tokenSecret]` below now reads truthy
+    // and this repo is read LIVE like the other two — `expectedUnreadable`
+    // has not applied since. `report-watchdog.mjs` (the owner's machine) is
+    // no longer this repo's only branch coverage; it is now redundant with
+    // the Worker's own daily report rather than compensating for a gap in it.
+    // Kept as a fallback field, not deleted, in case the token is ever unset
+    // again — a `!token` Worker restart must not read as a new incident.
+    expectedUnreadable: 'WAREHOUSE_REPO_TOKEN is not configured on the Worker, so its branches cannot be listed. (Historically true 2026-08-06..2026-08-10 by deliberate owner choice, plan 4.1 — see PROJECT-SPEC-TABLES.md\'s A7 row for the correction dated 2026-08-11.)',
   },
 ]);
 

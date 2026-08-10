@@ -46,6 +46,23 @@
  * model call. They are enforced where they live; restating them in every prompt
  * would cost tokens to tell an agent about a meeting it is not attending.
  *
+ * ── CORRECTION, 2026-08-11 (appended, not edited in place — A15) ─────────
+ *
+ * "A3... already has its own code" was FALSE the day this file was written.
+ * This module and A3's actual mechanism (`workers/probation.js`,
+ * `probation-review.js`, `context-editor.js`) were both built 2026-08-10, but
+ * this file landed EARLIER that day than "Wire the Learning Loop" — the
+ * session that gave A3 its code. At the moment this sentence was first
+ * committed, A3 governed nothing but the policy document itself; it became
+ * true only once that later session shipped, still the same calendar day.
+ * The instance report a reader loads today is accurate BY COINCIDENCE of
+ * timing, not because the claim was checked against the code that existed
+ * when it was written. Documentation-asserted-capability, the same shape
+ * `docs/CAPABILITY-TOOLBOX.md` names for the Designer and gate-call-audit —
+ * flagged rather than silently reconciled, per this project's own standing
+ * rule. No functional change: A3 is still cut from the digest, correctly,
+ * because it does have its own code now.
+ *
  * Cut SECOND, from the brief shape only: A8's objection procedure and A2's
  * governing principle. Kept in the full shape (meetings and reports) because a
  * meeting is exactly where an objection is raised.
