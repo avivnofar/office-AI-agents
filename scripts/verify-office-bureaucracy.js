@@ -137,7 +137,18 @@ check('BUDGETS.report is the loosest — those two sites make no model call',
 // `deliverables-count` and `questions-headline` outright: an admin was told
 // neither that a deliverable was in the review loop nor that the office had
 // questions open with the owner. Same failure the meeting budget hit twice.
-check('BUDGETS.agent is 520 as measured', officeContext.BUDGETS.agent === 520);
+/*
+ * RAISED 520 -> 880 (admin) and 380 -> 660 (standard) on 2026-08-10 with the
+ * owner channel. Not a loosening: at the old numbers ONE owner message made the
+ * fitter drop `requirements-status` from the standard shape, which is one of the
+ * two things A11 names as universal. Measured curve in office-context.js BUDGETS.
+ *
+ * Pinned to the exact numbers on purpose. A `> 500` style assertion would let
+ * the budget drift upward one convenience at a time, which is how a budget stops
+ * being one.
+ */
+check('BUDGETS.agent is 880 as measured (raised with the owner channel)', officeContext.BUDGETS.agent === 880);
+check('BUDGETS.agent_standard is 660 as measured', officeContext.BUDGETS.agent_standard === 660);
 check('BUDGETS.agent_standard exists and is tighter than the admin one (A11)',
   officeContext.BUDGETS.agent_standard < officeContext.BUDGETS.agent);
 // 3,500 since 2026-08-10 (was 1,200). OB-030 closed: at 1,200 the meeting
@@ -211,6 +222,18 @@ const bigBoard = officeContext.parseBoard(
 check('the big test board parses', bigBoard.ok === true, bigBoard.reason);
 const bigSnap = { fetched_at: Date.now(), board: bigBoard, requirements: reqs, errors: [] };
 const bigAgent = officeContext.buildOfficeContext(bigSnap, 'agent', { agentId: 3 });
+/*
+ * THE ADMIN SHAPE IS WHAT BINDS, and this variable exists because the check
+ * below started passing for the wrong reason on 2026-08-10.
+ *
+ * `bigAgent` has no `clearance`, so A11 treats it as STANDARD and the section
+ * filter removes `board-titles` — the 161-item list this fixture exists to
+ * blow — before the fitter ever sees it. At the old 380 budget the shape still
+ * bound on the agent's OWN ~18 tasks; at 660 it does not, so `trimmed` came back
+ * empty and the shrink-before-drop assertion failed against a shape that had
+ * nothing to shrink. The assertion was right and the fixture had gone slack.
+ */
+const bigAgentAdmin = officeContext.buildOfficeContext(bigSnap, 'agent', { agentId: 3, clearance: 'sudo' });
 const bigMeeting = officeContext.buildOfficeContext(bigSnap, 'meeting');
 const bigReport = officeContext.buildOfficeContext(bigSnap, 'report');
 check(`the fixture (${BIG_BOARD_TASKS} tasks) actually BINDS the meeting budget — a fixture that does not bind makes the ordering check below pass for the wrong reason`,
@@ -219,8 +242,9 @@ check(`the fixture (${BIG_BOARD_TASKS} tasks) actually BINDS the meeting budget 
 check('under a board big enough to bind, report > meeting > agent',
   bigReport.tokens > bigMeeting.tokens && bigMeeting.tokens > bigAgent.tokens,
   `agent=${bigAgent.tokens} meeting=${bigMeeting.tokens} report=${bigReport.tokens}`);
-check('the agent shape still respects its 400-token ceiling under load',
-  bigAgent.tokens <= officeContext.BUDGETS.agent, `${bigAgent.tokens}`);
+check(`the agent shape still respects its ${officeContext.BUDGETS.agent}-token ceiling under load`,
+  bigAgent.tokens <= officeContext.BUDGETS.agent && bigAgentAdmin.tokens <= officeContext.BUDGETS.agent,
+  `standard=${bigAgent.tokens} admin=${bigAgentAdmin.tokens}`);
 check(`the meeting shape still respects its ${officeContext.BUDGETS.meeting}-token ceiling under load`,
   bigMeeting.tokens <= officeContext.BUDGETS.meeting, `${bigMeeting.tokens}`);
 // SHRINK BEFORE DROP. The first version of fitToBudget() only dropped whole
@@ -229,13 +253,16 @@ check(`the meeting shape still respects its ${officeContext.BUDGETS.meeting}-tok
 // and left ~1,050 tokens unused — a full meeting ended up with LESS office
 // context (149 tokens) than a single agent (349). Invisible with the
 // three-task fixture; it would have appeared the first day the board grew.
+check('the admin fixture actually BINDS (a slack fixture makes the next check meaningless)',
+  bigAgentAdmin.trimmed.length > 0 || bigAgentAdmin.dropped.length > 0,
+  `trimmed=${bigAgentAdmin.trimmed.join(',')} dropped=${bigAgentAdmin.dropped.join(',')}`);
 check('a bound shape TRIMS list sections rather than dropping them whole',
-  bigAgent.trimmed.length > 0,
-  `agent trimmed=${JSON.stringify(bigAgent.trimmed)} dropped=${JSON.stringify(bigAgent.dropped)}`);
+  bigAgentAdmin.trimmed.length > 0,
+  `agent trimmed=${JSON.stringify(bigAgentAdmin.trimmed)} dropped=${JSON.stringify(bigAgentAdmin.dropped)}`);
 check('the report shape, being unbound, neither trims nor drops',
   bigReport.trimmed.length === 0 && bigReport.dropped.length === 0);
 check('a trimmed list SAYS it was trimmed — no silent caps',
-  /showing \d+ of \d+/.test(bigAgent.text), bigAgent.text.slice(0, 200));
+  /showing \d+ of \d+/.test(bigAgentAdmin.text), bigAgentAdmin.text.slice(0, 200));
 check('trimming never empties a section below one item (the section survives)',
   /Open work/.test(bigMeeting.text) || bigMeeting.dropped.includes('board-titles'));
 check('even fully squeezed, the agent shape keeps the requirement statuses',

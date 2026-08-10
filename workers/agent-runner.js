@@ -70,6 +70,14 @@ import {
   REPO_OWNER, REPO_NAME, BACKOFFICE_REPO_NAME, WAREHOUSE_REPO_NAME,
   REPO_TO_PROJECT_KEY, REPO_TO_TOKEN_SECRET, secretsPresentIn, commitFileToRepo,
 } from './repo-write.js';
+// The owner channel (2026-08-10, REQ-001). The BASE only — the interface and
+// the visual page over it are the office's work and are on the board.
+import {
+  READ_LOG_PATH, readKey, parseReadLog, renderReadLog, recordOwnerRead, ageQuestions,
+} from './owner-channel.js';
+import {
+  ownerChannelEnabled, notifyOwner, selectNotificationItems, recentFailures, OWNER_ISSUE_LABEL,
+} from './owner-notify.js';
 import { improvementLoopEnabled } from './improvement-loop.js';
 import { architectLiaisonEnabled, processArchitectLiaisonBlock } from './architect-liaison.js';
 import { runChoreRotationSlot } from './chore-runner.js';
@@ -548,6 +556,111 @@ async function fileAssetTaskIssue(env, item, ownerAgentIds) {
     body: `Board item: \`${item.id}\`\nSpec: ${item.spec_file}\n\nSee the spec file for the full goal, schema, and acceptance criteria. Update reports/asset-pipeline/board.json's \`${item.id}\` entry as the work progresses.`,
     labels,
   });
+}
+
+/* ─────────────────────────────── Owner channel ──────────────────────────── */
+
+/**
+ * THE OWNER CHANNEL BLOCK — REQ-001's base, run once a day.
+ *
+ * Two acts, in this order, and the order is the contract:
+ *
+ *   1. **RECORD WHAT WAS READ.** Every owner message whose CONTENT the office
+ *      has no receipt for gets one — in `channel/from-office/READ-LOG.md` (the
+ *      file the owner can open) and in D1 `owner_channel_reads` (the table the
+ *      report queries). The record is the deliverable; see owner-channel.js.
+ *   2. **NOTIFY.** Submissions awaiting a decision, plus any question that has
+ *      climbed the age ladder, go out as one GitHub Issue — and on the weekly
+ *      heartbeat day one goes out even when there is nothing to say.
+ *
+ * ── WHY RECORDING RUNS FIRST, AND WHY A FAILED RECORD DOES NOT STOP IT ──
+ *
+ * If the receipt commit fails, the office has still read the message and must
+ * still act on it. Blocking the notification on the receipt would let a GitHub
+ * hiccup silence the client's channel — which is the failure mode this whole
+ * feature exists to remove, reproduced inside the feature. So a failed receipt
+ * is REPORTED in the block's return value and the notification proceeds.
+ *
+ * ── WHAT THIS BLOCK IS NOT ALLOWED TO DO ────────────────────────────────
+ *
+ * It never writes into `channel/from-owner/`. Not to mark a message read, not
+ * to flip a `status:` line. `channel/README.md`'s one-directory-per-direction
+ * rule holds, and the receipt lives in the office's own directory precisely so
+ * that reading the client's mail never requires writing in his folder.
+ */
+async function processOwnerChannelBlock(env, opts = {}) {
+  const sim = await getSimulationState(env);
+  if (!opts.bypassGate && !(await ownerChannelEnabled(env))) {
+    console.log('[owner-channel] owner_channel_enabled is not true — block is a no-op');
+    return { skipped: true, reason: 'owner_channel_disabled' };
+  }
+
+  const today = todayDateStr();
+
+  // allowFetch: this runs once a day, which is exactly the caller class
+  // getOfficeSnapshot()'s `allowFetch` was written for.
+  const snapshot = await getOfficeSnapshot(env, { allowFetch: true });
+  if (!snapshot) {
+    return { skipped: true, reason: 'office_context_disabled — the owner channel rides on it and does not carry a second switch for the same fact' };
+  }
+
+  const out = { today, recorded: [], receiptCommitted: null, notified: null, errors: [...(snapshot.errors || [])] };
+
+  /* ── 1. the read record ── */
+  const messages = snapshot.owner?.messages || [];
+  const known = new Set((snapshot.owner?.readLog?.records || []).map((r) => r.key));
+  const fresh = messages.filter((m) => !known.has(readKey(m)));
+
+  if (fresh.length) {
+    const rows = [...(snapshot.owner.readLog?.records || [])];
+    for (const m of fresh) {
+      const row = {
+        readAt: new Date().toISOString().replace('T', ' ').slice(0, 16),
+        key: readKey(m),
+        cycle: `owner_channel ${today}`,
+        note: `${m.kind} · ${m.title}`,
+      };
+      rows.push(row);
+      out.recorded.push(row.key);
+      await recordOwnerRead(env, { message: m, cycle: row.cycle, note: row.note });
+    }
+
+    const commit = await commitFileToRepo(
+      env, BACKOFFICE_REPO_NAME, READ_LOG_PATH, renderReadLog(rows),
+      `chore(office): read ${fresh.length} owner message(s) — ${today} [skip ci]`
+    );
+    out.receiptCommitted = commit.committed;
+    if (!commit.committed) {
+      // LOUD, and it does not stop the notification. A lost receipt is a lost
+      // measurement; a silenced client channel is lost work.
+      const reason = `READ RECEIPT NOT WRITTEN — ${commit.reason || 'unknown'}. The office read ${fresh.length} owner message(s) and cannot prove it; they will report as UNREAD until this clears.`;
+      console.error(`[owner-channel] ${reason}`);
+      out.errors.push(reason);
+    }
+  }
+
+  /* ── 2. the notification ── */
+  //
+  // HEARTBEAT DAY = Sunday, the office's first working day. Chosen so a missing
+  // heartbeat is noticed at the START of a week rather than discovered at the
+  // end of one, and so it never lands on Saturday, which A13 makes a rest day.
+  const isHeartbeatDay = new Date(`${today}T00:00:00Z`).getUTCDay() === 0;
+
+  const items = selectNotificationItems({
+    submissions: snapshot.submissions?.submissions || [],
+    questions: ageQuestions(snapshot.questions?.questions || [], today),
+  });
+
+  out.notified = await notifyOwner(env, {
+    postIssue: (e, issue) => fileGitHubIssue(e, REPO_NAME, issue),
+  }, { items, today, isHeartbeatDay, force: !!opts.bypassGate });
+
+  if (out.notified && out.notified.sent === false && !out.notified.skipped) {
+    out.errors.push(`OWNER NOTIFICATION #${out.notified.seq ?? '?'} FAILED — ${out.notified.reason}. The office has NOT reached the client.`);
+  }
+
+  console.log(`[owner-channel] ${today}: ${fresh.length} newly-read message(s), ${items.length} item(s) for the client, notification=${out.notified?.sent ? `sent #${out.notified.seq}` : (out.notified?.reason || 'not sent')}`);
+  return { skipped: false, ...out, paused: !!sim.paused };
 }
 
 /* ────────────────────────────── Guides pipeline ─────────────────────────── */
@@ -2682,6 +2795,10 @@ export async function runWorkDayCycle(env) {
     stats: newStats,
   };
   const scheduleInfo = { schedule, dayOfWeek, batches, toolTask, aiExperience, spareTime, weeklySummary, versionBumps };
+  // A13 rest-day guard — see the fuller comment on the same guard in
+  // finalizeScheduledDay(). Applied HERE TOO even though this whole function is
+  // the documented-non-functional {"type":"day"} path: a rule enforced on one of
+  // two code paths is a rule that comes back the day someone repairs the other.
   // allowFetch: true — the daily summary runs once per cycle, so it is one
   // of the callers permitted to refresh the office-context cache.
   // `projects` added 2026-08-08 — see generateWeeklySummary() for why.
@@ -2694,10 +2811,12 @@ export async function runWorkDayCycle(env) {
     return null;
   });
   const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office, branches);
-  const report = await commitFileToRepo(
-    env, REPO_NAME, `reports/daily/day-${pad(nextDay, 3)}-summary.md`, markdown,
-    `chore(agents): day ${nextDay} summary [skip ci]`
-  );
+  const report = isOffDay
+    ? { committed: false, skipped: true, reason: 'rest_day_zero_write', policy: 'OFFICE-POLICY.md A13' }
+    : await commitFileToRepo(
+      env, REPO_NAME, `reports/daily/day-${pad(nextDay, 3)}-summary.md`, markdown,
+      `chore(agents): day ${nextDay} summary [skip ci]`
+    );
 
   return {
     ...summary, year: newState, standup, sidePlotsStarted: sidePlotStarted, sidePlotUpdates, milestone, milestoneMeeting, monthlyReport, report,
@@ -2812,6 +2931,7 @@ export async function runScheduledBlock(env, israelTime, dayOfWeek) {
       results: {
         toolTask: null, aiExperience: null, standup: null, spareTime: [], weeklySummary: null, versionBumps: [], choreRotation: null,
         guideDraft: null, guideReview: null, guideVerify: null, architectLiaison: null,
+        ownerChannel: null,
       },
     };
   }
@@ -2872,6 +2992,12 @@ export async function runScheduledBlock(env, israelTime, dayOfWeek) {
         cycle.results.guideReview = await processGuideReviewBlock(env, todayDateStr());
       } else if (block.type === 'guide_verify') {
         cycle.results.guideVerify = await processGuideVerifyBlock(env);
+      } else if (block.type === 'owner_channel') {
+        // Self-gating inside the handler, like the guide_* blocks and unlike
+        // architect_liaison's call-site gate. Deliberate: this block's FIRST act
+        // is to establish what the office has read, and a gate that refuses to
+        // enter cannot report that it refused. The handler logs its no-op.
+        cycle.results.ownerChannel = await processOwnerChannelBlock(env);
       } else if (block.type === 'architect_liaison') {
         // INERT BY DEFAULT — the gate is HERE, at the call site, not inside
         // the module. When architectLiaisonEnabled(sim) is false (the
@@ -3008,6 +3134,37 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
     stats: newStats,
   };
   const scheduleInfo = { schedule, dayOfWeek, batches: cycle.batches, toolTask, aiExperience, spareTime, weeklySummary, versionBumps, choreRotation, guideDraft, guideReview, guideVerify };
+  /*
+   * ── A13: SATURDAY IS A REST DAY, AND A REST DAY WRITES NOTHING ──────────
+   *
+   * Added 2026-08-10, and the guard is on the daily-summary commit below.
+   *
+   * `isOffDay` has been a parameter of this function since it was written and
+   * was used for exactly ONE thing — whether to run a milestone meeting. The
+   * summary commit ran unconditionally, so **the office has been committing a
+   * report to the public repo every Saturday**, on a day its own schedule file
+   * described as off. Nobody had looked, because the file said "day off" and the
+   * argument that would have contradicted it was sitting unused in the signature.
+   *
+   * OFFICE-POLICY A13, owner-approved 2026-08-10: *"Saturday is a rest day. Not
+   * for token saving — that is solved elsewhere — but as a safety floor: a day
+   * with no automated writing is a day accumulating error stops."* A summary
+   * saying nothing happened is still automated writing, and it is exactly the
+   * kind that accumulates without anyone reading it.
+   *
+   * ── WHAT STILL RUNS ON SATURDAY, AND WHY IT IS NOT A WRITE ──────────────
+   *
+   * persistYearState() above, which advances the day counter. That is not
+   * authorship and must not be skipped: a Saturday that does not advance the day
+   * opens Sunday on a stale day number, which is a worse failure than the one
+   * A13 guards against. The line is "does this produce a document nobody
+   * reviewed", not "does this touch storage".
+   *
+   * The markdown is still RENDERED. It costs nothing — renderDailySummary() is a
+   * string template with no model call — and it keeps the off-day path
+   * exercising the same code every other day runs, so a renderer that breaks on
+   * an idle day fails on Saturday rather than waiting for Sunday to reveal it.
+   */
   // allowFetch: true — the daily summary runs once per cycle, so it is one
   // of the callers permitted to refresh the office-context cache.
   // `projects` added 2026-08-08 — see generateWeeklySummary() for why.
@@ -3020,10 +3177,12 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
     return null;
   });
   const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office, branches);
-  const report = await commitFileToRepo(
-    env, REPO_NAME, `reports/daily/day-${pad(nextDay, 3)}-summary.md`, markdown,
-    `chore(agents): day ${nextDay} summary [skip ci]`
-  );
+  const report = isOffDay
+    ? { committed: false, skipped: true, reason: 'rest_day_zero_write', policy: 'OFFICE-POLICY.md A13' }
+    : await commitFileToRepo(
+      env, REPO_NAME, `reports/daily/day-${pad(nextDay, 3)}-summary.md`, markdown,
+      `chore(agents): day ${nextDay} summary [skip ci]`
+    );
 
   return {
     ...summary, year: newState, standup, sidePlotsStarted: sidePlotStarted, sidePlotUpdates, milestone, milestoneMeeting, monthlyReport, report,
@@ -3394,6 +3553,52 @@ export default {
             // scheduled guide_draft/guide_review/guide_verify blocks are
             // logged no-ops.
             result = await updateSimulationState(env, { guides_enabled: !!body.enabled });
+            break;
+          case 'owner_channel_toggle':
+            // The owner channel's kill switch (workers/owner-notify.js
+            // ownerChannelEnabled()). Body: { enabled: true|false }. While off
+            // or absent — the code default — the daily owner_channel block is a
+            // logged no-op: no receipt is written and no Issue is filed.
+            result = await updateSimulationState(env, { owner_channel_enabled: !!body.enabled });
+            break;
+          case 'owner_channel_status': {
+            // Read-back, NO model calls and NO Issue. Answers the three
+            // questions a documented switch state cannot (OB-040): is it on,
+            // what has the office failed to send, and what is waiting on the
+            // client right now.
+            const snapshot = await getOfficeSnapshot(env, { allowFetch: true });
+            const today = todayDateStr();
+            const aged = ageQuestions(snapshot?.questions?.questions || [], today);
+            result = {
+              owner_channel_enabled: await ownerChannelEnabled(env),
+              office_context_enabled: await officeContextEnabled(env),
+              issue_label: OWNER_ISSUE_LABEL,
+              today,
+              heartbeat_day: new Date(`${today}T00:00:00Z`).getUTCDay() === 0,
+              owner_messages: snapshot?.owner?.classified?.counts || null,
+              owner_messages_malformed: snapshot?.owner?.malformed || [],
+              read_records: (snapshot?.owner?.readLog?.records || []).length,
+              submissions: snapshot?.submissions?.counts || null,
+              questions_risen: aged.filter((q) => q.open && q.escalation?.headline)
+                .map((q) => `${q.id} [${q.escalation.rung}, ${q.escalation.days}d]`),
+              would_notify: selectNotificationItems({
+                submissions: snapshot?.submissions?.submissions || [],
+                questions: aged,
+              }).map((i) => `${i.id} — ${i.title}`),
+              // THE LOUD HALF. A failed notification stays visible here until it
+              // clears, because a channel that only reports its successes is the
+              // incumbent this one replaced.
+              recent_failures: await recentFailures(env),
+              errors: snapshot?.errors || [],
+            };
+            break;
+          }
+          case 'owner_channel_block':
+            // Supervised single run with the gate bypassed — the same pattern
+            // `guide_block` uses, and for the same reason: {"type":"block"} at
+            // the scheduled time would also fire that tick's other blocks.
+            // THIS FILES A REAL ISSUE AND WRITES A REAL RECEIPT.
+            result = await processOwnerChannelBlock(env, { bypassGate: true });
             break;
           case 'architect_liaison_toggle':
             // Architect-liaison kill switch (see workers/architect-liaison.js

@@ -67,6 +67,17 @@ import { parseInFlight, inFlightSections } from './deliverable-lifecycle.js';
  * load this module and the verifiers still exercise the real code.
  */
 import { buildPolicyBlock, parsePolicy, POLICY_PATH } from './office-policy.js';
+/*
+ * The THIRD import, added 2026-08-10 with the owner channel. Same test as the
+ * other two, and it was checked rather than assumed: `owner-channel.js` imports
+ * nothing at all, so plain `node` still loads this module and the verifiers
+ * still exercise the real code.
+ */
+import {
+  OWNER_DIR, READ_LOG_PATH, SUBMISSIONS_PATH,
+  parseOwnerMessage, parseReadLog, classifyOwnerMessages, ownerMessageSections,
+  parseSubmissions, submissionSections, ageQuestions,
+} from './owner-channel.js';
 
 /**
  * Local token estimate — NOT imported from provider-common.js, deliberately.
@@ -192,7 +203,67 @@ export const BUDGETS = Object.freeze({
    * That is the figure OB-030 asked for and it does not bind. What binds is the
    * fitter, which still runs and still reports what it cut.
    */
-  agent: 520,
+  agent: 880,
+  /**
+   * ── RAISED AGAIN 520 -> 880 / 380 -> 660 ON 2026-08-10, WITH THE OWNER
+   *    CHANNEL. MEASURED, AND THE FIRST MEASUREMENT WAS A REGRESSION. ──────
+   *
+   * The owner channel puts the client's own messages into every agent prompt at
+   * `headline` priority. At the previous numbers, ONE owner message of ordinary
+   * length caused the fitter to drop — from the STANDARD shape —
+   * `requirements-status`, `board-counts`, `own-tasks` and `questions-headline`.
+   *
+   * **`requirements-status` is one of the two things A11 names as universal:**
+   * *"Everyone sees the client requirements and this policy. Nobody can obey
+   * what they cannot see."* So the first cut of this feature made an agent
+   * unable to see the requirements in order to show it the owner — which is the
+   * same rule being satisfied and violated in one render, and it is exactly the
+   * failure this block has now recorded four times: **the percentage was never
+   * the number that mattered; what the fitter had to cut to reach it is.**
+   *
+   * ── THE CURVE, MEASURED against the live 46-task board, the live
+   *    requirements file, the live questions file, and 0 / 1 / 3 owner
+   *    messages (2026-08-10) ────────────────────────────────────────────────
+   *
+   *     standard  380 -> drops requirements-status, board-counts, own-tasks,
+   *                      questions-headline (the A11 floor)
+   *               520 -> drops questions-headline, own-tasks
+   *               600 -> drops questions-headline
+   *               660 -> NOTHING DROPPED at 0, 1 and 3 messages (647 / 652)
+   *
+   *     admin     520 -> drops board-stuck, requirements-detail, board-titles,
+   *                      submissions-count, questions-open, questions-headline
+   *               700 -> still drops questions-open
+   *               880 -> 0 msgs: NOTHING dropped (854). 1 msg: 877, drops only
+   *                      board-stuck and requirements-detail. 3 msgs: 831,
+   *                      also drops board-titles.
+   *
+   * **880 does not clear the three-message case, and that is deliberate rather
+   * than an oversight** — the same call the meeting budget made about three
+   * deliverables in flight. A budget that grows with however much the client has
+   * written is not a budget; what it must never do is drop the rule's own
+   * content, and at 880 what it drops is the office's recitation of itself.
+   *
+   * ── THE HONEST ACCOUNTING, BECAUSE THE RAISE BUYS MORE THAN ONE THING ───
+   *
+   * Two-thirds of this raise is NOT paying for owner messages. At 520 the admin
+   * shape was already dropping four sections with no owner message present; at
+   * 880 it drops none. So the feature exposed a budget that had been quietly too
+   * small and the raise fixes both at once. Saying "this is the cost of the
+   * owner channel" would be a number a later session could not reproduce.
+   *
+   * ── THE PER-DAY COST, MEASURED RATHER THAN FEARED ───────────────────────
+   *
+   * ~150 agent model calls a day (21 cron ticks, `computeDailyQuestionVolume()`
+   * caps the day near 100 questions, some carrying follow-ups). ~330 extra
+   * tokens × 150 calls = **~50,000 additional input tokens per day**, spread
+   * across Groq, Cloudflare Workers AI and Gemini — **all on free tiers whose
+   * limits are counted in REQUESTS, not tokens.** The one lane that meters
+   * tokens (Cerebras, 131,000 per request) is not on this path. That is the
+   * same argument the 400 -> 520 raise made, at three times the size, and it
+   * still does not bind. What binds is the fitter, which still runs and still
+   * reports what it cut.
+   */
   /**
    * ── A11 RANK FILTERING, ADDED 2026-08-10 ────────────────────────────────
    *
@@ -249,7 +320,7 @@ export const BUDGETS = Object.freeze({
    * enforced only by a budget stops being enforced the next time the budget
    * moves, and this one moved twice in the week before it was written.
    */
-  agent_standard: 380,
+  agent_standard: 660,
   report: 8000,
 });
 
@@ -306,12 +377,42 @@ export function isAdminClearance(clearance) {
  */
 export const STANDARD_SECTIONS = Object.freeze([
   'headline',
+  /*
+   * ── THE OWNER'S MESSAGES REACH EVERY RANK, IN FULL (2026-08-10) ────────
+   *
+   * This is the one addition to this list that is NOT a headline-or-count
+   * compromise, and the reason is A11's own carve-out rather than an
+   * exception to it: *"Everyone sees the client requirements and this policy.
+   * Nobody can obey what they cannot see."*
+   *
+   * An owner message is the client saying what he wants — the same class of
+   * thing as a client requirement, arriving by a faster route. A11 withholds
+   * the office's recitations about ITSELF (the board, the deliverable picture,
+   * the projects list) from regular agents so that a meeting still teaches
+   * something. It does not withhold instructions, and a rank rule that
+   * filtered the client's own words would be a rank rule deciding who has to
+   * obey him.
+   *
+   * The body is still abridged for the `agent` shape — see
+   * owner-channel.js bodyForShape() — but that is a BUDGET decision applied
+   * identically to admins and standard agents, and it says it is abridged.
+   * Rank decides nothing here.
+   */
+  'owner-messages-count',
+  'owner-messages',
   'own-tasks',
   'own-review',
   'board-counts',
   'requirements-headline',
   'requirements-status',
   'questions-headline',
+  /*
+   * The COUNT only. A standard agent needs to know the office already has
+   * three submissions in front of the client — the same anti-duplication
+   * argument `questions-headline` carries — and does not need the entries.
+   * Composing a submission is an admin act under A8.
+   */
+  'submissions-count',
   'deliverables-count',
   'errors',
 ]);
@@ -753,22 +854,81 @@ async function fetchBackOfficeFile(env, filePath) {
 }
 
 /**
- * Fetches and parses both back-office sources. Returns a snapshot object that
+ * Lists a back-office DIRECTORY. The first directory read this module has ever
+ * needed, and it exists for exactly one reason: the owner writes one file per
+ * message and cannot be asked to maintain an index of them.
+ *
+ * ── THE COST, MEASURED AND REPORTED RATHER THAN ABSORBED ─────────────────
+ *
+ * Every other source here is ONE GET for a known path. `channel/from-owner/` is
+ * a listing plus one GET per message, so a snapshot refresh costs
+ * `5 + 1 + N + 1` GitHub requests where N is the number of owner messages —
+ * against 5 before. At the cap below that is a worst case of 19 requests per
+ * refresh, and a refresh happens at most every CACHE_TTL_MS (30 minutes) and
+ * only from the handful of callers that pass `allowFetch`. The per-LLM-call
+ * agent path never fetches at all, which is the number that would have mattered.
+ *
+ * ── WHY THE OWNER IS NOT ASKED FOR AN INDEX FILE ─────────────────────────
+ *
+ * It would collapse this to one GET. It would also be a NEW HABIT, and
+ * criterion 1 of OB-023 — the owner's own, listed first — is that he must not
+ * have to acquire one. He writes a file from his phone; that is the whole
+ * interaction the channel is allowed to require. Spending fourteen HTTP
+ * requests every half hour to avoid asking him to maintain a table of contents
+ * is the correct trade and it is not close.
+ */
+async function fetchBackOfficeDir(env, dirPath) {
+  const url = `https://api.github.com/repos/${BACKOFFICE_REPO_OWNER}/${BACKOFFICE_REPO_NAME}/contents/${dirPath}`;
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'data-center-agent-sim',
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${env.BACKOFFICE_REPO_TOKEN}`,
+    },
+  }).catch((err) => ({ ok: false, status: 0, _err: err?.message }));
+
+  if (!res?.ok) return { entries: null, reason: `GET ${dirPath}/ failed: HTTP ${res?.status ?? 'network error'}` };
+  const body = await res.json().catch(() => null);
+  if (!Array.isArray(body)) return { entries: null, reason: `${dirPath}/: Contents API did not return a directory listing` };
+  return { entries: body, reason: null };
+}
+
+/**
+ * How many owner messages are fetched in one refresh.
+ *
+ * A cap is necessary — an unbounded directory is an unbounded number of
+ * subrequests, and Cloudflare's per-invocation limit is a real ceiling this
+ * project has already hit once (`{"type":"day"}`, 2026-07-19).
+ *
+ * **The cap is not silent.** `renderSection()`'s NO SILENT CAPS rule applies
+ * with more force to an owner instruction than to anything else this module
+ * renders: a truncated list of the client's own messages that does not say it
+ * was truncated is the office believing it has read everything he wrote. When
+ * the cap bites, the overflow is reported as an ERROR, not a note — it lands in
+ * the errors section and rides in every prompt until it clears.
+ */
+const MAX_OWNER_MESSAGES = 12;
+
+/**
+ * Fetches and parses every back-office source. Returns a snapshot object that
  * is safe to cache and safe to render — including when it failed, because the
  * failure is data too.
  */
-export async function fetchOfficeSnapshot(env) {
+export async function fetchOfficeSnapshot(env, { today = new Date().toISOString().slice(0, 10) } = {}) {
   if (!env?.BACKOFFICE_REPO_TOKEN) {
-    return { fetched_at: Date.now(), board: null, requirements: null, questions: null, lifecycle: null, policy: null, errors: ['BACKOFFICE_REPO_TOKEN is not configured — office context cannot be read'] };
+    return { fetched_at: Date.now(), board: null, requirements: null, questions: null, lifecycle: null, policy: null, owner: null, submissions: null, errors: ['BACKOFFICE_REPO_TOKEN is not configured — office context cannot be read'] };
   }
 
   const errors = [];
-  const [boardFile, reqFile, questionsFile, lifecycleFile, policyFile] = await Promise.all([
+  const [boardFile, reqFile, questionsFile, lifecycleFile, policyFile, submissionsFile, ownerDir, readLogFile] = await Promise.all([
     fetchBackOfficeFile(env, BOARD_PATH),
     fetchBackOfficeFile(env, REQUIREMENTS_PATH),
     fetchBackOfficeFile(env, QUESTIONS_PATH),
     fetchBackOfficeFile(env, LIFECYCLE_PATH),
     fetchBackOfficeFile(env, POLICY_PATH),
+    fetchBackOfficeFile(env, SUBMISSIONS_PATH),
+    fetchBackOfficeDir(env, OWNER_DIR),
+    fetchBackOfficeFile(env, READ_LOG_PATH),
   ]);
 
   let board = null;
@@ -841,7 +1001,89 @@ export async function fetchOfficeSnapshot(env) {
     else errors.push(`policy parse failed: ${parsed.reason}`);
   }
 
-  return { fetched_at: Date.now(), board, requirements, questions, lifecycle, policy, errors };
+  /*
+   * ── THE OWNER'S OWN MESSAGES (added 2026-08-10) ────────────────────────
+   *
+   * A 404 on the DIRECTORY is the healthy empty state — the same rule the
+   * questions channel and the lifecycle digest already keep. Any other failure
+   * is LOUD, and louder than those two: "the office cannot read what the client
+   * wrote" is not a degraded nicety, it is the channel being down.
+   */
+  let owner = null;
+  if (ownerDir.reason) {
+    if (!/HTTP 404/.test(ownerDir.reason)) {
+      errors.push(`${ownerDir.reason} — THE OWNER CHANNEL IS UNREADABLE. Anything the client has written is invisible to the office right now.`);
+    } else {
+      owner = { ok: true, messages: [], classified: classifyOwnerMessages([], { byKey: new Map() }), malformed: [] };
+    }
+  } else {
+    const files = ownerDir.entries
+      .filter((e) => e.type === 'file' && /\.md$/i.test(e.name) && e.name.toUpperCase() !== 'README.MD')
+      .sort((a, b) => String(b.name).localeCompare(String(a.name)));
+
+    const capped = files.slice(0, MAX_OWNER_MESSAGES);
+    if (files.length > capped.length) {
+      errors.push(
+        `${OWNER_DIR}/ holds ${files.length} messages and only the ${capped.length} most recent were read this cycle`
+        + ` (MAX_OWNER_MESSAGES=${MAX_OWNER_MESSAGES}). ${files.length - capped.length} of the client's messages are NOT in this context.`
+        + ' Reported as an error rather than a note: a silently truncated list of the client\'s own instructions is the office believing it has read everything he wrote.'
+      );
+    }
+
+    const fetched = await Promise.all(capped.map((f) => fetchBackOfficeFile(env, `${OWNER_DIR}/${f.name}`)));
+    const messages = [];
+    const malformed = [];
+    capped.forEach((f, i) => {
+      if (fetched[i].reason) { errors.push(fetched[i].reason); return; }
+      const parsed = parseOwnerMessage(fetched[i].text, f.name, f.sha);
+      if (parsed.ok) messages.push(parsed.message);
+      else malformed.push(parsed.reason);
+    });
+
+    // The read log's ABSENCE is healthy — no owner message has ever been read.
+    // Its being UNREADABLE for any other reason is not, and it is loud, because
+    // an unreadable log makes every message look UNREAD and the office would
+    // re-record reads it had already made.
+    let readLog = { ok: true, records: [], byKey: new Map() };
+    if (readLogFile.reason) {
+      if (!/HTTP 404/.test(readLogFile.reason)) {
+        errors.push(`${readLogFile.reason} — the read record could not be read, so every owner message below will report as NOT YET READ even if it was.`);
+      }
+    } else {
+      readLog = parseReadLog(readLogFile.text);
+    }
+
+    // NOTE `readLog.records`, not `readLog`. The snapshot is JSON-serialised into
+    // SIM_KV, and parseReadLog()'s `byKey` is a Map — which survives that round
+    // trip as `{}`. Storing it would give the daily block an empty index that
+    // LOOKED populated, so every message would re-record as newly read. The
+    // classification is already computed here, where the Map is real.
+    owner = { ok: true, messages, classified: classifyOwnerMessages(messages, readLog), readLog: { records: readLog.records }, malformed };
+  }
+
+  /*
+   * ── SUBMISSIONS (added 2026-08-10) ─────────────────────────────────────
+   *
+   * 404 is healthy, exactly as for OPEN-QUESTIONS.md: the office may
+   * legitimately have nothing awaiting a decision.
+   *
+   * `today` is passed IN rather than read from the clock here so the verifier
+   * can pin a date and assert a rung. The rung is therefore computed at PARSE
+   * time and cached with the snapshot for up to CACHE_TTL_MS (30 minutes) —
+   * which can only be wrong within half an hour of a day boundary, on a ladder
+   * whose steps are 3, 7 and 14 days. Stated rather than left to be discovered.
+   */
+  let submissions = null;
+  if (submissionsFile.reason) {
+    if (!/HTTP 404/.test(submissionsFile.reason)) errors.push(submissionsFile.reason);
+    else submissions = { ok: true, submissions: [], counts: { total: 0, open: 0, closed: 0, escalated: 0, overdue: 0 }, malformed: [] };
+  } else {
+    const parsed = parseSubmissions(submissionsFile.text, today);
+    if (parsed.ok) submissions = parsed;
+    else errors.push(`submissions parse failed: ${parsed.reason}`);
+  }
+
+  return { fetched_at: Date.now(), today, board, requirements, questions, lifecycle, policy, owner, submissions, errors };
 }
 
 /* ──────────────────────────────── Rendering ───────────────────────────── */
@@ -1013,8 +1255,25 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
      * changed is that the failure no longer takes the rules down with it.
      */
     const policyOnly = buildPolicyBlock(shape === 'agent' ? 'brief' : 'full', { parsed: snapshot?.policy || null });
+    /*
+     * ── AND THE OWNER'S MESSAGES SURVIVE HERE TOO (2026-08-10) ────────────
+     *
+     * Exactly the argument the policy block above makes, applied to the other
+     * thing an agent must never lose to a network blip. If the board read fails
+     * and the owner channel read succeeded, returning policy alone would drop
+     * the client's own instruction on the ground — and it would do it silently,
+     * because `degraded: true` reads as "the office's own work is incomplete",
+     * not as "the client told us something and you were not shown it".
+     *
+     * Rendered raw rather than through fitToBudget(): there is nothing here to
+     * balance it against, and an instruction trimmed to fit a budget it is the
+     * only occupant of would be a trim for its own sake.
+     */
+    const ownerOnly = snapshot?.owner?.classified
+      ? ownerMessageSections(snapshot.owner.classified, { shape }).map(renderSection).filter(Boolean).join('\n')
+      : '';
     return {
-      text: policyOnly.text,
+      text: ownerOnly ? `${policyOnly.text}\n\n${ownerOnly}` : policyOnly.text,
       degraded: true,
       reason: errors.length ? errors.join(' | ') : 'no office snapshot available',
       tokens: 0,
@@ -1033,6 +1292,26 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
     priority: PRIORITY.headline,
     text: 'THE OFFICE\'S OWN WORK (not the case pipeline). This is real work the office is accountable for.',
   });
+
+  /*
+   * ── THE OWNER'S MESSAGES GO FIRST, AND FIRST IS NOT DECORATION ──────────
+   *
+   * Pushed here — before the requirements, before the board — because
+   * `fitToBudget()` breaks ties among equal priorities by INDEX, dropping the
+   * later one. Everything in this block sits at PRIORITY.headline alongside the
+   * requirements headline and the deliverables count, so position is what
+   * decides which of them survives a squeeze. The client's own instruction
+   * should be the last thing standing, so it is pushed first.
+   *
+   * That is the same mechanism the `deliverables-count` comment below records
+   * being MEASURED into its slot. Position among equal priorities is load-bearing
+   * in this function and is not stylistic ordering.
+   */
+  if (snapshot?.owner?.classified) {
+    for (const s of ownerMessageSections(snapshot.owner.classified, { shape })) {
+      sections.push({ ...s, priority: PRIORITY.headline });
+    }
+  }
 
   if (requirements) {
     const urgentCount = requirements.requirements.filter((r) => r.urgent).length;
@@ -1113,8 +1392,27 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
   // a DIFFERENT fact from "the channel could not be read", which lands in the
   // errors section instead.
   if (questions) {
-    const open = questions.questions.filter((q) => q.open);
+    /*
+     * ── THE AGE LADDER, APPLIED HERE RATHER THAN IN THE PARSER ───────────
+     *
+     * A8: *"keeps surfacing the question until it is answered [...] a question
+     * asked once and forgotten is the graveyard this rule exists to prevent."*
+     *
+     * An entry that renders identically on day 1 and day 40 IS forgotten,
+     * whatever the file says about it. `ageQuestions()` gives each open entry a
+     * rung, and a risen entry is re-pushed at `headline` priority below — so the
+     * older a question gets, the harder it becomes for the budget fitter to make
+     * it disappear. The re-surfacing is not a reminder someone sends; it is a
+     * property of how the prompt is assembled.
+     *
+     * Applied at RENDER time, not parse time, so the rung follows the calendar
+     * rather than the cache.
+     */
+    const today = opts.today || snapshot?.today || new Date().toISOString().slice(0, 10);
+    const aged = ageQuestions(questions.questions, today);
+    const open = aged.filter((q) => q.open);
     const closed = questions.counts.closed;
+    const risenQuestions = open.filter((q) => q.escalation?.headline);
     /*
      * TWO WIDTHS, ONE FACT. The long form is instruction for whoever COMPOSES
      * an entry — a meeting, a report, an admin — and it costs ~150 tokens. The
@@ -1147,8 +1445,46 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
         label: 'questions-open',
         priority: QUESTIONS_PRIORITY,
         header: 'Already asked and still open',
-        items: open.map((q) => `- ${q.id} (${q.askedBy}, ${q.date || 'undated'}) ${q.question} — blocking: ${firstFew(q.blocking) || 'unstated'} — on silence: ${firstSentence(q.fallback)}`),
+        items: open.map((q) => `- ${q.id} [${q.escalation.rung}${q.escalation.days === null ? ', DATE UNREADABLE' : `, ${q.escalation.days}d`}] (${q.askedBy}, ${q.date || 'undated'}) ${q.question} — blocking: ${firstFew(q.blocking) || 'unstated'} — on silence: ${firstSentence(q.fallback)}`),
       });
+    }
+    /*
+     * A SECOND SECTION for the risen entries, at `headline`, rather than simply
+     * re-ordering the one above. Two reasons, and the second is the load-bearing
+     * one:
+     *
+     *   1. `questions-open` sits at `status` and is shrinkable — the fitter takes
+     *      it down to one item on a busy day, and which item survives is an
+     *      artefact of array order.
+     *   2. An OVERDUE entry must survive a trim that a fresh one does not. Same
+     *      priority for both would make ageing purely cosmetic, and the whole
+     *      point of the ladder is that visibility CHANGES.
+     *
+     * The duplication between the two sections for a risen entry is deliberate
+     * and cheap: seeing an escalated question twice in a prompt is the intended
+     * effect of "keeps surfacing", not a rendering bug.
+     */
+    if (risenQuestions.length) {
+      sections.push({
+        label: 'questions-overdue',
+        priority: PRIORITY.headline,
+        header: 'ASKED AND NOT ANSWERED — these have been waiting and they do not go quiet',
+        items: risenQuestions.map((q) => `- ${q.id} [${q.escalation.rung}${q.escalation.days === null ? ', DATE UNREADABLE — rung forced to the top, because an entry whose age cannot be established must never look fresh' : `, ${q.escalation.days} days unanswered`}] ${q.question}`
+          + ` — ${q.escalation.takeFallback ? 'THE FALLBACK HAS BEEN TAKEN and the question is STILL OPEN and still being asked' : 'on silence'}: ${firstSentence(q.fallback)}`),
+      });
+    }
+  }
+
+  // ── SUBMISSIONS TO THE CLIENT (added 2026-08-10) ───────────────────────
+  //
+  // A8 draws the line this section renders: *the owner receives finished work,
+  // not questions.* A submission and a question are therefore different acts
+  // and are shown as different things — a meeting handed one blob treats them
+  // alike and then wonders why the client is being asked things rather than
+  // shown things.
+  if (snapshot?.submissions) {
+    for (const s of submissionSections(snapshot.submissions, { shape })) {
+      sections.push({ ...s, priority: s.priority === 0 ? PRIORITY.headline : PRIORITY.status });
     }
   }
 
@@ -1364,7 +1700,7 @@ export async function getOfficeSnapshot(env, { allowFetch = false } = {}) {
   return snapshot;
 }
 
-export async function getOfficeContext(env, { shape = 'agent', agentId = null, clearance = null, allowFetch = false, snapshot: given = undefined, projects = [], agentNames = {} } = {}) {
+export async function getOfficeContext(env, { shape = 'agent', agentId = null, clearance = null, allowFetch = false, snapshot: given = undefined, projects = [], agentNames = {}, today = undefined } = {}) {
   /*
    * THE POLICY HAS NO SWITCH OF ITS OWN, deliberately — the same decision
    * deliverable-lifecycle.js took on 2026-08-10 and for the same reason. It
@@ -1388,7 +1724,7 @@ export async function getOfficeContext(env, { shape = 'agent', agentId = null, c
   // have rendered names since the lifecycle landed. Threaded through 2026-08-10
   // while the signature was being changed anyway; it is a legibility fix, not a
   // behaviour change — the ids were correct, they were just harder to read.
-  const built = buildOfficeContext(snapshot, shape, { agentId, clearance, projects, agentNames });
+  const built = buildOfficeContext(snapshot, shape, { agentId, clearance, projects, agentNames, today });
   if (built.degraded) {
     console.warn(`[office-context] degraded (${shape}): ${built.reason}`);
   }
@@ -1406,6 +1742,11 @@ export async function getOfficeContext(env, { shape = 'agent', agentId = null, c
     ...(snapshot?.questions?.malformed || []),
     ...(snapshot?.lifecycle?.malformed || []),
     ...(snapshot?.policy?.malformed || []),
+    // An unreadable OWNER message is the most serious entry this list can carry
+    // — it is the client's own words failing to reach the office — so it is
+    // prefixed rather than left to look like one more parse note.
+    ...((snapshot?.owner?.malformed || []).map((r) => `OWNER MESSAGE UNREADABLE — ${r}`)),
+    ...(snapshot?.submissions?.malformed || []),
   ];
   if (malformed.length) {
     console.warn(`[office-context] ${shape} built from UNREADABLE input — ${malformed.join(' | ')}`);

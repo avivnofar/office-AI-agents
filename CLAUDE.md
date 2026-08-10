@@ -8,8 +8,9 @@
 > of its own; what follows is the honest index of what it does not know, so a
 > reader stops trusting the omissions.
 >
-> **Eight production modules exist that this file never mentions.** Every one is
-> live, and several are the office's core loop today:
+> **TEN production modules exist that this file never mentions** (eight when this
+> block was written on 2026-08-10; two more landed the same day with the owner
+> channel). Every one is live, and several are the office's core loop today:
 >
 > | Module | What it is |
 > |---|---|
@@ -21,6 +22,8 @@
 > | `workers/architect-liaison.js` | files an unattended Architect session into D1 so the office can see the night happened. Switch `architect_liaison_enabled`, **live ON** |
 > | `workers/meeting-decisions.js` | meeting action items → the board's inbox. Switch `action_items_to_board_enabled`, **live ON** |
 > | `workers/task-router.js` | task-type routing. Switch `routing_enabled` — **LIVE ON since 2026-08-10.** This row used to read "absent = OFF — the one below that is still what this file says it is". That is no longer true: all seven switches now read back ON. |
+> | `workers/owner-channel.js` | **(2026-08-10)** REQ-001's base — **the owner↔office channel**. Parses `channel/from-owner/` (his messages, which **outrank the delegation board** and reach every rank in full), writes the **read record** that separates *unread* from *read-and-ignored* by keying on message id **and content SHA**, parses `channel/to-owner/SUBMISSIONS.md`, and holds the four-rung **age ladder** that stops an unanswered entry going quiet. Pure — imports nothing. Rides on `office_context_enabled` |
+> | `workers/owner-notify.js` | **(2026-08-10)** the hop that reaches him: one GitHub Issue a day plus a **Sunday heartbeat sent even when there is nothing to report** — which is the only mechanism that makes silence informative. **This is NOT the gap-digest Issue path the 2026-07-18 rebuild banned**; that rule is about machine-generated gap reports, this is owner-approved correspondence, labelled `owner-channel`. Switch `owner_channel_enabled`, **code default OFF** |
 > | `workers/deliverable-lifecycle.js` | **(2026-08-10)** what happens to a deliverable AFTER it is built: eight stages, one forward exit, and that exit is the **CEO**. Build → admin review → gaps to a **meeting** → discussion and a **binding vote** → improvement round → back to review → … → CEO approval. **No cap on rounds**; a deliverable going round without converging is a *finding*, not a reason to stop or to ship. Pure — imports nothing. **No switch of its own**, deliberately: it rides on `office_context_enabled`, which is ON. Its writer is `scripts/lifecycle.mjs`; its record lives in `warehouse-office-AI-agents/tasks/<slug>/STATE.json` and **the Worker cannot write it — `WAREHOUSE_REPO_TOKEN` is deliberately unset and this design does not need it.** |
 >
 > **The two claims in this file most likely to mislead:**

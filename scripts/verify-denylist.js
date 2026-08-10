@@ -281,10 +281,17 @@ console.log('  PROVEN LIVE       (2026-08-10, recorded in DENYLIST-PROOF.md §1)
 console.log('                    the inline --disallowedTools list IS enforced under');
 console.log('                    --dangerously-skip-permissions, and the prefix matches');
 console.log('                    at a TOKEN BOUNDARY (a hyphen defeats it, a space does not).');
-console.log('  STILL OPEN:       whether .claude/settings.json participates in that');
-console.log('                    enforcement. The probe was refused by a session\'s own');
-console.log('                    classifier and not routed around — DENYLIST-PROOF.md §3a');
-console.log('                    is written for the owner to run. Two echo commands.');
+console.log('  PROVEN LIVE       (2026-08-10, §3a AND its §3b control, run by the owner):');
+console.log('                    .claude/settings.json does NOT enforce under');
+console.log('                    --dangerously-skip-permissions. BOTH the probe and the');
+console.log('                    control echoed, so the negative result is real.');
+console.log('                    => the inline --disallowedTools list is the ENTIRE');
+console.log('                    barrier. There is no second layer, and the settings');
+console.log('                    file must NOT be counted as one.');
+console.log('  STILL OPEN:       the wrapper\'s own inline list still carries the two');
+console.log('                    prefix gaps §2 demonstrates. The exact replacement is');
+console.log('                    DENYLIST-PROOF.md §4; the wrapper belongs to the');
+console.log('                    Architect chat and is boarded for them as OB-053.');
 if (skipped) console.log('\n  A SKIP IS NOT A PASS.');
 if (fail) {
   console.log('\n  FAILED:');

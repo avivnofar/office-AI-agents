@@ -227,11 +227,34 @@ check('Friday: guide_draft at 10:30 (after the Friday report block)',
   dailySchedule.friday_schedule.blocks.findIndex((b) => b.time === '10:30' && b.type === 'guide_draft'));
 check('Friday: guide_review at 12:00', hasBlock(dailySchedule.friday_schedule, '12:00', 'guide_review'));
 
-check('Saturday: guide_verify at 08:00', hasBlock(dailySchedule.saturday_schedule, '08:00', 'guide_verify'));
-check('Saturday schedule label documents the "no longer zero-API-calls" reality',
-  /guide|verif/i.test(dailySchedule.saturday_schedule.label));
-check('week_mapping Saturday entry no longer claims a blanket "no Gemini/Claude calls"',
-  !/Saturday \(off — idle only, no Gemini\/Claude calls\)/.test(dailySchedule._meta.week_mapping['7']));
+/*
+ * ── guide_verify MOVED OFF SATURDAY, 2026-08-10 ──────────────────────────
+ *
+ * These three checks previously asserted `guide_verify` at Saturday 08:00 and
+ * that the schedule's own label ADMITTED Saturday was "no longer a
+ * zero-API-calls day". Both were accurate descriptions of a design that
+ * `docs/OFFICE-POLICY.md` A13 has since overruled — the policy is NEWER, it is
+ * owner-approved (2026-08-10), and it makes Saturday a rest day with no
+ * automated writing. This block is a WEEKLY Claude call that commits a guide.
+ *
+ * The assertions are INVERTED rather than deleted: a check that merely stopped
+ * looking at Saturday would let the block drift back there. The pass now
+ * requires the day to be genuinely empty.
+ */
+check('Saturday: NO guide_verify — A13 makes it a rest day with no automated writing',
+  !dailySchedule.saturday_schedule.blocks.some((b) => b.type === 'guide_verify'));
+check('Friday: guide_verify at 11:30 — still weekly, still one run, only the day moved',
+  hasBlock(dailySchedule.friday_schedule, '11:30', 'guide_verify')
+  && dailySchedule.friday_schedule.blocks.filter((b) => b.type === 'guide_verify').length === 1);
+check('Saturday schedule label now claims a REST day, and says zero-write',
+  /rest day/i.test(dailySchedule.saturday_schedule.label) && /zero-write/i.test(dailySchedule.saturday_schedule.label));
+check('…and records the move rather than silently relabelling',
+  !!dailySchedule.saturday_schedule._rest_day_2026_08_10);
+check('week_mapping Saturday entry agrees with the blocks (it has disagreed twice before)',
+  /rest day/i.test(dailySchedule._meta.week_mapping['7']) && /zero-write/i.test(dailySchedule._meta.week_mapping['7']));
+check('the guides_program still calls the pass WEEKLY and names its new day',
+  /FRIDAY 11:30/.test(dailySchedule.guides_program.guide_verify.what)
+  && !!dailySchedule.guides_program.guide_verify._moved_off_saturday_2026_08_10);
 
 const agentRunnerSrc = readFileSync(new URL('../workers/agent-runner.js', import.meta.url), 'utf8');
 check('agent-runner.js dispatches guide_draft/guide_review/guide_verify block types',
