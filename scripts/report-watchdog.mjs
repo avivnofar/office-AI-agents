@@ -274,10 +274,30 @@ if (!onlyBranches) {
   else if (reports.ok === false) code = 1;
 }
 
+/**
+ * `process.exitCode` and NOT `process.exit()`.
+ *
+ * Found by running it: `process.exit()` while `fetch`'s keep-alive socket is
+ * still open aborts Node on Windows with
+ * `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\\win\\async.c`
+ * and an exit code of **-1073740791**, AFTER printing a correct `exit 0`.
+ *
+ * That is the worst possible shape for this particular script: the output says
+ * the office reported, the exit code says the check crashed, and §9 of the
+ * night run's instructions tells the run to act on the EXIT CODE. Every healthy
+ * night would have been filed as a failed check.
+ *
+ * `exitCode` plus `unref()`ing the keep-alive below lets the loop drain and the
+ * process exit with the code it actually means.
+ */
+function finish(code) {
+  process.exitCode = code;
+}
+
 if (asJson) {
   console.log(JSON.stringify({ date: dateStr, restDay, reports, branches, branchVerdict: verdict, exitCode: code }, null, 2));
-  process.exit(code);
-}
+  finish(code);
+} else {
 
 console.log(`\nA16 EXTERNAL CHECK — ${dateStr} (Israel)${restDay ? '  [SATURDAY — rest day per policy A13]' : ''}`);
 console.log('='.repeat(72));
@@ -329,4 +349,6 @@ if (branches) {
 }
 
 console.log(`\nexit ${code}  (0 reported / 1 DID NOT REPORT / 2 could not check)\n`);
-process.exit(code);
+finish(code);
+
+}
