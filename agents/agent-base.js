@@ -523,18 +523,47 @@ export class AgentBase {
     //
     // `result.source` is what ACTUALLY answered, including after a lane
     // degraded to its backup — not the provider that was asked for.
+    // ── THE ASK THAT NEVER HAPPENED IS A DIFFERENT EVENT (2026-08-10) ──────
+    //
+    // This line used to write EVERY outcome as `case_answer`, including the ones
+    // where no provider was ever contacted. Measured on 2026-08-10: 86 of 129
+    // rows, all `skipped: true`, all notebook-x, all `quality IS NULL` — the
+    // Gemini pacer denying two thirds of Notebook-X asks, each denial recorded as
+    // a row that looks like a unit of work and contains no measurement.
+    //
+    // The null was honest; the EVENT TYPE was not. `case_not_asked` splits them
+    // on the one axis every consumer of this table already groups by, so a query
+    // for `case_answer` returns scored asks and nothing else without a single
+    // consumer being edited. See improvement-loop.js's NOT_ASKED_EVENT block for
+    // the full decision, including why the 86 existing rows are left alone.
+    //
+    // `skipped` STAYS in the content JSON. It is the discriminator for every row
+    // written before this change, and removing it would make the historical rows
+    // unclassifiable — the pre-2026-08-10 archive is read by
+    // `content LIKE '%"skipped":true%'` and that has to keep working.
+    const notAsked = result?.skipped === true;
     await recordOfficeEvent(this.env, {
       agentId: this.id,
-      eventType: 'case_answer',
+      eventType: notAsked ? 'case_not_asked' : 'case_answer',
       track: 'client',
-      embodimentModel: result?.source || this.lastModelSource || null,
-      quality: typeof result?.quality === 'number' ? result.quality : null,
+      // Nothing answered, so there is no embodiment to record. Writing the
+      // agent's LAST provider here would attribute a call that did not happen to
+      // a provider that did not make it — and the Lead QA's cross-embodiment
+      // comparison (1.5) would then average a real provider against silence.
+      embodimentModel: notAsked ? null : (result?.source || this.lastModelSource || null),
+      quality: typeof result?.quality === 'number' && !notAsked ? result.quality : null,
       project: opts.project || null,
-      title: `case_answer — ${opts.caseId || this.name}`,
+      title: `${notAsked ? 'case_not_asked' : 'case_answer'} — ${opts.caseId || this.name}`,
       content: JSON.stringify({
         mode,
         followup_depth: depth,
-        skipped: result?.skipped === true,
+        skipped: notAsked,
+        // WHY it was not asked. `callGroq()`'s lesson applied one layer up: a
+        // path that discards the reason converts every upstream cause into the
+        // same symptom, and then only the response body could have told them
+        // apart. Pacing, an exhausted Claude budget and the daily call cap need
+        // completely different responses and looked identical in this table.
+        not_asked_reason: notAsked ? (result?.reason || 'unstated') : null,
         kb_slug: opts.kbSlug || null,
       }),
     });

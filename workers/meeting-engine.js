@@ -301,9 +301,16 @@ async function gatherClosingQaReview(env, attendeeIds) {
      WHERE timestamp >= ? AND type != 'idle' ORDER BY RANDOM() LIMIT 6`
   ).bind(since).all().catch(() => ({ results: [] }));
 
+  // `scored` MEANS SCORED. The `AND quality IS NOT NULL` was added 2026-08-10:
+  // COUNT(*) here was counting every row and labelling the total `scored`, while
+  // AVG(quality) silently averaged only the rows that had one — the same
+  // two-populations-one-sentence error week-07 published ("81 entries, average
+  // 0.80"), in the closing QA review's own agenda data. `case_not_asked` now
+  // keeps future non-events out of this query by event type; this predicate also
+  // keeps the 86 pre-cutover rows out, which the event type cannot.
   const { results: quality } = await env.DB.prepare(
     `SELECT agent_id, AVG(quality) AS avg_quality, COUNT(*) AS scored
-     FROM reports WHERE event_type = 'case_answer' AND created_at >= ?
+     FROM reports WHERE event_type = 'case_answer' AND quality IS NOT NULL AND created_at >= ?
      GROUP BY agent_id`
   ).bind(since).all().catch(() => ({ results: [] }));
 
@@ -467,7 +474,8 @@ const SUBSTANTIVE_AGENDA = `Then, IN THIS ORDER:
 2. PRODUCT DECISIONS — only after the relevant agents have reviewed the preliminary work. The Architect (Agent 10) is substantively involved in product planning and speaks at length here; he is not a rubber stamp and not a closing summary.
 3. CONFLICT RESOLUTION — anything unresolved between agents.
 4. THE WORKFLOW'S PRODUCTIVITY PICTURE — Agent 12 presents the four measures as given. He does not average them into one number.
-5. VOTES — every binding decision reached above is put to a vote. ADMINS ONLY vote. The CEO (Agent 11) leads, holds a DOUBLE VOTE and a VETO. Routine work distribution is NOT voted on — only product decisions, conflict resolution, and anything touching the client, or the mechanism stops meaning anything. Record each vote as: the question, who voted which way, the outcome, the date. On a TIE, the meeting decides whether to keep investigating the question, defer it, or drop it — and that resolution is itself recorded.`;
+5. OPEN QUESTIONS TO THE CLIENT — the office's questions to the owner are listed above (back-office channel/to-owner/OPEN-QUESTIONS.md). This item is NOT "answer them" — the office cannot. For each open question, check three things: does it still block what it claims to block; is its stated fallback still the right fallback; and has it been open long enough that the fallback should simply be TAKEN. A question the office has already worked around is a question to WITHDRAW, not to keep waiting on. If the list is absent from the context above, say so — do not assume the office has nothing to ask.
+6. VOTES — every binding decision reached above is put to a vote. ADMINS ONLY vote. The CEO (Agent 11) leads, holds a DOUBLE VOTE and a VETO. Routine work distribution is NOT voted on — only product decisions, conflict resolution, and anything touching the client, or the mechanism stops meaning anything. Record each vote as: the question, who voted which way, the outcome, the date. On a TIE, the meeting decides whether to keep investigating the question, defer it, or drop it — and that resolution is itself recorded.`;
 
 const AGENDA_BUILDERS = {
   daily_standup: (data) => `Run the OPENING STANDUP — forward-looking, the start of the day. The Workflow (Agent 12) dispatches: he states what is going out to whom today, presents his metrics, and names what is stuck. Each other attendee gives a 1-2 sentence status.\nSession data:\n${JSON.stringify(data.sessionStats)}\nOpen incidents to address: ${JSON.stringify(data.openIncidents)}\n${data.workflowMetrics || ''}`,
@@ -563,7 +571,29 @@ function buildMeetingPrompt(meetingType, attendeeSnapshots, data, opts) {
     ? 'AGENDA ITEM 1 (ALWAYS FIRST, never a closing summary): Where do we stand against the client requirements listed above? Name each requirement by its REQ id, say whether its status is still accurate, and if it is not, say what it should be and why. If nothing has moved on a requirement, SAY THAT PLAINLY rather than inventing progress.\n\n'
     : '';
 
-  const prompt = `Meeting type: ${meta.label}\nDate: ${new Date().toISOString()}\n\n${requirementsFirst}Agenda data:\n${agendaBuilder(data)}`;
+  // ── THE ARCHITECT'S NIGHT WORK — A CONDITIONAL AGENDA ITEM ─────────────
+  //
+  // Added 2026-08-10 with the bible's "He sometimes doesn't sleep" block. The
+  // Architect occasionally works unattended overnight; the office is supposed to
+  // discuss what a night produced.
+  //
+  // CONDITIONAL, AND THAT IS THE DESIGN, NOT A SHORTCUT. A standing agenda item
+  // about a thing that may not have happened teaches a meeting to report on
+  // nothing — and this project has a name for what comes next: a model handed
+  // "discuss last night's run" on a night with no run will discuss one anyway.
+  // So the item exists only when `architectRuns` carries real rows, and the rows
+  // come from D1 (`reports.type = 'architect_session'`, filed by
+  // architect-liaison.js from the run's own session record) rather than from an
+  // assumption about a schedule. NO RUN → NO ITEM, and nothing anywhere says a
+  // run was expected, because none ever is.
+  const runs = Array.isArray(opts?.architectRuns) ? opts.architectRuns : [];
+  const architectNight = runs.length
+    ? `AGENDA ITEM — THE ARCHITECT'S NIGHT WORK. ${runs.length} unattended Architect session(s) have been filed since this meeting last ran:\n`
+      + runs.map((r) => `- ${r.created_at} · ${r.title}${r.content ? ` · ${String(r.content).slice(0, 400)}` : ''}`).join('\n')
+      + '\nDiscuss WHAT IT PRODUCED, as work: is it right, does it need review, does it change anything already decided, and does anything now need to go back to him. Two things not to do. Do NOT treat these runs as a schedule or a shift — they are occasional, unannounced, and may not happen again for a while; an office that plans around the next one is planning around something nobody promised. And do NOT congratulate the run in place of reviewing it — he is the office\'s final technical authority and his output is still output.\n\n'
+    : '';
+
+  const prompt = `Meeting type: ${meta.label}\nDate: ${new Date().toISOString()}\n\n${requirementsFirst}${architectNight}Agenda data:\n${agendaBuilder(data)}`;
 
   return { systemPrompt, prompt };
 }
@@ -927,7 +957,32 @@ export async function runMeeting(meetingType, env, opts = {}) {
     }));
   }
 
-  const { systemPrompt, prompt } = buildMeetingPrompt(meetingType, attendeeSnapshots, data, { ...opts, officeContext });
+  // Unattended Architect sessions filed SINCE THIS MEETING TYPE LAST RAN.
+  //
+  // The window is "since the last meeting of this type", not "since midnight" —
+  // the run is not on a schedule, so a fixed lookback would either miss a run
+  // (window too short) or re-table one already discussed (window too long). A
+  // meeting type that has never run gets every session ever filed, which is
+  // correct for a first run and self-limiting thereafter.
+  //
+  // Fails to NO ITEM, never to a claim: an unreadable query yields an empty
+  // array, and buildMeetingPrompt() then omits the agenda item entirely. It does
+  // NOT say "no runs occurred" — nothing here can establish that.
+  let architectRuns = [];
+  if (env.DB && OFFICE_CONTEXT_MEETINGS.has(meetingType)) {
+    const lastSame = await env.DB.prepare(
+      'SELECT MAX(created_at) AS last_at FROM meetings WHERE type = ?'
+    ).bind(meetingType).first().catch(() => null);
+    const since = lastSame?.last_at || '1970-01-01';
+    const rows = await env.DB.prepare(
+      `SELECT title, content, created_at FROM reports
+        WHERE type = 'architect_session' AND created_at > ?
+        ORDER BY created_at ASC LIMIT 5`
+    ).bind(since).all().catch(() => null);
+    architectRuns = rows?.results || [];
+  }
+
+  const { systemPrompt, prompt } = buildMeetingPrompt(meetingType, attendeeSnapshots, data, { ...opts, officeContext, architectRuns });
 
   let modelResult;
   if (GEMINI_MEETING_TYPES.has(meetingType)) {

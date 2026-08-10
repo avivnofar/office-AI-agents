@@ -1079,6 +1079,149 @@ check('[new] report_pipeline is declared in database/schema.sql',
 check('[new] the D1 shape in code matches the declared schema (both carry both provider columns)',
   /drafter_provider TEXT/.test(rp.REPORT_PIPELINE_TABLE_SQL) && /reviewer_provider TEXT/.test(rp.REPORT_PIPELINE_TABLE_SQL));
 
+/* ══════════════════════════════════════════════════════════════════════════
+   §12 — 2026-08-10: DISPATCH IS COUNTED, AND OUTPUT IS INDEXED ON THE REPO
+   OB-036 and OB-038. Both were "the fact pack cannot see something the office
+   already records", and both are proved here against the REAL consumer rather
+   than against the text of the line.
+   ══════════════════════════════════════════════════════════════════════════ */
+section('§12 dispatch counting and repo-write attribution (2026-08-10)');
+
+const BOARD_2 = {
+  counts: { total: 3, READY: 2, 'IN-PROGRESS': 1 },
+  tasks: [
+    { id: 'OB-001', state: 'READY', assignee: 'Agent 13', title: 'a' },
+    { id: 'OB-017', state: 'READY', assignee: 'Agent 4', title: 'b', offered: '2026-08-10 · available to an unattended run' },
+    { id: 'OB-018', state: 'IN-PROGRESS', assignee: 'Agent 4', title: 'c', dispatched: '2026-08-09 · held by headless Architect run' },
+  ],
+};
+
+const dispatchedPack = rp.buildFactPack({
+  reportType: 'weekly', periodLabel: 'week-08', board: BOARD_2,
+  dispatchedCount: 1, inProgressCount: 1, offeredCount: 1,
+});
+check('[FAILS-OLD] a real dispatch count reaches the pack instead of UNVERIFIED',
+  /^DISPATCHED: 1 of the 3 tasks/m.test(dispatchedPack) && !/DISPATCHED: UNVERIFIED/.test(dispatchedPack));
+check('[new] an OFFERED task is reported as still on the board and still claimable',
+  /OFFERED to an unattended Architect run: 1\./.test(dispatchedPack)
+  && /does NOT remove a task from the board or block it/.test(dispatchedPack));
+
+// THE ZERO CASE. This is the one that would regress under a tidy-up: a reader
+// who changed `!= null` to a truthiness test would send 0 down the UNVERIFIED
+// path and republish the exact confusion the pipeline exists to prevent.
+const zeroDispatchPack = rp.buildFactPack({
+  reportType: 'weekly', periodLabel: 'week-08', board: BOARD_2,
+  dispatchedCount: 0, inProgressCount: 0,
+});
+check('[new] ZERO dispatched renders as a real measurement, never as UNVERIFIED',
+  /^DISPATCHED: 0 of the 3 tasks/m.test(zeroDispatchPack) && !/DISPATCHED: UNVERIFIED/.test(zeroDispatchPack));
+check('[new] ...and the pack says explicitly not to write UNVERIFIED for it',
+  /Zero dispatched is a REAL measurement/.test(zeroDispatchPack));
+
+// The two board fields disagreeing is a defect in the board's own record, and
+// the report carries it rather than silently preferring one number.
+const skewPack = rp.buildFactPack({
+  reportType: 'weekly', periodLabel: 'week-08', board: BOARD_2,
+  dispatchedCount: 1, inProgressCount: 3,
+});
+check('[new] IN-PROGRESS and Dispatched disagreeing is REPORTED, not reconciled',
+  /3 task\(s\) are IN-PROGRESS but 1 carry a Dispatched line/.test(skewPack));
+
+// ── OB-038: the attribution has to reach the CHECK, not just the pack ──────
+const projects = [
+  { key: 'notebook-x', name: 'Notebook-X' },
+  { key: 'office-agents', name: 'office-AI-agents' },
+];
+const unattributedPack = rp.buildFactPack({
+  reportType: 'weekly', periodLabel: 'week-07',
+  artifacts: ['Guides: 5 approved.'],
+  gapSummary: '- notebook-x: 5 capability gap(s) flagged against that system this period',
+  repoWrites: [],
+});
+check('[FAILS-OLD] the week-07 shape credits notebook-x and NOT office-AI-agents',
+  rp.projectsWithOutput(unattributedPack, projects).map((p) => p.key).join(',') === 'notebook-x');
+check('[FAILS-OLD] ...so "Nothing moved" about office-AI-agents was consistent with every fact given',
+  rp.validateReportBody(
+    ['# R', '## Summary', 'Nothing moved on office-AI-agents this week. Notebook-X saw five findings.',
+      ...rp.REQUIRED_SECTIONS.map((s) => `## ${s.n}. ${s.key}`), rp.REPORT_SENTINEL].join('\n'),
+    { factPack: unattributedPack, projects }
+  ).reasons.every((r) => !/no movement on office-AI-agents/.test(r)));
+
+const attributedPack = rp.buildFactPack({
+  reportType: 'weekly', periodLabel: 'week-07',
+  artifacts: ['Guides: 5 approved.'],
+  gapSummary: '- notebook-x: 5 capability gap(s) flagged against that system this period',
+  repoWrites: ['office-AI-agents: 61 file(s) committed.'],
+});
+check('[FAILS-OLD] with the repo axis present, office-AI-agents IS credited with output',
+  rp.projectsWithOutput(attributedPack, projects).map((p) => p.key).sort().join(',') === 'notebook-x,office-agents');
+check('[FAILS-OLD] ...and the exact sentence week-07 published is now REFUSED by the unchanged check',
+  rp.validateReportBody(
+    ['# R', '## Summary', 'Nothing moved on office-AI-agents this week. Notebook-X saw five findings.',
+      ...rp.REQUIRED_SECTIONS.map((s) => `## ${s.n}. ${s.key}`), rp.REPORT_SENTINEL].join('\n'),
+    { factPack: attributedPack, projects }
+  ).reasons.some((r) => /no movement on office-AI-agents/.test(r)));
+check('[new] the two axes are labelled as two axes, so a reader does not treat 5a as complete',
+  /index the SAME work on two different axes/.test(attributedPack));
+
+// null vs [] — "we could not look" must not render as "we looked and found none".
+const unreadableWrites = rp.buildFactPack({ reportType: 'weekly', periodLabel: 'week-08', repoWrites: null });
+check('[new] an unreadable repo-write record renders UNVERIFIED, not zero',
+  /5a-bis[\s\S]*?UNVERIFIED — the repo-write record could not be read/.test(unreadableWrites));
+check('[new] ...and forbids inferring that nothing was written',
+  /Do NOT infer that nothing was written/.test(unreadableWrites));
+check('[new] an EMPTY record names the date recording began, so a pre-2026-08-10 zero is not read as a fact',
+  /recording of repo writes began 2026-08-10/.test(
+    rp.buildFactPack({ reportType: 'weekly', periodLabel: 'week-08', repoWrites: [] })
+  ));
+
+// The recorder itself: it may never cost a write.
+const rwSrc = read('workers/repo-write.js');
+check('[new] recordRepoWrite runs AFTER the PUT, never before it',
+  rwSrc.indexOf('method: \'PUT\'') < rwSrc.lastIndexOf('await recordRepoWrite('));
+check('[new] recordRepoWrite cannot throw — it swallows and warns, like recordOfficeEvent',
+  /export async function recordRepoWrite[\s\S]*?try \{[\s\S]*?\} catch \(err\) \{[\s\S]*?console\.warn/.test(rwSrc));
+check('[new] the record does NOT appear in commitFileToRepo\'s return value (nothing may branch on it)',
+  /return \{ committed: res\.ok, status: res\.status, path \};/.test(rwSrc));
+check('[new] a DENIED write is not recorded as output (a denial is not an artifact)',
+  rwSrc.indexOf('return { committed: false, reason: verdict.reason') < rwSrc.lastIndexOf('await recordRepoWrite('));
+check('[new] the table is created lazily, the same call task-router.js made for provider_usage',
+  /CREATE TABLE IF NOT EXISTS repo_writes/.test(rwSrc)
+  && !/repo_writes/.test(read('database/schema.sql')));
+
+// The Architect's night work: present only when filed, and never a cadence.
+const nightPack = rp.buildFactPack({
+  reportType: 'weekly', periodLabel: 'week-08',
+  architectRuns: [{ title: 'Architect session — 2026-08-10 (build)', created_at: '2026-08-10 05:00:34' }],
+});
+check('[new] a filed unattended Architect session reaches the pack',
+  /Unattended Architect sessions filed this period: 1\./.test(nightPack));
+check('[new] ...and the pack forbids reporting it as a schedule or implying another is expected',
+  /NOT a shift and NOT a schedule/.test(nightPack) && /do not imply the next one is expected/.test(nightPack));
+check('[new] with no run filed, the pack says NOTHING about night work (absence is not a quiet night)',
+  !/Unattended Architect session/.test(rp.buildFactPack({ reportType: 'weekly', periodLabel: 'week-08' })));
+
+// Open questions reach the client-facing report, with their fallbacks.
+const qPack = rp.buildFactPack({
+  reportType: 'weekly', periodLabel: 'week-08',
+  questions: {
+    counts: { total: 2, open: 1, closed: 1 },
+    questions: [
+      { id: 'Q-001', question: 'which products?', open: true, askedBy: 'Agent 12 — The Workflow', date: '2026-08-10', blocking: 'REQ-004', fallback: 'REQ-004 goes last, marked provisional.' },
+      { id: 'Q-002', question: 'answered one', open: false, askedBy: 'Agent 9', date: '2026-08-09', blocking: 'REQ-006', fallback: 'x' },
+    ],
+  },
+});
+check('[new] an open question reaches the client-facing report with its fallback',
+  /Q-001 \(Agent 12 — The Workflow, 2026-08-10\): which products\?/.test(qPack)
+  && /if no answer comes: REQ-004 goes last/.test(qPack));
+check('[new] ...and must NOT be reported as blocked work',
+  /NOT as blocked work/.test(qPack));
+check('[new] an unreadable questions channel is UNREADABLE, not "nothing to ask"',
+  /UNREADABLE — the office→owner questions channel/.test(
+    rp.buildFactPack({ reportType: 'weekly', periodLabel: 'week-08' })
+  ));
+
 /* ══════════════════════════════════════════════════════════════════════════ */
 section('─────────────────────────────────────────────────────────────');
 console.log(`\n  ${pass} passed, ${fail} failed  (${pass + fail} checks)`);

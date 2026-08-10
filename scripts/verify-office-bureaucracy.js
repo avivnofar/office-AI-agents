@@ -539,6 +539,142 @@ check('agent-base.js wraps the office-context call so it can never break a clien
 check('getDbContext() was left exactly as it was (still the inert placeholder)',
   /async getDbContext\(_query\) \{\s*return '';\s*\}/.test(agentBaseSrc));
 
+/* ══════════════════════════════════════════════════════════════════════════
+   §10 — THE OFFICE→OWNER QUESTIONS CHANNEL, AND THE OFFER MARKER
+   Added 2026-08-10 with channel/to-owner/. Two mechanisms, one section,
+   because they share one property worth proving together: NEITHER may change
+   what a board task's State means.
+   ══════════════════════════════════════════════════════════════════════════ */
+section('§10 the owner-questions channel and the offer marker');
+
+const GOOD_Q = `# OPEN QUESTIONS — office → owner
+
+**Counts:** 9 entries — deliberately WRONG, to prove counts are derived.
+
+### Q-001 — which products does REQ-004 mean?
+
+- **Asked by:** Agent 12 — The Workflow
+- **Date:** 2026-08-10
+- **Blocking:** REQ-004 · plan 4.5 · OB-016 · OB-024
+- **What I need:** a decision
+- **If no answer comes:** REQ-004 goes last in the order. The justification says the position is provisional.
+- **Answer:** —
+
+### Q-002 — ~~does "PR" mean public relations?~~ — ANSWERED
+
+- **Asked by:** Agent 9 — The Designer
+- **Date:** 2026-08-09
+- **Blocking:** REQ-006
+- **What I need:** a clarification
+- **If no answer comes:** the office assumes public relations and marks it provisional.
+- **Answer:** *(2026-08-09, owner)* Public relations.
+
+### Q-003 — may we raise the meeting budget? — DECLINED
+
+- **Asked by:** Agent 8 — The Lead QA
+- **Date:** 2026-08-09
+- **Blocking:** nothing — a preference.
+- **What I need:** an approval
+- **If no answer comes:** the budget stays at 1200 and the measurement is reported.
+- **Answer:** *(2026-08-10, owner)* Not now.
+`;
+
+const qs = officeContext.parseOpenQuestions(GOOD_Q);
+check('parseOpenQuestions reads a well-formed questions file', qs.ok === true, qs.reason);
+check('parseOpenQuestions reads all three entries', qs.ok && qs.questions.length === 3, `got ${qs.questions?.length}`);
+check('an entry with no heading marker is OPEN (the only defaulted state)',
+  qs.ok && qs.questions[0].open === true && qs.questions[0].marker === null);
+check('ANSWERED is read from the heading suffix, not from the Answer field',
+  qs.ok && qs.questions[1].marker === 'ANSWERED' && qs.questions[1].open === false);
+check('DECLINED is a real outcome and is NOT counted as open',
+  qs.ok && qs.questions[2].marker === 'DECLINED' && qs.questions[2].open === false);
+check('the strikethrough and the marker are stripped from the question text',
+  qs.ok && !/~~|ANSWERED/.test(qs.questions[1].question), qs.questions[1]?.question);
+check('parseOpenQuestions DERIVES counts rather than reading the file\'s own Counts line',
+  qs.ok && qs.counts.total === 3 && qs.counts.open === 1 && qs.counts.closed === 2,
+  JSON.stringify(qs.counts));
+check('the asking agent id is extracted so an agent can see its own questions',
+  qs.ok && qs.questions[0].agentId === 12);
+
+// THE REFUSAL THAT MATTERS. The contract makes the fallback mandatory because a
+// question with no fallback is a stall dressed as a question — so an entry
+// missing it must not reach a prompt, where it would put an agent in front of an
+// open question with no path but to wait.
+const noFallback = officeContext.parseOpenQuestions(
+  GOOD_Q.replace('- **If no answer comes:** REQ-004 goes last in the order. The justification says the position is provisional.\n', '')
+);
+check('an entry with NO "If no answer comes" line is REFUSED, not rendered without it',
+  noFallback.ok === true && !noFallback.questions.some((q) => q.id === 'Q-001'));
+check('...and the refusal is REPORTED, naming the missing field',
+  noFallback.malformed.some((s) => /Q-001/.test(s) && /If no answer comes/.test(s)),
+  JSON.stringify(noFallback.malformed));
+const noAsker = officeContext.parseOpenQuestions(GOOD_Q.replace('- **Asked by:** Agent 12 — The Workflow\n', ''));
+check('an entry with no readable "Asked by" line is REFUSED',
+  noAsker.ok === true && !noAsker.questions.some((q) => q.id === 'Q-001'));
+
+// An EMPTY channel is healthy, not broken. Reporting it as a parse failure would
+// put a spurious error into every prompt for as long as the office had nothing
+// to ask.
+const emptyQ = officeContext.parseOpenQuestions('# OPEN QUESTIONS\n\nNothing open.\n');
+check('an EMPTY questions file parses ok with zero entries (a healthy state, not an error)',
+  emptyQ.ok === true && emptyQ.questions.length === 0 && emptyQ.counts.open === 0);
+check('parseOpenQuestions still refuses a non-string / empty input',
+  officeContext.parseOpenQuestions('').ok === false);
+
+// ── The rendering contract: the count survives, the answered TEXT does not ──
+const qSnap = { fetched_at: Date.now(), board, requirements: reqs, questions: qs, errors: [] };
+const qMeeting = officeContext.buildOfficeContext(qSnap, 'meeting');
+const qAgent = officeContext.buildOfficeContext(qSnap, 'agent', { agentId: 12 });
+check('the meeting shape names the open-question count', /1 awaiting an answer/.test(qMeeting.text || ''));
+check('...and the closed count, so "answered eleven" and "never asked" cannot look alike',
+  /2 already answered/.test(qMeeting.text || ''));
+check('an ANSWERED question\'s TEXT does not reach the prompt (history lives in the file)',
+  !/does "PR" mean public relations/i.test(qMeeting.text || ''));
+check('the open question\'s text DOES reach the prompt', /which products does REQ-004 mean/i.test(qMeeting.text || ''));
+check('the prompt tells the agent to check the list before asking again (the whole purpose)',
+  /BEFORE asking the client anything/.test(qMeeting.text || ''));
+check('the per-agent shape keeps the questions HEADLINE even when it drops the list',
+  /awaiting an answer/.test(qAgent.text || ''), `agent text: ${(qAgent.text || '').slice(0, 200)}`);
+check('adding the questions section did not push the meeting shape over budget',
+  qMeeting.tokens <= officeContext.BUDGETS.meeting, `${qMeeting.tokens}/${officeContext.BUDGETS.meeting}`);
+
+// firstSentence(): a truncated commitment must SAY it was truncated.
+check('an abridged fallback carries a visible marker, never a silent clip',
+  /\[…full text in the file\]/.test(qMeeting.text || ''));
+
+// ── THE OFFER MARKER: a marker, never a state ──────────────────────────────
+const OFFER_BOARD = GOOD_BOARD
+  .replace('- **State:** READY', '- **State:** READY\n- **Offered:** 2026-08-10 · available to the Architect\'s next unattended run · warehouse task `x`');
+const offerBoard = officeContext.parseBoard(OFFER_BOARD);
+check('parseBoard reads the optional Offered field', offerBoard.ok && !!offerBoard.tasks[0].offered);
+check('an OFFERED task is still exactly as READY as it was — the offer is not a state',
+  offerBoard.ok && offerBoard.tasks[0].state === 'READY');
+check('...and the READY count is UNCHANGED by the offer (the "not blocked" half of the rule)',
+  offerBoard.ok && board.ok && offerBoard.counts.READY === board.counts.READY,
+  `${offerBoard.counts?.READY} vs ${board.counts?.READY}`);
+const DISPATCHED_BOARD = GOOD_BOARD
+  .replace('- **State:** READY', '- **State:** IN-PROGRESS\n- **Dispatched:** 2026-08-09 · held by headless Architect run · deadline 2026-08-13');
+const dispBoard = officeContext.parseBoard(DISPATCHED_BOARD);
+check('parseBoard reads the Dispatched line so the office can see WHO holds a task',
+  dispBoard.ok && /held by headless Architect run/.test(dispBoard.tasks[0].dispatched || ''));
+const dispSnap = { fetched_at: Date.now(), board: dispBoard, requirements: reqs, questions: emptyQ, errors: [] };
+const dispText = officeContext.buildOfficeContext(dispSnap, 'report').text || '';
+check('the holder is RENDERED — an IN-PROGRESS task with no visible holder is a race the prompt invites',
+  /HELD: 2026-08-09/.test(dispText), dispText.slice(0, 300));
+const offerSnap = { fetched_at: Date.now(), board: offerBoard, requirements: reqs, questions: emptyQ, errors: [] };
+const offerText = officeContext.buildOfficeContext(offerSnap, 'report').text || '';
+check('an offered task is rendered as STILL CLAIMABLE by the office, not as taken',
+  /OFFERED/.test(offerText) && /still yours to claim/.test(offerText));
+
+// The questions channel's malformed entries must reach the same log line the
+// board's and the requirements' do — three sources, one channel, no fourth
+// mechanism.
+const ocSrc = read('workers/office-context.js');
+check('questions malformed entries join the SAME malformed log line as board and requirements',
+  /snapshot\?\.questions\?\.malformed/.test(ocSrc));
+check('a 404 on the questions file is NOT reported as an error (empty channel is healthy)',
+  /HTTP 404/.test(ocSrc) && /questionsFile\.reason/.test(ocSrc));
+
 console.log(`\n${pass}/${pass + fail} checks passed.`);
 if (fail) { console.log(`${fail} FAILED`); process.exit(1); }
 process.exit(0);

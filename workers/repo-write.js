@@ -96,6 +96,77 @@ export function secretsPresentIn(env) {
 }
 
 /**
+ * THE REPO-WRITE RECORD — OB-038, built 2026-08-10.
+ *
+ * ── THE DEFECT THIS CLOSES ───────────────────────────────────────────────
+ *
+ * `reports/weekly/week-07-report.md` published *"office-AI-agents: Nothing
+ * moved"* in a period with 61 commits, 5 guides, 5 gap digests and the report
+ * itself landing in that repo. `validateReportBody()`'s consistency check
+ * exists precisely to refuse that sentence — and it was not weak. It was given
+ * no fact that credited `office-AI-agents` with anything, because every fact in
+ * the pack was indexed on THE SYSTEM ASKED (data-center, notebook-x) and never
+ * on THE REPOSITORY WRITTEN TO. **A check can only be as good as the axis its
+ * input is indexed on.**
+ *
+ * commitFileToRepo() returned `{ committed, status, path }` and every caller
+ * consumed it transiently — a log line, a summary string. Nothing persisted.
+ * §7.2 exactly: a value produced at the right moment, by the right component,
+ * for the right reason, and consumed by nobody.
+ *
+ * ── WHY A SEPARATE TABLE AND NOT A `reports` ROW ─────────────────────────
+ *
+ * `reports` is documents the office authored; a write is an EVENT about where a
+ * document went. Putting writes in `reports` would make "how many reports did we
+ * file" and "how many files did we push" the same query shape, and every
+ * existing `reports` consumer would start seeing rows it was never written for.
+ * The `type` / `event_type` separation exists for this reason and this is the
+ * same call one level out.
+ *
+ * Created LAZILY and deliberately NOT added to database/schema.sql — the same
+ * decision task-router.js's PROVIDER_USAGE_TABLE_SQL took, for the same reason:
+ * a new table that only one module writes does not need a migration step a
+ * deployer can forget, and CREATE TABLE IF NOT EXISTS on every write costs one
+ * cheap statement.
+ *
+ * ── THE HARD REQUIREMENT: THIS MAY NEVER COST A WRITE ────────────────────
+ *
+ * This sits on the live path that files gap digests, guides and reports. It runs
+ * AFTER the PUT has already happened, it cannot throw, nothing branches on what
+ * it returns, and it does not appear in commitFileToRepo()'s return value — so a
+ * broken recorder degrades to the exact behaviour this module had before it
+ * existed. A failed record is a lost measurement; a failed write is lost work,
+ * and the two are not comparable.
+ */
+export const REPO_WRITE_TABLE_SQL = `CREATE TABLE IF NOT EXISTS repo_writes (
+  id TEXT PRIMARY KEY,
+  repo TEXT NOT NULL,
+  project_key TEXT,
+  path TEXT NOT NULL,
+  committed INTEGER NOT NULL,
+  status INTEGER,
+  redirected INTEGER DEFAULT 0,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)`;
+
+export async function recordRepoWrite(env, { repo, projectKey, path, committed, status, redirected }) {
+  try {
+    if (!env?.DB) return { recorded: false, reason: 'no_db_binding' };
+    await env.DB.prepare(REPO_WRITE_TABLE_SQL).run();
+    await env.DB.prepare(
+      `INSERT INTO repo_writes (id, repo, project_key, path, committed, status, redirected)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).bind(crypto.randomUUID(), repo, projectKey || null, path, committed ? 1 : 0, status ?? null, redirected ? 1 : 0).run();
+    return { recorded: true };
+  } catch (err) {
+    // Swallowed on purpose. Same posture recordOfficeEvent() takes: a capture
+    // failure must not cost the thing being captured.
+    console.warn(`[repo-write] could not record the write of ${path} to ${repo}, continuing: ${err?.message || err}`);
+    return { recorded: false, reason: 'record_error' };
+  }
+}
+
+/**
  * Commits a file to a repo via the GitHub Contents API.
  *
  * EVERY decision is delegated to resolveRepoWrite() (permission-guard.js) —
@@ -150,5 +221,20 @@ export async function commitFileToRepo(env, repoName, path, content, message, op
     headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({ message, content: btoa(unescape(encodeURIComponent(content))), ...(sha ? { sha } : {}) }),
   });
+
+  // Record the write. Deliberately AFTER the PUT and deliberately not awaited
+  // into the return value's shape — see recordRepoWrite()'s header. A DENIED
+  // write is not recorded here at all: a denial is a permission decision, not
+  // an output, and counting it as one would make `projectsWithOutput()` credit
+  // a project the office was refused access to.
+  await recordRepoWrite(env, {
+    repo: repoName,
+    projectKey: verdict.projectKey,
+    path,
+    committed: res.ok,
+    status: res.status,
+    redirected: !!verdict.redirected,
+  });
+
   return { committed: res.ok, status: res.status, path };
 }

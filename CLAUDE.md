@@ -1,5 +1,43 @@
 # CLAUDE.md — Office AI Agents
 
+> ## ⚠️ THIS FILE IS BEHIND THE CODE. READ THIS FIRST. *(flagged 2026-08-10)*
+>
+> **Flagged, not reconciled** — per the standing rule that a
+> documentation-vs-reality divergence is reported and the owner decides which
+> side changes. Rewriting this file to match nine sessions of work is a session
+> of its own; what follows is the honest index of what it does not know, so a
+> reader stops trusting the omissions.
+>
+> **Eight production modules exist that this file never mentions.** Every one is
+> live, and several are the office's core loop today:
+>
+> | Module | What it is |
+> |---|---|
+> | `workers/office-context.js` | parses back-office's `BOARD.md`, `CLIENT-REQUIREMENTS.md` and (2026-08-10) `channel/to-owner/OPEN-QUESTIONS.md` into agent, meeting and report prompts. Switch `office_context_enabled`, **live ON** |
+> | `workers/report-pipeline.js` | the office writes and reviews its own periodic reports, with a structural gate that refuses a draft. Switch `report_pipeline_enabled`, **live ON** |
+> | `workers/improvement-loop.js` | one D1 row per unit of office work (`event_type`, `track`, `quality`, `embodiment_model`). Switch `improvement_loop_enabled`, **live ON** — 129 rows |
+> | `workers/repo-write.js` | **the one place a repo write happens.** Lifted out of `agent-runner.js` 2026-08-07, because `meeting-engine.js` built its own `Authorization` header for every meeting report the office ever filed |
+> | `workers/permission-guard.js` | `resolveRepoWrite()` — the single write-decision entry point, three repos, one scoped token each |
+> | `workers/architect-liaison.js` | files an unattended Architect session into D1 so the office can see the night happened. Switch `architect_liaison_enabled`, **live ON** |
+> | `workers/meeting-decisions.js` | meeting action items → the board's inbox. Switch `action_items_to_board_enabled`, **live ON** |
+> | `workers/task-router.js` | task-type routing. Switch `routing_enabled`, **absent = OFF** — the one below that is still what this file says it is |
+>
+> **The two claims in this file most likely to mislead:**
+> - It describes the repo as if the Q&A engine were the whole of it. The office
+>   now also runs a **delegation board**, **client requirements**, an
+>   **improvement loop**, a **report pipeline**, an **owner questions channel**
+>   and a **meeting protocol** — all specified in `back-office-AI-agents`
+>   (private), whose `CLAUDE.md` is the session-start protocol for that work and
+>   whose `plans/OFFICE-SCALING-TODO.md` is the live master plan.
+> - It names kill switches as shipping OFF. **That is true of the code defaults
+>   and false of production**: six of the seven read back ON from live SIM_KV on
+>   2026-08-10. A documented switch state is a claim about production and goes
+>   stale the moment someone toggles it. Boarded as `OB-040`.
+>
+> **Everything below this block is still accurate about what it does cover** —
+> the Q&A engine, the guides pipeline, the token economy and the Notebook-X
+> history are unchanged and worth reading.
+
 ## What this repo is
 
 An office of 11 AI personas that use and stress-test two production AI
@@ -718,6 +756,28 @@ site, not merely defined nearby.
   proven rather than claimed (new)
 - `scripts/verify-guide-engine.js` — dry-run verification for the Guides
   pipeline (new)
+- **The 2026-08-10 additions**, listed here because the flagged block at the top
+  of this file explains why the rest of them are not:
+  - `workers/office-context.js` `parseOpenQuestions()` — the office→owner
+    questions channel, plus the `Dispatched:` and `Offered:` board fields.
+    **Neither new board field is a state**, and neither moves a state count.
+  - `workers/repo-write.js` `recordRepoWrite()` + `REPO_WRITE_TABLE_SQL` — the
+    `repo_writes` table, created **lazily** and deliberately NOT in
+    `database/schema.sql`, the same call `task-router.js`'s
+    `PROVIDER_USAGE_TABLE_SQL` made. It records which **repository** received a
+    write, which is the axis the report pipeline's consistency check was missing
+    when week-07 published *"office-AI-agents: Nothing moved"* against 61
+    commits. It runs after the PUT, cannot throw, and does not appear in
+    `commitFileToRepo()`'s return value — a lost measurement must never cost a
+    write.
+  - `workers/improvement-loop.js` `case_not_asked` — an ask that never reached a
+    provider is no longer written as a `case_answer`. Read
+    `NOT_ASKED_EVENT`'s block for the decision, including why the 86 rows
+    written before 2026-08-10 are **not** relabelled.
+  - `scripts/verify-office-bureaucracy.js` §10 and
+    `scripts/verify-report-pipeline.js` §12 — the proofs. §12 asserts that
+    week-07's own false sentence passes without the repo axis and is refused
+    with it, by the same unchanged check.
 - `wrangler.toml` — Worker bindings, cron, secrets reference
 - `AGENTS.md` / `PENDING-WORK.md` / `DEPLOY.md` — spec, open work, and
   deploy reference docs (`STRATEGY.md` was deleted in the 2026-07-16

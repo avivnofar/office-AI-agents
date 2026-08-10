@@ -99,6 +99,18 @@ const BACKOFFICE_REPO_OWNER = 'avivnofar';
 const BACKOFFICE_REPO_NAME = 'back-office-AI-agents';
 const BOARD_PATH = 'campus/shared/board/BOARD.md';
 const REQUIREMENTS_PATH = 'docs/CLIENT-REQUIREMENTS.md';
+/**
+ * The office→owner questions file (opened 2026-08-10, contract in
+ * back-office-AI-agents/channel/to-owner/README.md).
+ *
+ * WHY IT IS READ HERE and not left as a file a person opens: the failure this
+ * file exists to prevent is five personas independently asking the owner the
+ * same question, and a shared file only prevents that if the personas can SEE
+ * the file. Parsing it into prompts is the whole mechanism; without this line
+ * it is a folder with a good README, which is the §7.2 shape (an artifact
+ * produced and consumed by nobody) landing on the office's own channel.
+ */
+const QUESTIONS_PATH = 'channel/to-owner/OPEN-QUESTIONS.md';
 
 const CACHE_KEY = 'office-context-cache';
 /** How long a cached parse stays usable. The board changes on the order of
@@ -142,6 +154,26 @@ const PRIORITY = Object.freeze({
   titles: 2,     // task titles and assignees
   detail: 3,     // metrics, blocked-by reasons, requirement prose
 });
+
+/**
+ * OPEN QUESTIONS SIT AT `status`, AND ANSWERED ONES DO NOT APPEAR AT ALL.
+ *
+ * Stated here rather than left to the section-building code, because it is the
+ * one budget decision in this module that was made for a reason other than
+ * size, and the reason is in channel/to-owner/README.md:
+ *
+ *   An UNANSWERED question is operational — an agent about to do the work needs
+ *   to know the question is already asked, who asked it, and what the office
+ *   will do on silence. An ANSWERED question's text is HISTORY, and history
+ *   belongs in the file rather than in every prompt.
+ *
+ * So unanswered entries render as items (shrinkable, never below one), and
+ * answered/declined/withdrawn entries collapse to a COUNT that rides in the
+ * headline. The count is deliberately kept: dropping it would make "the owner
+ * has answered eleven questions" and "nobody has ever asked him anything" look
+ * identical in a prompt, which is this project's most-repeated defect shape.
+ */
+const QUESTIONS_PRIORITY = PRIORITY.status;
 
 /* ─────────────────────────────── The switch ───────────────────────────── */
 
@@ -224,6 +256,26 @@ export function parseBoard(markdown) {
       urgency: plain(boardField(block, 'Urgency')) || null,
       metric: plain(boardField(block, 'Metric')) || null,
       blockedBy: plain(boardField(block, 'Blocked by')) || null,
+      // ── THE TWO FIELDS ADDED 2026-08-10 ───────────────────────────────
+      //
+      // `Dispatched:` already existed on the board — dispatch.js has written it
+      // since 2026-08-09 — and this parser could not see it, so the office read
+      // a task as IN-PROGRESS with no idea WHO held it. That is half of OB-032's
+      // gap surviving inside the fix for the other half.
+      //
+      // `Offered:` is new, and it is the whole of requirement 1.3: the office
+      // may leave work for the Architect's midnight run WITHOUT removing it from
+      // the board and WITHOUT blocking it. An offer is therefore a MARKER, never
+      // a state — a task carrying it is still exactly as READY and exactly as
+      // claimable as it was before, and if the run never takes it the office
+      // proceeds as though the offer was never made.
+      //
+      // NEITHER FIELD AFFECTS THE COUNTS, deliberately. `State:` remains the one
+      // thing that decides what a task is. An offer that quietly moved a task
+      // out of the READY count would be the "not removed from the board and not
+      // blocked" rule broken by the mechanism meant to implement it.
+      dispatched: plain(boardField(block, 'Dispatched')) || null,
+      offered: plain(boardField(block, 'Offered')) || null,
     });
   }
 
@@ -235,6 +287,105 @@ export function parseBoard(markdown) {
   for (const s of BOARD_STATES) counts[s] = tasks.filter((t) => t.state === s).length;
 
   return { ok: true, tasks, counts, malformed };
+}
+
+/**
+ * The four heading markers an entry in channel/to-owner/OPEN-QUESTIONS.md can
+ * carry. Absent means OPEN — that is the default and it is the only one that is
+ * a default, because "asked and not yet answered" is the state an entry is born
+ * in and the only one that needs no writer.
+ *
+ * DECLINED is a real outcome and is NOT counted as open. An owner who chooses
+ * not to answer has answered the question of whether he will; leaving it open
+ * would report the office as blocked on a decision that has been made.
+ */
+export const QUESTION_MARKERS = Object.freeze(['ANSWERED', 'DECLINED', 'WITHDRAWN']);
+
+/**
+ * Parses channel/to-owner/OPEN-QUESTIONS.md into entries.
+ *
+ * Same posture as parseBoard(), for the same reason: REFUSE, do not guess. An
+ * entry missing `Asked by:` or `If no answer comes:` is reported as malformed
+ * and does not reach the office — and the second of those is the one worth
+ * refusing on. The contract makes the fallback mandatory precisely because a
+ * question with no fallback is a stall dressed as a question, so an entry that
+ * reached a prompt WITHOUT one would put the agent in front of an open question
+ * and give it no path but to wait. That is the state this file exists to end.
+ *
+ * Counts are DERIVED, never read from the file's own "**Counts:**" line — the
+ * board's rule, and if the two disagree the hand-maintained line is the stale
+ * one.
+ *
+ * @returns {{ok: true, questions: Array, counts: object, malformed: string[]} | {ok: false, reason: string}}
+ */
+export function parseOpenQuestions(markdown) {
+  if (typeof markdown !== 'string' || !markdown.trim()) {
+    return { ok: false, reason: 'open-questions markdown was empty or not a string' };
+  }
+
+  const headingRe = /^### (Q-\d{3}) — (.+)$/gm;
+  const starts = [];
+  let m;
+  while ((m = headingRe.exec(markdown)) !== null) {
+    starts.push({ id: m[1], heading: m[2].trim(), index: m.index });
+  }
+  if (!starts.length) {
+    // An EMPTY questions file is a legitimate and healthy state — the office has
+    // nothing it needs the owner for. It is NOT a parse failure, and reporting it
+    // as one would put a spurious error into every prompt for as long as the
+    // office happened to have no questions.
+    return { ok: true, questions: [], counts: { total: 0, open: 0, closed: 0 }, malformed: [] };
+  }
+
+  const questions = [];
+  const malformed = [];
+  for (let i = 0; i < starts.length; i += 1) {
+    const end = i + 1 < starts.length ? starts[i + 1].index : markdown.length;
+    const block = markdown.slice(starts[i].index, end);
+
+    const askedBy = plain(boardField(block, 'Asked by'));
+    const fallback = plain(boardField(block, 'If no answer comes'));
+    if (!askedBy || !fallback) {
+      malformed.push(
+        `${starts[i].id}: ${!askedBy ? 'no readable "Asked by" line' : 'no readable "If no answer comes" line'}`
+        + ' — the contract requires both; an entry with no fallback is a stall dressed as a question'
+      );
+      continue;
+    }
+
+    // The marker is a SUFFIX on the heading, so the question text itself may
+    // contain any punctuation including the em-dash the heading is split on.
+    const marker = QUESTION_MARKERS.find((k) => new RegExp(`—\\s*${k}\\s*$`).test(starts[i].heading)) || null;
+    const question = plain(
+      starts[i].heading.replace(/—\s*(?:ANSWERED|DECLINED|WITHDRAWN)\s*$/, '').replace(/~~/g, '')
+    );
+
+    const agentMatch = /Agent\s+(\d+)/.exec(askedBy);
+    questions.push({
+      id: starts[i].id,
+      question,
+      marker,
+      open: marker === null,
+      askedBy,
+      agentId: agentMatch ? Number(agentMatch[1]) : null,
+      date: plain(boardField(block, 'Date')) || null,
+      blocking: plain(boardField(block, 'Blocking')) || null,
+      need: plain(boardField(block, 'What I need')) || null,
+      fallback,
+    });
+  }
+
+  if (!questions.length) {
+    return { ok: false, reason: `found ${starts.length} question heading(s) but none was readable — ${malformed.join('; ')}` };
+  }
+
+  const open = questions.filter((q) => q.open).length;
+  return {
+    ok: true,
+    questions,
+    counts: { total: questions.length, open, closed: questions.length - open },
+    malformed,
+  };
 }
 
 const REQ_STATUSES = Object.freeze(['not started', 'in progress', 'in review', 'delivered']);
@@ -337,13 +488,14 @@ async function fetchBackOfficeFile(env, filePath) {
  */
 export async function fetchOfficeSnapshot(env) {
   if (!env?.BACKOFFICE_REPO_TOKEN) {
-    return { fetched_at: Date.now(), board: null, requirements: null, errors: ['BACKOFFICE_REPO_TOKEN is not configured — office context cannot be read'] };
+    return { fetched_at: Date.now(), board: null, requirements: null, questions: null, errors: ['BACKOFFICE_REPO_TOKEN is not configured — office context cannot be read'] };
   }
 
   const errors = [];
-  const [boardFile, reqFile] = await Promise.all([
+  const [boardFile, reqFile, questionsFile] = await Promise.all([
     fetchBackOfficeFile(env, BOARD_PATH),
     fetchBackOfficeFile(env, REQUIREMENTS_PATH),
+    fetchBackOfficeFile(env, QUESTIONS_PATH),
   ]);
 
   let board = null;
@@ -362,7 +514,24 @@ export async function fetchOfficeSnapshot(env) {
     else errors.push(`requirements parse failed: ${parsed.reason}`);
   }
 
-  return { fetched_at: Date.now(), board, requirements, errors };
+  // The questions file is the one source whose ABSENCE is not an error. The
+  // other two must exist for the office to function; this one is a channel the
+  // office may legitimately have nothing in — and a 404 on it while the office
+  // has no questions is indistinguishable from a healthy empty file. It is
+  // reported as an error only when the fetch failed for a reason OTHER than the
+  // file not being there, so "the owner channel is unreachable" stays loud while
+  // "the office has nothing to ask" stays quiet.
+  let questions = null;
+  if (questionsFile.reason) {
+    if (!/HTTP 404/.test(questionsFile.reason)) errors.push(questionsFile.reason);
+    else questions = { ok: true, questions: [], counts: { total: 0, open: 0, closed: 0 }, malformed: [] };
+  } else {
+    const parsed = parseOpenQuestions(questionsFile.text);
+    if (parsed.ok) questions = parsed;
+    else errors.push(`open-questions parse failed: ${parsed.reason}`);
+  }
+
+  return { fetched_at: Date.now(), board, requirements, questions, errors };
 }
 
 /* ──────────────────────────────── Rendering ───────────────────────────── */
@@ -447,6 +616,42 @@ function requirementLines(requirements, { detail }) {
   });
 }
 
+/**
+ * The FIRST SENTENCE of a field, plus an explicit marker when there was more.
+ *
+ * ── WHY A SENTENCE AND NOT A CHARACTER COUNT ─────────────────────────────
+ *
+ * A `If no answer comes:` field is a commitment followed by its reasoning, and
+ * it runs 300–600 characters. Rendering all of it for every open question cost
+ * the meeting shape enough budget that fitToBudget() crushed "Open work" from
+ * 26 items to 1 — measured, not feared. Rendering a character-clipped prefix
+ * would have been worse than either: this module's own fitter rule is that
+ * items are whole lines because *a half sentence in a prompt reads as a fact the
+ * model then completes*, and a mid-word clip of a commitment is exactly that
+ * hazard applied to the sentence that says what the office will do.
+ *
+ * The first sentence IS the commitment; what follows it is why. So the prompt
+ * gets a complete, true sentence and a pointer, and the file keeps the argument.
+ * The marker is not optional — an abridged fallback that does not say it is
+ * abridged reads as the whole undertaking.
+ */
+function firstSentence(text, { pointer = 'full text in the file' } = {}) {
+  const s = String(text || '').trim();
+  if (!s) return '';
+  const m = /^[\s\S]*?[.!?](?=\s|$)/.exec(s);
+  if (!m || m[0].length >= s.length) return s;
+  return `${m[0]} […${pointer}]`;
+}
+
+/** First few `·`-separated items of a list field, with the true remainder named.
+ *  Same NO SILENT CAPS rule renderSection() keeps — a shortened list that does
+ *  not say it was shortened reads as the complete one. */
+function firstFew(text, n = 3) {
+  const parts = String(text || '').split('·').map((p) => p.trim()).filter(Boolean);
+  if (parts.length <= n) return parts.join(' · ');
+  return `${parts.slice(0, n).join(' · ')} (+${parts.length - n} more)`;
+}
+
 function boardCountLine(counts) {
   return BOARD_STATES.filter((s) => counts[s]).map((s) => `${counts[s]} ${s}`).join(' · ');
 }
@@ -467,7 +672,13 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
   const errors = snapshot?.errors || [];
   const board = snapshot?.board || null;
   const requirements = snapshot?.requirements || null;
+  const questions = snapshot?.questions || null;
 
+  // `questions` is NOT in this guard, deliberately. An office with a readable
+  // questions file and no readable board has no office context worth the name —
+  // it would render "you have 4 open questions" with nothing to attach them to.
+  // The empty-questions case is common and healthy; the questions-only case is a
+  // failure and should say so through the same "no snapshot" path as before.
   if (!board && !requirements) {
     return {
       text: null,
@@ -538,7 +749,10 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
         label: 'board-titles',
         priority: PRIORITY.titles,
         header: 'Open work',
-        items: actionable.map((t) => `- ${t.id} [${t.state}] ${t.assignee || 'unassigned'} — ${t.title}${t.urgency ? ' (URGENT)' : ''}`),
+        // `held by` is what stops the same task being picked up twice. Before
+        // 2026-08-10 the office could see a task was IN-PROGRESS and could not
+        // see who had it, which is a race the prompt itself invites.
+        items: actionable.map((t) => `- ${t.id} [${t.state}] ${t.assignee || 'unassigned'} — ${t.title}${t.urgency ? ' (URGENT)' : ''}${t.dispatched ? ` [HELD: ${t.dispatched}]` : ''}${t.offered ? ' [OFFERED to the Architect\'s next unattended run — still yours to claim; claiming it writes the Dispatched line and the run then refuses it]' : ''}`),
       });
     }
 
@@ -549,6 +763,35 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
         priority: PRIORITY.detail,
         header: 'Stuck (not a capacity problem — these are waiting on something)',
         items: stuck.map((t) => `- ${t.id} [${t.state}] ${t.title} — waiting on: ${t.blockedBy || 'unstated'}`),
+      });
+    }
+  }
+
+  // ── WHAT THE OFFICE HAS ALREADY ASKED THE OWNER (added 2026-08-10) ──────
+  //
+  // The purpose is negative and worth naming: this section exists to stop a
+  // question being asked a second time, not to prompt anyone to ask one. So the
+  // headline states the counts even when there is nothing open — "the office has
+  // asked the owner nothing" is a fact an agent should be able to see, and it is
+  // a DIFFERENT fact from "the channel could not be read", which lands in the
+  // errors section instead.
+  if (questions) {
+    const open = questions.questions.filter((q) => q.open);
+    const closed = questions.counts.closed;
+    sections.push({
+      label: 'questions-headline',
+      priority: QUESTIONS_PRIORITY,
+      text: `Open questions to the client (back-office channel/to-owner/OPEN-QUESTIONS.md): ${open.length} awaiting an answer`
+        + `${closed ? `, ${closed} already answered/declined/withdrawn (text not repeated here — read the file)` : ''}.`
+        + ' BEFORE asking the client anything, check this list: a question already open must not be asked again in another voice.'
+        + ' Every entry names what the office will do if no answer comes, so an open question is never a reason to stop work.',
+    });
+    if (open.length) {
+      sections.push({
+        label: 'questions-open',
+        priority: QUESTIONS_PRIORITY,
+        header: 'Already asked and still open',
+        items: open.map((q) => `- ${q.id} (${q.askedBy}, ${q.date || 'undated'}) ${q.question} — blocking: ${firstFew(q.blocking) || 'unstated'} — on silence: ${firstSentence(q.fallback)}`),
       });
     }
   }
@@ -639,6 +882,7 @@ export async function getOfficeContext(env, { shape = 'agent', agentId = null, a
   const malformed = [
     ...(snapshot?.requirements?.malformed || []),
     ...(snapshot?.board?.malformed || []),
+    ...(snapshot?.questions?.malformed || []),
   ];
   if (malformed.length) {
     console.warn(`[office-context] ${shape} built from UNREADABLE input — ${malformed.join(' | ')}`);

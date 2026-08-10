@@ -53,7 +53,11 @@ import { generateAssignedDailyBatch, persistQuestions } from './qa-engine.js';
 import { getClaudeBudgetStatus, recordClaudeSpend, routeTaskTypeCall, resolveTaskLane, getRoutingQuotaStatus, MODEL_ROUTING } from './model-router.js';
 import { collectTodayGapReports, renderGapDigest } from './gap-reports.js';
 import { resolveIssueTarget } from './permission-guard.js';
-import { getOfficeContext, getOfficeSnapshot, officeContextEnabled } from './office-context.js';
+// buildOfficeContext + BUDGETS are imported for the office_context_status
+// read-back ONLY (2026-08-10): the meeting and per-agent shapes are the two that
+// actually bind, and a probe that reports only the generous `report` shape cannot
+// tell you that the meeting shape is at 98% and trimming the board out of view.
+import { getOfficeContext, getOfficeSnapshot, officeContextEnabled, buildOfficeContext, BUDGETS as OFFICE_BUDGETS } from './office-context.js';
 import {
   REPO_OWNER, REPO_NAME, BACKOFFICE_REPO_NAME, WAREHOUSE_REPO_NAME,
   REPO_TO_PROJECT_KEY, REPO_TO_TOKEN_SECRET, secretsPresentIn, commitFileToRepo,
@@ -994,8 +998,24 @@ async function buildReportFacts(env, { reportType, periodLabel, dateStr, agentRo
       ? (gapRows.results).map((r) => `- ${r.project || 'unattributed'}: ${r.n} capability gap(s) flagged against that system this period`).join('\n')
       : 'No capability gaps were flagged this period.';
 
+    // ── COUNT AND AVERAGE ARE TWO POPULATIONS, AND THE PACK MUST SAY SO ────
+    //
+    // week-07 published *"81 case_answer entries with an average quality of
+    // 0.80"* as one sentence about one population. It was two: the count
+    // included paced-out asks that were never made, and the average could only
+    // be taken over the rows that had a score. Reading it as one overstated the
+    // evidence base by about 3x.
+    //
+    // So `scored` is now counted separately from `n`, in SQL, and the fact pack
+    // carries both. Since 2026-08-10 a paced-out ask is written as
+    // `case_not_asked` (see improvement-loop.js), so the two diverge only for the
+    // 86 rows written before that — and where they diverge the line says which
+    // number the average belongs to rather than leaving a reader to assume.
     const capRows = await env.DB.prepare(
-      `SELECT event_type, COUNT(*) AS n, AVG(quality) AS avg_quality FROM reports
+      `SELECT event_type, COUNT(*) AS n,
+              SUM(CASE WHEN quality IS NOT NULL THEN 1 ELSE 0 END) AS scored,
+              AVG(quality) AS avg_quality
+         FROM reports
         WHERE event_type IS NOT NULL AND created_at >= ? GROUP BY event_type`
     ).bind(sinceIso).all().catch(() => null);
     if (capRows === null) {
@@ -1003,7 +1023,19 @@ async function buildReportFacts(env, { reportType, periodLabel, dateStr, agentRo
     } else if (!capRows.results.length) {
       captureSummary = 'Improvement-loop capture: zero office events recorded this period. That is a fact about the capture, not necessarily about the work.';
     } else {
-      captureSummary = `Improvement-loop capture: ${capRows.results.map((r) => `${r.n} ${r.event_type}${r.avg_quality != null ? ` (avg quality ${Number(r.avg_quality).toFixed(2)})` : ''}`).join(', ')}.`;
+      const parts = capRows.results.map((r) => {
+        const n = Number(r.n);
+        const scored = Number(r.scored || 0);
+        const avg = r.avg_quality != null ? ` (avg quality ${Number(r.avg_quality).toFixed(2)}` : '';
+        // The average's own population, stated on the same line as the average.
+        const over = avg ? `${scored === n ? ' over all of them' : ` over ONLY the ${scored} of these ${n} rows that carry a score — the other ${n - scored} recorded no measurement and the average does NOT describe them`})` : '';
+        return `${n} ${r.event_type}${avg}${over}`;
+      });
+      const notAsked = capRows.results.find((r) => r.event_type === 'case_not_asked');
+      captureSummary = `Improvement-loop capture: ${parts.join(', ')}.`
+        + (notAsked
+          ? ` NOTE: the ${notAsked.n} case_not_asked row(s) are asks that never reached a provider — the Gemini pacer denied the slot or a budget cap refused it. They are recorded so the refusal rate is visible, and they are NOT units of completed work. Do not add them to the case_answer count.`
+          : '');
     }
   }
 
@@ -1035,6 +1067,49 @@ async function buildReportFacts(env, { reportType, periodLabel, dateStr, agentRo
       `SELECT COUNT(*) AS n FROM reports WHERE type = 'status' AND created_at >= ?`
     ).bind(sinceIso).first().catch(() => null);
     if (statusNotes?.n) artifacts.push(`Daily AI-experience notes filed by agents: ${statusNotes.n}.`);
+  }
+
+  // ── OB-038: OUTPUT INDEXED ON THE REPOSITORY WRITTEN TO ────────────────
+  //
+  // The axis the consistency check was missing. See recordRepoWrite() in
+  // workers/repo-write.js for the full defect; the short form is that week-07
+  // published "office-AI-agents: Nothing moved" against 61 commits because every
+  // fact in the pack was indexed on the system ASKED, never on the repo WRITTEN
+  // TO, and validateReportBody() was given nothing that could contradict it.
+  //
+  // THREE OUTCOMES, NOT TWO, and the middle one is the whole point:
+  //   null  → the table could not be read → the pack renders UNVERIFIED
+  //   []    → readable and empty → "no write recorded", with the start date named
+  //   rows  → real attribution, one line per repository
+  // A table that does not exist yet reads as the FIRST case, not the second,
+  // because "we could not look" must never render as "we looked and found
+  // nothing" — which is the error this section exists to correct.
+  let repoWrites = null;
+  if (env.DB) {
+    const rows = await env.DB.prepare(
+      `SELECT repo, COUNT(*) AS n, SUM(committed) AS ok, SUM(redirected) AS redirected
+         FROM repo_writes WHERE created_at >= ? GROUP BY repo ORDER BY n DESC`
+    ).bind(sinceIso).all().catch(() => null);
+    repoWrites = rows === null ? null : (rows.results || []).map((r) => {
+      const failed = Number(r.n) - Number(r.ok || 0);
+      return `${r.repo}: ${r.ok || 0} file(s) committed`
+        + `${failed > 0 ? `, ${failed} write(s) FAILED` : ''}`
+        + `${Number(r.redirected || 0) > 0 ? `, ${r.redirected} redirected by the permission guard` : ''}`
+        + '.';
+    });
+  }
+
+  // Unattended Architect sessions this period (architect-liaison.js files these
+  // from the run's own session record). Absent → the section is omitted, never
+  // rendered as "no runs occurred": the runs are occasional and unannounced, so
+  // a period without one is the normal case and not a fact about the office.
+  let architectRuns = [];
+  if (env.DB) {
+    const rows = await env.DB.prepare(
+      `SELECT title, created_at FROM reports
+        WHERE type = 'architect_session' AND created_at >= ? ORDER BY created_at ASC LIMIT 10`
+    ).bind(sinceIso).all().catch(() => null);
+    architectRuns = rows?.results || [];
   }
 
   // ── PERIOD-CORRECT CASE COUNTS ────────────────────────────────────────
@@ -1069,12 +1144,28 @@ async function buildReportFacts(env, { reportType, periodLabel, dateStr, agentRo
     .filter((t) => t.state === 'BLOCKED' || t.state === 'NOT-READY')
     .map((t) => `${t.id} [${t.state}] ${t.title} — waiting on: ${t.blockedBy || 'UNVERIFIED — nothing recorded'}`);
 
+  // ── DISPATCH IS NOW COUNTED, 2026-08-10 (OB-036) ───────────────────────
+  //
+  // This was `dispatchedCount: null` — a literal, at the pipeline's only call
+  // site — so buildFactPack()'s number branch was unreachable and every report
+  // ever published said DISPATCHED: UNVERIFIED. It kept saying it after the board
+  // grew a real `Dispatched:` line on 2026-08-09, because nothing here read one.
+  //
+  // Counted from the board's OWN `Dispatched:` field rather than from a separate
+  // store, so the office's record of who holds what is the file a human reads.
+  // An unreadable board leaves all three null and the pack renders UNVERIFIED —
+  // which is then true for the right reason.
+  const dispatchedCount = board ? board.tasks.filter((t) => t.dispatched).length : null;
+  const inProgressCount = board ? board.counts['IN-PROGRESS'] ?? 0 : null;
+  const offeredCount = board ? board.tasks.filter((t) => t.offered).length : null;
+
   const due = requirements?.due || null;
   const factPack = buildFactPack({
     reportType,
     periodLabel,
     dateStr,
     requirements,
+    questions: snapshot?.questions || null,
     daysRemaining: daysUntil(due),
     decisions,
     board,
@@ -1084,9 +1175,13 @@ async function buildReportFacts(env, { reportType, periodLabel, dateStr, agentRo
     captureSummary,
     gapSummary,
     artifacts,
+    repoWrites,
+    architectRuns,
     blocked,
     pipelineSummary,
-    dispatchedCount: null,
+    dispatchedCount,
+    inProgressCount,
+    offeredCount,
   });
 
   return { factPack, due, snapshotErrors: snapshot?.errors || [] };
@@ -3327,7 +3422,31 @@ export default {
                     malformed: snapshot.requirements.malformed ?? [],
                   }
                 : null,
+              // The office→owner questions channel (2026-08-10). Reported for
+              // the same reason the other two are: the owner's question is not
+              // "is it wired" but "is it wired AND is there content behind it",
+              // and flag-on-input-empty is the state that reads as healthy.
+              questions: snapshot?.questions
+                ? {
+                    counts: snapshot.questions.counts,
+                    open: snapshot.questions.questions.filter((q) => q.open).map((q) => q.id),
+                    malformed: snapshot.questions.malformed ?? [],
+                  }
+                : null,
+              // The two board fields added 2026-08-10. `dispatched` is what
+              // OB-036 was about: the transition existed on the board and no
+              // consumer could see it.
+              dispatched: snapshot?.board ? snapshot.board.tasks.filter((t) => t.dispatched).map((t) => t.id) : null,
+              offered: snapshot?.board ? snapshot.board.tasks.filter((t) => t.offered).map((t) => t.id) : null,
               reportShape: { degraded: built.degraded, reason: built.reason, tokens: built.tokens, dropped: built.dropped },
+              meetingShape: (() => {
+                const m = buildOfficeContext(snapshot, 'meeting', { projects: officeProjects.projects });
+                return { tokens: m.tokens, budget: OFFICE_BUDGETS.meeting, dropped: m.dropped, trimmed: m.trimmed };
+              })(),
+              agentShape: (() => {
+                const a = buildOfficeContext(snapshot, 'agent', { agentId: 12, projects: officeProjects.projects });
+                return { tokens: a.tokens, budget: OFFICE_BUDGETS.agent, dropped: a.dropped, trimmed: a.trimmed };
+              })(),
             };
             break;
           }

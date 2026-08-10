@@ -220,3 +220,107 @@ reads them as measurement. It is open on the board as **OB-027**, which says
 
 *Corrections raised and written 2026-08-09 by the closing session, against
 `office-AI-agents@a183354`. Nothing above the fold was edited.*
+
+---
+
+# Follow-up — 2026-08-10
+
+**Appended again, and dated again.** Two of the three corrections above left a
+question open rather than resolving it. Both have now been resolved, and this
+block records how — because a correction that ends in *"this is a design
+decision, not a patch"* has to be followed by the decision, or it is a deferral
+that reads like a conclusion. Nothing above this line is edited.
+
+## Correction 2's underlying defect is FIXED — the attribution axis now exists
+
+Correction 2 established that *"office-AI-agents: Nothing moved"* was false, that
+the consistency check could not catch it, and that **the check was not the
+problem** — nothing anywhere recorded which repository a write landed in.
+
+That is now recorded. `commitFileToRepo()` in
+`office-AI-agents/workers/repo-write.js` calls a new `recordRepoWrite()` into a
+`repo_writes` table after every write, and the fact pack carries a new section
+— **5a-bis, "WHERE THE OFFICE'S OUTPUT WAS WRITTEN"** — indexed on the
+repository rather than on the system asked.
+
+**The check was not weakened, and that is proved rather than claimed.**
+`scripts/verify-report-pipeline.js` §12 builds this report's own fact-pack shape
+and asserts, in one run, that the sentence *"Nothing moved on office-AI-agents
+this week"* **passed** without the repo axis and is **refused** with it — by the
+same `validateReportBody()`, unchanged. 219/219 checks green.
+
+**What is not retro-fitted, and will not be.** This period's 61 commits have no
+rows and never will; durable recording began 2026-08-10. A back-fill from the
+git log was considered and rejected — the git log knows what *landed*, not what
+the Worker *attempted or was denied*, so it would be a different measurement
+wearing the same column name. **For any period before 2026-08-10 the correct
+statement about repo attribution is UNVERIFIED, not zero**, and the fact pack now
+says exactly that when the table is empty.
+
+## Correction 3's open design question is DECIDED — paced-out asks are captured, separately
+
+Correction 3 deliberately left this open: *whether a paced-out ask should be
+captured as a row at all* — or under a distinct `event_type`, or as-is and
+filtered by every consumer.
+
+**Decided: captured, under a distinct `event_type` — `case_not_asked`**
+(`office-AI-agents/workers/improvement-loop.js`, routed at
+`agents/agent-base.js`'s capture line).
+
+**Not-capturing was rejected**, and the reason is the more useful half: the
+pacer turning away two thirds of the office's Notebook-X asks is the single most
+important operational fact that table holds, and dropping the row would have
+deleted it — into the same defect family, since nothing else anywhere records a
+paced-out ask. The `event_type` axis was chosen over a new column because every
+consumer of the table already groups by it, so the split makes all of them
+correct **without editing any of them.**
+
+**Re-measured against live D1 on 2026-08-10** — these supersede the 90/56/34
+figures in Correction 3, which were themselves cited as a later-same-day
+measurement rather than this report's own 81:
+
+| | rows |
+|---|---|
+| `case_answer` rows total | **129** |
+| …`quality IS NULL` | **86 (67%)** |
+| …**all 86** `skipped: true`, **all 86** `project: notebook-x` | zero exceptions |
+| rows carrying a real score | **43** (39 notebook-x + **4** data-center) |
+| `track = 'office'` rows | **0** |
+
+**The 86 rows written before the change are NOT relabelled, and that decision is
+because of this report.** This report published *"81 case_answer entries"*. An
+`UPDATE` would make that published figure unverifiable against the database
+forever — and the rule that produced this whole corrections block is that a
+correction is appended and dated, **never achieved by rewriting the data
+underneath the thing that was published.** The discriminator for pre-cutover
+rows is `content LIKE '%"skipped":true%'`, exact for all 86. Relabelling is
+boarded as an owner decision (`OB-041`), not taken by a session.
+
+**One further defect found and fixed while in here**, in the same
+two-populations family this correction is about:
+`workers/meeting-engine.js`'s closing-QA-review query counted **every** row and
+labelled the total `scored`, while `AVG(quality)` averaged only the rows that had
+a score — this report's own error, in the agenda data of the meeting that reviews
+the office's work. It now carries `AND quality IS NOT NULL`, and the report
+pack counts scored rows separately from total rows and **states on the same line
+which population an average describes.**
+
+## What of the three corrections remains open
+
+- **Correction 1 (the Groq claim):** closed 2026-08-09. Nothing further.
+- **Correction 2:** the defect is fixed. `OB-038` is `DONE`; the un-back-fillable
+  history is stated above and is not a pending item.
+- **Correction 3:** the *design* question is decided. The *judgement* it was
+  gating is **still open** — `OB-027` still owes a yes/no on whether the sample
+  supports building the review jobs, and the two facts that disqualify most of it
+  are unchanged by this decision: the scored sample is **43**, not 129, and it is
+  **39 notebook-x against 4 data-center**. `1.4` and `1.5` still have **no** data
+  rather than thin data. Those are three different verdicts and the office owes
+  three different sentences.
+
+---
+
+*Follow-up raised and written 2026-08-10 by the backlog session. Measurements
+read back live from D1 (`data-center-db`, remote) on that date. Nothing above the
+2026-08-09 fold was edited, and nothing in the 2026-08-09 corrections block was
+edited either.*

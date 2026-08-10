@@ -100,12 +100,79 @@ export const TRACKS = Object.freeze(['client', 'office']);
  */
 export const EVENT_TYPES = Object.freeze([
   'case_answer',       // one Q&A unit of work (1.1) — see the note in buildOfficeEventRow
+  'case_not_asked',    // an ask that never reached a provider (2026-08-10) — see below
   'qa_review',         // 1.2, not built
   'team_lead_review',  // 1.3, not built
   'lead_qa_weekly',    // 1.5, not built
   'meeting',
   'guide_review',
 ]);
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ * `case_not_asked` — THE DECISION TAKEN 2026-08-10, AND WHY
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * ── THE MEASUREMENT ──────────────────────────────────────────────────────
+ *
+ * Live D1, 2026-08-10: **129 `case_answer` rows, 86 with `quality IS NULL`.
+ * All 86 carry `skipped: true` in their content JSON. All 86 are
+ * `project: notebook-x`. Zero exceptions.** So two thirds of the loop's only
+ * table recorded asks THAT NEVER HAPPENED — gemini-pacer.js denied the slot,
+ * `_askNotebookX()` returned `{ skipped: true, quality: undefined }`, and the
+ * capture line wrote the non-event as a row.
+ *
+ * The null was CORRECT at its origin. This module documents that null means
+ * "no score exists here, never zero", and a paced-out ask genuinely has no
+ * score. **That correctness is exactly why nothing noticed**: a review job that
+ * counts rows sees 129 units of work, and `AVG(quality)` silently answers over
+ * a different population than `COUNT(*)` — which is how week-07 came to publish
+ * "81 case_answer entries with an average quality of 0.80" as one sentence
+ * about one population when it was two.
+ *
+ * ── THE CHOICE, AND WHY IT IS NOT "STOP CAPTURING THEM" ──────────────────
+ *
+ * The two options were: don't capture a paced-out ask, or capture it under a
+ * status that cannot be mistaken for a scored answer. **Not capturing was
+ * rejected**, and the reason is that the pacer turning away two thirds of the
+ * office's Notebook-X work is the single most important operational fact this
+ * table holds. Dropping the row would delete it — and would delete it INTO the
+ * same defect family, since nothing else anywhere records a paced-out ask. The
+ * cure would have reproduced the disease with a cleaner-looking table.
+ *
+ * ── WHY A DISTINCT `event_type` AND NOT A NEW COLUMN ─────────────────────
+ *
+ * Every consumer of this table already groups by `event_type` — plan items
+ * 1.2–1.5 are specified that way, `meeting-engine.js` filters on it, and
+ * `buildReportFacts()` does `GROUP BY event_type`. So splitting on this axis
+ * makes every existing consumer correct WITHOUT EDITING ANY OF THEM: a query
+ * for `case_answer` now returns only asks that reached a provider and carry a
+ * real score, and the paced-out ones become separately countable rather than
+ * separately invisible. A new column would have required every consumer to
+ * learn about it, and the ones that did not would have kept reading 129.
+ *
+ * ── WHAT WAS DELIBERATELY NOT DONE: THE 86 EXISTING ROWS STAND ───────────
+ *
+ * They are NOT relabelled, and this is a decision rather than an omission.
+ * `reports/weekly/week-07-report.md` published "81 case_answer entries" —
+ * an UPDATE would make that published figure unverifiable against the database
+ * forever, and this project's standing rule is that a correction to published
+ * work is APPENDED AND DATED, never achieved by rewriting the data underneath
+ * it. The discriminator for pre-2026-08-10 rows is
+ * `content LIKE '%"skipped":true%'`, and it is exact — all 86, no exceptions.
+ * Relabelling is boarded as an owner decision, not taken by a session.
+ *
+ * ── THIS DOES NOT ANSWER OB-027 ─────────────────────────────────────────
+ *
+ * It opens it. OB-027 owes a yes/no on whether the sample supports building the
+ * review jobs, and the two facts that disqualify most of it are unchanged by
+ * this: the scored sample is **43**, not 129, and it is **39 notebook-x against
+ * 4 data-center** — not a base for a cross-project quality judgement. And the
+ * `office` track still has zero rows, which is a different verdict from "not yet
+ * enough". What this changes is that the numbers are now separable by query
+ * instead of by knowing to look inside a JSON blob.
+ */
+export const NOT_ASKED_EVENT = 'case_not_asked';
 
 /** The `type` value every row from this module carries. See the rule above. */
 export const OFFICE_EVENT_TYPE = 'office_event';
@@ -156,6 +223,14 @@ export function buildOfficeEventRow({
   if (quality !== null && quality !== undefined) {
     if (typeof quality !== 'number' || Number.isNaN(quality) || quality < 0 || quality > 1) {
       return { valid: false, reason: `quality must be null or a number in [0,1], got ${JSON.stringify(quality)}` };
+    }
+    // A `case_not_asked` row with a score is a contradiction: the ask never
+    // reached a provider, so there was nothing to score. REFUSED rather than
+    // dropped-silently, because the only way this happens is a caller wiring the
+    // wrong event type onto a real answer — which would put a scored row into
+    // the population every consumer now trusts to be unscored.
+    if (eventType === NOT_ASKED_EVENT) {
+      return { valid: false, reason: `${NOT_ASKED_EVENT} rows must carry quality null — the ask never reached a provider, so a score cannot exist. Got ${JSON.stringify(quality)}` };
     }
   }
 

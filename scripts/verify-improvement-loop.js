@@ -28,7 +28,13 @@ import {
   OFFICE_EVENT_INSERT_SQL,
   IMPROVEMENT_LOOP_FLAG,
   SIM_STATE_KEY,
+  NOT_ASKED_EVENT,
 } from '../workers/improvement-loop.js';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import nodePath from 'node:path';
+const __vdir = nodePath.dirname(fileURLToPath(import.meta.url));
+const readRepo = (rel) => readFileSync(nodePath.join(__vdir, '..', rel), 'utf8');
 
 /* ── tripwire ────────────────────────────────────────────────────────────── */
 globalThis.fetch = () => {
@@ -220,6 +226,71 @@ console.log('\n-- 8. INSERT column list matches database/schema.sql --');
     checkTrue(`INSERT names the new column "${c}"`, cols.includes(c));
   }
   checkTrue('INSERT does not touch created_at (the DB default is the timestamp)', !cols.includes('created_at'));
+}
+
+/* ── 9. `case_not_asked` — the paced-out ask is not a scored answer ──────
+   Added 2026-08-10. 86 of 129 live rows were asks that never reached a
+   provider, written as `case_answer` with a correct null. The null was honest;
+   the event type was not. */
+console.log('\n-- 9. case_not_asked: an ask that never happened is a different event --');
+{
+  checkTrue('NOT_ASKED_EVENT is a member of the closed EVENT_TYPES set',
+    EVENT_TYPES.includes(NOT_ASKED_EVENT));
+  checkTrue('...and it is spelled case_not_asked', NOT_ASKED_EVENT === 'case_not_asked');
+
+  const good = buildOfficeEventRow({ agentId: 3, eventType: NOT_ASKED_EVENT, track: 'client', quality: null });
+  checkTrue('a case_not_asked row with a null quality is valid', good.valid === true);
+  checkTrue('...and it still carries the client track (the work was client work that did not happen)',
+    good.valid && good.row.track === 'client');
+
+  // THE REFUSAL. The only way a scored case_not_asked row appears is a caller
+  // wiring the wrong event type onto a real answer, which would poison the
+  // population every consumer now trusts to be unscored.
+  const scored = buildOfficeEventRow({ agentId: 3, eventType: NOT_ASKED_EVENT, track: 'client', quality: 0.8 });
+  checkTrue('a case_not_asked row carrying a SCORE is REFUSED, not silently accepted',
+    scored.valid === false);
+  checkTrue('...and the refusal says why a score cannot exist for it',
+    scored.valid === false && /never reached a provider/.test(scored.reason));
+  checkTrue('a case_answer row carrying the same score is still fine (the rule is scoped)',
+    buildOfficeEventRow({ agentId: 3, eventType: 'case_answer', track: 'client', quality: 0.8 }).valid === true);
+}
+
+/* ── 10. The call site routes skipped results to the new event type ────── */
+console.log('\n-- 10. agent-base.js routes a skipped ask away from case_answer --');
+{
+  const src = readRepo('agents/agent-base.js');
+  checkTrue('the capture line branches on result.skipped',
+    /const notAsked = result\?\.skipped === true;/.test(src));
+  checkTrue('...and chooses the event type from it',
+    /eventType: notAsked \? 'case_not_asked' : 'case_answer'/.test(src));
+  checkTrue('a not-asked row records NO embodiment (nothing answered, so nothing to attribute)',
+    /embodimentModel: notAsked \? null :/.test(src));
+  checkTrue('a not-asked row can never carry a quality, even if one is somehow present',
+    /quality: typeof result\?\.quality === 'number' && !notAsked \? result\.quality : null/.test(src));
+  checkTrue('WHY it was not asked is recorded — a discarded reason collapses every cause into one symptom',
+    /not_asked_reason: notAsked \? \(result\?\.reason \|\| 'unstated'\) : null/.test(src));
+  // The historical archive is read by this flag. Removing it would make the 86
+  // pre-cutover rows unclassifiable.
+  checkTrue('`skipped` STAYS in the content JSON (the discriminator for pre-2026-08-10 rows)',
+    /skipped: notAsked,/.test(src));
+
+  const decision = readRepo('workers/improvement-loop.js');
+  checkTrue('the decision NOT to relabel the 86 existing rows is recorded with its reason',
+    /published "81 case_answer entries"/.test(decision) && /APPENDED AND DATED/.test(decision));
+  checkTrue('the exact discriminator for the historical rows is written down',
+    /content LIKE '%"skipped":true%'/.test(decision));
+  checkTrue('the decision states plainly that it does NOT answer OB-027',
+    /THIS DOES NOT ANSWER OB-027/.test(decision));
+
+  // The two-populations error, fixed at both consumers.
+  const runner = readRepo('workers/agent-runner.js');
+  checkTrue('the report pack counts SCORED rows separately from total rows',
+    /SUM\(CASE WHEN quality IS NOT NULL THEN 1 ELSE 0 END\) AS scored/.test(runner));
+  checkTrue('...and states which population the average describes, on the same line',
+    /the average does NOT describe them/.test(runner));
+  const meeting = readRepo('workers/meeting-engine.js');
+  checkTrue('the closing QA review no longer labels a total-row count "scored"',
+    /event_type = 'case_answer' AND quality IS NOT NULL AND created_at >= \?/.test(meeting));
 }
 
 console.log(`\n=== ${passed} passed, ${failed} failed ===`);

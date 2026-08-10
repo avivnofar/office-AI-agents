@@ -551,6 +551,30 @@ export function buildFactPack(f = {}) {
   }
   push('');
 
+  // ── 1b. WHAT THE OFFICE NEEDS FROM THE CLIENT (added 2026-08-10) ────────
+  //
+  // The report is read by the client. A question the office is waiting on him
+  // for belongs in it — and so does the fallback, because the fallback is the
+  // reason the question is not a stall. He reads finished work; this section
+  // exists so he can see the assumptions that work was finished under, and
+  // overturn one if it is wrong.
+  push('=== 1b. OPEN QUESTIONS TO THE CLIENT (source: back-office channel/to-owner/OPEN-QUESTIONS.md) ===');
+  if (f.questions?.counts) {
+    const open = (f.questions.questions || []).filter((q) => q.open);
+    push(`${open.length} question(s) awaiting an answer; ${f.questions.counts.closed} answered, declined or withdrawn.`);
+    for (const q of open) {
+      push(`- ${q.id} (${q.askedBy}, ${q.date || 'undated'}): ${q.question}`);
+      push(`    blocking: ${q.blocking || 'unstated'}`);
+      push(`    if no answer comes: ${q.fallback}`);
+    }
+    if (open.length) {
+      push('Report these as OPEN QUESTIONS with their fallbacks. NOT as blocked work — every one names what the office does anyway. A report that presents an open question as a stall is misreporting it.');
+    }
+  } else {
+    push('UNREADABLE — the office→owner questions channel could not be read this cycle. Say so; do not report that the office has nothing to ask.');
+  }
+  push('');
+
   push('=== 2/3. MEETING DECISIONS, VOTES AND CONFLICTS THIS PERIOD ===');
   if (f.decisions?.length) {
     for (const d of f.decisions) push(`- ${d}`);
@@ -574,11 +598,46 @@ export function buildFactPack(f = {}) {
     // first live draft duly wrote "As the office does not yet record
     // dispatch…" and lost the word. Split, so the VALUE and the INSTRUCTION
     // are not the same string.
+    // ── OB-036/OB-038 CLOSED HERE, 2026-08-10 ──────────────────────────
+    //
+    // `dispatchedCount` was hardcoded `null` at its only call site, so this
+    // branch was unreachable and every report published DISPATCHED: UNVERIFIED
+    // — including reports written AFTER the board grew an IN-PROGRESS task with
+    // a real `Dispatched:` line. Two consumers of the same file, one updated:
+    // `office-context.js` counted the transition and the fact pack did not.
+    //
+    // The count now comes from the SAME markdown the humans read (the board's
+    // `Dispatched:` field, written by dispatch.js), for the same reason
+    // office-context.js parses the board instead of a JSON sidecar: a second
+    // source of truth is a drift waiting to happen.
+    //
+    // ZERO IS A REAL NUMBER AND MUST NOT RENDER AS UNVERIFIED. "The record works
+    // and nothing was dispatched" and "there is no record" are different facts,
+    // and collapsing them is the defect this whole pipeline was built to stop —
+    // so `0` takes the first branch, and only an unreadable board takes the
+    // second. `!= null` does that; `if (f.dispatchedCount)` would not, which is
+    // worth stating because it is the kind of edit that looks like a tidy-up.
     if (f.dispatchedCount != null) {
-      push(`DISPATCHED: ${f.dispatchedCount}.`);
+      push(`DISPATCHED: ${f.dispatchedCount} of the ${c.total} tasks carry a Dispatched line naming a holder and a deadline.`);
+      if (f.dispatchedCount === 0) {
+        push('  ^ Zero dispatched is a REAL measurement, not an absent one: the board records dispatch and none happened this period. Do NOT write UNVERIFIED for this.');
+      }
+      // Disagreement between the two board fields is itself a finding, and the
+      // report should carry it rather than silently prefer one.
+      if (f.inProgressCount != null && f.inProgressCount !== f.dispatchedCount) {
+        push(`  ^ NOTE: ${f.inProgressCount} task(s) are IN-PROGRESS but ${f.dispatchedCount} carry a Dispatched line. The two should agree; where they do not, one of the writes is incomplete and that is a defect in the board's own record.`);
+      }
     } else {
-      push('DISPATCHED: UNVERIFIED — the office does not yet record dispatch, so "READY" means ready to be dispatched, not started.');
-      push('  ^ When section 4 states this, the sentence must contain the literal word UNVERIFIED. Writing "the office does not yet record dispatch" without that word does not satisfy the marker rule.');
+      push('DISPATCHED: UNVERIFIED — the board could not be read, so dispatch could not be counted at all. This is not evidence that nothing was dispatched.');
+      // The anchors in this sentence ("dispatch", "satisfy the marker rule") are
+      // load-bearing: verify-report-pipeline.js locates this line by them to
+      // prove the INSTRUCTION is a separate line from the VALUE and that it
+      // demands the literal token. Reword it and the guard silently stops
+      // finding it — which is the failure mode the guard is about.
+      push('  ^ When section 4 states this, the sentence must contain the literal word UNVERIFIED. Writing "the board could not be read" or "the office does not record dispatch" without that word does not satisfy the marker rule.');
+    }
+    if (f.offeredCount) {
+      push(`OFFERED to an unattended Architect run: ${f.offeredCount}. An offer does NOT remove a task from the board or block it — those tasks are still READY and still claimable by the office.`);
     }
     for (const t of (f.board.tasks || []).slice(0, BOARD_TASKS_IN_PACK)) {
       const waiting = t.blockedBy && t.blockedBy !== 'nothing' ? ` — waiting on: ${clip(t.blockedBy)}` : '';
@@ -634,6 +693,31 @@ export function buildFactPack(f = {}) {
   }
   push('');
 
+  // ── 5a-bis. THE AXIS THE CONSISTENCY CHECK WAS MISSING (OB-038) ────────
+  //
+  // week-07 published "office-AI-agents: Nothing moved" in a period with 61
+  // commits, and validateReportBody()'s consistency check could not catch it
+  // because every fact it was given was indexed on THE PROJECT ASKED, never on
+  // THE REPO WRITTEN TO. All five gap digests in 5a are attributed to
+  // data-center or notebook-x — the systems the questions went to — and all
+  // five were written INTO office-AI-agents. The two axes never met.
+  //
+  // The check was not weak and has not been weakened. What was missing was the
+  // fact, and this section is the fact: one line per repository, naming the
+  // repository, carrying a positive integer. projectsWithOutput() scans
+  // sections 5/5a/5b for exactly that shape, so `office-AI-agents` now becomes
+  // creditable with output without one word of the check changing.
+  push('=== 5a-bis. WHERE THE OFFICE\'S OUTPUT WAS WRITTEN (indexed on the REPOSITORY, not on the system asked) ===');
+  if (f.repoWrites?.length) {
+    for (const w of f.repoWrites) push(`- ${w}`);
+    push('This section and 5a index the SAME work on two different axes: 5a says which system a question was put to, this says which repository the answer was filed in. A project credited here MOVED, whatever 5a says about it.');
+  } else if (f.repoWrites === null) {
+    push('UNVERIFIED — the repo-write record could not be read this cycle, so which repositories received output is unknown. Do NOT infer that nothing was written; every gap digest and guide in the sections above was written somewhere.');
+  } else {
+    push('No repo write has been recorded this period. NOTE: durable recording of repo writes began 2026-08-10 — for any period before that the correct statement is UNVERIFIED, not zero, and section 5 above will still name output that was written somewhere.');
+  }
+  push('');
+
   push('=== 5a. CAPABILITY GAPS FLAGGED THIS PERIOD (the Q&A engine\'s findings against the two client AI systems) ===');
   if (f.gapSummary) push(f.gapSummary);
   else push('No capability-gap figures were passed to this report.');
@@ -647,6 +731,15 @@ export function buildFactPack(f = {}) {
   }
   push(f.captureSummary || 'Improvement-loop capture: UNVERIFIED — no event counts were passed to this report.');
   push('Do NOT open section 5 with a per-agent mood list. Mood and irritation are the office\'s internal weather; the client asked what was produced.');
+  // The Architect's unattended night work. Present only when a run was actually
+  // filed — an absent line means nothing is known, and the fact pack says so
+  // rather than reporting a quiet night, because a night with no run is the
+  // normal case and is not a fact about the office at all.
+  if (f.architectRuns?.length) {
+    push(`Unattended Architect sessions filed this period: ${f.architectRuns.length}.`);
+    for (const r of f.architectRuns) push(`- ${r.created_at}: ${r.title}`);
+    push('These are occasional, unannounced, unattended runs — NOT a shift and NOT a schedule. Report what they produced; do not report them as a cadence, and do not imply the next one is expected.');
+  }
   push('');
 
   push('=== 6. BLOCKED WORK ===');
