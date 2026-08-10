@@ -133,10 +133,53 @@ export const CACHE_TTL_MS = 30 * 60 * 1000;
  * client-requirements status most belongs.
  */
 export const BUDGETS = Object.freeze({
-  meeting: 1200,
+  meeting: 3500,
   agent: 400,
   report: 6000,
 });
+
+/**
+ * ── `meeting` RAISED 1,200 -> 3,500 ON 2026-08-10. THIS CLOSES OB-030. ────
+ *
+ * OB-030 asked for a measurement and a recommendation, because "changing the
+ * budget is a code change and not yours to make". The measurement now exists
+ * and the owner took the decision in the routing-enable session, so it is
+ * applied here rather than left boarded.
+ *
+ * **The number that decided it was never the percentage.** At 1,200 the
+ * meeting shape measured 1,181 tokens — 98.4%, comfortably "fitting" — while
+ * fitToBudget() quietly shrank FOUR sections to a single item each. Measured
+ * against the real 41-task board, the real requirements file and the real
+ * questions file on 2026-08-10, a meeting was being shown:
+ *
+ *     open work        1 of 26        projects         1 of 5
+ *     requirements     1 of 8         stuck items      1 of 12
+ *
+ * §2 of MEETING-PROTOCOL.md exists so meetings know what the office is doing.
+ * A meeting that sees one of twenty-six tasks does not. The fitter was working
+ * exactly as designed; the design had run out of room.
+ *
+ * **The curve, measured, not guessed** — same board, budget varied:
+ *
+ *     1,200 ->  1 of 26 tasks     2,400 -> all tasks, only board-stuck trimmed
+ *     1,600 -> 11 of 26 tasks     2,800 -> board-stuck 5 of 12
+ *     2,000 -> 23 of 26 tasks     3,236 -> nothing trimmed at all
+ *
+ * 3,236 is the shape's full untrimmed size today. 3,500 clears it with ~8%
+ * headroom, so nothing is hidden from a meeting and the board can grow before
+ * the fitter starts choosing again. It is still a real budget with a real
+ * fitter behind it — not "no limit".
+ *
+ * **`agent` was deliberately NOT raised, and that is the open half of OB-030.**
+ * It measures 305/400 (76%) and drops the board titles, the projects, the
+ * requirement detail, the stuck list and the open-questions list ENTIRELY,
+ * keeping only the headline counts. That is defensible — an agent needs to
+ * know a question is open, not to recite it — but it is a real limit and it is
+ * the one shape that costs money on EVERY model call, of which there are many
+ * a day. The meeting shape is per meeting. Raising `agent` needs a per-day cost
+ * figure that this session did not measure, so it keeps its number and OB-030
+ * keeps that question.
+ */
 
 /**
  * WHAT GETS CUT FIRST, decided 2026-08-07 and stated so a later session does

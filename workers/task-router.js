@@ -7,17 +7,31 @@
  * table itself is DATA (config/model-routing.json) — this module contains no
  * per-lane conditionals, so changing a lane is a config edit.
  *
- * ── SHIPPED OFF ──────────────────────────────────────────────────────────
+ * ── SHIPPED OFF 2026-08-05 · ENABLED IN PRODUCTION 2026-08-10 ────────────
  *
  * Every routed call passes through routingEnabled() first. While the
  * `routing_enabled` flag in SIM_KV's `simulation-state` is absent or false —
- * which is the default, and the state this ships in — routeTask() refuses
- * with `routing_disabled` and does nothing else. No provider is contacted,
- * no counter is touched, no table is created. Deploying this changes the
- * behaviour of exactly nothing.
+ * which is the CODE DEFAULT — routeTask() refuses with `routing_disabled` and
+ * does nothing else: no provider contacted, no counter touched, no table
+ * created. That is still true of the default and is what the verifier pins.
+ *
+ * It is NO LONGER true of production. The flag was turned on 2026-08-10 after
+ * the supervised test (back-office docs/procedures/ROUTING-SUPERVISED-TEST.md)
+ * was run lane by lane. **A documented switch state is a claim about
+ * production and goes stale the moment someone toggles it** — read it back
+ * with `{"type":"routing_status"}`; do not trust this comment or any other.
  *
  * This mirrors `guides_enabled` (agent-runner.js guidesEnabled(), 2026-08-02),
  * which is the proven shape in this repo for shipping a feature dark.
+ *
+ * ── WHAT ENABLING IT ACTUALLY CHANGED ────────────────────────────────────
+ *
+ * One live consumer, not none: workers/report-pipeline.js planReportProviders()
+ * returns `mode: 'routed'` when the flag is on, which moves the weekly report's
+ * REVIEW onto the judgment lane (Cerebras, 131,000-token input) and its DRAFT
+ * onto the report_drafting lane (Gemini, holding AD-028). The daily Q&A engine
+ * and the Guides pipeline were NOT rewired and use the providers they always
+ * did.
  *
  * ── WHY THIS IS A SEPARATE FILE FROM model-router.js ─────────────────────
  *
@@ -757,6 +771,53 @@ export async function routeTask({
     // Count against the same period the allow-check just read, so a provider
     // can never be checked monthly and recorded daily.
     const countPeriod = capFor(tokenEconomy, providerId).period ?? 'day';
+
+    /* ── AN EMPTY ANSWER IS NOT A SUCCESS (wired 2026-08-10) ──────────────
+     *
+     * provider-common.js added `finishReason` to the envelope with an
+     * explicit purpose, written in its own header: "so a max_tokens-truncated
+     * answer can be REJECTED rather than parsed as if it were complete."
+     * NOTHING EVER READ IT. The field was defined and never wired into the
+     * call site — the same shape as checkCodeWriteAllowedForModel(), which
+     * existed for `frontend_code_change` and was never attached to it.
+     *
+     * The supervised test found it on 2026-08-10, on the lane it hurts most.
+     * Cerebras' `gpt-oss-120b` is a REASONING model: it spends output tokens
+     * thinking before it emits any content. Measured, same 87-token prompt:
+     *
+     *     maxTokens  64 -> text ""     finishReason "length"   ok: true
+     *     maxTokens 600 -> text "0.8"  finishReason "stop"     154 output tokens
+     *
+     * So a judgment-lane call — "score this 0-1", the natural place to ask for
+     * a small budget — returned an empty string wrapped in a perfectly
+     * well-formed success envelope, with `ok: true` and one clean attempt. The
+     * lane did not degrade, because a truthy `result` was the only test.
+     *
+     * An empty answer must fail like any other failure: record what it spent,
+     * then move to the backup. `kind === 'chat'` guards the embeddings lane,
+     * whose result carries `embeddings` and no `text` at all and must not be
+     * caught by this.
+     */
+    const emptyChat = !!result && resolved.kind === 'chat' && !String(result.text || '').trim();
+
+    if (emptyChat) {
+      // The provider answered and spent real tokens — record them on ITS
+      // numbers, not zeroes, because the free tier was consumed either way.
+      await recordProviderCall(env, providerId, {
+        confirmed: true,
+        inputTokens: result.usage?.inputTokens ?? 0,
+        outputTokens: result.usage?.outputTokens ?? 0,
+        asOf,
+        period: countPeriod,
+      });
+      const why = result.finishReason === 'length' ? 'empty_text_truncated' : 'empty_text';
+      attempts.push({ provider: providerId, outcome: 'failed', reason: why });
+      console.warn(
+        `[routing] ${taskType}: ${providerId} returned an empty answer `
+        + `(finishReason=${result.finishReason ?? 'null'}, outputTokens=${result.usage?.outputTokens ?? '?'}) — degrading`
+      );
+      continue;
+    }
 
     if (result) {
       await recordProviderCall(env, providerId, {

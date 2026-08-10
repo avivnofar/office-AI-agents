@@ -335,12 +335,18 @@ export function assertDistinctReviewer({ draftProvider, reviewProvider, draftAge
 /**
  * ── THE CONTEXT CEILING, AND WHY THESE TWO NUMBERS EXIST ─────────────────
  *
+ * ⚠ HISTORICAL AS OF 2026-08-10 — THE CONSTRAINT DESCRIBED BELOW IS GONE.
+ * Routing was enabled and DIRECT_REVIEW_CONTEXT_TOKENS was raised 8,192 ->
+ * 131,000 the same day, so neither path is squeezed any more and
+ * BOARD_TASKS_IN_PACK went 18 -> 60 with it. This block is kept as written
+ * because it is what produced the two measures, and BOTH measures remain
+ * correct and still run under the larger ceiling — a bounded pack and a
+ * refusal are right regardless of how much room there is.
+ *
  * The REVIEW call is the constrained one, and only in the routing-off state.
  * With routing off the reviewer was Groq's `llama3-8b-8192`, whose 8,192
  * tokens are TOTAL — prompt plus completion, not input alone. (That model was
- * decommissioned; see DIRECT_REVIEW_CONTEXT_TOKENS below for why the number
- * stayed anyway. The reasoning here is preserved as written because it is what
- * produced the two measures, and both remain correct under a larger ceiling.)
+ * decommissioned; see DIRECT_REVIEW_CONTEXT_TOKENS below.)
  * The review
  * prompt carries the whole fact pack AND the whole draft, so the first real
  * fact pack (10,605 characters, ~3,535 tokens, measured 2026-08-08 against
@@ -362,49 +368,93 @@ export function assertDistinctReviewer({ draftProvider, reviewProvider, draftAge
  *      review. Refusing is the only way that failure stays visible.
  */
 /**
- * 18, not 27 and not 40. Measured 2026-08-08 against the live board: at 22
- * tasks the review call came to ~8,065 of the routing-off reviewer's 8,192
- * total tokens — a 1.5% margin, which is not a margin. At 18 it is ~7%.
+ * 60, raised from 18 on 2026-08-10 when routing was enabled.
  *
- * This number is a symptom, not a solution. The real fix is the judgment
- * lane (Cerebras, 131,000-token input), where the ceiling does not exist at
- * all; enabling routing removes the constraint rather than managing it.
- * Until then the cap is visible in the pack ("showing 18 of 27") and
- * estimateReviewFit() refuses anything that still would not fit.
+ * ── WHY 18 EXISTED, AND WHY IT NO LONGER SHOULD ──────────────────────────
+ *
+ * 18 was measured 2026-08-08 against the live board: at 22 tasks the review
+ * call came to ~8,065 of the routing-off reviewer's 8,192 total tokens — a
+ * 1.5% margin, which is not a margin. At 18 it was ~7%. It was always a
+ * symptom of DIRECT_REVIEW_CONTEXT_TOKENS below, never a judgement about how
+ * much board a report should see.
+ *
+ * That ceiling is gone on BOTH paths (see DIRECT_REVIEW_CONTEXT_TOKENS), so
+ * the cap that existed to respect it goes with it. Measured 2026-08-10
+ * against the real 41-task board: the fact pack at 18 tasks was 3,827
+ * estimated tokens and at the full 41 it is 4,780 — against a ceiling of
+ * 131,000. The truncation was costing the office 23 of its own 41 tasks in
+ * every report, to save 953 tokens out of a budget with six figures of room.
+ *
+ * ── STILL BOUNDED, DELIBERATELY ──────────────────────────────────────────
+ *
+ * 60 rather than "no cap". An unbounded list inside a bounded context is the
+ * exact failure office-context.js already learned once — it passed every test
+ * at three items and would have blown its budget the first day the board grew.
+ * 60 clears today's 41 with room for the board to grow by half again, and if
+ * it is ever exceeded the "(showing 60 of N)" marker still fires rather than
+ * the list silently reading as complete.
  */
-export const BOARD_TASKS_IN_PACK = 18;
-/** The blocked list is bounded too. An unbounded list inside a bounded
- *  context is the exact failure office-context.js already learned once: it
- *  passed every test at three items and would have blown its budget the first
- *  day the board grew. */
-export const BLOCKED_IN_PACK = 12;
+export const BOARD_TASKS_IN_PACK = 60;
+/** The blocked list is bounded too, for the same reason, and raised 12 -> 30
+ *  in the same 2026-08-10 change. NOT BINDING TODAY: the live board carries 7
+ *  blocked items, so this cap has never actually clipped anything. Raised
+ *  anyway so it does not become the next binding constraint the moment the
+ *  board's blocked list grows — the point of lifting the ceiling was to stop
+ *  managing scarcity that no longer exists. */
+export const BLOCKED_IN_PACK = 30;
 const BLOCKED_BY_MAX_CHARS = 150;
 
 /**
- * Total context of the routing-off reviewer.
+ * Total context available to the review call, whichever path serves it.
  *
- * ⚠ **STALE-BY-CHOICE SINCE 2026-08-09, AND LEFT THAT WAY DELIBERATELY.**
- * This 8,192 was the TOTAL context of Groq's `llama3-8b-8192`. That model was
- * found decommissioned on 2026-08-09 (shut down 2025-08-30) and the client now
- * sends `llama-3.1-8b-instant`, whose context is **131,072** — sixteen times
- * this number. So the value below is no longer the reviewer's real ceiling; it
- * is now deliberate under-use of a limit that has stopped binding.
+ * ── RAISED 8,192 -> 131,000 ON 2026-08-10, BY OWNER DECISION (OB-037) ────
  *
- * **Not raised in the session that found it, on purpose.** Raising it would
- * relax `BOARD_TASKS_IN_PACK` and `BLOCKED_IN_PACK` above and change what every
- * report is built from — a behavioural change to the live report pipeline, made
- * on the same day and in the same breath as a provider fix, with no supervised
- * run behind it. Over-estimating the constraint costs nothing but a smaller
- * fact pack; under-estimating it publishes a truncated review. The safe
- * direction is the one already in place.
+ * The old 8,192 was the TOTAL context of Groq's `llama3-8b-8192`. That model
+ * was found decommissioned on 2026-08-09 (shut down 2025-08-30) and the client
+ * now sends `llama-3.1-8b-instant`, whose context is 131,072. The session that
+ * found it deliberately did NOT raise this number — raising it relaxes
+ * `BOARD_TASKS_IN_PACK` above and changes what every report is built from, and
+ * that was not a change to make in the same breath as a provider fix. It was
+ * boarded as OB-037 and blocked on the owner. He approved it on 2026-08-10,
+ * in the session that enabled routing, which is what put a real measurement
+ * behind both halves of the decision.
  *
- * The owner decides whether to raise it. Two facts for that decision: routing's
- * judgment lane (Cerebras, 131,000 input) removes the ceiling anyway, and the
- * corrected Groq model now removes it on the degraded path too — the constraint
- * this whole section was written to manage has quietly stopped existing on
- * BOTH paths.
+ * ── WHY 131,000 AND NOT 131,072 ──────────────────────────────────────────
+ *
+ * The two paths have DIFFERENT real ceilings, and this constant has to be safe
+ * for both:
+ *
+ *   routing ON  — judgment lane, Cerebras `gpt-oss-120b`: 131,000 tokens of
+ *                 INPUT, measured by binary search 2026-08-06. Output is
+ *                 counted separately by that provider.
+ *   routing OFF — direct path, Groq `llama-3.1-8b-instant`: 131,072 tokens
+ *                 TOTAL, prompt plus completion.
+ *
+ * estimateReviewFit() below measures a TOTAL (fact pack + draft + system
+ * prompt + max output + margin). Comparing that total against the smaller of
+ * the two numbers, and against an INPUT-only limit as though it were a total
+ * budget, is conservative in both directions at once. That is the whole
+ * reason to take 131,000 rather than 131,072 — it is not a rounding
+ * preference.
+ *
+ * ── THIS GUARD NO LONGER BINDS, AND THAT IS THE POINT ────────────────────
+ *
+ * Measured 2026-08-10 against the real 41-task board: the full review call is
+ * ~7,600 tokens against 131,000 — about 6% of the ceiling. The guard is now a
+ * backstop against something going badly wrong rather than a daily
+ * constraint. It is kept, not deleted, because the failure it catches is
+ * silent: neither groq-client.js nor gemini-client.js reports a finish reason,
+ * so an overrun on the direct path comes back as a plausible-looking truncated
+ * review rather than an error. A guard that rarely fires is still the only
+ * thing standing between that failure and a published report.
+ *
+ * NOTE the number is NOT re-verified by this session against a live catalog.
+ * 131,072 is carried from the 2026-08-09 finding and 131,000 from the
+ * 2026-08-06 measurement. This project has been burned three times by a model
+ * whose limits stopped being true, so treat both as due for the monthly
+ * model-currency check rather than as permanent.
  */
-export const DIRECT_REVIEW_CONTEXT_TOKENS = 8192;
+export const DIRECT_REVIEW_CONTEXT_TOKENS = 131000;
 /** Headroom for the estimate itself being wrong in the cheap direction.
  *  estimateTokens over-estimates by design (length/3), which is the right
  *  asymmetry here: over-estimating costs a skipped review, under-estimating
@@ -467,9 +517,10 @@ export function estimateReviewFit({ factPack, draftContent, systemPrompt, maxOut
     estimated,
     ceiling: DIRECT_REVIEW_CONTEXT_TOKENS,
     reason: fits ? null
-      : `review input+output ~${estimated} tokens exceeds the routing-off reviewer's ${DIRECT_REVIEW_CONTEXT_TOKENS}-token TOTAL context. `
-        + 'Refused rather than sent: an overrun returns a truncated review that looks like a real one, because this provider reports no finish reason. '
-        + 'Enabling routing moves the review to the judgment lane (131,000-token input) and removes this ceiling.',
+      : `review input+output ~${estimated} tokens exceeds the reviewer's ${DIRECT_REVIEW_CONTEXT_TOKENS}-token context. `
+        + 'Refused rather than sent: an overrun returns a truncated review that looks like a real one, because the direct-path providers report no finish reason. '
+        + 'Since 2026-08-10 this ceiling is the same order of magnitude on both paths (Cerebras 131,000 input / Groq llama-3.1-8b-instant 131,072 total), '
+        + 'so hitting it means something is genuinely wrong upstream rather than that the board grew.',
   };
 }
 

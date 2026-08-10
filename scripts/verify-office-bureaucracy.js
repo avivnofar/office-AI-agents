@@ -131,7 +131,15 @@ check('BUDGETS.agent is the tightest — it is the per-LLM-call one',
 check('BUDGETS.report is the loosest — those two sites make no model call',
   officeContext.BUDGETS.report > officeContext.BUDGETS.meeting);
 check('BUDGETS.agent is 400 as specified', officeContext.BUDGETS.agent === 400);
-check('BUDGETS.meeting is 1200 as specified', officeContext.BUDGETS.meeting === 1200);
+// 3,500 since 2026-08-10 (was 1,200). OB-030 closed: at 1,200 the meeting
+// shape measured 1,181 tokens — 98.4%, apparently healthy — while quietly
+// shrinking FOUR sections to a single item each, so a meeting saw 1 of 26 open
+// tasks, 1 of 5 projects, 1 of 8 requirements and 1 of 12 stuck items. The
+// shape's full untrimmed size is 3,236; 3,500 clears it with headroom. See the
+// measured curve in office-context.js's BUDGETS note.
+check('BUDGETS.meeting is 3500 as specified (OB-030, 2026-08-10)', officeContext.BUDGETS.meeting === 3500);
+check('the meeting budget clears the shape\'s full untrimmed size, so nothing is hidden from a meeting',
+  officeContext.BUDGETS.meeting >= 3236);
 
 const snapshot = { fetched_at: Date.now(), board, requirements: reqs, errors: [] };
 
@@ -146,8 +154,16 @@ check('report shape fits its budget', reportShape.tokens <= officeContext.BUDGET
 // dropped and all three shapes are the same size — so this builds a board big
 // enough to force the budget to bite, which is the condition the ordering is
 // actually a claim about.
+//
+// 60 -> 110 TASKS ON 2026-08-10. The meeting budget went 1,200 -> 3,500 and a
+// 60-task board stopped binding it: meeting and report both came back at 2,465
+// untrimmed and the ordering assertion below failed on EQUALITY, not on a real
+// regression. Weakening it to `>=` would have been the wrong repair — it would
+// have left the suite asserting an ordering it was no longer testing. The
+// fixture is scaled instead, so the claim is still made under a board that
+// genuinely binds every budget.
 const bigBoard = officeContext.parseBoard(
-  Array.from({ length: 60 }, (_, i) => `### OB-${String(i + 1).padStart(3, '0')} — Task number ${i + 1} with a deliberately long title to consume budget
+  Array.from({ length: 110 }, (_, i) => `### OB-${String(i + 1).padStart(3, '0')} — Task number ${i + 1} with a deliberately long title to consume budget
 
 - **Assignee:** Agent ${(i % 9) + 1} — Somebody
 - **State:** ${i % 3 === 0 ? 'READY' : i % 3 === 1 ? 'IN-PROGRESS' : 'BLOCKED'}
@@ -165,7 +181,7 @@ check('under a board big enough to bind, report > meeting > agent',
   `agent=${bigAgent.tokens} meeting=${bigMeeting.tokens} report=${bigReport.tokens}`);
 check('the agent shape still respects its 400-token ceiling under load',
   bigAgent.tokens <= officeContext.BUDGETS.agent, `${bigAgent.tokens}`);
-check('the meeting shape still respects its 1200-token ceiling under load',
+check(`the meeting shape still respects its ${officeContext.BUDGETS.meeting}-token ceiling under load`,
   bigMeeting.tokens <= officeContext.BUDGETS.meeting, `${bigMeeting.tokens}`);
 // SHRINK BEFORE DROP. The first version of fitToBudget() only dropped whole
 // sections, and this assertion is what caught it: a 60-task "Open work"

@@ -275,8 +275,28 @@ console.log('\n-- 10. agent-base.js routes a skipped ask away from case_answer -
     /skipped: notAsked,/.test(src));
 
   const decision = readRepo('workers/improvement-loop.js');
-  checkTrue('the decision NOT to relabel the 86 existing rows is recorded with its reason',
-    /published "81 case_answer entries"/.test(decision) && /APPENDED AND DATED/.test(decision));
+  // 2026-08-10: the owner reversed this. The rows WERE relabelled (113 of them),
+  // so the assertion changes from "the refusal is recorded" to "the reversal is
+  // recorded, and the published figure was corrected rather than overwritten".
+  // The rule being protected is unchanged and is what this still pins: a
+  // published number whose data moved underneath it must carry a dated note.
+  checkTrue('the relabel decision is recorded, with the row count it actually touched',
+    /RELABELLED 2026-08-10, BY OWNER DECISION/.test(decision) && /113 rows/.test(decision));
+  checkTrue('the superseded "do not relabel" reasoning is STRUCK, not deleted',
+    /~~WHAT WAS DELIBERATELY NOT DONE/.test(decision) && /struck 2026-08-10/.test(decision));
+  checkTrue('the published figure was corrected by an appended dated note, not by rewriting it',
+    /Correction 4/.test(decision) && /week-07-report\.md/.test(decision));
+  checkTrue('week-07 actually carries that appended correction, naming both numbers',
+    (() => {
+      // Collapse the markdown's hard wraps before matching — these sentences
+      // are prose in a published file and WILL be re-wrapped by any later edit.
+      const wk = readRepo('reports/weekly/week-07-report.md').replace(/\s+/g, ' ');
+      return /# Correction 4/.test(wk) && /113 rows changed/.test(wk)
+        && /can no longer be reproduced from the database/.test(wk)
+        && /Appended 2026-08-10/.test(wk);
+    })());
+  checkTrue('the change is reversible against the exact rows it touched',
+    /checkpoints\/2026-08-10-ob-041-relabel-ids\.txt/.test(decision));
   checkTrue('the exact discriminator for the historical rows is written down',
     /content LIKE '%"skipped":true%'/.test(decision));
   checkTrue('the decision states plainly that it does NOT answer OB-027',

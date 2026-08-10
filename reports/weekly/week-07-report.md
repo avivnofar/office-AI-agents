@@ -324,3 +324,76 @@ which population an average describes.**
 read back live from D1 (`data-center-db`, remote) on that date. Nothing above the
 2026-08-09 fold was edited, and nothing in the 2026-08-09 corrections block was
 edited either.*
+
+---
+
+# Correction 4 — the 113 rows WERE relabelled, and this report's "81" is no longer reproducible
+
+*Appended 2026-08-10 by the routing-enable session, later the same day as the
+follow-up above. **This supersedes the paragraph in that follow-up which said
+the rows would not be relabelled.** Nothing above this line was edited.*
+
+## What changed
+
+The follow-up above stated, in bold, that the 86 paced-out rows were **not**
+relabelled, and that relabelling was boarded as `OB-041` for the owner. **The
+owner took that decision on 2026-08-10 and chose to relabel: accuracy over
+stability.** It has been done.
+
+```sql
+UPDATE reports SET event_type='case_not_asked'
+ WHERE type='office_event' AND event_type='case_answer'
+   AND content LIKE '%"skipped":true%';
+-- 113 rows changed
+```
+
+**113, not 86.** The 86 figure was measured earlier on 2026-08-10; the cron kept
+writing paced-out asks as `case_answer` until the `case_not_asked` change reached
+production at some point between **08:04:06** (the last mislabelled row) and
+**09:01:25** (the first correctly-labelled one). The two families do not overlap
+by a single row, which is also the evidence that there was no second, unfixed
+capture site still writing the old label.
+
+The discriminator was verified **exact before the UPDATE ran**, not assumed:
+every `case_answer` row matching `skipped: true` had `quality IS NULL`, every row
+not matching it had a real score, and there were no mixed cases in either
+direction. The 113 row ids are recorded in
+`checkpoints/2026-08-10-ob-041-relabel-ids.txt` so the change is reversible
+against **the exact rows it touched** rather than against a re-run of the
+discriminator, which would now also catch rows written since.
+
+## What the number was, what it is, and why it changed
+
+| | before | after |
+|---|---|---|
+| `case_answer` rows | 168 | **55** |
+| …of those, `quality IS NULL` | 113 (67%) | **0** |
+| `case_not_asked` rows | 55 | **168** |
+| scored sample, notebook-x | 51 | 51 (avg **0.896**) |
+| scored sample, data-center | 4 | 4 (avg **0.50**) |
+
+**The point of the change is the second row of that table.** `case_answer` now
+contains only asks that reached a provider and carry a real score, so a count of
+those rows and an average over them finally describe **the same population** —
+which is the exact defect Correction 3 was written about. Nothing was deleted:
+the paced-out asks are all still there, under a label that cannot be mistaken for
+a scored answer, and the fact that the pacer turns away most of the office's
+Notebook-X work is still the most important thing this table records.
+
+## What this costs, stated plainly
+
+**This report's headline figure of "81 case_answer entries" can no longer be
+reproduced from the database.** A query for `case_answer` over this report's
+window now returns a smaller number, because two thirds of what it counted has
+been moved to a different label. That is the cost the earlier decision was
+protecting against, and the owner accepted it knowingly.
+
+It is written here, appended and dated, for the reason the rule exists: **a
+published figure whose data changed underneath it, with no note saying so, makes
+every other figure in the same report untrustworthy too.** The 81 was not wrong
+when it was published — it counted exactly what it said it counted. It is now
+**unreproducible**, which is a different thing from wrong, and a reader who finds
+55 where the report says 81 should land here rather than conclude the report was
+fabricated.
+
+`OB-041` is closed by this.

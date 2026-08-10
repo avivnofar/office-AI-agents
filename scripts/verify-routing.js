@@ -62,7 +62,7 @@ globalThis.fetch = (...args) => {
 /** Swaps every registry provider for a stub that counts invocations. */
 const INVOCATIONS = [];
 const REAL_INVOKE = {};
-function stubAllProviders({ failing = [] } = {}) {
+function stubAllProviders({ failing = [], emptyText = [] } = {}) {
   INVOCATIONS.length = 0;
   for (const [id, p] of Object.entries(PROVIDER_REGISTRY)) {
     if (!(id in REAL_INVOKE)) REAL_INVOKE[id] = p.invoke;
@@ -71,6 +71,12 @@ function stubAllProviders({ failing = [] } = {}) {
       if (failing.includes(id)) {
         opts.onResponse?.({ status: 500 });
         return null;
+      }
+      // A 200 that carries NO CONTENT. This is what Cerebras' reasoning model
+      // actually returns when max_tokens is spent on thinking — a well-formed
+      // envelope with an empty string in it. See §5b below.
+      if (emptyText.includes(id)) {
+        return { text: '', source: id, finishReason: 'length', usage: { inputTokens: 87, outputTokens: 64 }, rateLimit: {} };
       }
       return { text: `stub:${id}`, source: id, finishReason: 'stop', usage: { inputTokens: 10, outputTokens: 5 }, rateLimit: {} };
     };
@@ -491,6 +497,81 @@ check('...and no chat provider was substituted for it',
 
 check('no degradation path threw — every result came back structured', true);
 check('nothing in the degradation tests reached the network', NETWORK_TRIPWIRE.length === 0, NETWORK_TRIPWIRE.join(','));
+
+/* ── 5b. AN EMPTY ANSWER IS NOT A SUCCESS  [FAILS-OLD] ───────────────────
+ *
+ * Found by the supervised test on 2026-08-10, on the live judgment lane.
+ *
+ * provider-common.js added `finishReason` to the envelope for one stated
+ * purpose — "so a max_tokens-truncated answer can be REJECTED rather than
+ * parsed as if it were complete" — and NOTHING EVER READ IT. routeTask()
+ * tested `if (result)` and nothing else, so a 200 carrying an empty string
+ * came back as ok:true with one clean attempt and no degradation.
+ *
+ * It bites hardest exactly where it matters most. Cerebras' `gpt-oss-120b` is
+ * a REASONING model whose thinking is charged against max_tokens, so the
+ * judgment lane — "short scored calls", the shape a caller naturally gives a
+ * small budget — was the one that returned nothing. Measured live, same
+ * 87-token prompt: max_tokens 64 -> text "" / finish_reason "length";
+ * max_tokens 600 -> "0.8" after 154 output tokens.
+ *
+ * This is the repo's recurring defect shape (an unwired guard, a valid-looking
+ * envelope with nothing in it), so it gets a FAILS-OLD scenario rather than a
+ * passing description. */
+console.log('\n--- 5b. An empty answer is not a success  [FAILS-OLD] ---');
+
+stubAllProviders({ emptyText: ['cerebras'] });
+const emptied = await routeTask({
+  env: onEnv({}), taskType: 'judgment', routingConfig, tokenEconomy, prompt: 'score this 0-1',
+});
+
+/** VERBATIM transcription of the pre-change decision: a truthy result is a
+ *  success, whatever is in it. */
+const oldWouldHaveAccepted = (result) => !!result;
+const emptyEnvelope = { text: '', source: 'cerebras', finishReason: 'length', usage: { inputTokens: 87, outputTokens: 64 } };
+check('[FAILS-OLD] the old test (truthy result) ACCEPTS an empty answer as a success',
+  oldWouldHaveAccepted(emptyEnvelope) === true);
+check('[FAILS-OLD] ...and would have returned it to the caller as the lane\'s answer, with no degradation',
+  oldWouldHaveAccepted(emptyEnvelope) === true && emptyEnvelope.text === '');
+
+check('[new] an empty chat answer is treated as a FAILED attempt, not a success',
+  emptied.attempts[0].provider === 'cerebras' && emptied.attempts[0].outcome === 'failed',
+  JSON.stringify(emptied.attempts));
+check('[new] the attempt reason names truncation specifically when finishReason says so',
+  emptied.attempts[0].reason === 'empty_text_truncated', emptied.attempts[0].reason);
+check('[new] and the lane DEGRADES to its backup rather than returning nothing',
+  emptied.ok === true && emptied.provider === 'mistral', JSON.stringify(emptied.attempts));
+check('[new] the backup was actually invoked — the degradation is real, not just relabelled',
+  INVOCATIONS.join(',') === 'cerebras,mistral', INVOCATIONS.join(','));
+
+// A whitespace-only answer is the same failure wearing a different coat.
+stubAllProviders();
+PROVIDER_REGISTRY.cerebras.invoke = async () => {
+  INVOCATIONS.push('cerebras');
+  return { text: '   \n  ', source: 'cerebras', finishReason: 'stop', usage: { inputTokens: 5, outputTokens: 2 } };
+};
+const whitespaced = await routeTask({
+  env: onEnv({}), taskType: 'judgment', routingConfig, tokenEconomy, prompt: 'score this 0-1',
+});
+check('[new] a whitespace-only answer degrades too — the check trims before testing',
+  whitespaced.provider === 'mistral' && whitespaced.attempts[0].reason === 'empty_text',
+  JSON.stringify(whitespaced.attempts));
+
+/* The guard must NOT catch the embeddings lane, whose result carries
+ * `embeddings` and no `text` at all. Catching it would break the one lane the
+ * design says must fail rather than degrade — and it would do so silently. */
+stubAllProviders();
+PROVIDER_REGISTRY.cohere.invoke = async () => {
+  INVOCATIONS.push('cohere');
+  return { embeddings: [[0.1, 0.2, 0.3]], source: 'cohere', usage: { inputTokens: 4 } };
+};
+const embedOk = await routeTask({
+  env: onEnv({}), taskType: 'embeddings', routingConfig, tokenEconomy, texts: ['a'],
+});
+check('[new] an embeddings result with no `text` field is NOT caught by the empty-answer check',
+  embedOk.ok === true && embedOk.provider === 'cohere', JSON.stringify(embedOk.attempts));
+check('[new] ...and its vectors survive intact', Array.isArray(embedOk.result?.embeddings?.[0]));
+check('nothing in the empty-answer tests reached the network', NETWORK_TRIPWIRE.length === 0, NETWORK_TRIPWIRE.join(','));
 
 /* ── 6. Controlled-random embodiment ────────────────────────────────────── */
 console.log('\n--- Controlled-random embodiment (a measurement instrument) ---');

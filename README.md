@@ -98,11 +98,38 @@ no-automated-writes rule).
 
 | Model | Provider | Role | Cost |
 |-------|----------|------|------|
-| `llama3-8b-8192` | **Groq** | Primary model for all routine per-question agent work | Free, ~14,400 req/day |
+| `llama-3.1-8b-instant` | **Groq** | Primary model for all routine per-question agent work | Free, ~14,400 req/day |
 | `llama-3.1-8b-instruct-fp8` | **Cloudflare Workers AI** | Question routing/classification + same-session fallback when Groq or Gemini is unavailable | Free, account-scoped |
 | **Gemini 3.1 Flash-Lite** | Google AI Studio | Report synthesis (monthly/quarterly/yearly meetings) **and** direct Notebook-X question-asking (paced ~1 call/20s from this automation — Gemini's free-tier quota is shared with Notebook-X's own traffic) | Free tier, ~1,500 req/day |
 | **Google AI Studio** (interactive) | Google | Reserved for human-in-the-loop creative-tool sessions (Agents 9/10 building design assets) — never called programmatically | n/a |
-| `claude-sonnet-4-6` | **Anthropic** | Data Center's AI Search bar. **Shared $4.50/month soft-stop budget** across the Q&A engine (10 active personas) and the chore-automation economy — a per-month dollar cap tracked in D1 and checked in software before every call, deliberately below the account's own $5/month spend ceiling (the hard backstop) — not a per-day call count | Paid, low volume |
+| `claude-sonnet-5` | **Anthropic** | Data Center's AI Search bar, and the Guides pipeline's review pass (`workers/claude-client.js` `CLAUDE_MODEL`). **Shared $4.50/month soft-stop budget** across the Q&A engine (10 active personas) and the chore-automation economy — a per-month dollar cap tracked in D1 and checked in software before every call, deliberately below the account's own $5/month spend ceiling (the hard backstop) — not a per-day call count. **Never reachable from task-type routing** (see below) | Paid, low volume |
+
+### Task-type routing — **LIVE since 2026-08-10**
+
+Work is routed to a provider by **what kind of task it is**, never by which
+agent is doing it. The lane table is data (`config/model-routing.json`); the
+switch is `routing_enabled` in `SIM_KV`.
+
+| Model | Provider | Lane | Cost |
+|-------|----------|------|------|
+| `gpt-oss-120b` | **Cerebras** | Judgment/quality **and** long-document — primary on both | Free, 1,000 req/min, **131,000-token input ceiling** (measured) |
+| `mistral-small-latest` | **Mistral** | Backup on judgment, long-document and Hebrew composition. Primary on none | Free, 50 req/min |
+| `embed-multilingual-v3.0` | **Cohere** | Embeddings / semantic search — **no backup by design** | Trial key, 1,000 calls/**month** |
+
+> **Anthropic has no lane and is unreachable from routing**, enforced two
+> independent ways: the `architect` lane is marked non-routable and names no
+> provider, and the provider registry imports no Anthropic client. Its two live
+> call paths are direct callers that never went through the router.
+>
+> **Every provider above stays on its free tier.** A call that would exceed one
+> is refused and logged as `overtime_required` and the lane degrades or skips.
+> There is no automatic escalation to a paid tier, for any provider, ever.
+
+*Model IDs in the two tables above were corrected 2026-08-10: Groq's
+`llama3-8b-8192` (decommissioned 2025-08-30) and Anthropic's `claude-sonnet-4-6`
+(retired, flagged in-repo 2026-08-07) were both still published here after the
+code had moved on. A model ID in a README is a claim about production and goes
+stale silently — check it against the code, not against this file.*
 
 ---
 
@@ -262,7 +289,7 @@ whether an answer was actually good enough.
 | Worker | `data-center-agents` (`workers/agent-runner.js`) |
 | State storage | Cloudflare D1 (`data-center-db`) + KV (`SIM_KV`) + Durable Objects (`AGENT_STATE`) |
 | Service binding | `APP_API` → `data-center-api` |
-| Primary agent model | Groq `llama3-8b-8192` |
+| Primary agent model | Groq `llama-3.1-8b-instant` |
 | Routing + fallback | Cloudflare Workers AI |
 | Report synthesis + direct Notebook-X asks | Google Gemini 3.1 Flash-Lite |
 | Data Center AI Search | Claude Sonnet 4.6 — $4.50/month shared soft-stop (under the account's $5/month ceiling), dollar-tracked not call-counted |

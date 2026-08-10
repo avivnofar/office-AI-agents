@@ -350,26 +350,46 @@ check('[new] and getWeeklyCasesHandled() itself is unchanged (its committed CSV 
 check('[new] but it may NOT renumber the sections',
   rp.validateReportBody(okBody.replace('## 1. Where we stand', '## 4. Where we stand'), { factPack: FACTS_WITH_MARKER, due: '2026-09-07' }).ok === false);
 
-/* ── The context ceiling on the routing-off path ─────────────────────────
- * The reviewer with routing OFF is Groq llama3-8b-8192, whose 8,192 tokens
- * are TOTAL — prompt plus completion. The first real fact pack measured
- * ~3,535 tokens against the live 27-task board, which put the review within a
- * few hundred tokens of the ceiling before the completion counted. Neither
- * client on this path reports a finish reason, so an overrun would return a
- * truncated review that parses like a real one. */
-section('§5b  The routing-off context ceiling — refuse, never send-and-hope');
+/* ── The review context ceiling — refuse, never send-and-hope ────────────
+ * Originally written against Groq llama3-8b-8192, whose 8,192 tokens were
+ * TOTAL (prompt plus completion). That model was decommissioned, and on
+ * 2026-08-10 DIRECT_REVIEW_CONTEXT_TOKENS was raised 8,192 -> 131,000 by owner
+ * decision when routing was enabled.
+ *
+ * THE FIXTURES BELOW ARE NOW SIZED FROM THE CONSTANT, NOT FROM A LITERAL.
+ * They were hardcoded to 8,192 and every one of them silently stopped testing
+ * anything the moment the ceiling moved — they passed as "fits" instead of
+ * proving a refusal. That is the same class of rot this suite exists to catch,
+ * so the scenario now calibrates itself and will survive the next change.
+ *
+ * What is being proven is unchanged: an overrunning review is REFUSED rather
+ * than sent, because neither client on the direct path reports a finish reason
+ * and an overrun would come back as a truncated review that parses like a real
+ * one. */
+section('§5b  The review context ceiling — refuse, never send-and-hope');
 
-const bigPack = 'FACT '.repeat(6000);      // ~6,000 tokens of facts
-const smallPack = 'FACT '.repeat(400);     // ~400 tokens
+const estTok = (t) => (t ? Math.ceil(String(t).length / 3) : 0);
+/** `'FACT '` is 5 chars => 5/3 tokens each. Repeats needed for N tokens. */
+const packOf = (tokens) => 'FACT '.repeat(Math.max(1, Math.ceil((tokens * 3) / 5)));
+
+const CEILING = rp.DIRECT_REVIEW_CONTEXT_TOKENS;
+const bigPack = packOf(CEILING * 1.2);     // comfortably over, whatever the ceiling is
+const smallPack = packOf(400);             // ~400 tokens — a realistic pack
 const SYS = rp.REVIEW_SYSTEM;
-check('[new] a fact pack that would overrun the routing-off reviewer is REFUSED',
+check('[new] a fact pack that would overrun the reviewer is REFUSED',
   rp.estimateReviewFit({ factPack: bigPack, draftContent: okBody, systemPrompt: SYS, maxOutputTokens: 1800 }).fits === false);
-check('[new] the refusal names the ceiling AND the fix (enabling routing removes it)',
-  /131,000|judgment lane/.test(rp.estimateReviewFit({ factPack: bigPack, draftContent: okBody, systemPrompt: SYS, maxOutputTokens: 1800 }).reason || ''));
+check('[new] the refusal names the ceiling AND the provider limits behind it',
+  /131,000|131000|judgment lane|Cerebras/.test(rp.estimateReviewFit({ factPack: bigPack, draftContent: okBody, systemPrompt: SYS, maxOutputTokens: 1800 }).reason || ''));
 check('[new] a realistic pack fits and is NOT refused',
   rp.estimateReviewFit({ factPack: smallPack, draftContent: okBody, systemPrompt: SYS, maxOutputTokens: 1800 }).fits === true);
 check('[new] the completion budget counts against the ceiling, not just the prompt',
-  rp.estimateReviewFit({ factPack: smallPack, draftContent: okBody, systemPrompt: SYS, maxOutputTokens: 7500 }).fits === false);
+  rp.estimateReviewFit({ factPack: smallPack, draftContent: okBody, systemPrompt: SYS, maxOutputTokens: CEILING }).fits === false);
+check('[new] the ceiling is the SMALLER of the two real provider limits, used as a total',
+  CEILING <= 131000 && CEILING <= 131072);
+check('[new] the full 41-task board fits with room — the cap that managed scarcity is gone',
+  rp.BOARD_TASKS_IN_PACK >= 41 && rp.estimateReviewFit({
+    factPack: packOf(5181), draftContent: okBody, systemPrompt: SYS, maxOutputTokens: 500,
+  }).fits === true);
 check('[new] the runner checks the fit only on the DIRECT path (routing ON has 131K and does not bind)',
   /if \(plan\.review\.mode !== 'direct'\) \{\s*\n\s*return callReportModel\(env, plan\.review, \{/.test(runnerSrc)
   && runnerSrc.indexOf('const fit = estimateReviewFit(') > runnerSrc.indexOf("if (plan.review.mode !== 'direct')"));
@@ -397,18 +417,28 @@ section('§5c  The fit guard measures what is actually sent, not REVIEW_SYSTEM')
  *  a thousand tokens on top of REVIEW_SYSTEM. */
 const ASSEMBLED = `${rp.REVIEW_SYSTEM}\n\nCurrent state: mood=NEUTRAL, irritation=1/5, angry=false.\n\nBehavioral rules:\n- ${'checks every figure against its source. '.repeat(20)}\n\n${'The office board: OB-0xx [READY] Agent 12 — a task title long enough to matter. '.repeat(60)}`;
 
-/** VERBATIM transcription of the pre-change signature: systemPrompt defaults
- *  to REVIEW_SYSTEM and the caller passes nothing. */
+/** Transcription of the pre-change signature: systemPrompt defaults to
+ *  REVIEW_SYSTEM and the caller passes nothing. The BUG being reproduced is
+ *  which STRING gets measured, not which ceiling it is measured against — so
+ *  the ceiling here tracks the current constant, and both sides of the
+ *  comparison are judged against the same number. Hardcoding 8,192 here made
+ *  this scenario stop reproducing anything when the ceiling moved. */
 function oldEstimateReviewFit({ factPack, draftContent, systemPrompt = rp.REVIEW_SYSTEM, maxOutputTokens }) {
   const est = (t) => (t ? Math.ceil(String(t).length / 3) : 0);
   const estimated = est(factPack) + est(draftContent) + est(systemPrompt) + maxOutputTokens + 400;
-  return { fits: estimated <= 8192, estimated };
+  return { fits: estimated <= rp.DIRECT_REVIEW_CONTEXT_TOKENS, estimated };
 }
 
-// A pack sized so the call fits when the un-assembled prompt is measured and
-// overruns when the real one is — which is precisely the live 8,347-vs-8,192
-// case, reproduced in miniature.
-const EDGE_PACK = 'FACT '.repeat(1900);
+// A pack sized so the call FITS when the un-assembled prompt is measured and
+// OVERRUNS when the real one is — precisely the live 8,347-vs-8,192 case,
+// reproduced at whatever ceiling is currently in force. Sized from the
+// assembly delta so the straddle holds by construction rather than by luck.
+const ASSEMBLY_DELTA = estTok(ASSEMBLED) - estTok(rp.REVIEW_SYSTEM);
+const EDGE_PACK = packOf(
+  rp.DIRECT_REVIEW_CONTEXT_TOKENS
+  - estTok(okBody) - estTok(rp.REVIEW_SYSTEM) - 1600 - 400
+  - Math.floor(ASSEMBLY_DELTA / 2)
+);
 const oldFit = oldEstimateReviewFit({ factPack: EDGE_PACK, draftContent: okBody, maxOutputTokens: 1600 });
 const newFit = rp.estimateReviewFit({ factPack: EDGE_PACK, draftContent: okBody, systemPrompt: ASSEMBLED, maxOutputTokens: 1600 });
 console.log(`        old guard (measuring REVIEW_SYSTEM):     ~${oldFit.estimated} tokens -> fits=${oldFit.fits}`);
@@ -538,9 +568,10 @@ const loudFit = rp.estimateReviewFit({ factPack: bigPack, draftContent: okBody, 
 check('[LOUD] the refusal carries a reason, never a bare false',
   typeof loudFit.reason === 'string' && loudFit.reason.length > 80);
 check('[LOUD] the reason states BOTH numbers, so the margin is auditable from the log alone',
-  /~\d+ tokens/.test(loudFit.reason) && /8192/.test(loudFit.reason));
+  /~\d+ tokens/.test(loudFit.reason)
+  && new RegExp(String(rp.DIRECT_REVIEW_CONTEXT_TOKENS)).test(loudFit.reason));
 check('[LOUD] the reason says WHY it refuses rather than truncating (no finish reason on this path)',
-  /reports no finish reason/.test(loudFit.reason));
+  /no finish reason/.test(loudFit.reason));
 check('[LOUD] the runner console.warns the refusal — it is not a silent skip',
   /console\.warn\(`\[report-pipeline\] \$\{fit\.reason\}`\)/.test(runnerSrc));
 check('[LOUD] and returns a named, greppable reason to its caller',

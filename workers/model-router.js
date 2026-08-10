@@ -187,7 +187,11 @@ export function selectModelForChoreTask({ projectKey, taskType, requiresHighQual
 }
 
 /* ════════════════════════════════════════════════════════════════════════
- * TASK-TYPE ROUTING (added 2026-08-05, plan Phase 3) — SHIPPED OFF
+ * TASK-TYPE ROUTING (added 2026-08-05, plan Phase 3)
+ * Shipped OFF 2026-08-05 · ENABLED IN PRODUCTION 2026-08-10.
+ * The code default is still OFF; production is not. Read the live flag back
+ * with `{"type":"routing_status"}` rather than trusting this line — see
+ * workers/task-router.js's header.
  *
  * Everything above this line is the pre-existing budget router and is
  * unchanged: selectModelForChoreTask() still returns the same model for the

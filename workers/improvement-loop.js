@@ -151,16 +151,34 @@ export const EVENT_TYPES = Object.freeze([
  * separately invisible. A new column would have required every consumer to
  * learn about it, and the ones that did not would have kept reading 129.
  *
- * ── WHAT WAS DELIBERATELY NOT DONE: THE 86 EXISTING ROWS STAND ───────────
+ * ── THE EXISTING ROWS: RELABELLED 2026-08-10, BY OWNER DECISION ──────────
  *
- * They are NOT relabelled, and this is a decision rather than an omission.
- * `reports/weekly/week-07-report.md` published "81 case_answer entries" —
- * an UPDATE would make that published figure unverifiable against the database
- * forever, and this project's standing rule is that a correction to published
- * work is APPENDED AND DATED, never achieved by rewriting the data underneath
- * it. The discriminator for pre-2026-08-10 rows is
- * `content LIKE '%"skipped":true%'`, and it is exact — all 86, no exceptions.
- * Relabelling is boarded as an owner decision, not taken by a session.
+ * ~~WHAT WAS DELIBERATELY NOT DONE: THE 86 EXISTING ROWS STAND. They are NOT
+ * relabelled, and this is a decision rather than an omission. An UPDATE would
+ * make week-07's published "81 case_answer entries" unverifiable against the
+ * database forever. Relabelling is boarded as an owner decision (OB-041), not
+ * taken by a session.~~ — **struck 2026-08-10. The owner took that decision the
+ * same day and chose to relabel: accuracy over stability. OB-041 is closed.**
+ *
+ * `UPDATE reports SET event_type='case_not_asked' WHERE type='office_event'
+ *  AND event_type='case_answer' AND content LIKE '%"skipped":true%'`
+ * changed **113 rows** — not 86, because the cron kept writing the old label
+ * until this change reached production between 08:04:06 (last mislabelled row)
+ * and 09:01:25 (first correct one). The two families do not overlap by a single
+ * row, which is the evidence that no second capture site was still writing the
+ * old label.
+ *
+ * The discriminator was verified exact BEFORE the UPDATE, in both directions:
+ * every `skipped: true` row had `quality IS NULL` and every scored row did not,
+ * with no mixed cases. Result: `case_answer` = 55 rows, **zero** null quality —
+ * count and average now describe the same population, which was the whole point.
+ *
+ * The published figure was NOT rewritten underneath. The rule stands and was
+ * followed the other way round: `reports/weekly/week-07-report.md` carries an
+ * appended, dated **Correction 4** saying what the number was, what it is, and
+ * that "81" is now unreproducible. The 113 row ids are in
+ * `checkpoints/2026-08-10-ob-041-relabel-ids.txt` so the change is reversible
+ * against the exact rows it touched.
  *
  * ── THIS DOES NOT ANSWER OB-027 ─────────────────────────────────────────
  *

@@ -20,7 +20,7 @@
 > | `workers/permission-guard.js` | `resolveRepoWrite()` — the single write-decision entry point, three repos, one scoped token each |
 > | `workers/architect-liaison.js` | files an unattended Architect session into D1 so the office can see the night happened. Switch `architect_liaison_enabled`, **live ON** |
 > | `workers/meeting-decisions.js` | meeting action items → the board's inbox. Switch `action_items_to_board_enabled`, **live ON** |
-> | `workers/task-router.js` | task-type routing. Switch `routing_enabled`, **absent = OFF** — the one below that is still what this file says it is |
+> | `workers/task-router.js` | task-type routing. Switch `routing_enabled` — **LIVE ON since 2026-08-10.** This row used to read "absent = OFF — the one below that is still what this file says it is". That is no longer true: all seven switches now read back ON. |
 >
 > **The two claims in this file most likely to mislead:**
 > - It describes the repo as if the Q&A engine were the whole of it. The office
@@ -317,9 +317,16 @@ in full before flipping `guides_enabled` on.
 
 ## Token economy (`config/token-economy.json`)
 
-- **Groq `llama3-8b-8192`** — primary model for all routine per-case agent
-  work (`workers/groq-client.js callGroq()`). Free tier, ~14,400 req/day,
-  resets 00:00 UTC.
+- **Groq `llama-3.1-8b-instant`** — primary model for all routine per-case
+  agent work (`workers/groq-client.js callGroq()`). Free tier, ~14,400 req/day,
+  resets 00:00 UTC. ~~`llama3-8b-8192`~~ — **struck 2026-08-10.** Groq shut that
+  model down on **2025-08-30**; every Groq call had been failing with HTTP 400
+  `model_decommissioned` and silently degrading to Cloudflare Workers AI for
+  months. The ID was corrected in `config/token-economy.json` and
+  `workers/groq-client.js` on 2026-08-09 and this file (and `README.md`) kept
+  publishing the dead one until 2026-08-10. **The provider is unchanged** — only
+  the model ID moved. A 400 here reads exactly like a 401 from the outside,
+  which is why AD-030 forbids proposing a key rotation before four checks.
 - **Cloudflare Workers AI** (`@cf/meta/llama-3.1-8b-instruct-fp8`) — case
   routing/classification, and the same-session fallback when Groq is down
   or Gemini 429s. Free, ~10,000 req/day, account-scoped `AI` binding.
@@ -371,7 +378,23 @@ in full before flipping `guides_enabled` on.
   human-in-the-loop creative-tool sessions (Agents 9/10 building design
   assets), never called programmatically by the Worker.
 
-### Task-type routing (added 2026-08-05) — **SHIPPED OFF**
+### Task-type routing (added 2026-08-05) — **ENABLED IN PRODUCTION 2026-08-10**
+
+> **Turned on 2026-08-10** after the supervised test's Steps 3a–3i were run
+> lane by lane. The `routing_enabled` kill switch described further down still
+> **defaults** to OFF in code — that part is accurate — but production reads
+> back `true`. The supervised run found two defects that an HTTP 200 hid and
+> both were fixed before the flag was flipped: an empty answer was being
+> returned as a success (`finishReason` existed for exactly that check and was
+> never read), and Cerebras' `gpt-oss-120b` is a reasoning model whose thinking
+> is charged against `max_tokens`, so the judgment lane returned empty at small
+> budgets. See `workers/task-router.js` `routeTask()` and
+> `workers/cerebras-client.js` `MIN_OUTPUT_TOKENS`.
+>
+> Enabling it also moved the weekly report's **review** onto the judgment lane
+> (Cerebras, 131,000-token input), which is what let
+> `DIRECT_REVIEW_CONTEXT_TOKENS` go 8,192 → 131,000 and
+> `BOARD_TASKS_IN_PACK` 18 → 60 the same day.
 
 Free-tier providers and a routing table that picks a provider by **what kind
 of work a task is**, never by which agent is doing it — a persona's voice
@@ -436,8 +459,9 @@ a config edit, not a code edit), `config/token-economy.json`'s `providers`
 block (free-tier limits), the three `workers/*-client.js` modules, and
 `scripts/verify-providers.js` / `scripts/verify-routing.js`.
 
-**Kill switch (`routing_enabled`)**: absent or false — the shipped default —
-means every routed call is refused with `routing_disabled`, no provider is
+**Kill switch (`routing_enabled`)**: absent or false — the **code default**,
+which production no longer matches (**ON since 2026-08-10**) — means every
+routed call is refused with `routing_disabled`, no provider is
 contacted, and no counter or D1 table is touched. Same shape as
 `guides_enabled`. Toggle without redeploy: `POST /api/agents/trigger
 {"type":"routing_toggle","enabled":true|false}`. Read-back:
@@ -446,11 +470,17 @@ counters, no model calls). Supervised per-lane test with the gate bypassed:
 `{"type":"routing_test","lane":"judgment", ...}` — one lane per call, the
 same pattern `guide_block` uses.
 
-**No existing caller was rewired.** The daily Q&A engine, the meeting engine
-and the Guides pipeline all use exactly the providers they used before.
-Routing has no production caller yet; its first one is the improvement loop's
-judgment-lane reviews (scaling-plan Phase 1). So flipping the switch on does
-not, by itself, change any current behaviour.
+**The daily Q&A engine, the meeting engine and the Guides pipeline were not
+rewired** and use exactly the providers they used before. ~~Routing has no
+production caller yet; so flipping the switch on does not, by itself, change
+any current behaviour.~~ — **struck 2026-08-10.** That was true when written
+and stopped being true on 2026-08-09, when the report pipeline landed:
+`workers/report-pipeline.js` `planReportProviders()` returns `mode: 'routed'`
+whenever the flag is on, so turning it on **did** change behaviour — the weekly
+report's review moved to the judgment lane (Cerebras) and its draft to the
+`report_drafting` lane (Gemini, holding AD-028). Verified after enabling.
+The improvement loop's judgment-lane reviews (scaling-plan Phase 1) are still
+unbuilt and remain the *second* caller, not the first.
 
 **Anthropic is unreachable from routing**, enforced two independent ways: the
 `architect` lane is marked non-routable and names no provider, and

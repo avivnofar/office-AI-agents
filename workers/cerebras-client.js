@@ -94,6 +94,45 @@ const DEFAULT_MODEL = 'gpt-oss-120b';
  * constraint on this provider is REQUESTS PER MINUTE, so the daily field
  * stays null and the router's wall-clock pacing keeps applying.
  */
+/**
+ * MINIMUM output budget for this provider, added 2026-08-10.
+ *
+ * ── `gpt-oss-120b` IS A REASONING MODEL, AND max_tokens INCLUDES THE THINKING
+ *
+ * It spends output tokens reasoning BEFORE it emits any visible content, and
+ * `max_tokens` bounds the two together. A budget large enough for the answer
+ * but not for the reasoning does not produce a short answer — it produces NO
+ * answer, with `finish_reason: "length"` and an empty `content`.
+ *
+ * Measured against the live API on 2026-08-10, same 87-token prompt
+ * ("Rate this answer 0-1 and reply with only the number"):
+ *
+ *     max_tokens  64 -> content ""     finish_reason "length"
+ *     max_tokens 600 -> content "0.8"  finish_reason "stop"    154 output tokens
+ *
+ * 154 output tokens to emit three characters. A second data point, a real
+ * report-review call carrying a 5,046-token prompt, came back in 137 output
+ * tokens — so the overhead is a property of how much the model DELIBERATES,
+ * not of how long the prompt or the answer is, and the smallest, most
+ * ambiguous asks are the expensive ones. That is the opposite of the intuition
+ * a caller brings, which is why this floor exists in the client rather than as
+ * advice to callers.
+ *
+ * THE JUDGMENT LANE IS THE ONE THIS PROTECTS. Its whole description is "short
+ * scored calls" — precisely the shape a caller gives a small budget, and
+ * precisely the shape that returns empty.
+ *
+ * 512 is ~3.3x the largest overhead measured, and it is a FLOOR, not a cap: a
+ * caller asking for more still gets what it asked for. The bump is logged, so
+ * a caller whose budget is being overridden can see it rather than infer it.
+ *
+ * This is not a substitute for the router's empty-answer check (task-router.js
+ * routeTask()) and does not make it redundant — the floor makes the common
+ * case work, the router's check catches the case where it still comes back
+ * empty and degrades to the lane's backup instead of returning nothing.
+ */
+export const MIN_OUTPUT_TOKENS = 512;
+
 export const CEREBRAS_LIMITS = {
   maxInputTokensPerRequest: 131000,
   maxOutputTokensPerRequest: null,
@@ -173,6 +212,15 @@ export async function callCerebras({
     return null;
   }
 
+  // See MIN_OUTPUT_TOKENS: this model's reasoning is charged against
+  // max_tokens, so a budget below the floor returns an empty answer rather
+  // than a short one. Raising is safe (free tier is counted in REQUESTS, and
+  // the model stops when it is done); leaving it alone is not.
+  const effectiveMaxTokens = Math.max(maxTokens, MIN_OUTPUT_TOKENS);
+  if (effectiveMaxTokens !== maxTokens) {
+    console.log(`[agent-${agentId}] Cerebras max_tokens raised ${maxTokens} -> ${effectiveMaxTokens} (reasoning-model floor; a smaller budget returns empty content)`);
+  }
+
   const messages = [];
   if (systemPrompt) messages.push({ role: 'system', content: systemPrompt });
   messages.push({ role: 'user', content: prompt });
@@ -185,7 +233,7 @@ export async function callCerebras({
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({ model, messages, temperature, max_tokens: maxTokens }),
+      body: JSON.stringify({ model, messages, temperature, max_tokens: effectiveMaxTokens }),
     });
   } catch (err) {
     console.warn(`[agent-${agentId}] Cerebras request failed: ${err.message}`);
