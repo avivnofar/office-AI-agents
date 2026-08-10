@@ -9,4 +9,5 @@ a structural check.*
 ever deleted from `reports/<type>/`, per the standing rule that what was
 published stays published.*
 
+- [Weekly report — week-08](/reports/weekly/week-08-report.md) — weekly · 2026-08-10 · 661 words
 - [Weekly report — week-07](/reports/weekly/week-07-report.md) — weekly · 2026-08-09 · 627 words
