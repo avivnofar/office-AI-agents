@@ -406,13 +406,33 @@ const ALLOW_LIST_TO_TRIGGER = {
   office_context_enabled: 'office_context_toggle',
   action_items_to_board_enabled: 'action_items_to_board_toggle',
   report_pipeline_enabled: 'report_pipeline_toggle',
+  // Added 2026-08-10 with the owner channel. This map caught it immediately —
+  // which is the check working exactly as its header describes, on the first new
+  // switch since it was written.
+  owner_channel_enabled: 'owner_channel_toggle',
 };
 const allowListMatch = /const allowedKeys = \[([^\]]+)\]/.exec(arSrc0);
 const allowListKeys = allowListMatch
   ? allowListMatch[1].split(',').map((s) => s.trim().replace(/^'|'$/g, ''))
   : [];
+/*
+ * Was `length === 10`, a hardcoded count that had to be edited by hand every
+ * time a switch was added — and on 2026-08-10 it was the thing that failed when
+ * the eleventh arrived, reporting only a number. The set comparison below says
+ * WHICH key is unaccounted for in either direction, which is the whole reason
+ * anyone reads a failing check.
+ *
+ * Both directions matter and neither is redundant: a key in the source with no
+ * entry here is a switch whose authenticated route was never declared; an entry
+ * here with no key in the source is a route to a switch that no longer exists.
+ */
+const mapKeys = Object.keys(ALLOW_LIST_TO_TRIGGER);
 check('the allow-list was found in source (else the per-key checks below are vacuous)',
-  allowListKeys.length === 10, `${allowListKeys.length} keys: ${allowListKeys.join(', ')}`);
+  allowListKeys.length > 0, `${allowListKeys.length} keys`);
+check('the allow-list and the trigger map name exactly the same switches',
+  allowListKeys.length === mapKeys.length && allowListKeys.every((k) => mapKeys.includes(k)),
+  `in source only: ${allowListKeys.filter((k) => !mapKeys.includes(k)).join(', ') || 'none'}`
+  + ` | in this map only: ${mapKeys.filter((k) => !allowListKeys.includes(k)).join(', ') || 'none'}`);
 for (const key of allowListKeys) {
   const trigger = ALLOW_LIST_TO_TRIGGER[key];
   check(`allow-list key "${key}" has an authenticated route (trigger "${trigger}")`,

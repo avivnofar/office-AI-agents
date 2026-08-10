@@ -390,6 +390,34 @@ section('§7 wiring — the code that calls it, not the code that defines it');
       times.every((t, i) => i === 0 || t >= times[i - 1]));
   }
 
+  /*
+   * ── THE SWITCHBOARD TRAP, FOUND LIVE ON 2026-08-10 ─────────────────────
+   *
+   * `owner_channel_toggle` was written, deployed and called. The endpoint
+   * answered **HTTP 200 with a full state object** and the switch stayed off,
+   * because the key was not on `updateSimulationState()`'s allow-list and the
+   * loop iterated the ALLOW-LIST rather than the patch — so an unknown key was
+   * never even looked at. Nothing anywhere said a key had been ignored.
+   *
+   * §7.6 on the switchboard: *a value nothing produces, read by something that
+   * treats absence as fact.* And it is a standing trap rather than a one-off —
+   * **adding a toggle case is not enough, and forgetting the key is invisible.**
+   *
+   * This check makes it visible at verify time: every key any toggle case passes
+   * must be on the list. It is derived from the source, so a toggle added next
+   * month is covered without anyone remembering to extend this.
+   */
+  const toggleKeys = [...runner.matchAll(/updateSimulationState\(env,\s*\{\s*([a-z_]+)\s*:/g)].map((m) => m[1]);
+  const allowLine = /const allowedKeys = \[([^\]]+)\]/.exec(runner);
+  const allowed = allowLine ? allowLine[1].split(',').map((s) => s.trim().replace(/'/g, '')) : [];
+  check('the state allow-list was found at all', allowed.length > 0);
+  check(`every toggle case's key is on the allow-list (${toggleKeys.length} toggles found)`,
+    toggleKeys.length > 0 && toggleKeys.every((k) => allowed.includes(k)),
+    `missing: ${toggleKeys.filter((k) => !allowed.includes(k)).join(', ') || 'none'}`);
+  check('owner_channel_enabled specifically is on it', allowed.includes('owner_channel_enabled'));
+  check('an unknown key is REPORTED rather than silently dropped — the loop iterates the PATCH, not the allow-list',
+    /for \(const key of Object\.keys\(patch\)\)/.test(runner) && /_rejected_keys/.test(runner));
+
   check('the daily-schedule documents why an owner Issue is not the gap-digest Issue the rebuild banned',
     /why_a_GitHub_Issue_does_not_contradict/.test(JSON.stringify(schedule.owner_channel_program)));
   check('…and states the residual it does NOT close',

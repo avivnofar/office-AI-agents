@@ -343,15 +343,41 @@ async function getSimulationState(env) {
   return { ...base, ...(stored || {}) };
 }
 
+/**
+ * ── AN UNKNOWN KEY IS NOW REPORTED, NOT SILENTLY DROPPED (2026-08-10) ────
+ *
+ * Found live, the expensive way. `owner_channel_toggle` was added, deployed and
+ * called; the endpoint answered **HTTP 200 with a full state object** and the
+ * switch stayed off, because the new key was not on the list below and the loop
+ * simply never saw it. Nothing in the response, the logs or the read-back said a
+ * key had been ignored — the caller got back a state that looked authoritative
+ * and was missing the only field it had asked to change.
+ *
+ * That is `ARCHITECTURAL-DECISIONS.md` §7.6 exactly — *a value nothing produces,
+ * read by something that treats absence as fact* — landed on the switchboard,
+ * and it is a trap for every future switch: **adding a toggle case is not enough,
+ * and the failure to add the key is invisible.** So the function now returns
+ * `rejected`, and the callers surface it.
+ *
+ * The allow-list itself stays. It is the reason an unauthenticated body could
+ * never write arbitrary keys, and widening it to "anything" to avoid this class
+ * of bug would sell a real guard for a convenience.
+ */
 async function updateSimulationState(env, patch) {
   const current = await getSimulationState(env);
-  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled', 'improvement_loop_enabled', 'architect_liaison_enabled', 'office_context_enabled', 'action_items_to_board_enabled', 'report_pipeline_enabled'];
+  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled', 'improvement_loop_enabled', 'architect_liaison_enabled', 'office_context_enabled', 'action_items_to_board_enabled', 'report_pipeline_enabled', 'owner_channel_enabled'];
   const next = { ...current };
-  for (const key of allowedKeys) {
-    if (key in patch) next[key] = patch[key];
+  const rejected = [];
+  for (const key of Object.keys(patch)) {
+    if (allowedKeys.includes(key)) next[key] = patch[key];
+    else rejected.push(key);
+  }
+  if (rejected.length) {
+    console.warn(`[simulation-state] REFUSED ${rejected.length} unknown key(s) and changed nothing for them: ${rejected.join(', ')}. `
+      + 'A toggle case whose key is not on the allow-list returns 200 and does nothing — this line is the only signal that happened.');
   }
   if (env.SIM_KV) await env.SIM_KV.put(SIM_STATE_KEY, JSON.stringify(next));
-  return next;
+  return rejected.length ? { ...next, _rejected_keys: rejected } : next;
 }
 
 /* ───────────────────────────── Year tracker ────────────────────────────── */
@@ -644,7 +670,18 @@ async function processOwnerChannelBlock(env, opts = {}) {
   // HEARTBEAT DAY = Sunday, the office's first working day. Chosen so a missing
   // heartbeat is noticed at the START of a week rather than discovered at the
   // end of one, and so it never lands on Saturday, which A13 makes a rest day.
-  const isHeartbeatDay = new Date(`${today}T00:00:00Z`).getUTCDay() === 0;
+  //
+  // `opts.forceHeartbeat` exists for ONE reason: the supervised pre-enable run.
+  // With no owner messages and no submissions, a weekday `owner_channel_block`
+  // correctly skips — which proves the gating and proves nothing about the send.
+  // A channel that has never delivered anything is an unproven channel, and this
+  // project's standing rule before flipping a switch is to run one real cycle and
+  // read the result. So the supervised trigger may force the heartbeat.
+  //
+  // It is NOT reachable from the cron path — `runScheduledBlock()` calls this
+  // with no opts — so it cannot make the office send a heartbeat every day by
+  // accident.
+  const isHeartbeatDay = opts.forceHeartbeat || new Date(`${today}T00:00:00Z`).getUTCDay() === 0;
 
   const items = selectNotificationItems({
     submissions: snapshot.submissions?.submissions || [],
@@ -3598,7 +3635,10 @@ export default {
             // `guide_block` uses, and for the same reason: {"type":"block"} at
             // the scheduled time would also fire that tick's other blocks.
             // THIS FILES A REAL ISSUE AND WRITES A REAL RECEIPT.
-            result = await processOwnerChannelBlock(env, { bypassGate: true });
+            // `{"heartbeat": true}` forces the weekly heartbeat on a non-Sunday,
+            // which is the only way a supervised run can prove the SEND rather
+            // than the gating when the office has nothing pending.
+            result = await processOwnerChannelBlock(env, { bypassGate: true, forceHeartbeat: !!body.heartbeat });
             break;
           case 'architect_liaison_toggle':
             // Architect-liaison kill switch (see workers/architect-liaison.js
