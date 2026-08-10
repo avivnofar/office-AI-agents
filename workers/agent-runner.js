@@ -58,6 +58,14 @@ import { resolveIssueTarget } from './permission-guard.js';
 // actually bind, and a probe that reports only the generous `report` shape cannot
 // tell you that the meeting shape is at 98% and trimming the board out of view.
 import { getOfficeContext, getOfficeSnapshot, officeContextEnabled, buildOfficeContext, BUDGETS as OFFICE_BUDGETS } from './office-context.js';
+// Same read-back-only rule as the line above (2026-08-10). These two constants
+// are the office's TRANSCRIPTION of two facts that live in the owner's policy
+// file; `office_context_status` compares them against the live parse so a drift
+// is visible in production, not only in scripts/verify-office-policy.js.
+import { POLICY_RECHECK_DATE, PROVISIONAL_RULES } from './office-policy.js';
+// A7's visibility half — open branches and their age in the daily report.
+// See workers/branch-watch.js for why the PROHIBITION half is not here.
+import { fetchOpenBranches, renderBranchSection } from './branch-watch.js';
 import {
   REPO_OWNER, REPO_NAME, BACKOFFICE_REPO_NAME, WAREHOUSE_REPO_NAME,
   REPO_TO_PROJECT_KEY, REPO_TO_TOKEN_SECRET, secretsPresentIn, commitFileToRepo,
@@ -1843,7 +1851,7 @@ function renderOfficeSection(office) {
   return `\n## The Office's Own Work\n\n${office.text}\n`;
 }
 
-function renderDailySummary(yearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office) {
+function renderDailySummary(yearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office, branches) {
   const agentLines = summary.agents
     .map((a) => `- Agent ${a.agentId}: ${a.handled}/${a.caseCount} cases, mood ${a.mood}, irritation ${a.irritation}${a.isAngry ? ' (ANGRY)' : ''}${a.isPanic ? ' (PANIC)' : ''}`)
     .join('\n') || '_No agents processed cases today._';
@@ -1869,7 +1877,13 @@ ${standup?.transcript ? standup.transcript : standup?.error ? `_Standup error: $
 ## Side Plot Activity
 
 ${sidePlotLines}
-${renderOfficeSection(office)}${scheduleSection}`;
+${renderOfficeSection(office)}
+${/* A7: "Open branches and their age appear in the daily report." Rendered even
+     when the fetch partly failed — renderBranchSection() prints an unreadable
+     repo AS unreadable rather than omitting it, because an omitted repo reads
+     as a repo with no branches. `branches` is null only when the caller did
+     not ask, or when the fetch threw. */
+  branches ? renderBranchSection(branches) : ''}${scheduleSection}`;
 }
 
 /** Renders the tactical-schedule section (case batches, tool-task window, AI-experience reports, spare time, weekly summary). */
@@ -2672,7 +2686,14 @@ export async function runWorkDayCycle(env) {
   // of the callers permitted to refresh the office-context cache.
   // `projects` added 2026-08-08 — see generateWeeklySummary() for why.
   const office = await getOfficeContext(env, { shape: 'report', allowFetch: true, projects: officeProjects.projects });
-  const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office);
+  // A7's visibility half (2026-08-10). Runs once per day cycle, never on a
+  // model-call path. `.catch()` and not a bare await: a monitoring feature that
+  // can take down the report it monitors is worse than the gap it closes.
+  const branches = await fetchOpenBranches(env).catch((err) => {
+    console.warn(`[branch-watch] could not list branches, continuing: ${err?.message || err}`);
+    return null;
+  });
+  const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office, branches);
   const report = await commitFileToRepo(
     env, REPO_NAME, `reports/daily/day-${pad(nextDay, 3)}-summary.md`, markdown,
     `chore(agents): day ${nextDay} summary [skip ci]`
@@ -2991,7 +3012,14 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
   // of the callers permitted to refresh the office-context cache.
   // `projects` added 2026-08-08 — see generateWeeklySummary() for why.
   const office = await getOfficeContext(env, { shape: 'report', allowFetch: true, projects: officeProjects.projects });
-  const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office);
+  // A7's visibility half (2026-08-10). Runs once per day cycle, never on a
+  // model-call path. `.catch()` and not a bare await: a monitoring feature that
+  // can take down the report it monitors is worse than the gap it closes.
+  const branches = await fetchOpenBranches(env).catch((err) => {
+    console.warn(`[branch-watch] could not list branches, continuing: ${err?.message || err}`);
+    return null;
+  });
+  const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office, branches);
   const report = await commitFileToRepo(
     env, REPO_NAME, `reports/daily/day-${pad(nextDay, 3)}-summary.md`, markdown,
     `chore(agents): day ${nextDay} summary [skip ci]`
@@ -3258,6 +3286,71 @@ export default {
           case 'inspection':
             result = await updateSimulationState(env, { inspection_mode: !!body.active });
             break;
+
+          /*
+           * ══════════════════════════════════════════════════════════════
+           * THE FOUR CASES ADDED 2026-08-10, BEFORE `POST /api/simulation`
+           * WAS CLOSED — AND THE ORDER IS THE POINT
+           * ══════════════════════════════════════════════════════════════
+           *
+           * `updateSimulationState()`'s allow-list carries TEN keys. Seven had
+           * an authenticated route on this endpoint. Three did not:
+           * `paused`, `phase`, and `action_items_to_board_enabled` — reachable
+           * ONLY through the unauthenticated POST /api/simulation.
+           *
+           * So closing that endpoint first would have left three production
+           * switches — including `paused`, the office's stop button — with NO
+           * ROUTE AT ALL. A switch with no route is worse than one with an open
+           * route: the open route is a known risk with a known fix, and the
+           * absent route is discovered at the moment someone needs to stop the
+           * office. These land first, deliberately, and the endpoint closes
+           * after them in the same commit.
+           *
+           * `action_items_to_board_toggle` REVERSES a prior decision recorded in
+           * scripts/verify-office-bureaucracy.js §3, which asserted this case
+           * must NOT exist so the flag "stays owner-only". That reasoning was
+           * sound while the alternative was an unauthenticated endpoint and is
+           * inverted by closing it: with the endpoint authenticated, the trigger
+           * case IS the owner-only path, and refusing to add it would leave the
+           * flag settable by nobody. The check is rewritten, not deleted, so the
+           * reversal is legible in the diff rather than looking like a rule
+           * quietly dropped.
+           */
+          case 'pause':
+            // The office's stop button. Body: { paused: true|false }.
+            // `!!body.paused` and not `body.paused ?? true` — an absent field
+            // means UNPAUSE here, which is only a safe direction to fail in
+            // because pausing is always available as an explicit call.
+            result = await updateSimulationState(env, { paused: !!body.paused });
+            break;
+          case 'phase_set':
+            // The simulation phase (`phase` in simulation-config.json's
+            // SIMULATION block). Refused rather than coerced: `phase` drives
+            // which agent set and which schedule are live, and a phase set to
+            // the string "undefined" by a typo'd body is a whole day of the
+            // wrong office.
+            if (body.phase === undefined || body.phase === null || body.phase === '') {
+              return json({ error: 'phase_set_requires_phase' }, 400, origin);
+            }
+            result = await updateSimulationState(env, { phase: body.phase });
+            break;
+          case 'action_items_to_board_toggle':
+            // Meeting action items -> the board's inbox (workers/
+            // meeting-decisions.js, gate in meeting-engine.js
+            // actionItemsToBoardEnabled()). Body: { enabled: true|false }.
+            // See the block above for why this case now exists.
+            result = await updateSimulationState(env, { action_items_to_board_enabled: !!body.enabled });
+            break;
+          case 'simulation_state':
+            // Authenticated READ-BACK of the whole simulation state, and the
+            // reason it exists is the one the closure created: `GET
+            // /api/simulation` stays open (read-only, and data-center's admin
+            // tab depends on it), but an operator who has just flipped a switch
+            // through this endpoint should not have to change endpoints and
+            // drop authentication to confirm it took. Makes no model call and
+            // writes nothing.
+            result = await getSimulationState(env);
+            break;
           case 'week_reset':
             result = await runWeeklyResetCycle(env);
             break;
@@ -3463,9 +3556,36 @@ export default {
                 const m = buildOfficeContext(snapshot, 'meeting', { projects: officeProjects.projects });
                 return { tokens: m.tokens, budget: OFFICE_BUDGETS.meeting, dropped: m.dropped, trimmed: m.trimmed };
               })(),
+              // ── THE POLICY (2026-08-10) ───────────────────────────────
+              // Reported for the same reason every other source is: a status
+              // probe that cannot show a source cannot say whether that source
+              // is reaching the office. ABSENT and PRESENT are kept apart —
+              // `null` here means the live file could not be read, and the
+              // digest is rendering from workers/office-policy.js POLICY_DIGEST
+              // without corroboration, which is a real if survivable state.
+              policy: snapshot?.policy
+                ? {
+                    rules: snapshot.policy.rules.length,
+                    recheck: snapshot.policy.recheck,
+                    provisional: snapshot.policy.provisional,
+                    // The drift check, live rather than only in the verifier.
+                    codeAgreesWithFile:
+                      snapshot.policy.recheck === POLICY_RECHECK_DATE
+                      && [...snapshot.policy.provisional].sort().join(',') === [...PROVISIONAL_RULES].sort().join(','),
+                    malformed: snapshot.policy.malformed ?? [],
+                  }
+                : { live: null, note: 'the live policy file was not read this cycle — the digest still renders and still binds, uncorroborated' },
+              // ── A11 RANK FILTERING (2026-08-10) ───────────────────────
+              // BOTH agent shapes, because the whole point of A11 is that they
+              // differ, and a probe that reports one of them cannot show that.
+              // Agent 12 is sudo (admin); agent 3 is standard.
               agentShape: (() => {
-                const a = buildOfficeContext(snapshot, 'agent', { agentId: 12, projects: officeProjects.projects });
-                return { tokens: a.tokens, budget: OFFICE_BUDGETS.agent, dropped: a.dropped, trimmed: a.trimmed };
+                const a = buildOfficeContext(snapshot, 'agent', { agentId: 12, clearance: 'sudo', projects: officeProjects.projects });
+                return { rank: 'admin', tokens: a.tokens, policyTokens: a.policyTokens, total: a.totalTokens, budget: OFFICE_BUDGETS.agent, dropped: a.dropped, trimmed: a.trimmed };
+              })(),
+              agentShapeStandard: (() => {
+                const a = buildOfficeContext(snapshot, 'agent', { agentId: 3, clearance: 'standard', projects: officeProjects.projects });
+                return { rank: 'standard', tokens: a.tokens, policyTokens: a.policyTokens, total: a.totalTokens, budget: OFFICE_BUDGETS.agent_standard, dropped: a.dropped, trimmed: a.trimmed, withheld: a.withheld };
               })(),
             };
             break;
@@ -3658,6 +3778,39 @@ export default {
         return json(await getSimulationState(env), 200, origin);
       }
       if (request.method === 'POST' && url.pathname === '/api/simulation') {
+        /*
+         * ══════════════════════════════════════════════════════════════════
+         * CLOSED 2026-08-10. Flagged 2026-07-18, open for 23 days.
+         * ══════════════════════════════════════════════════════════════════
+         *
+         * This handler took a JSON body straight into updateSimulationState()
+         * with NO TOKEN CHECK. Its allow-list is ten keys and includes
+         * `paused` (stop the office), `guides_enabled`,
+         * `improvement_loop_enabled`, `office_context_enabled`,
+         * `report_pipeline_enabled`, `routing_enabled`,
+         * `architect_liaison_enabled` and `action_items_to_board_enabled` —
+         * every write-enabling switch the office has. The path is
+         * `/api/simulation`, not `/api/agents/*`, so the token gate at the top
+         * of fetch() never saw it. OFFICE-POLICY.md Part C: *"must be closed
+         * before the public front opens."*
+         *
+         * The check is written out here rather than by widening the prefix test
+         * above to `/api/`. Widening would silently close `GET /api/simulation`
+         * too, which is a READ used by data-center's admin tab and by every
+         * deploy-verification step in DEPLOY.md and TOKEN-BUDGET.md — a
+         * behaviour change nobody asked for, arriving as a side effect of a
+         * security fix. GET stays open, deliberately and narrowly: it exposes
+         * switch STATES, which is a real if minor disclosure, and it is boarded
+         * as OB-047 rather than closed in the same breath as the write path.
+         *
+         * Identical shape to the /api/agents/* gate — same header, same
+         * comparison, same 401 body — so there is one authentication idiom in
+         * this file and not two that must be kept in agreement.
+         */
+        const simToken = request.headers.get('X-Admin-Token') || '';
+        if (!env.ADMIN_TOKEN || simToken !== env.ADMIN_TOKEN) {
+          return json({ error: 'unauthorized' }, 401, origin);
+        }
         const body = await request.json();
         return json(await updateSimulationState(env, body), 200, origin);
       }

@@ -52,6 +52,7 @@
 
 import projectPermissions from '../config/project-permissions.json';
 import { resolveRepoWrite } from './permission-guard.js';
+import { scanOutbound, renderScanRefusal } from './security-scan.js';
 
 export const REPO_OWNER = 'avivnofar';
 export const REPO_NAME = 'office-AI-agents';
@@ -200,6 +201,40 @@ export async function commitFileToRepo(env, repoName, path, content, message, op
   repoName = verdict.repoName;
   path = verdict.path;
   if (verdict.redirected) message = `${message} [redirected: push disabled for "${verdict.projectKey}"]`;
+
+  /*
+   * ── A10: THE PRE-PUBLICATION SECURITY SCAN ─────────────────────────────
+   *
+   * Placed HERE and not one line earlier, deliberately: `verdict` may have
+   * REDIRECTED the write into this repo under agent-output/, so the path that
+   * matters is the resolved one. Scanning the requested path would let a
+   * redirected write reach the public repo unscanned — the guard's own
+   * fail-open shape, reproduced inside the check meant to close it.
+   *
+   * Scoped to REPO_NAME because that is the PUBLIC repo. back-office is where
+   * A10 says findings live; scanning it would refuse the very destination the
+   * refusal points at, which is a loop with no exit.
+   *
+   * REFUSES. Not warns. A10 is explicit that this is automatic and never
+   * judgment, so there is no override flag and no `opts.force` — adding one
+   * would put the judgment back in exactly the place A10 removed it from.
+   * Runs BEFORE the PUT: a scan after the write has published the content and
+   * is then commenting on it.
+   */
+  if (repoName === REPO_NAME) {
+    const scanned = scanOutbound(content, { path });
+    if (scanned.scanned && !scanned.clean) {
+      const reason = renderScanRefusal(path, scanned.hits);
+      console.warn(`[repo-write] ${reason}`);
+      // Recorded as a NON-committed write so the refusal is countable. A
+      // refusal that leaves no row is a control nobody can audit, and A10's
+      // whole argument is that unaudited security posture is the problem.
+      await recordRepoWrite(env, {
+        repo: repoName, projectKey: verdict.projectKey, path, committed: false, status: null, redirected: !!verdict.redirected,
+      });
+      return { committed: false, reason: 'security_scan_refused', securityHits: scanned.hits, message: reason };
+    }
+  }
 
   const headers = {
     Authorization: `Bearer ${env[verdict.tokenSecret]}`,

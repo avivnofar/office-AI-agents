@@ -61,6 +61,12 @@
  * code rather than a mirror of it.
  */
 import { parseInFlight, inFlightSections } from './deliverable-lifecycle.js';
+/*
+ * The SECOND import, added 2026-08-10 with the policy wiring. Same test as the
+ * first: `office-policy.js` imports nothing at all, so plain `node` can still
+ * load this module and the verifiers still exercise the real code.
+ */
+import { buildPolicyBlock, parsePolicy, POLICY_PATH } from './office-policy.js';
 
 /**
  * Local token estimate — NOT imported from provider-common.js, deliberately.
@@ -161,9 +167,154 @@ export const CACHE_TTL_MS = 30 * 60 * 1000;
  */
 export const BUDGETS = Object.freeze({
   meeting: 4600,
-  agent: 400,
+  /**
+   * ── RAISED 400 -> 520 ON 2026-08-10. THIS CLOSES OB-030's OPEN HALF. ────
+   *
+   * OB-030 kept the `agent` question open because raising it "needs a per-day
+   * cost figure that this session did not measure". This session measured it,
+   * because the policy wiring forced the question.
+   *
+   * At 400 the ADMIN agent shape measured 327 tokens — 82%, comfortably
+   * "fitting" — while dropping `deliverables-count` and `questions-headline`
+   * outright. So an admin was being told neither that a deliverable was sitting
+   * in the review loop nor that the office had questions open with the owner.
+   * Same pattern the meeting budget hit twice: the percentage was never the
+   * number that mattered.
+   *
+   * THE PER-DAY COST, measured rather than feared: the cron runs 21 ticks a day
+   * and `computeDailyQuestionVolume()` caps the day at roughly 100 questions,
+   * each of which may carry follow-ups — call it ~150 agent model calls a day.
+   * 120 extra tokens × 150 calls = **~18,000 additional input tokens per day**,
+   * spread across Groq, Cloudflare Workers AI and Gemini, all on free tiers
+   * whose limits are counted in REQUESTS, not tokens. The routing lanes that do
+   * meter tokens (Cerebras, 131,000 per request) are not on this path.
+   *
+   * That is the figure OB-030 asked for and it does not bind. What binds is the
+   * fitter, which still runs and still reports what it cut.
+   */
+  agent: 520,
+  /**
+   * ── A11 RANK FILTERING, ADDED 2026-08-10 ────────────────────────────────
+   *
+   * OFFICE-POLICY.md A11: *"Admins see everything — the full board,
+   * deliverables in flight, requirements, open gaps. Regular agents see their
+   * own tasks, plus a brief picture of the office: how many deliverables are in
+   * flight, what is blocked, what the last meeting concluded. Headlines, not
+   * detail."*
+   *
+   * `agent_standard` is that brief picture. It is a SEPARATE BUDGET and a
+   * SEPARATE SECTION SET (see STANDARD_SECTIONS), not merely a smaller number:
+   * relying on the fitter to shrink its way down to headlines would produce the
+   * same reduction by accident, and would silently un-produce it the day the
+   * board shrank. A11 is a rule about what a rank is SHOWN, so it is enforced
+   * by what is BUILT, and the budget is a second line of defence behind it.
+   *
+   * 380 was measured, not guessed, and THREE earlier numbers were wrong in the
+   * way this module's own header warns about. At 200 the standard shape
+   * measured 151 tokens — 76%, comfortably "fitting" — while the fitter quietly
+   * dropped `deliverables-count`, one of the three things A11 names by name as
+   * the brief picture. At 240, and again at 340, it dropped `questions-headline`
+   * instead. A shape that fits by cutting the rule's own content is the failure
+   * mode; the percentage never was. Every one of those three numbers was found
+   * by reading `dropped` on a live read-back, not by reasoning about the size.
+   *
+   * ── THE HONEST SIZE OF THE SAVING ──────────────────────────────────────
+   *
+   * 380 against 520 is a 140-token difference in the BUDGET, and the measured
+   * difference in what is actually rendered is far smaller than that. Live
+   * read-back against the 46-task board on 2026-08-10:
+   *
+   *     Agent 6  (sudo,     admin)   358 tokens
+   *     Agent 12 (sudo,     admin)   442 tokens
+   *     Agent 3  (standard, filtered) 353 tokens
+   *     Agent 4  (standard, filtered) 367 tokens
+   *
+   * **A standard agent costs almost exactly what an admin costs**, and pretending
+   * otherwise would be the kind of number a later session cannot reproduce. Two
+   * reasons, both worth knowing:
+   *
+   *   1. A11 itself. *"Everyone sees the client requirements and this policy."*
+   *      Those two are most of what a small agent shape contains, and they are
+   *      the two the rule refuses to withhold.
+   *   2. The fitter was already doing most of this cut for budget reasons. At
+   *      520 the admin shape STILL drops the board titles, the stuck list, the
+   *      requirement prose, the deliverable picture and the projects list —
+   *      the same sections rank filtering withholds.
+   *
+   * So the token case for A11 is real but SECOND, and small. The first argument
+   * is the one A11 gives: *"If everyone always knows everything, the meeting
+   * teaches nothing."* What genuinely changed is that the cut is now RULE-DRIVEN
+   * and stable — `withheld` says who was not shown what and why — instead of a
+   * side effect of a budget that this project raises roughly monthly. A rule
+   * enforced only by a budget stops being enforced the next time the budget
+   * moves, and this one moved twice in the week before it was written.
+   */
+  agent_standard: 380,
   report: 8000,
 });
+
+/**
+ * Who is an admin, for A11.
+ *
+ * Derived from the `clearance` tier that already exists on every agent in
+ * config/agents-config.json — `standard` for agents 1-4, and specialist / sudo /
+ * root for everyone else. DELIBERATELY NOT a new list of agent ids: a second
+ * list would be a second source of truth for "who is an admin", and the day
+ * someone's clearance changed the two would disagree with no error anywhere.
+ *
+ * Passed IN by callers (this module imports no JSON — see the block above).
+ * An ABSENT clearance is treated as standard, i.e. the LESS-INFORMED shape.
+ * Failing towards showing less is the only safe direction for an information
+ * rule: the cost of an admin briefly seeing headlines is a worse prompt, and
+ * the cost of the inverse is A11 not holding.
+ */
+export const ADMIN_CLEARANCES = Object.freeze(['specialist', 'sudo', 'root']);
+
+export function isAdminClearance(clearance) {
+  return ADMIN_CLEARANCES.includes(String(clearance || '').toLowerCase());
+}
+
+/**
+ * The sections a NON-ADMIN agent is shown. Everything else is admin-only.
+ *
+ * `own-tasks` and `own-review` are here because A11's exception is explicit —
+ * a regular agent sees ITS OWN work in full. The office-wide recitations
+ * (`board-titles`, `board-stuck`, `questions-open`, `deliverables`,
+ * `review-work`, `gap-agenda`, `requirements-detail`, `projects`) are not.
+ *
+ * `errors` is here deliberately. A degraded snapshot must not be hidden from
+ * the ranks that were shown less of it — otherwise a standard agent cannot tell
+ * "the office has one task" from "the board did not parse".
+ *
+ * `board-counts` carries A11's "what is blocked" — it already renders
+ * `6 BLOCKED · 4 NOT-READY` — so no separate blocked section is needed.
+ *
+ * `requirements-status` IS here, and it is here because A11 says so in as many
+ * words: *"Everyone sees the client requirements and this policy. Nobody can
+ * obey what they cannot see."* The first draft of this list withheld it — an
+ * over-application of "headlines, not detail" to the one thing A11 names as
+ * universal — and the pre-existing verifier caught it ("every shape keeps the
+ * requirement STATUS lines"). `requirements-detail` (the prose) is a different
+ * thing and stays admin-only; the STATUS lines are what "seeing the
+ * requirements" means.
+ *
+ * `questions-headline` is here for a narrower reason: it exists to stop the
+ * same question being asked twice in two voices, and a standard agent filing a
+ * gap note is exactly a second voice. It renders a COMPACT variant at this rank
+ * (see `questionsHeadlineText`) — the 150-token instructional version is aimed
+ * at whoever composes an entry, which under A8 is an admin act.
+ */
+export const STANDARD_SECTIONS = Object.freeze([
+  'headline',
+  'own-tasks',
+  'own-review',
+  'board-counts',
+  'requirements-headline',
+  'requirements-status',
+  'questions-headline',
+  'deliverables-count',
+  'errors',
+]);
 
 /**
  * ── RAISED AGAIN 2026-08-10, WITH THE DELIVERABLE LIFECYCLE ──────────────
@@ -608,15 +759,16 @@ async function fetchBackOfficeFile(env, filePath) {
  */
 export async function fetchOfficeSnapshot(env) {
   if (!env?.BACKOFFICE_REPO_TOKEN) {
-    return { fetched_at: Date.now(), board: null, requirements: null, questions: null, lifecycle: null, errors: ['BACKOFFICE_REPO_TOKEN is not configured — office context cannot be read'] };
+    return { fetched_at: Date.now(), board: null, requirements: null, questions: null, lifecycle: null, policy: null, errors: ['BACKOFFICE_REPO_TOKEN is not configured — office context cannot be read'] };
   }
 
   const errors = [];
-  const [boardFile, reqFile, questionsFile, lifecycleFile] = await Promise.all([
+  const [boardFile, reqFile, questionsFile, lifecycleFile, policyFile] = await Promise.all([
     fetchBackOfficeFile(env, BOARD_PATH),
     fetchBackOfficeFile(env, REQUIREMENTS_PATH),
     fetchBackOfficeFile(env, QUESTIONS_PATH),
     fetchBackOfficeFile(env, LIFECYCLE_PATH),
+    fetchBackOfficeFile(env, POLICY_PATH),
   ]);
 
   let board = null;
@@ -666,7 +818,30 @@ export async function fetchOfficeSnapshot(env) {
     else errors.push(`lifecycle parse failed: ${parsed.reason}`);
   }
 
-  return { fetched_at: Date.now(), board, requirements, questions, lifecycle, errors };
+  /*
+   * ── THE POLICY (added 2026-08-10) ──────────────────────────────────────
+   *
+   * Fetched for CORROBORATION, not for content. buildPolicyBlock() renders its
+   * transcribed digest with or without this — see office-policy.js's header for
+   * why a constraint may not depend on a network read. What the live file adds
+   * is the two facts that go stale: the re-check date, and which rules still
+   * carry the ⚖️ provisional marker.
+   *
+   * A failure here is therefore an ERROR (the office is running on an unverified
+   * transcription) but never a refusal. A 404 is NOT the healthy-empty case the
+   * questions channel and the lifecycle digest get: the policy is required to
+   * exist, and a missing policy file is exactly the state worth shouting about.
+   */
+  let policy = null;
+  if (policyFile.reason) {
+    errors.push(`${policyFile.reason} — the policy digest is rendering from workers/office-policy.js POLICY_DIGEST without live corroboration`);
+  } else {
+    const parsed = parsePolicy(policyFile.text);
+    if (parsed.ok) policy = parsed;
+    else errors.push(`policy parse failed: ${parsed.reason}`);
+  }
+
+  return { fetched_at: Date.now(), board, requirements, questions, lifecycle, policy, errors };
 }
 
 /* ──────────────────────────────── Rendering ───────────────────────────── */
@@ -796,14 +971,22 @@ function boardCountLine(counts) {
  *
  * @param {object} snapshot  from fetchOfficeSnapshot()
  * @param {'meeting'|'agent'|'report'} shape
- * @param {object} [opts]  {agentId, projects} — agentId narrows 'agent' shape
- *                          to that agent's own tasks; projects is the list
- *                          from config/office-projects.json, passed in
+ * @param {object} [opts]  {agentId, clearance, projects} — agentId narrows the
+ *                          'agent' shape to that agent's own tasks; clearance
+ *                          drives A11 rank filtering; projects is the list from
+ *                          config/office-projects.json, passed in
  * @returns {{text: string|null, degraded: boolean, reason: string|null, tokens: number, dropped: string[]}}
  */
 export function buildOfficeContext(snapshot, shape, opts = {}) {
   const projects = opts.projects || [];
-  const budget = BUDGETS[shape] ?? BUDGETS.agent;
+  /*
+   * A11: an `agent` shape for a non-admin is a DIFFERENT shape, with its own
+   * budget and its own section set. Meetings and reports are unaffected — a
+   * meeting's attendees are admins by construction (relationships.json
+   * meeting_default_attendees), and a report is read by the owner.
+   */
+  const rankFiltered = shape === 'agent' && !isAdminClearance(opts.clearance);
+  const budget = rankFiltered ? BUDGETS.agent_standard : (BUDGETS[shape] ?? BUDGETS.agent);
   const errors = snapshot?.errors || [];
   const board = snapshot?.board || null;
   const requirements = snapshot?.requirements || null;
@@ -816,11 +999,29 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
   // The empty-questions case is common and healthy; the questions-only case is a
   // failure and should say so through the same "no snapshot" path as before.
   if (!board && !requirements) {
+    /*
+     * THE POLICY STILL RENDERS HERE. Changed 2026-08-10.
+     *
+     * Before the policy wiring this returned `text: null` — correct then, and
+     * wrong now. A1 and A7 are CONSTRAINTS, and a constraint that vanishes when
+     * a GitHub read fails is a constraint a network blip removes. The office's
+     * worst day is precisely the day an agent should still be told it may not
+     * touch the Worker code.
+     *
+     * `degraded` stays true and the reason is unchanged, so every existing
+     * caller's logging and every existing check still see the failure. What
+     * changed is that the failure no longer takes the rules down with it.
+     */
+    const policyOnly = buildPolicyBlock(shape === 'agent' ? 'brief' : 'full', { parsed: snapshot?.policy || null });
     return {
-      text: null,
+      text: policyOnly.text,
       degraded: true,
       reason: errors.length ? errors.join(' | ') : 'no office snapshot available',
       tokens: 0,
+      policyTokens: policyOnly.tokens,
+      totalTokens: policyOnly.tokens,
+      rankFiltered: shape === 'agent' && !isAdminClearance(opts.clearance),
+      withheld: [],
       dropped: [],
     };
   }
@@ -914,13 +1115,32 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
   if (questions) {
     const open = questions.questions.filter((q) => q.open);
     const closed = questions.counts.closed;
+    /*
+     * TWO WIDTHS, ONE FACT. The long form is instruction for whoever COMPOSES
+     * an entry — a meeting, a report, an admin — and it costs ~150 tokens. The
+     * agent shape is spent on every model call and needs the fact and the
+     * prohibition, not the procedure. Measured: the long form alone was 60% of
+     * the standard rank's whole office-context budget.
+     *
+     * The COUNTS are identical in both. That is the part that must never differ
+     * by shape — "the owner has answered eleven questions" and "nobody has ever
+     * asked him anything" looking alike is the defect this section was built to
+     * prevent, and it would come straight back if the short form dropped them.
+     */
+    const questionsHeadlineText = shape === 'agent'
+      ? `Open questions to the client (back-office channel/to-owner/OPEN-QUESTIONS.md): ${open.length} awaiting an answer`
+        + `${closed ? `, ${closed} already answered/declined/withdrawn` : ''}.`
+        + ' Check that list before asking the client anything — a question already open must not be asked again in another voice.'
+        + ' Every entry says what the office does on silence, so an open question never stops work.'
+      : `Open questions to the client (back-office channel/to-owner/OPEN-QUESTIONS.md): ${open.length} awaiting an answer`
+        + `${closed ? `, ${closed} already answered/declined/withdrawn (text not repeated here — read the file)` : ''}.`
+        + ' BEFORE asking the client anything, check this list: a question already open must not be asked again in another voice.'
+        + ' Every entry names what the office will do if no answer comes, so an open question is never a reason to stop work.';
+
     sections.push({
       label: 'questions-headline',
       priority: QUESTIONS_PRIORITY,
-      text: `Open questions to the client (back-office channel/to-owner/OPEN-QUESTIONS.md): ${open.length} awaiting an answer`
-        + `${closed ? `, ${closed} already answered/declined/withdrawn (text not repeated here — read the file)` : ''}.`
-        + ' BEFORE asking the client anything, check this list: a question already open must not be asked again in another voice.'
-        + ' Every entry names what the office will do if no answer comes, so an open question is never a reason to stop work.',
+      text: questionsHeadlineText,
     });
     if (open.length) {
       sections.push({
@@ -950,6 +1170,29 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
   // if something has to be cut it should be the recitation, not the assignment.
   if (lifecycle && lifecycle.records.length) {
     const built = inFlightSections(lifecycle.records, { names: opts.agentNames || {} });
+
+    // ── A11'S "BRIEF PICTURE", AS ONE LINE ────────────────────────────────
+    //
+    // A11 names three things a regular agent sees: *how many deliverables are
+    // in flight, what is blocked, what the last meeting concluded.* The first
+    // two are here; the third is not in this snapshot at all (it lives in D1
+    // `meetings`, which this module does not read) and is boarded rather than
+    // faked. A count an agent can see is the difference between knowing the
+    // office has work in review and believing it has none.
+    sections.push({
+      label: 'deliverables-count',
+      // `headline`, not `status`, and it was MEASURED into that slot. At
+      // `status` the fitter dropped it from every agent shape — admin and
+      // standard alike — because it is pushed after the questions sections and
+      // the drop loop takes the later index among equal priorities. A11 names
+      // "how many deliverables are in flight" as part of the floor EVERY rank
+      // sees, which is the same argument `own-review` already sits at headline
+      // on. One line, dropped last, never trimmed.
+      priority: PRIORITY.headline,
+      text: `Deliverables in the review loop: ${lifecycle.records.length}`
+        + ` — ${lifecycle.records.map((r) => `${r.slug} [${r.stage} r${r.round}]`).join(', ')}.`
+        + ` ${lifecycle.records.reduce((n, r) => n + (r.open_gaps || 0), 0)} open gap(s) across them.`,
+    });
 
     // ── WHAT *THIS* AGENT OWES, AT HEADLINE PRIORITY ────────────────────
     //
@@ -1001,9 +1244,20 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
     // office cannot see what is in review" are different facts, and the second
     // one belongs in the errors section instead — which is where an unreadable
     // digest already lands.
+    //
+    // Labelled `deliverables-count` and not `deliverables`, so the empty case
+    // reaches a standard agent too. A rank that is told the count when it is
+    // three and told nothing when it is zero cannot tell zero from unread.
     sections.push({
-      label: 'deliverables',
-      priority: PRIORITY.titles,
+      label: 'deliverables-count',
+      // `headline`, not `status`, and it was MEASURED into that slot. At
+      // `status` the fitter dropped it from every agent shape — admin and
+      // standard alike — because it is pushed after the questions sections and
+      // the drop loop takes the later index among equal priorities. A11 names
+      // "how many deliverables are in flight" as part of the floor EVERY rank
+      // sees, which is the same argument `own-review` already sits at headline
+      // on. One line, dropped last, never trimmed.
+      priority: PRIORITY.headline,
       text: 'DELIVERABLES IN FLIGHT — none. No built deliverable is currently in the review loop.',
     });
   }
@@ -1027,12 +1281,54 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
     });
   }
 
-  const fitted = fitToBudget(sections, budget);
+  /*
+   * ── A11 ENFORCED BY CONSTRUCTION, BEFORE THE FITTER RUNS ────────────────
+   *
+   * Filtering here rather than inside fitToBudget() is deliberate. The fitter's
+   * job is "make this fit"; A11's rule is "this rank does not see that", and the
+   * two must not be the same decision — a rule enforced only by a budget stops
+   * being enforced the moment the budget is raised, which is a thing this
+   * project does roughly monthly (see the BUDGETS block above, twice in one
+   * week). `withheld` is REPORTED, not silent: the same NO SILENT CAPS rule
+   * renderSection() keeps, applied to rank instead of length.
+   */
+  const withheld = rankFiltered
+    ? sections.filter((s) => !STANDARD_SECTIONS.includes(s.label)).map((s) => s.label)
+    : [];
+  const visible = rankFiltered
+    ? sections.filter((s) => STANDARD_SECTIONS.includes(s.label))
+    : sections;
+
+  const fitted = fitToBudget(visible, budget);
+
+  /*
+   * ── THE POLICY RIDES OUTSIDE THE BUDGET, AND THAT IS THE WHOLE POINT ────
+   *
+   * A11: *"Everyone sees the client requirements and this policy. Nobody can
+   * obey what they cannot see."* A policy inside the office-context budget would
+   * be a policy the fitter is entitled to trim on a busy day — and A1 trimmed
+   * on a busy day is A1 absent on exactly the day it matters.
+   *
+   * So it is PREPENDED after the fit, and its cost is reported separately as
+   * `policyTokens` rather than folded into `tokens`. The two numbers answer two
+   * different questions and adding them together would answer neither: `tokens`
+   * is what the fitter managed, `policyTokens` is what the rule costs.
+   *
+   * Shape mapping: `brief` for a single agent (per model call, many a day),
+   * `full` for meetings and reports (once per meeting; reports make no model
+   * call at all).
+   */
+  const policy = buildPolicyBlock(shape === 'agent' ? 'brief' : 'full', { parsed: snapshot?.policy || null });
+
   return {
-    text: fitted.text,
+    text: `${policy.text}\n\n${fitted.text}`,
     degraded: errors.length > 0,
     reason: errors.length ? errors.join(' | ') : null,
     tokens: fitted.tokens,
+    policyTokens: policy.tokens,
+    totalTokens: fitted.tokens + policy.tokens,
+    rankFiltered,
+    withheld,
     dropped: fitted.dropped,
     trimmed: fitted.trimmed,
   };
@@ -1068,9 +1364,17 @@ export async function getOfficeSnapshot(env, { allowFetch = false } = {}) {
   return snapshot;
 }
 
-export async function getOfficeContext(env, { shape = 'agent', agentId = null, allowFetch = false, snapshot: given = undefined, projects = [] } = {}) {
+export async function getOfficeContext(env, { shape = 'agent', agentId = null, clearance = null, allowFetch = false, snapshot: given = undefined, projects = [], agentNames = {} } = {}) {
+  /*
+   * THE POLICY HAS NO SWITCH OF ITS OWN, deliberately — the same decision
+   * deliverable-lifecycle.js took on 2026-08-10 and for the same reason. It
+   * rides on `office_context_enabled`, which is live ON. A separate flag would
+   * be an eighth switch whose documented state goes stale the moment someone
+   * toggles it (OB-040), guarding a body of rules that the office is supposed to
+   * be unable to opt out of. Off means off: no fetch, no digest, no log noise.
+   */
   if (!(await officeContextEnabled(env))) {
-    return { text: null, degraded: false, reason: 'office_context_disabled', tokens: 0, dropped: [] };
+    return { text: null, degraded: false, reason: 'office_context_disabled', tokens: 0, policyTokens: 0, dropped: [] };
   }
 
   const snapshot = given !== undefined ? given : await getOfficeSnapshot(env, { allowFetch });
@@ -1079,7 +1383,12 @@ export async function getOfficeContext(env, { shape = 'agent', agentId = null, a
     return { text: null, degraded: true, reason: 'no cached office snapshot and this caller may not fetch', tokens: 0, dropped: [] };
   }
 
-  const built = buildOfficeContext(snapshot, shape, { agentId, projects });
+  // `agentNames` was accepted by buildOfficeContext() and never passed by this
+  // function, so inFlightSections() has been rendering agent ids where it could
+  // have rendered names since the lifecycle landed. Threaded through 2026-08-10
+  // while the signature was being changed anyway; it is a legibility fix, not a
+  // behaviour change — the ids were correct, they were just harder to read.
+  const built = buildOfficeContext(snapshot, shape, { agentId, clearance, projects, agentNames });
   if (built.degraded) {
     console.warn(`[office-context] degraded (${shape}): ${built.reason}`);
   }
@@ -1096,6 +1405,7 @@ export async function getOfficeContext(env, { shape = 'agent', agentId = null, a
     ...(snapshot?.board?.malformed || []),
     ...(snapshot?.questions?.malformed || []),
     ...(snapshot?.lifecycle?.malformed || []),
+    ...(snapshot?.policy?.malformed || []),
   ];
   if (malformed.length) {
     console.warn(`[office-context] ${shape} built from UNREADABLE input — ${malformed.join(' | ')}`);

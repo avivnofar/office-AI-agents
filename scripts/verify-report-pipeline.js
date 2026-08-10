@@ -158,10 +158,29 @@ check('[FAILS-OLD] proof the assertion above genuinely fails against the pre-cha
   !/Projects the office is responsible for/.test(oldReportContext.text));
 
 // OLD — the per-agent site, same omission.
-const oldAgentContext = officeContext.buildOfficeContext(snapshot, 'agent', { agentId: 12 });
-const newAgentContext = officeContext.buildOfficeContext(snapshot, 'agent', { agentId: 12, projects: PROJECTS });
+//
+// `clearance` added 2026-08-10 with A11 rank filtering. Agent 12 (The Workflow)
+// is `sudo` in config/agents-config.json, so this is the ADMIN shape — which is
+// what this scenario was always about. Without it the shape rank-filters and
+// withholds `projects`, and the check would fail for a reason that has nothing
+// to do with the projects wiring it exists to pin.
+const oldAgentContext = officeContext.buildOfficeContext(snapshot, 'agent', { agentId: 12, clearance: 'sudo' });
+const newAgentContext = officeContext.buildOfficeContext(snapshot, 'agent', { agentId: 12, clearance: 'sudo', projects: PROJECTS });
 check('[FAILS-OLD] the per-agent context names the projects too (site 2 of the survey)',
   /Notebook-X/.test(newAgentContext.text) && !/Notebook-X/.test(oldAgentContext.text));
+
+// A11's other half, pinned in the same place so the two cannot drift: the
+// projects list is admin detail, and a STANDARD agent does not get it even when
+// the caller passes it. Enforced by construction (office-context.js
+// STANDARD_SECTIONS), not by the budget — a rule enforced only by a budget
+// stops being enforced the next time the budget moves.
+const standardAgentContext = officeContext.buildOfficeContext(snapshot, 'agent', { agentId: 3, clearance: 'standard', projects: PROJECTS });
+check('[new] A11 — a STANDARD agent is NOT shown the projects list, even when the caller passes it',
+  !/Projects the office is responsible for/.test(standardAgentContext.text)
+  && standardAgentContext.rankFiltered === true
+  && standardAgentContext.withheld.includes('projects'));
+check('[new] A11 — but a standard agent IS shown the client requirements and the policy (everyone sees those)',
+  /REQ-001/.test(standardAgentContext.text) && /A1 RED LINE/.test(standardAgentContext.text));
 
 check('[new] the four call sites now pass projects — three report sites in agent-runner.js',
   (runnerSrc.match(/getOfficeContext\(env, \{ shape: 'report', allowFetch: true, projects: officeProjects\.projects \}\)/g) || []).length === 3);

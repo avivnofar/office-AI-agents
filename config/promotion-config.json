@@ -1,7 +1,8 @@
 {
   "_meta": {
     "version": "0.1.0",
-    "status": "specified",
+    "status": "shelved",
+    "_shelved_2026_08_10": "SHELVED BY POLICY, NOT DELETED. OFFICE-POLICY.md A13: 'Promotions are shelved. Reinstate only if data ever justifies it.' Nothing in this file is removed — A15 forbids deletion, and the paths, criteria and year-end process are the design the owner would reinstate FROM. What changed is the status field and this note. The consumer is meeting-engine.js's 'yearly' meeting (day 365 of the simulation, per year-tracker.json), which the office has not yet reached, so shelving costs nothing today and is recorded now while the decision is fresh rather than discovered at day 365. THE REINSTATEMENT TEST IS DATA: A3's improvement loop must be producing evidence that an agent's behaviour changed durably before a promotion means anything. As of 2026-08-10 the scored sample is 43 rows and the 'office' track has zero (see OB-027), so there is no data to justify it and that is why it is shelved rather than merely unscheduled.",
     "description": "Promotion paths, eligibility criteria, and the year-end nomination/decision process for the 11-agent simulation. Consumed by meeting-engine.js's 'yearly' meeting and year-tracker.json's day-365 milestone.",
     "trigger": "Evaluated at the year-end ('yearly') meeting, day 365 of the simulation (see year-tracker.json milestones)."
   },

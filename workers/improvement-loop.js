@@ -86,6 +86,20 @@
  * done — a QA review of zero rows passes every test and means nothing.
  */
 
+/*
+ * THE ONE IMPORT IN THIS FILE, added 2026-08-10 with B5's office-wide reach.
+ *
+ * `deliverable-lifecycle.js` imports nothing (asserted by
+ * scripts/verify-lifecycle.js §11), so plain `node` can still load this module
+ * and scripts/verify-improvement-loop.js still exercises the real code.
+ *
+ * It is imported rather than reimplemented for one reason: B5 defines a
+ * refusal's SHAPE, and there must be exactly one validator and exactly one
+ * renderer for it. Two implementations of "what counts as a recorded refusal"
+ * is how the office would come to have two grammars for its own evidence.
+ */
+import { recordRefusal as validateRefusal, renderRefusal } from './deliverable-lifecycle.js';
+
 /** SIM_KV key, and the flag inside it. Mirrors guides_enabled / routing_enabled. */
 export const SIM_STATE_KEY = 'simulation-state';
 export const IMPROVEMENT_LOOP_FLAG = 'improvement_loop_enabled';
@@ -106,6 +120,7 @@ export const EVENT_TYPES = Object.freeze([
   'lead_qa_weekly',    // 1.5, not built
   'meeting',
   'guide_review',
+  'refusal',           // B5, office-wide (2026-08-10) — see below
 ]);
 
 /**
@@ -191,6 +206,49 @@ export const EVENT_TYPES = Object.freeze([
  * instead of by knowing to look inside a JSON blob.
  */
 export const NOT_ASKED_EVENT = 'case_not_asked';
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ * `refusal` — B5 APPLIED TO THE WHOLE OFFICE, NOT ONLY THE NIGHT RUN
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * OFFICE-POLICY.md B5 lives in the NIGHT ANNEX and closes with a sentence that
+ * takes it straight back out again:
+ *
+ *   > **A refusal not recorded when it happens cannot be recovered.**
+ *   > Reconstructing it later produces something that reads as evidence and is
+ *   > an invention — indistinguishable from the real thing. **This applies to
+ *   > the whole office, not only the night run.**
+ *
+ * As of 2026-08-10 the only implementation was
+ * `workers/deliverable-lifecycle.js recordRefusal()`, which records refusals
+ * INSIDE a deliverable's record — a QA rejecting a build, a vote against, the
+ * CEO declining. That covers the review loop and nothing else. A QA rejecting
+ * something that is not a deliverable, an admin objecting to a task under A8,
+ * the Workflow bouncing an ambiguous dispatch: all of those are refusals under
+ * B5 and none of them had anywhere to go.
+ *
+ * ── WHY HERE AND NOT A NEW TABLE ─────────────────────────────────────────
+ *
+ * A refusal IS a unit of office work — that is precisely B5's argument, that it
+ * is evidence about how the office behaved. It has an actor, a moment, a track,
+ * and an embodiment, which is the exact shape this table already carries. A
+ * separate `refusals` table would need its own migration, its own consumers, and
+ * its own reason to be joined back to the events it happened during.
+ *
+ * ── THE VALIDATION IS BORROWED, NOT COPIED ───────────────────────────────
+ *
+ * `validateRefusal()` above is deliverable-lifecycle.js's `recordRefusal()`, and
+ * it REFUSES a refusal with no character line. That strictness is the whole
+ * mechanism: B5 says the line cannot be supplied later, so a caller that cannot
+ * produce one must record NO REFUSAL AND SAY SO, rather than record a refusal
+ * with a plausible line somebody wrote afterwards.
+ *
+ * `quality` is always null on these rows and that is deliberate: a refusal has
+ * no quality score, and this module already documents that null means "no score
+ * exists here", never zero.
+ */
+export const REFUSAL_EVENT = 'refusal';
 
 /** The `type` value every row from this module carries. See the rule above. */
 export const OFFICE_EVENT_TYPE = 'office_event';
@@ -313,4 +371,63 @@ export async function recordOfficeEvent(env, fields) {
     console.warn(`[improvement-loop] capture failed, continuing: ${err?.message || err}`);
     return { recorded: false, reason: 'capture_error' };
   }
+}
+
+/**
+ * Records one refusal, anywhere in the office. B5.
+ *
+ * @param {object} env
+ * @param {{agentId:number, who:string, declined:string, characterLine:string,
+ *          track?:'client'|'office', source?:string, embodimentModel?:string}} r
+ *
+ * REFUSES a refusal it cannot record honestly, and RETURNS the refusal-to-record
+ * rather than swallowing it — the caller must be able to say "a refusal happened
+ * and I could not record it", which is a different and more useful statement
+ * than silence. That is deliberately unlike `recordOfficeEvent()`, which sits on
+ * the client answer path and must never surface anything; a refusal is not on
+ * that path and the asymmetry is the point.
+ *
+ * `track` defaults to 'office' HERE and only here. Everywhere else in this
+ * module a defaulted track is refused, because a wrong track corrupts the
+ * per-track quota measurement. A refusal is not a quota-consuming call — nothing
+ * was spent, something was declined — so 'office' is a true statement about
+ * where the act belongs rather than a guess about where the tokens went.
+ */
+export async function recordRefusalEvent(env, r = {}) {
+  // `characterLine`, not `line` — that is the field name recordRefusal() reads.
+  // The first version passed `line`, every refusal was rejected as missing its
+  // character line, and the rejection message was so plausible that it read as
+  // the mechanism working. Caught by the verifier scenario that asserts a VALID
+  // refusal is refused by the FLAG rather than by validation — which is the
+  // whole reason that scenario distinguishes the two.
+  const validated = validateRefusal({
+    who: r.who,
+    declined: r.declined,
+    characterLine: r.characterLine,
+    source: r.source,
+    at: r.at,
+  });
+  if (!validated.ok) {
+    console.warn(`[improvement-loop] REFUSAL NOT RECORDED: ${validated.reason}`);
+    return { recorded: false, reason: validated.reason, refusalLost: true };
+  }
+
+  const result = await recordOfficeEvent(env, {
+    agentId: r.agentId,
+    eventType: REFUSAL_EVENT,
+    track: r.track || 'office',
+    embodimentModel: r.embodimentModel || null,
+    quality: null,
+    title: `refusal — ${validated.refusal.who} declined ${String(validated.refusal.declined).slice(0, 80)}`,
+    // The rendered line IS the record. Stored as the office's one shape
+    // (renderRefusal) so a reader of this table and a reader of a lifecycle
+    // record see the same sentence.
+    content: renderRefusal(validated.refusal),
+    severity: 'info',
+  });
+
+  // A refusal that could not be written is REPORTED as lost, not as absent.
+  // B5's whole argument is that it cannot be reconstructed later, so the loss
+  // is the thing worth knowing.
+  return result.recorded ? result : { ...result, refusalLost: true };
 }

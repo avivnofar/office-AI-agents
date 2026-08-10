@@ -45,6 +45,10 @@ import {
   addOfficeDays, normalizeActionItems, renderBoardTask,
   computeWorkflowMetrics, renderWorkflowMetrics,
 } from './meeting-decisions.js';
+// B5 (2026-08-10) — refusal recording, office-wide. The meeting is where a QA
+// rejects, an admin objects and the Workflow bounces something, and it is the
+// one moment those are visible to code. See recordMeetingRefusals().
+import { recordRefusalEvent } from './improvement-loop.js';
 
 /*
  * The pure half of the action-items pipeline and the Workflow's metrics live
@@ -503,10 +507,17 @@ Respond in two parts:
   "state_changes": [{ "agent_id": <int>, "field": "isHappy|isAngry|isPanic|panicLevel|isComplacent", "value": <bool|number>, "reason": "<short reason>" }],
   "action_items": [{ "agent_id": <int>, "task": "<one imperative sentence>", "delivered": "<the ARTIFACT that will exist>", "due_days": <int office-days>, "decided": <bool>, "open_question": "<if decided is false, what was left unsettled>" }],
   "config_overrides": [{ "agent_id": <int>, "overrides": { "<config_key>": <value> }, "reason": "<short reason>" }],
-  "suggestion_decisions": [{ "suggestion_id": "<id or empty>", "decision": "approved|rejected", "reason": "<short reason>" }]
+  "suggestion_decisions": [{ "suggestion_id": "<id or empty>", "decision": "approved|rejected", "reason": "<short reason>" }],
+  "refusals": [{ "agent_id": <int>, "declined": "<what this character declined, in one clause>", "character_line": "<the line of THEIR OWN character or role this refusal came from, quoted or closely paraphrased from their persona above>" }]
 }
 Then the marker ---END---.
 Every array may be empty. Keep the JSON valid and self-contained.
+
+RULES FOR refusals — the office policy's B5, and it binds the whole office, not only the night run:
+- A REFUSAL IS ANY MOMENT A CHARACTER DECLINED SOMETHING. The QA rejecting a deliverable. An admin objecting to a task. The Workflow bouncing an ambiguous item back. A vote cast against. Someone refusing to sign off. If it happened in the transcript above, it belongs here.
+- "character_line" is REQUIRED and must come from THAT AGENT'S OWN persona text in this prompt. It answers "which part of who they are made them say no".
+- IF YOU CANNOT NAME THE LINE, OMIT THE ENTRY. Do not invent one. A refusal recorded with a manufactured character line reads as evidence and is an invention — and an entry without the line is DROPPED at parse time anyway, so inventing one only makes the record worse.
+- Do not manufacture refusals to fill the array. An empty array is the correct answer for a meeting where nobody declined anything.
 
 RULES FOR action_items — these are ENFORCED, and an item breaking them is DROPPED, not repaired:
 - "agent_id" is REQUIRED and must be a real staff id. If you cannot say who owns an item, DO NOT INVENT AN OWNER — omit the item. An unowned action item is not an action item.
@@ -704,6 +715,50 @@ ${droppedBlock}`;
 }
 
 /* ────────────────────────────── Effects ───────────────────────────────── */
+
+/**
+ * B5 — RECORD EVERY REFUSAL AT THE MOMENT IT HAPPENS. Office-wide.
+ *
+ * Runs at the end of the meeting, which IS the moment: the meeting is one
+ * model call, the refusals are reported in its own decisions block, and this is
+ * the first code to see them. B5's argument is that a refusal reconstructed
+ * later is an invention; recording them here is the only point at which they
+ * are not.
+ *
+ * REFUSES an entry with no character line and SAYS SO. `recordRefusalEvent()`
+ * returns `refusalLost: true` in that case, and this function logs the loss
+ * rather than dropping it silently — "a refusal happened and we could not
+ * record it" is a different and more useful fact than nothing at all.
+ *
+ * Cannot throw. A meeting that failed to file its paperwork must still have
+ * happened; the transcript, the decisions and the mood effects are the meeting.
+ */
+async function recordMeetingRefusals(meetingType, attendeeSnapshots, decisions, env) {
+  const entries = Array.isArray(decisions?.refusals) ? decisions.refusals : [];
+  if (!entries.length) return { recorded: 0, lost: 0 };
+
+  const byId = new Map(attendeeSnapshots.map((s) => [s.id, s]));
+  let recorded = 0;
+  let lost = 0;
+  for (const e of entries) {
+    // An id that was not in the room is dropped: a character who was not at the
+    // meeting did not refuse anything at it, and attributing a refusal to an
+    // absent agent is the same invention B5 forbids, one step removed.
+    const snap = byId.get(e?.agent_id);
+    if (!snap) { lost += 1; console.warn(`[meeting-engine] refusal names agent ${e?.agent_id}, who was not an attendee — dropped`); continue; }
+    const res = await recordRefusalEvent(env, {
+      agentId: e.agent_id,
+      who: `Agent ${e.agent_id} — ${snap.config?.name || 'unknown'}`,
+      declined: e.declined,
+      characterLine: e.character_line,
+      source: `${meetingType} meeting`,
+      track: 'office',
+    }).catch((err) => ({ recorded: false, refusalLost: true, reason: err?.message }));
+    if (res?.recorded) recorded += 1;
+    else { lost += 1; console.warn(`[meeting-engine] REFUSAL LOST (agent ${e.agent_id}): ${res?.reason}`); }
+  }
+  return { recorded, lost };
+}
 
 async function applyMeetingEffects(meetingType, attendeeSnapshots, decisions, env) {
   const snapshotsById = new Map(attendeeSnapshots.map((s) => [s.id, s]));
@@ -1033,6 +1088,12 @@ export async function runMeeting(meetingType, env, opts = {}) {
 
   await applyMeetingEffects(meetingType, attendeeSnapshots, decisions, env);
 
+  // B5, at the moment it happened. Before the persist, so a failure to store the
+  // meeting row does not also lose the refusals — they are separate records of
+  // separate facts and the more fragile one goes first.
+  const refusals = await recordMeetingRefusals(meetingType, attendeeSnapshots, decisions, env)
+    .catch((err) => { console.warn(`[meeting-engine] refusal recording failed: ${err?.message}`); return { recorded: 0, lost: 0, error: err?.message }; });
+
   const dbId = await persistMeeting(env, { meetingType, attendees: attendeeIds, transcript, decisions });
 
   const markdown = renderMeetingReport(meetingType, attendeeSnapshots, transcript, decisions, opts);
@@ -1044,6 +1105,10 @@ export async function runMeeting(meetingType, env, opts = {}) {
     transcript,
     decisions,
     dbId,
+    // Surfaced, not swallowed. `lost` is the number that matters: a refusal
+    // that happened and could not be recorded is unrecoverable per B5, and a
+    // caller that cannot see the count cannot report it.
+    refusals,
     report: { markdown, ...commit },
   };
 }

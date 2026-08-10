@@ -130,7 +130,16 @@ check('BUDGETS.agent is the tightest — it is the per-LLM-call one',
   officeContext.BUDGETS.agent < officeContext.BUDGETS.meeting);
 check('BUDGETS.report is the loosest — those two sites make no model call',
   officeContext.BUDGETS.report > officeContext.BUDGETS.meeting);
-check('BUDGETS.agent is 400 as specified', officeContext.BUDGETS.agent === 400);
+// 400 -> 520 on 2026-08-10, closing OB-030's open half with a measured per-day
+// cost figure (~18,000 extra input tokens a day across free tiers that meter
+// requests, not tokens — see BUDGETS' own header). At 400 the ADMIN agent shape
+// measured 327 tokens, 82%, apparently healthy, while dropping
+// `deliverables-count` and `questions-headline` outright: an admin was told
+// neither that a deliverable was in the review loop nor that the office had
+// questions open with the owner. Same failure the meeting budget hit twice.
+check('BUDGETS.agent is 520 as measured', officeContext.BUDGETS.agent === 520);
+check('BUDGETS.agent_standard exists and is tighter than the admin one (A11)',
+  officeContext.BUDGETS.agent_standard < officeContext.BUDGETS.agent);
 // 3,500 since 2026-08-10 (was 1,200). OB-030 closed: at 1,200 the meeting
 // shape measured 1,181 tokens — 98.4%, apparently healthy — while quietly
 // shrinking FOUR sections to a single item each, so a meeting saw 1 of 26 open
@@ -284,8 +293,106 @@ check('office_context_status exists so flag-ON-input-EMPTY is observable without
   arSrc0.includes("case 'office_context_status':"));
 check('office_context_status reports the token presence — the silent-empty cause',
   /officeContextEnabled: true[\s\S]{0,200}backofficeTokenPresent/.test(arSrc0));
-check('action_items_to_board_enabled deliberately has NO toggle case (stays owner-only, see MEETING-PROTOCOL.md)',
-  !arSrc0.includes("case 'action_items_to_board_toggle':"));
+/* ── THE REVERSAL, 2026-08-10 ────────────────────────────────────────────
+ *
+ * This check used to assert the OPPOSITE: that `action_items_to_board_toggle`
+ * must NOT exist, so the flag "stays owner-only". That reasoning was sound
+ * while the alternative route was an UNAUTHENTICATED `POST /api/simulation`,
+ * and it inverts the moment that endpoint requires the admin token — which it
+ * now does. With the endpoint closed, the trigger case IS the owner-only path,
+ * and withholding it would leave a live production flag settable by nobody.
+ *
+ * Rewritten in place rather than deleted, so the reversal is legible in the
+ * diff instead of reading as a rule quietly dropped.
+ */
+check('action_items_to_board_toggle now EXISTS — the endpoint that used to be its only route is closed',
+  arSrc0.includes("case 'action_items_to_board_toggle':"));
+
+/* ═══════ §3b THE UNAUTHENTICATED STATE ENDPOINT — CLOSED 2026-08-10 ═════
+ *
+ * Flagged 2026-07-18, open 23 days, named in OFFICE-POLICY.md Part C as a
+ * thing that "must be closed before the public front opens". `POST
+ * /api/simulation` took a JSON body straight into updateSimulationState() with
+ * no token check, reaching all ten allow-list keys including `paused`.
+ *
+ * THE SCENARIO BELOW FAILS AGAINST THE PRE-CHANGE CODE, by construction: the
+ * gate detector is run against a TRANSCRIPTION of the old handler as well as
+ * against the live source, and is required to refuse one and pass the other.
+ * A checker that only ever sees the fixed code cannot tell "this is guarded"
+ * from "my regex matches anything".
+ */
+section('§3b POST /api/simulation requires the admin token');
+
+/** Extracts the POST /api/simulation handler body and asks whether the admin
+ *  token is checked BEFORE updateSimulationState() is reached. Pure, so it can
+ *  be pointed at the old code and the new one alike. */
+function simulationPostIsGuarded(source) {
+  const start = source.indexOf("url.pathname === '/api/simulation'", source.indexOf("request.method === 'POST' && url.pathname === '/api/simulation'"));
+  if (start === -1) return { found: false, guarded: false };
+  const body = source.slice(start, start + 2500);
+  const gateAt = body.search(/env\.ADMIN_TOKEN/);
+  const updateAt = body.search(/updateSimulationState\(env, body\)/);
+  if (updateAt === -1) return { found: false, guarded: false };
+  return { found: true, guarded: gateAt !== -1 && gateAt < updateAt };
+}
+
+// The pre-change handler, transcribed verbatim from office-AI-agents@39ff10c
+// workers/agent-runner.js. This is the control: if the detector passes it, the
+// detector is not detecting anything.
+const PRE_CHANGE_HANDLER = `
+      if (request.method === 'POST' && url.pathname === '/api/simulation') {
+        const body = await request.json();
+        return json(await updateSimulationState(env, body), 200, origin);
+      }
+`;
+const preChange = simulationPostIsGuarded(PRE_CHANGE_HANDLER);
+check('CONTROL — the pre-change handler is detected as UNGUARDED (else this check proves nothing)',
+  preChange.found === true && preChange.guarded === false, JSON.stringify(preChange));
+
+const liveGuard = simulationPostIsGuarded(arSrc0);
+check('the LIVE handler is guarded, and the token check precedes the state write',
+  liveGuard.found === true && liveGuard.guarded === true, JSON.stringify(liveGuard));
+
+check('the closure did NOT widen the /api/agents/ prefix gate (GET /api/simulation stays a public read)',
+  arSrc0.includes("url.pathname.startsWith('/api/agents/')") && !arSrc0.includes("url.pathname.startsWith('/api/')"));
+check('the 401 body is the SAME shape the /api/agents/* gate returns (one idiom, not two)',
+  (arSrc0.match(/error: 'unauthorized' \}, 401, origin\)/g) || []).length >= 2);
+
+/* ── EVERY SWITCH IS STILL REACHABLE THROUGH AN AUTHENTICATED PATH ───────
+ *
+ * The reason this check exists at all: `office_context_enabled` was set through
+ * the unauthenticated endpoint precisely BECAUSE it had no trigger handler. A
+ * switch with no route is worse than one with an open route — the open route is
+ * a known risk with a known fix; the absent route is discovered at the moment
+ * someone needs to stop the office. So closing the endpoint is only safe if
+ * every allow-list key has a case on /api/agents/trigger, and that is asserted
+ * here per key rather than assumed.
+ */
+const ALLOW_LIST_TO_TRIGGER = {
+  inspection_mode: 'inspection',
+  paused: 'pause',
+  phase: 'phase_set',
+  guides_enabled: 'guides_toggle',
+  routing_enabled: 'routing_toggle',
+  improvement_loop_enabled: 'improvement_loop_toggle',
+  architect_liaison_enabled: 'architect_liaison_toggle',
+  office_context_enabled: 'office_context_toggle',
+  action_items_to_board_enabled: 'action_items_to_board_toggle',
+  report_pipeline_enabled: 'report_pipeline_toggle',
+};
+const allowListMatch = /const allowedKeys = \[([^\]]+)\]/.exec(arSrc0);
+const allowListKeys = allowListMatch
+  ? allowListMatch[1].split(',').map((s) => s.trim().replace(/^'|'$/g, ''))
+  : [];
+check('the allow-list was found in source (else the per-key checks below are vacuous)',
+  allowListKeys.length === 10, `${allowListKeys.length} keys: ${allowListKeys.join(', ')}`);
+for (const key of allowListKeys) {
+  const trigger = ALLOW_LIST_TO_TRIGGER[key];
+  check(`allow-list key "${key}" has an authenticated route (trigger "${trigger}")`,
+    !!trigger && arSrc0.includes(`case '${trigger}':`));
+}
+check('a read-back of the whole state exists on the AUTHENTICATED endpoint too',
+  arSrc0.includes("case 'simulation_state':"));
 
 // THE SILENT DROP (found 2026-08-08, live). The commitment due date sat inside
 // a blockquote, `^- **Due:**` could not match it, and `due:null` rendered as
@@ -581,8 +688,17 @@ const agentBaseSrc = read('agents/agent-base.js');
 check('agent-base.js takes the office context CACHE-ONLY (no allowFetch on the per-call path)',
   /getOfficeContext\(this\.env,\s*\{\s*shape: 'agent'[^}]*\}\)/.test(agentBaseSrc) &&
   !/getOfficeContext\(this\.env[^)]*allowFetch/.test(agentBaseSrc));
+// The window was {0,300} and the A11 `clearance` argument (plus the comment
+// explaining it) pushed the try/catch span past it. Widened to 1200, and
+// recorded rather than silently retuned: this is a TEXT-PROXIMITY PROXY, the
+// same shape agent-runner.js's `report_block` comment already flags — a check
+// that a comment can break can also pass by coincidence of layout. Its intent
+// is right and there is no cheap way to assert "wrapped in try/catch" from
+// source text without one.
 check('agent-base.js wraps the office-context call so it can never break a client answer',
-  /try\s*\{[\s\S]{0,300}getOfficeContext[\s\S]{0,300}catch/.test(agentBaseSrc));
+  /try\s*\{[\s\S]{0,1200}getOfficeContext[\s\S]{0,1200}catch/.test(agentBaseSrc));
+check('agent-base.js passes the agent\'s CLEARANCE so A11 rank filtering has an input',
+  /getOfficeContext\(this\.env,[\s\S]{0,800}clearance:/.test(agentBaseSrc));
 check('getDbContext() was left exactly as it was (still the inert placeholder)',
   /async getDbContext\(_query\) \{\s*return '';\s*\}/.test(agentBaseSrc));
 
@@ -721,6 +837,125 @@ check('questions malformed entries join the SAME malformed log line as board and
   /snapshot\?\.questions\?\.malformed/.test(ocSrc));
 check('a 404 on the questions file is NOT reported as an error (empty channel is healthy)',
   /HTTP 404/.test(ocSrc) && /questionsFile\.reason/.test(ocSrc));
+
+/* ═══════ §11 POLICY MECHANISM — B5, A7's branch half, A12's roster ══════
+ *
+ * Added 2026-08-10 with the policy wiring. Three rules that each needed code,
+ * pinned in one place because they were built in one session and a later reader
+ * needs to find them together.
+ */
+section('§11 policy mechanism — B5 refusals, A7 branches, A12 attendance');
+
+/* ── B5: refusal recording, office-wide ────────────────────────────────── */
+const improvementLoop = await import('../workers/improvement-loop.js');
+const lifecycle = await import('../workers/deliverable-lifecycle.js');
+
+check('B5 — `refusal` is a first-class event type on the office-wide table',
+  improvementLoop.EVENT_TYPES.includes('refusal'));
+check('B5 — there is ONE validator for a refusal, borrowed not copied',
+  /from '\.\/deliverable-lifecycle\.js'/.test(read('workers/improvement-loop.js')));
+
+// The strictness IS the mechanism. A refusal with no character line must be
+// refused, and the refusal-to-record must reach the caller.
+const noLine = await improvementLoop.recordRefusalEvent({}, {
+  agentId: 6, who: 'Agent 6 — The QA', declined: 'the deliverable', characterLine: '',
+});
+check('B5 — a refusal with NO character line is REFUSED, not stored',
+  noLine.recorded === false && noLine.refusalLost === true);
+check('B5 — ...and the refusal-to-record names why, so the caller can report the loss',
+  /character/i.test(noLine.reason || ''), noLine.reason);
+const noWho = await improvementLoop.recordRefusalEvent({}, {
+  agentId: 6, declined: 'the deliverable', characterLine: 'I do not sign off on what I have not read.',
+});
+check('B5 — a refusal that names no refuser is REFUSED', noWho.recorded === false);
+
+// With a valid refusal and the flag OFF, nothing is written — but the reason
+// must be the FLAG, not a validation failure. Those are different states and
+// collapsing them would hide a malformed refusal behind a disabled switch.
+const validOff = await improvementLoop.recordRefusalEvent({}, {
+  agentId: 6, who: 'Agent 6 — The QA', declined: 'the office-site deliverable at round 2',
+  characterLine: 'I do not sign off on what I have not read end to end.',
+});
+check('B5 — a VALID refusal with the loop off is refused by the FLAG, not by validation',
+  validOff.recorded === false && validOff.reason === 'improvement_loop_disabled');
+
+check('B5 — the rendered line is the office\'s ONE shape (same renderer as the lifecycle)',
+  /refusal: WHO declined WHAT, and the line of their character it came from: "LINE"/.test(
+    lifecycle.renderRefusal({ who: 'WHO', declined: 'WHAT', character_line: 'LINE' })));
+
+const meSrc11 = read('workers/meeting-engine.js');
+check('B5 — the meeting prompt ASKS for refusals in the required shape',
+  /"refusals": \[\{ "agent_id"/.test(meSrc11) && /character_line/.test(meSrc11));
+check('B5 — the prompt forbids inventing a character line',
+  /IF YOU CANNOT NAME THE LINE, OMIT THE ENTRY/.test(meSrc11));
+check('B5 — refusals are recorded BEFORE the meeting row is persisted (the fragile record first)',
+  meSrc11.indexOf('recordMeetingRefusals(') < meSrc11.indexOf('await persistMeeting(env'));
+check('B5 — a refusal naming a non-attendee is dropped, not attributed',
+  /was not an attendee/.test(meSrc11));
+check('B5 — the loss count reaches the caller, so "we lost one" can be reported',
+  /refusals,\n    report:/.test(meSrc11) || /\n    refusals,/.test(meSrc11));
+
+/* ── A7: the branch rule's visibility half ─────────────────────────────── */
+const branchWatch = await import('../workers/branch-watch.js');
+
+const twoBranches = [
+  { repo: 'office-AI-agents', defaultBranch: 'master', branches: [{ branch: 'feat/a', ageDays: 12, sha: 'abc1234' }, { branch: 'feat/b', ageDays: 3, sha: 'def5678' }] },
+  { repo: 'back-office-AI-agents', defaultBranch: 'main', branches: [] },
+  { repo: 'warehouse-office-AI-agents', unreadable: 'WAREHOUSE_REPO_TOKEN is deliberately unset.' },
+];
+const bv = branchWatch.branchVerdict(twoBranches);
+check('A7 — two active branches in one project is reported as a VIOLATION', bv.violation === true);
+check('A7 — a project with any active branch is blocked from opening a new one',
+  bv.blockedFromNew.includes('office-AI-agents') && !bv.blockedFromNew.includes('back-office-AI-agents'));
+check('A7 — an unreadable repo is listed as unreadable, never as clean',
+  bv.unreadable.includes('warehouse-office-AI-agents'));
+
+const bs = branchWatch.renderBranchSection(twoBranches);
+check('A7 — the section renders ages, which is the half A7 asks for by name',
+  /12 day\(s\) old/.test(bs) && /3 day\(s\) old/.test(bs));
+check('A7 — the violation is stated in the report, not left to be inferred',
+  /A7 VIOLATION/.test(bs));
+check('A7 — "not checked from here" is distinguished from "no branches"',
+  /not "no branches"/.test(bs));
+check('A7 — a repo with no branches says so explicitly',
+  /no open branches/.test(bs));
+
+// An unknown age must never render as 0 — a six-week-old branch shown as
+// today's is worse than no age at all.
+const unknownAge = branchWatch.parseBranchRows([{ name: 'x', commit: { sha: 'aaaaaaa' } }], {}, 'master');
+check('A7 — an unreadable tip date yields ageDays:null, never 0', unknownAge[0].ageDays === null);
+check('A7 — ...and renders as "age unknown"',
+  /age unknown/.test(branchWatch.renderBranchSection([{ repo: 'r', defaultBranch: 'master', branches: unknownAge }])));
+check('A7 — the default branch is EXCLUDED, and it is passed in rather than guessed',
+  branchWatch.parseBranchRows([{ name: 'main', commit: {} }, { name: 'feat/x', commit: {} }], {}, 'main').length === 1);
+
+const arSrc11 = read('workers/agent-runner.js');
+check('A7 — the daily report actually renders the branch section (a section nobody calls is the defect)',
+  /renderBranchSection\(branches\)/.test(arSrc11));
+check('A7 — the branch fetch cannot take down the daily report it rides in',
+  /fetchOpenBranches\(env\)\.catch\(/.test(arSrc11));
+check('A7 — the warehouse gap is declared in code, not discovered later',
+  /expectedUnreadable/.test(read('workers/branch-watch.js')));
+
+/* ── A12: "The Workflow attends all four" ──────────────────────────────── */
+//
+// FOUND ALREADY DONE, 2026-08-10, and pinned rather than "fixed". The session
+// brief said the Workflow "was added to the roster two days ago and the
+// attendee lists were never updated". relationships.json's own
+// `_meta_meeting_attendees_2026_08_07` records that they WERE updated on
+// 2026-08-07, and agent 12 is seated at all four. The prompt was wrong and the
+// config was right; what was missing was a check saying so, which is why the
+// claim was believable. Only `weekly` was pinned before this.
+const FOUR = ['daily_standup', 'closing_qa_review', 'weekly', 'monthly'];
+for (const m of FOUR) {
+  check(`A12 — the Workflow (12) is seated at "${m}"`,
+    Array.isArray(relationships.meeting_default_attendees[m])
+    && relationships.meeting_default_attendees[m].includes(12));
+}
+check('A12 — all four are meeting types the engine can actually run',
+  FOUR.every((m) => new RegExp(`^  ${m}: \\{`, 'm').test(meSrc11)));
+check('A12 — all four get the office context (a meeting that cannot see the office decides nothing)',
+  /OFFICE_CONTEXT_MEETINGS = new Set\(\[\s*'daily_standup', 'closing_qa_review', 'weekly', 'monthly'/.test(meSrc11));
 
 console.log(`\n${pass}/${pass + fail} checks passed.`);
 if (fail) { console.log(`${fail} FAILED`); process.exit(1); }

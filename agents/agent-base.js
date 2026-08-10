@@ -251,6 +251,13 @@ export class AgentBase {
     try {
       const office = await getOfficeContext(this.env, {
         shape: 'agent', agentId: this.id, projects: officeProjects.projects,
+        // A11 rank filtering (2026-08-10). `clearance` already exists on every
+        // agent in agents-config.json and already routes fileSuggestion(); this
+        // is the same tier driving what the agent is SHOWN. Passing the config
+        // value rather than a new field means "who is an admin" stays one fact
+        // in one file. An agent whose config somehow lacks it gets the
+        // less-informed shape — see isAdminClearance()'s header.
+        clearance: this.config?.clearance || null,
       });
       if (office?.text) officeBlock = office.text;
     } catch (err) {
