@@ -348,6 +348,55 @@ section('§6 notification — both ends learn');
   check('the notification table records failures by schema, not by convention', /ok INTEGER NOT NULL/.test(OWNER_NOTIFY_TABLE_SQL));
 }
 
+/* ═════ §6b THE THIRD STATE: a message the office cannot even SEE ═════
+ *
+ * FOUND LIVE, 2026-08-10, and it is the sharpest thing this channel has taught.
+ *
+ * `channel/from-owner/` contained
+ * `messages-from-aviv/aviv-is-writing-to-the-office.md`, committed by the owner,
+ * reading in full:
+ *
+ *   > this is a test note to see if the office responds. find a way to let me
+ *   > know you've read this.
+ *
+ * The office never saw it. Not read-and-ignored — INVISIBLE. It was in a
+ * SUBDIRECTORY, so fetchOfficeSnapshot()'s `type === 'file'` filter dropped it
+ * before any parser ran; its filename was not `YYYY-MM-DD-<slug>.md`; and it had
+ * no front matter. A top-level file that fails to parse at least lands in
+ * `malformed` and is reported. A subdirectory landed nowhere at all.
+ *
+ * So the channel built specifically to end *"a message the office has not read
+ * looks exactly like a message the office has read and ignored"* had a THIRD
+ * state nobody had named — and the message it swallowed was him testing exactly
+ * that.
+ *
+ * The filter is UNCHANGED: those entries genuinely cannot be parsed and must not
+ * be guessed at. What changed is that being unreadable is now LOUD.
+ * ═══════════════════════════════════════════════════════════════════════ */
+section('§6b the third state — an unreadable entry is an ERROR, not a filter');
+
+{
+  const ctx6b = fs.readFileSync(path.join(ROOT, 'workers', 'office-context.js'), 'utf8');
+
+  check('a DIRECTORY in from-owner/ is reported as unreadable rather than filtered away',
+    /unreadableEntries/.test(ctx6b) && /e\.type === 'dir'/.test(ctx6b));
+  check('the report says THE CLIENT MAY HAVE WRITTEN SOMETHING NOBODY HAS SEEN',
+    /THE CLIENT MAY HAVE WRITTEN SOMETHING NOBODY HAS SEEN/.test(ctx6b));
+  check('it is pushed onto `errors` — which rides at the top of every prompt — not onto a quiet note',
+    /errors\.push\([\s\S]{0,240}CANNOT READ AS A MESSAGE/.test(ctx6b));
+  check('it names the third state explicitly, so nobody has to re-derive it',
+    /THIRD state beyond unread and read-and-ignored/.test(ctx6b));
+  check('it is deliberately NOT auto-corrected — the office never writes into his folder',
+    /deliberately NOT auto-corrected/.test(ctx6b));
+  check('...and says why: renaming his file to suit our parser would be editing the clients own words',
+    /would be editing the client/.test(ctx6b));
+  check('a non-.md file is caught too, not only a directory', /not a \.md file/.test(ctx6b));
+  check('the incident is recorded with the owners own words, so the finding survives the fix',
+    /find a way to let me/.test(ctx6b));
+  check('the unparseable-entry FILTER itself is unchanged (they still must not be guessed at)',
+    /\.filter\(\(e\) => e\.type === 'file' && \/\\.md\$\/i\.test\(e\.name\)/.test(ctx6b));
+}
+
 /* ═══════════ §7 wiring — the gate is on the calling path (OB-001) ═══════ */
 section('§7 wiring — the code that calls it, not the code that defines it');
 
@@ -486,7 +535,31 @@ section('§9 the contracts — a format is load-bearing only if it is written do
     ['What we did', 'What we recommend', 'Decision needed', 'If no answer comes'].every((f) => subs.includes(f)));
   check('…and the full age ladder with its four rungs', AGE_LADDER.every((r) => subs.includes(r.rung)));
   check('…and marks the numbers provisional, like the policy does with its own', /⚖️/.test(subs) && /2026-08-24/.test(subs));
-  check('…and is deliberately EMPTY of example entries', parseSubmissions(subs, '2026-08-10').submissions.length === 0);
+  /*
+   * UPDATED 2026-08-10 (fourth session), when the ledger stopped being empty.
+   *
+   * This check read `submissions.length === 0` and passed for as long as the file
+   * had nothing in it. **That was never the property worth checking** — it was a
+   * proxy for the real one, which is that the contract's own fenced ```markdown
+   * illustration (`### S-000 — what was delivered, in one line`) and its worked
+   * example of a decided heading must NOT parse as live submissions. Without the
+   * code-fence strip in parseSubmissions(), the office would report work awaiting
+   * the client's decision that nobody ever submitted, and `S-000` would appear in a
+   * notification to him.
+   *
+   * The proxy expired the moment S-001 and S-002 were filed. Replaced with the
+   * property itself, which holds whether the file has 0 entries or 50 — and which
+   * would have failed against a parser with no fence strip even on an empty file.
+   */
+  const subsParsed = parseSubmissions(subs, '2026-08-10');
+  check('SUBMISSIONS.md — the contract\'s own fenced EXAMPLE does not parse as a live submission',
+    !subsParsed.submissions.some((x) => x.id === 'S-000'),
+    subsParsed.submissions.map((x) => x.id).join(','));
+  check('…and every entry that DOES parse is well-formed (no missing required field)',
+    subsParsed.ok === true && subsParsed.malformed.length === 0, JSON.stringify(subsParsed.malformed));
+  check('…and the hand-maintained Counts line agrees with the DERIVED count (if not, the line is the stale one)',
+    subs.includes(`**Counts:** ${subsParsed.counts.total} entr`) || subsParsed.counts.total === 0,
+    `derived ${subsParsed.counts.total}`);
   check('…and says why it is empty, so the next session does not "fix" it', /deliberately EMPTY/.test(subs));
 
   check('the parent contract points at each direction\'s own README', /from-owner\/README\.md/.test(files['channel/README.md'] || ''));

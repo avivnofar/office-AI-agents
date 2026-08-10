@@ -39,6 +39,8 @@ import {
   hasKnownCap,
   dailyCapFor,
   PROVIDER_REGISTRY,
+  LANE_KINDS,
+  EMBODIMENT_KIND,
 } from './task-router.js';
 
 const CHORE = tokenEconomy.chore_automation;
@@ -227,10 +229,15 @@ export const MODEL_ROUTING = modelRouting;
  *
  * @param {object} env - Worker env
  * @param {string} taskType - a lane key: 'judgment' | 'long_document' |
- *   'hebrew_composition' | 'routine_volume' | 'classification' |
- *   'conversation' | 'embeddings'. ('architect' resolves to a refusal.)
+ *   'hebrew_composition' | 'report_drafting' | 'routine_volume' |
+ *   'classification' | 'conversation' | 'embeddings' | 'image'.
+ *   ('architect' resolves to a refusal.)
  * @param {object} [opts] - prompt/systemPrompt/maxTokens/personas/etc.,
  *   plus `bypassGate: true` for supervised testing only.
+ *   For the `image` lane: `role: 'draft' | 'polish'` (absent uses the lane's
+ *   default_role, which is 'draft'), `imageModel`, `steps`, and for a polish
+ *   pass `instruction` + `inputImages: [{base64, mimeType}]`. A role resolves to
+ *   exactly one provider and NEVER degrades to the other role.
  */
 export async function routeTaskTypeCall(env, taskType, opts = {}) {
   return routeTask({ env, taskType, routingConfig: modelRouting, tokenEconomy, ...opts });
@@ -277,6 +284,28 @@ export async function getRoutingQuotaStatus(env, asOf = new Date()) {
   };
 }
 
+/**
+ * The `image` lane's two roles, resolved without calling anything — the
+ * read-back the supervised image test uses and the shape the capability audit
+ * asks for. Returns one entry per role, each naming its single provider, so
+ * "which provider serves polish" is answerable without reading the config by eye.
+ *
+ * Kept here rather than generalised over every lane because `roles` mode has
+ * exactly one lane today, and a generic helper over one instance is a shape
+ * nobody has tested against a second case.
+ */
+export function resolveImageRoles() {
+  const lane = modelRouting.lanes?.image;
+  const roles = Object.keys(lane?.roles || {});
+  return {
+    mode: lane?.mode ?? null,
+    kind: lane?.kind ?? null,
+    defaultRole: lane?.default_role ?? null,
+    onUnavailable: lane?.on_unavailable ?? null,
+    roles: Object.fromEntries(roles.map((r) => [r, resolveLane(modelRouting, 'image', { role: r })])),
+  };
+}
+
 export {
   routingEnabled,
   assignEmbodiment,
@@ -287,4 +316,6 @@ export {
   hasKnownCap,
   dailyCapFor,
   PROVIDER_REGISTRY,
+  LANE_KINDS,
+  EMBODIMENT_KIND,
 };

@@ -205,6 +205,155 @@ export function computeWorkflowMetrics({ boardTasks = [], activityByAgent = {}, 
   };
 }
 
+/* ─────────────────────── The output census (2026-08-10) ─────────────────── */
+
+/**
+ * FOR EVERY AGENT: HAS IT PRODUCED ANYTHING IN N DAYS, AND OF WHAT KIND?
+ *
+ * ── WHAT THIS COMPLETES, AND WHY THE OLD MEASURE WAS NOT ENOUGH ──────────
+ *
+ * `computeWorkflowMetrics()`'s measure 2 above already asks "who has not
+ * worked", and it was nearly right. Two things were wrong with it as an OUTPUT
+ * census, and both are the kind that flatter the office:
+ *
+ *  1. **It measured ACTIVITY, not OUTPUT.** Its input is the last row in
+ *     `interactions` — which includes every Q&A ask. An agent that asks
+ *     questions all day and produces nothing has a warm activity row and never
+ *     appears. That is not a hypothetical: it is precisely how The Designer
+ *     (agent 9) went two months without producing a single thing her role is for
+ *     while never once reading as idle. **She was not idle. She was absent from
+ *     the question.**
+ *  2. **It had no window and no kinds.** `days >= 1` flags almost everyone
+ *     almost always, so the signal is noise; and a count with no KINDS cannot
+ *     tell "produced plenty, none of it her job" from "produced nothing".
+ *
+ * So this measures output, over a stated window, BY KIND, and reports three
+ * distinguishable states rather than one:
+ *
+ *   NEVER     no output row of any kind, ever. `days: null`.
+ *   SILENT    has produced before, nothing inside the window.
+ *   PRODUCING something inside the window.
+ *
+ * And then the finding that matters: **PRODUCING_OFF_ROLE** — inside the window,
+ * but none of it is a kind this agent's own role is for. That is the Designer's
+ * state made visible, and it is the whole reason the census was worth completing
+ * rather than replacing.
+ *
+ * ── WHAT IT STILL CANNOT SEE, STATED SO IT IS NOT ASSUMED ────────────────
+ *
+ * A census can only count kinds something is able to produce. It cannot tell you
+ * that no code path exists to produce `visual_asset` at all — from in here, an
+ * agent with no means and an agent with no assignment look identical. That is
+ * `workers/capability-audit.js`'s question, and it is a SECOND mechanism because
+ * one cannot do both jobs.
+ *
+ * Pure function of its inputs, like everything else in this module, so the
+ * verifier exercises every branch without D1.
+ *
+ * @param {object} opts
+ * @param {number[]} opts.rosterIds
+ * @param {object} opts.outputByAgent - `{ <agentId>: { lastAt: ms|null,
+ *   kinds: { '<kind>': count } } }`. An agent ABSENT from this map has produced
+ *   nothing ever, which is deliberately distinct from `{ lastAt: null }`.
+ * @param {object} [opts.roleKinds] - `{ <agentId>: ['<kind>', ...] }`, the kinds
+ *   each role is FOR (config/capability-manifest.json's `output_kinds`). Absent
+ *   means the off-role check cannot run for that agent, and it says so rather
+ *   than passing it.
+ * @param {number} [opts.windowDays]
+ * @param {number[]} [opts.dormantAgents] - passed in, never hardcoded, so a
+ *   caller has to state the exemption rather than inherit it.
+ */
+export function computeOutputCensus({
+  rosterIds = [],
+  outputByAgent = {},
+  roleKinds = {},
+  windowDays = 7,
+  dormantAgents = [10],
+  now = Date.now(),
+} = {}) {
+  const windowMs = windowDays * 24 * 60 * 60 * 1000;
+  const agents = rosterIds.map((id) => {
+    const row = outputByAgent[id];
+    const kinds = row?.kinds || {};
+    const kindNames = Object.keys(kinds);
+    const total = kindNames.reduce((sum, k) => sum + (kinds[k] || 0), 0);
+    const dormant = dormantAgents.includes(id);
+
+    if (!row || !row.lastAt || total === 0) {
+      return {
+        agentId: id, verdict: 'NEVER', days: null, total: 0, kinds: {},
+        onRoleKinds: [], offRole: false, dormant,
+        note: 'no output of any kind has ever been recorded for this agent',
+      };
+    }
+
+    const days = Math.floor((now - row.lastAt) / (24 * 60 * 60 * 1000));
+    const withinWindow = (now - row.lastAt) <= windowMs;
+
+    // The off-role check. `expected` empty means the manifest declares no output
+    // kinds for this agent, and the honest answer is then "cannot say" — NOT
+    // "on role", which would be the flattering default and would hide exactly the
+    // agent nobody has described the job of.
+    const expected = roleKinds[id] || [];
+    const onRoleKinds = kindNames.filter((k) => expected.includes(k));
+    const offRole = withinWindow && expected.length > 0 && onRoleKinds.length === 0;
+
+    return {
+      agentId: id,
+      verdict: withinWindow ? (offRole ? 'PRODUCING_OFF_ROLE' : 'PRODUCING') : 'SILENT',
+      days,
+      total,
+      kinds,
+      onRoleKinds,
+      offRole,
+      dormant,
+      note: expected.length === 0
+        ? 'no output_kinds declared for this role in config/capability-manifest.json — the off-role check could NOT run, which is not the same as passing it'
+        : null,
+    };
+  });
+
+  return {
+    windowDays,
+    agents,
+    never: agents.filter((a) => a.verdict === 'NEVER' && !a.dormant),
+    silent: agents.filter((a) => a.verdict === 'SILENT' && !a.dormant),
+    offRole: agents.filter((a) => a.verdict === 'PRODUCING_OFF_ROLE' && !a.dormant),
+    producing: agents.filter((a) => a.verdict === 'PRODUCING'),
+    // Agents the check could not be run for. Reported as its own list, because
+    // "we checked and it was fine" and "we could not check" must never share a
+    // number — this project's single most-repeated defect shape.
+    uncheckable: agents.filter((a) => !!a.note && a.verdict !== 'NEVER'),
+    dormantExcluded: agents.filter((a) => a.dormant).map((a) => a.agentId),
+  };
+}
+
+/** Renders the census as the Workflow presents it. GAPS FIRST — a reader who
+ *  stops after two lines should have read the worst of it. */
+export function renderOutputCensus(c) {
+  if (!c) return '';
+  const name = (a) => `Agent ${a.agentId}`;
+  const lines = [
+    `THE OUTPUT CENSUS (Agent 12) — has each agent PRODUCED anything in the last ${c.windowDays} days, and of what kind?`,
+    'This is not measure 2 above restated. Measure 2 reads ACTIVITY, which a Q&A ask keeps warm; this reads OUTPUT, by kind.',
+  ];
+
+  lines.push(`A. NEVER PRODUCED ANYTHING — ${c.never.length}.${c.never.length ? ` ${c.never.map(name).join(', ')}. Not "quiet lately": no output row of any kind has ever existed for these.` : ''}`);
+  lines.push(`B. PRODUCING, BUT NONE OF IT ITS OWN JOB — ${c.offRole.length}.${c.offRole.length ? ` ${c.offRole.map((a) => `${name(a)} (produced ${Object.keys(a.kinds).join('/')}; its role is for ${a.onRoleKinds.length ? a.onRoleKinds.join('/') : 'none of those'})`).join('; ')}. THIS IS THE STATE THE OLD MEASURE COULD NOT SEE — a warm activity row and nothing the role is for.` : ''}`);
+  lines.push(`C. SILENT — produced before, nothing in the window — ${c.silent.length}.${c.silent.length ? ` ${c.silent.map((a) => `${name(a)} (${a.days}d)`).join(', ')}` : ''}`);
+  lines.push(`D. PRODUCING ON ROLE — ${c.producing.length}.${c.producing.length ? ` ${c.producing.map(name).join(', ')}` : ''}`);
+
+  if (c.uncheckable.length) {
+    lines.push(`E. COULD NOT BE CHECKED — ${c.uncheckable.length}: ${c.uncheckable.map(name).join(', ')}. No output_kinds are declared for these roles, so the off-role test did not run. "Could not check" is NOT "checked and fine".`);
+  }
+  if (c.dormantExcluded.length) {
+    lines.push(`Excluded as deliberately dormant: ${c.dormantExcluded.map((id) => `Agent ${id}`).join(', ')}.`);
+  }
+
+  lines.push('A census sees a role that STOPPED working. It cannot see a role that NEVER STARTED — an agent nobody dispatched anything to is not idle, it is absent from this question. That is the capability audit\'s job (workers/capability-audit.js), and it is a separate mechanism on purpose.');
+  return lines.join('\n');
+}
+
 /** Renders the metrics as the Workflow would present them in a meeting. */
 export function renderWorkflowMetrics(m) {
   if (!m) return '';

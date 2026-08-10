@@ -21,7 +21,12 @@ import { readFileSync, readdirSync } from 'node:fs';
 import * as cerebras from '../workers/cerebras-client.js';
 import * as mistral from '../workers/mistral-client.js';
 import * as cohere from '../workers/cohere-client.js';
-import { estimateTokens, estimatePromptTokens, parseRateLimitHeaders, normalizeOpenAiChat } from '../workers/provider-common.js';
+import * as cfImage from '../workers/cf-image-client.js';
+import * as geminiImage from '../workers/gemini-image-client.js';
+import {
+  estimateTokens, estimatePromptTokens, parseRateLimitHeaders, normalizeOpenAiChat,
+  imageEnvelope, renderAssetProvenance, sniffImageMime, extensionForMime,
+} from '../workers/provider-common.js';
 
 const require = createRequire(import.meta.url);
 const tokenEconomy = require('../config/token-economy.json');
@@ -124,6 +129,203 @@ for (const { name, mod, secret } of MODULES) {
 }
 
 check('no missing-key path reached the network', NETWORK_TRIPWIRE.length === 0, NETWORK_TRIPWIRE.join(', '));
+
+/* ════════════════════════════════════════════════════════════════════════
+ * THE IMAGE PROVIDERS (added 2026-08-10, plan 5.1)
+ *
+ * The office's first. The Designer's role has asserted this capability since
+ * 2026-08-05 and no code path supplied it — see workers/cf-image-client.js's
+ * header for why that is a distinct defect shape from an unwired gate.
+ *
+ * They are checked in their own section rather than added to MODULES above,
+ * because two of that loop's assertions are false of them for GOOD reasons and
+ * papering over that would hide a real difference: `cloudflare-images` has NO
+ * SECRET (it is the account-scoped AI binding, like the pre-existing
+ * `cloudflare-ai` chat entry) and therefore no https endpoint of its own, and
+ * `gemini-images` deliberately SHARES its secret with the `gemini` chat provider.
+ * The shared-secret fact in particular is load-bearing and is asserted here
+ * rather than allowed to fail a uniqueness check it should not be subject to.
+ * ════════════════════════════════════════════════════════════════════════ */
+console.log('\n--- The image providers: the Designer\'s first means of working ---');
+
+const IMAGE_MODULES = [
+  { name: 'cf-image-client.js', mod: cfImage, id: 'cloudflare-images', role: 'draft', secret: null, limitsExport: 'CF_IMAGE_LIMITS', configKey: 'cloudflare_images' },
+  { name: 'gemini-image-client.js', mod: geminiImage, id: 'gemini-images', role: 'polish', secret: 'GEMINI_API_KEY', limitsExport: 'GEMINI_IMAGE_LIMITS', configKey: 'gemini_images' },
+];
+
+for (const { name, mod, id, role, secret, limitsExport, configKey } of IMAGE_MODULES) {
+  const p = mod.PROVIDER;
+  const cfg = tokenEconomy.providers[configKey];
+  check(`${name} exports a PROVIDER descriptor`, !!p && typeof p === 'object');
+  check(`${name} PROVIDER.id is "${id}"`, p?.id === id, `got ${p?.id}`);
+  check(`${name} PROVIDER.kind is "image" — the guard that keeps it off every chat lane`, p?.kind === 'image', `got ${p?.kind}`);
+  check(`${name} PROVIDER.role is "${role}" (a role, not a fallback position)`, p?.role === role, `got ${p?.role}`);
+  check(`${name} PROVIDER.secretName is ${secret === null ? 'null (account-scoped binding, not a secret)' : secret}`,
+    p?.secretName === secret, `got ${p?.secretName}`);
+  check(`${name} PROVIDER.call is a function`, typeof p?.call === 'function');
+  check(`${name} PROVIDER.checkInputWithinCaps is a function`, typeof p?.checkInputWithinCaps === 'function');
+  check(`${name} PROVIDER.limits IS the exported ${limitsExport} (one source, not a copy)`, p?.limits === mod[limitsExport]);
+  check(`${name} declares paid:false — free tier only, no escalation ever`, p?.limits?.paid === false);
+  check(`${name} declares a defaultModel`, typeof p?.defaultModel === 'string' && p.defaultModel.length > 0);
+
+  // Code and config are two copies of one fact here on purpose (the clients
+  // import no JSON so a plain-node verifier can load them). This is the
+  // assertion that makes changing one alone FAIL rather than drift.
+  check(`${configKey} exists in config/token-economy.json`, !!cfg);
+  check(`${configKey}.default_model agrees with the client's DEFAULT_MODEL`,
+    cfg?.default_model === p?.defaultModel, `${cfg?.default_model} vs ${p?.defaultModel}`);
+  check(`${configKey}.paid is false in the config too`, cfg?.paid === false);
+  check(`${configKey}.requests_per_day is null — an honest unknown, never "unlimited"`,
+    cfg?.requests_per_day === null, String(cfg?.requests_per_day));
+  check(`${name} agrees: requestsPerDay is null, so the router paces by wall clock`,
+    mod[limitsExport].requestsPerDay === null, String(mod[limitsExport].requestsPerDay));
+  check(`${configKey} names the allowance it SHARES with another provider`,
+    typeof cfg?.shared_allowance_with === 'string' && cfg.shared_allowance_with.length > 0,
+    String(cfg?.shared_allowance_with));
+  check(`${name} names the same shared allowance as the config`,
+    mod[limitsExport].sharedAllowanceWith === cfg?.shared_allowance_with,
+    `${mod[limitsExport].sharedAllowanceWith} vs ${cfg?.shared_allowance_with}`);
+}
+
+// The Cloudflare side's real unit. This is the check that stops someone
+// "filling in" requests_per_day from a plausible conversion.
+check('cloudflare_images records the free tier in its REAL unit (neurons_per_day)',
+  tokenEconomy.providers.cloudflare_images.neurons_per_day === 10000,
+  String(tokenEconomy.providers.cloudflare_images.neurons_per_day));
+check('...and records that the balance CANNOT be read from inside the Worker',
+  tokenEconomy.providers.cloudflare_images.neuron_balance_readable === false);
+check('...and says WHY requests_per_day is the wrong unit rather than an unknown number',
+  /wrong unit/i.test(tokenEconomy.providers.cloudflare_images._why_requests_per_day_is_null_and_it_is_not_the_usual_reason || ''));
+check('cf-image-client.js agrees on the neuron figure (one fact, two copies, asserted equal)',
+  cfImage.CF_IMAGE_LIMITS.neuronsPerDay === tokenEconomy.providers.cloudflare_images.neurons_per_day);
+
+// The shared-secret fact, asserted rather than assumed.
+check('gemini-images shares GEMINI_API_KEY with the gemini chat provider (a THIRD consumer on a paced key)',
+  geminiImage.PROVIDER.secretName === 'GEMINI_API_KEY'
+  && tokenEconomy.providers.gemini.secret === 'GEMINI_API_KEY');
+check('...and the config says so, so "why did gap digests start getting paced out" has an answer on file',
+  /THIRD unobservable consumer|third unobservable consumer/i.test(
+    tokenEconomy.providers.gemini_images._this_is_the_same_key_as_the_gemini_block_below || ''));
+
+/* ── The polish role refuses rather than degrading ──────────────────────── */
+console.log('\n--- The polish role refuses a call with nothing to polish ---');
+
+const [noImagePolish, noImageWarnings] = await captureWarnings(() =>
+  geminiImage.polishImage({ apiKey: 'stub', instruction: 'make the type larger', inputImages: [], agentId: 'verify' }));
+check('polishImage() with no input image returns null — it does NOT fall through to generation',
+  noImagePolish === null, JSON.stringify(noImagePolish));
+check('...and says why, naming the substitution it is refusing to make',
+  noImageWarnings.some((w) => /fresh draft|nothing to polish/i.test(w)), JSON.stringify(noImageWarnings));
+
+const [noKeyPolish, noKeyWarnings] = await captureWarnings(() =>
+  geminiImage.polishImage({ apiKey: undefined, instruction: 'x', inputImages: [{ base64: 'aGk=' }], agentId: 'verify' }));
+check('polishImage() with no key returns null and names GEMINI_API_KEY',
+  noKeyPolish === null && noKeyWarnings.some((w) => w.includes('GEMINI_API_KEY')), JSON.stringify(noKeyWarnings));
+
+const [noBinding, noBindingWarnings] = await captureWarnings(() =>
+  cfImage.callCloudflareImage({ ai: null, prompt: 'a logo', agentId: 'verify' }));
+check('callCloudflareImage() with no AI binding returns null',
+  noBinding === null);
+check('...and says it is a BINDING rather than a secret (so nobody rotates a key over it — AD-030)',
+  noBindingWarnings.some((w) => /binding, not a secret/i.test(w)), JSON.stringify(noBindingWarnings));
+
+/* ── Prompt caps refuse; they never truncate ────────────────────────────── */
+console.log('\n--- Image prompt caps refuse rather than truncate ---');
+
+const longPrompt = 'x'.repeat(5000);
+check('cf-image-client refuses an over-long prompt',
+  cfImage.checkInputWithinCaps({ prompt: longPrompt }).ok === false);
+check('...and says it is NOT truncating, and why that matters for an image',
+  /Not truncating/.test(cfImage.checkInputWithinCaps({ prompt: longPrompt }).reason || ''));
+check('cf-image-client refuses an empty prompt',
+  cfImage.checkInputWithinCaps({ prompt: '' }).ok === false);
+check('cf-image-client refuses steps over flux-schnell\'s maximum of 8',
+  cfImage.checkInputWithinCaps({ prompt: 'a logo', steps: 20 }).ok === false);
+check('cf-image-client accepts a normal prompt but reports capUnknown — the ok is about the PROMPT, not the free tier',
+  cfImage.checkInputWithinCaps({ prompt: 'a logo', steps: 4 }).ok === true
+  && cfImage.checkInputWithinCaps({ prompt: 'a logo', steps: 4 }).capUnknown === true);
+
+// The defect scripts/verify-routing.js §8d caught: the router calls this
+// uniformly against the caller's whole options object, and a polish call's text
+// is in `instruction`, not `prompt`.
+check('gemini-image-client\'s cap check reads `instruction`, not only `prompt` (a polish call carries its text there)',
+  geminiImage.checkInputWithinCaps({ instruction: 'make the type larger' }).ok === true,
+  JSON.stringify(geminiImage.checkInputWithinCaps({ instruction: 'make the type larger' })));
+check('...and still refuses when NEITHER is present',
+  geminiImage.checkInputWithinCaps({}).ok === false);
+check('gemini-image-client refuses more input images than its per-request cap',
+  geminiImage.checkInputWithinCaps({ instruction: 'x', inputImages: [1, 2, 3, 4, 5] }).ok === false);
+check('...and says "send fewer" rather than dropping any silently',
+  /Not dropping any/.test(geminiImage.checkInputWithinCaps({ instruction: 'x', inputImages: [1, 2, 3, 4, 5] }).reason || ''));
+
+/* ── The provenance note the bible requires ─────────────────────────────── */
+console.log('\n--- The provenance note (AGENTS-CHARACTER-CORE-v2.md AGENT 9) ---');
+
+const prov = renderAssetProvenance({
+  assetPath: 'campus/agents/09-the-designer/assets/2026-08-10-office-mark.png',
+  prompt: 'a minimal monochrome office mark',
+  model: '@cf/black-forest-labs/flux-1-schnell',
+  provider: 'cloudflare-images',
+  role: 'draft',
+  date: '2026-08-10',
+  bytes: 51234,
+});
+check('the provenance note names the MODEL — the bible\'s first required field',
+  prov.includes('@cf/black-forest-labs/flux-1-schnell'));
+check('the provenance note names the DATE — the bible\'s second required field', prov.includes('2026-08-10'));
+check('the provenance note names the PROMPT (more than the bible asks; without it the asset cannot be judged against its brief)',
+  prov.includes('a minimal monochrome office mark'));
+check('the provenance note names WHICH ROLE produced it', /role `draft`/.test(prov));
+check('the provenance note names the Designer', /Agent 9 — The Designer/.test(prov));
+check('the provenance note cites the requirement it satisfies, so it is not mistaken for decoration',
+  /AGENTS-CHARACTER-CORE-v2\.md/.test(prov));
+
+const env1 = imageEnvelope({ base64: 'aGVsbG8=', source: 'cloudflare-images', model: 'm' });
+check('imageEnvelope() computes byte length from the base64, so an empty image is detectable as 0 bytes',
+  env1.bytes === 5 && imageEnvelope({ base64: '', source: 'x', model: 'm' }).bytes === 0);
+check('imageEnvelope() carries NO `text` field — routeTask()\'s empty-answer guard must not reach for one',
+  !('text' in env1), Object.keys(env1).join(','));
+check('imageEnvelope() carries finishReason, and its consumer shipped in the same commit (unlike the chat one)',
+  'finishReason' in env1
+  && /empty_image/.test(readFileSync(new URL('../workers/task-router.js', import.meta.url), 'utf8')));
+
+/* ── The image type is READ, not asserted ───────────────────────────────── */
+//
+// The first asset the office ever committed landed in back-office as
+// `2026-08-10-office-mark.png` and was a JPEG. `cf-image-client.js` hardcoded
+// `mimeType: 'image/png'` because every Workers AI image model is documented as
+// returning PNG. The bytes were perfect; the NAME was wrong — the worse of the
+// two failures, because nothing breaks (viewers sniff) and it surfaces later, in
+// whichever tool does not.
+console.log('\n--- The image type is read from the bytes, never asserted ---');
+
+// Real signatures, hand-built so the test does not depend on a fixture file.
+const PNG_B64 = btoa(String.fromCharCode(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13));
+const JPEG_B64 = btoa(String.fromCharCode(0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1));
+const GIF_B64 = btoa('GIF89a______');
+const WEBP_B64 = btoa('RIFF____WEBPVP8 ');
+
+check('sniffImageMime() reads a PNG signature', sniffImageMime(PNG_B64) === 'image/png', String(sniffImageMime(PNG_B64)));
+check('sniffImageMime() reads a JPEG signature — the case that actually bit',
+  sniffImageMime(JPEG_B64) === 'image/jpeg', String(sniffImageMime(JPEG_B64)));
+check('sniffImageMime() reads GIF and WEBP too',
+  sniffImageMime(GIF_B64) === 'image/gif' && sniffImageMime(WEBP_B64) === 'image/webp');
+check('sniffImageMime() returns null for unrecognised bytes — null means UNKNOWN, not "probably png"',
+  sniffImageMime(btoa('not an image at all')) === null && sniffImageMime('') === null);
+check('extensionForMime() maps an UNKNOWN type to .bin, not to a plausible .png',
+  extensionForMime(null) === 'bin' && extensionForMime('image/png') === 'png' && extensionForMime('image/jpeg') === 'jpg');
+
+check('cf-image-client.js no longer hardcodes a mime type',
+  !/mimeType: 'image\/png'/.test(readFileSync(new URL('../workers/cf-image-client.js', import.meta.url), 'utf8')));
+check('cf-image-client.js sniffs the bytes instead',
+  /mimeType: sniffImageMime\(base64\)/.test(readFileSync(new URL('../workers/cf-image-client.js', import.meta.url), 'utf8')));
+check('gemini-image-client.js prefers the sniffed type over the declared one, and logs a disagreement',
+  /trusting the bytes/.test(readFileSync(new URL('../workers/gemini-image-client.js', import.meta.url), 'utf8')));
+check('the asset writer takes its extension from the sniffed type, not from a ternary on jpeg',
+  /extensionForMime\(result\.mimeType\)/.test(readFileSync(new URL('../workers/agent-runner.js', import.meta.url), 'utf8'))
+  && !/mimeType === 'image\/jpeg' \? 'jpg' : 'png'/.test(readFileSync(new URL('../workers/agent-runner.js', import.meta.url), 'utf8')));
+
+check('no image-provider path reached the network', NETWORK_TRIPWIRE.length === 0, NETWORK_TRIPWIRE.join(', '));
 
 /* ── GitHub Models is GONE, and stays gone ──────────────────────────────── */
 //
@@ -437,41 +639,144 @@ check('report_model is untouched (Gemini 3.1 Flash-Lite)', tokenEconomy.report_m
 // agent-base.js would bypass both, and this is what catches that.
 console.log('\n--- Containment: new providers are reachable only through the router ---');
 
-const NEW_MODULES = ['cerebras-client.js', 'mistral-client.js', 'cohere-client.js', 'provider-common.js'];
+/* ── TIGHTENED 2026-08-10, when the image lane made the old shape wrong ────
+ *
+ * This check tested MODULE-level imports: any file but the router importing any
+ * of these modules failed it. The image lane broke that in a way that is not a
+ * violation of the rule the check exists to enforce:
+ *
+ *   · `agent-runner.js` imports `renderAssetProvenance` from provider-common.js
+ *     — a pure string renderer that calls no provider;
+ *   · `agent-runner.js` imports `listImageCapableModels` from
+ *     gemini-image-client.js for the `image_catalog` trigger — a live CATALOG
+ *     read, which is AD-030 check 1 and consumes no generation quota.
+ *
+ * The tempting move was to add agent-runner.js to ALLOWED_IMPORTERS. That would
+ * have been the wrong fix and the expensive kind of wrong: it would have exempted
+ * the single largest file in the repo — the one that actually contains the
+ * scheduled callers — from the containment rule entirely, and the exemption would
+ * have been invisible at the site of any future violation.
+ *
+ * So the check now asserts on IMPORTED SYMBOLS. The property that matters is not
+ * "which files may name these modules" but **nothing outside the router may
+ * import a function that CALLS a provider**, because that is what bypasses the
+ * kill switch and the quota allow-check. Every generating function in these
+ * modules is named `call<Provider>` or is `polishImage`, and both patterns are
+ * enforced below by name rather than by a hand-maintained list, so a NEW
+ * generating function is caught the day it is added.
+ *
+ * The three pre-existing chat/embeddings clients keep the stricter MODULE-level
+ * rule, with no symbol exemption at all: they have live callers on the daily Q&A
+ * path and there is no reason for anything but the router to name them.
+ */
+const CALLING_MODULES = [
+  'cerebras-client.js', 'mistral-client.js', 'cohere-client.js',
+  'cf-image-client.js', 'gemini-image-client.js', 'provider-common.js',
+];
+/** Modules NOTHING outside the router may import, at all, by any symbol. */
+const ROUTER_ONLY_MODULES = ['cerebras-client.js', 'mistral-client.js', 'cohere-client.js'];
 const ALLOWED_IMPORTERS = ['task-router.js'];
 const workerFiles = readdirSync(new URL('../workers/', import.meta.url)).filter((f) => f.endsWith('.js'));
 const agentFiles = readdirSync(new URL('../agents/', import.meta.url)).filter((f) => f.endsWith('.js'));
 
+/** A symbol that performs a provider call. Pattern-based on purpose: a list of
+ *  known names goes stale the moment somebody adds a function to a client. */
+const CALLS_A_PROVIDER = (symbol) => /^call[A-Z]/.test(symbol) || symbol === 'polishImage';
+
+/**
+ * Every import statement in a file, as `{ clause, module }`.
+ *
+ * Anchored at `^import` with the `m` flag, and that anchor is load-bearing: an
+ * unanchored lazy `import\s+([\s\S]*?)\s+from\s+'<module>'` starts at the FIRST
+ * import in the file and extends across every statement between it and the
+ * target, so a file's whole import block reads as one clause. That is exactly
+ * what happened when this was first written — `agent-runner.js` was reported as
+ * importing `{ *, PerfectionistAgent }` from `gemini-image-client.js`, which is a
+ * containment violation the checker invented out of its own regex. A checker that
+ * reports a false violation is worse than a loose one: the cheapest way to make it
+ * pass is to add an exemption for a problem that does not exist.
+ */
+function importStatements(src) {
+  const out = [];
+  const re = /^import\s+([\s\S]*?)\s+from\s+(['"])([^'"]+)\2/gm;
+  let m;
+  while ((m = re.exec(src)) !== null) out.push({ clause: m[1].trim(), module: m[3] });
+  return out;
+}
+
+/** The named import specifiers a file pulls from one module, e.g.
+ *  `import { a, b as c } from './x.js'` -> ['a', 'b']. Default and namespace
+ *  imports are reported as '*', which always counts as calling: a namespace
+ *  import hands the importer every function in the module. */
+function importedSymbolsFrom(src, moduleFile) {
+  const symbols = [];
+  for (const { clause, module } of importStatements(src)) {
+    if (!module.endsWith(`/${moduleFile}`) && module !== `./${moduleFile}` && !module.endsWith(moduleFile)) continue;
+    const braces = /\{([\s\S]*?)\}/.exec(clause);
+    if (!braces) { symbols.push('*'); continue; }
+    if (!/^\{/.test(clause)) symbols.push('*'); // a default import alongside a named list
+    for (const part of braces[1].split(',')) {
+      const name = part.trim().split(/\s+as\s+/)[0].trim();
+      if (name) symbols.push(name);
+    }
+  }
+  return symbols;
+}
+
 const importers = [];
+const moduleLevelViolations = [];
+const benignImports = [];
 for (const [dir, files] of [['workers', workerFiles], ['agents', agentFiles]]) {
   for (const file of files) {
-    if (dir === 'workers' && NEW_MODULES.includes(file)) continue; // the new modules may import each other
+    if (dir === 'workers' && CALLING_MODULES.includes(file)) continue; // these may import each other
     if (dir === 'workers' && ALLOWED_IMPORTERS.includes(file)) continue; // the router is the one legitimate importer
     const src = readFileSync(new URL(`../${dir}/${file}`, import.meta.url), 'utf8');
-    for (const newMod of NEW_MODULES) {
-      if (new RegExp(`from\\s+['"][^'"]*${newMod.replace('.', '\\.')}['"]`).test(src)) {
-        importers.push(`${dir}/${file} -> ${newMod}`);
+    for (const mod of CALLING_MODULES) {
+      const symbols = importedSymbolsFrom(src, mod);
+      if (!symbols.length) continue;
+      if (ROUTER_ONLY_MODULES.includes(mod)) {
+        moduleLevelViolations.push(`${dir}/${file} -> ${mod}`);
+        continue;
       }
+      const calling = symbols.filter(CALLS_A_PROVIDER);
+      if (calling.length) importers.push(`${dir}/${file} -> ${mod} { ${calling.join(', ')} }`);
+      else benignImports.push(`${dir}/${file} -> ${mod} { ${symbols.join(', ')} }`);
     }
   }
 }
-check('no file except the router imports a provider client directly (so nothing bypasses the switch or the quota check)',
+
+check('nothing outside the router imports a function that CALLS a provider (so nothing bypasses the switch or the quota check)',
   importers.length === 0, importers.join(', '));
-check('the router itself DOES import all three clients (it is the single entry point)',
-  ['cerebras-client.js', 'mistral-client.js', 'cohere-client.js'].every((m) =>
+check('the three chat/embeddings clients are imported by NOTHING but the router, by any symbol',
+  moduleLevelViolations.length === 0, moduleLevelViolations.join(', '));
+// Reported rather than merely permitted. A benign import is still a coupling, and
+// a silent allow-list is how the next one goes unnoticed.
+check('every non-calling import of a provider module is accounted for (2 expected: the provenance renderer and the catalog read-back)',
+  benignImports.length === 2, benignImports.join(' | '));
+check('...and one of them is the AD-030 catalog read-back, which makes no generation call',
+  benignImports.some((s) => /gemini-image-client\.js \{ listImageCapableModels \}/.test(s)), benignImports.join(' | '));
+check('...and the other is provider-common.js, for the provenance renderer the bible requires and the mime sniffer',
+  benignImports.some((s) => /provider-common\.js \{[^}]*renderAssetProvenance/.test(s)), benignImports.join(' | '));
+
+check('the router itself DOES import all five clients (it is the single entry point)',
+  ['cerebras-client.js', 'mistral-client.js', 'cohere-client.js', 'cf-image-client.js', 'gemini-image-client.js'].every((m) =>
     new RegExp(`from\\s+'\\./${m.replace('.', '\\.')}'`).test(
       readFileSync(new URL('../workers/task-router.js', import.meta.url), 'utf8'))));
 
-const newModuleImports = NEW_MODULES.filter((f) => f !== 'provider-common.js').map((f) => {
+// All five clients, image ones included: the shared helpers exist so that the
+// two things which rot when duplicated — the input estimate and the response
+// envelope — have one definition. A client that copied them would pass every
+// behavioural check here and drift on the next edit.
+const newModuleImports = CALLING_MODULES.filter((f) => f !== 'provider-common.js').map((f) => {
   const src = readFileSync(new URL(`../workers/${f}`, import.meta.url), 'utf8');
   return { f, importsCommon: /from '\.\/provider-common\.js'/.test(src) };
 });
-check('every new client imports the shared helpers rather than copying them',
+check('every client imports the shared helpers rather than copying them',
   newModuleImports.every((m) => m.importsCommon), JSON.stringify(newModuleImports));
 
 check('model-router.js reaches the providers only via task-router.js, never by importing a client directly',
   /from '\.\/task-router\.js'/.test(readFileSync(new URL('../workers/model-router.js', import.meta.url), 'utf8'))
-  && !/from '\.\/(cerebras|mistral|cohere)-client\.js'/.test(
+  && !/from '\.\/(cerebras|mistral|cohere|cf-image|gemini-image)-client\.js'/.test(
     readFileSync(new URL('../workers/model-router.js', import.meta.url), 'utf8')));
 
 /* ── Final network assertion ────────────────────────────────────────────── */

@@ -183,6 +183,27 @@ export async function recordRepoWrite(env, { repo, projectKey, path, committed, 
  *   4. The token FOLLOWS THE REPO — GITHUB_TOKEN for the public repo,
  *      BACKOFFICE_REPO_TOKEN for back-office. No fallback: an unmapped or
  *      unset secret is a denial, never a borrow of another target's token.
+ *
+ * ── BINARY CONTENT (opts.contentIsBase64, added 2026-08-10) ───────────────
+ *
+ * The Designer's image lane produces PNG bytes, and this function's encoder is
+ * `btoa(unescape(encodeURIComponent(content)))` — correct for text and
+ * CORRUPTING for bytes. So a caller holding an already-base64 payload passes
+ * `contentIsBase64: true` and the encode step is skipped. It is a flag on the
+ * ONE write function rather than a second write function, because a second one
+ * is how a repo ends up with a write path that never learned about the
+ * permission guard (see this file's own header).
+ *
+ * **A binary write to the PUBLIC repo is refused.** Not because of permissions —
+ * `office-agents` has `push: true` — but because A10's pre-publication security
+ * scan is a TEXT scan, and base64 is not text it can read. Letting a binary
+ * through would mean the one write path that reaches the public internet had an
+ * exemption from the scan that A10 says is "automatic and never judgment", and
+ * the exemption would be invisible: the write would succeed and the scan would
+ * report `scanned: false`. Refusing is the only option that does not quietly
+ * create the hole. Assets therefore live in back-office (which A10 does not
+ * scan, by design), and putting an image on the public Front is the publishing
+ * gate's decision — board `OB-014`, not yet built.
  */
 export async function commitFileToRepo(env, repoName, path, content, message, opts = {}) {
   const verdict = resolveRepoWrite(projectPermissions, {
@@ -221,6 +242,18 @@ export async function commitFileToRepo(env, repoName, path, content, message, op
    * Runs BEFORE the PUT: a scan after the write has published the content and
    * is then commenting on it.
    */
+  if (repoName === REPO_NAME && opts.contentIsBase64) {
+    // See the header. A base64 payload is not text scanOutbound() can read, so
+    // allowing it here would give the public write path a silent exemption from
+    // the one control A10 says is never a judgment call.
+    const reason = `binary_write_to_public_repo_refused: "${path}" is base64 content bound for ${REPO_NAME}, and A10's pre-publication scan is a TEXT scan that cannot read it. Refused rather than passed through unscanned. Assets belong in back-office; publishing one to the Front is the publishing gate's decision (OB-014).`;
+    console.warn(`[repo-write] ${reason}`);
+    await recordRepoWrite(env, {
+      repo: repoName, projectKey: verdict.projectKey, path, committed: false, status: null, redirected: !!verdict.redirected,
+    });
+    return { committed: false, reason: 'binary_write_to_public_repo_refused', message: reason };
+  }
+
   if (repoName === REPO_NAME) {
     const scanned = scanOutbound(content, { path });
     if (scanned.scanned && !scanned.clean) {
@@ -254,7 +287,14 @@ export async function commitFileToRepo(env, repoName, path, content, message, op
   const res = await fetch(url, {
     method: 'PUT',
     headers: { ...headers, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, content: btoa(unescape(encodeURIComponent(content))), ...(sha ? { sha } : {}) }),
+    body: JSON.stringify({
+      message,
+      // Text is UTF-8-encoded then base64'd; binary arrives already base64 and
+      // must NOT go through that encoder, which would corrupt every byte above
+      // 0x7F. See the header's note on opts.contentIsBase64.
+      content: opts.contentIsBase64 ? String(content) : btoa(unescape(encodeURIComponent(content))),
+      ...(sha ? { sha } : {}),
+    }),
   });
 
   // Record the write. Deliberately AFTER the PUT and deliberately not awaited

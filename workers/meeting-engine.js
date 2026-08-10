@@ -35,6 +35,11 @@
  */
 
 import agentsConfig from '../config/agents-config.json';
+// The capability manifest supplies each role's `output_kinds` to the output
+// census. Read from the SAME file workers/capability-audit.js reads, deliberately:
+// "what this role is for" gets one definition, so the census and the audit cannot
+// disagree about it.
+import capabilityManifest from '../config/capability-manifest.json';
 import relationships from '../config/relationships.json';
 import officeProjects from '../config/office-projects.json';
 import { callGemini, callCloudflareFallback } from './gemini-client.js';
@@ -44,6 +49,7 @@ import { getOfficeContext, getOfficeSnapshot } from './office-context.js';
 import {
   addOfficeDays, normalizeActionItems, renderBoardTask,
   computeWorkflowMetrics, renderWorkflowMetrics,
+  computeOutputCensus, renderOutputCensus,
 } from './meeting-decisions.js';
 // B5 (2026-08-10) — refusal recording, office-wide. The meeting is where a QA
 // rejects, an admin objects and the Workflow bounces something, and it is the
@@ -62,6 +68,7 @@ import { recordRefusalEvent } from './improvement-loop.js';
 export {
   addOfficeDays, normalizeActionItems, renderBoardTask,
   computeWorkflowMetrics, renderWorkflowMetrics,
+  computeOutputCensus, renderOutputCensus,
 } from './meeting-decisions.js';
 
 const SIM_STATE_KEY = 'simulation-state';
@@ -449,6 +456,24 @@ function relationshipNotesFor(attendeeIds) {
 
 /** Meetings where the Workflow presents his picture: the opening standup
  *  (he dispatches) and the substantive meetings (agenda item 4). */
+/*
+ * ── EVERY MEETING IN THIS SET MUST ALSO RENDER THEM (fixed 2026-08-10) ────
+ *
+ * This set decides which meetings COMPUTE the Workflow's measures. Until
+ * 2026-08-10, `quarterly`, `semi_yearly` and `yearly` were in it and their
+ * agenda builders below rendered neither `data.workflowMetrics` nor anything
+ * derived from it — so the four measures were computed, for three meeting types,
+ * and consumed by nobody.
+ *
+ * That is `ARCHITECTURAL-DECISIONS.md` §7.2 exactly, found while adding the
+ * output census beside them: a value produced at the right moment, by the right
+ * component, for the right reason, and read by nothing. Membership of this set
+ * and rendering in the agenda are two facts that must agree, and nothing tied
+ * them together. All six now render both blocks;
+ * `scripts/verify-office-bureaucracy.js` asserts the two lists match, so adding a
+ * meeting type to this set without rendering it fails a check instead of quietly
+ * computing into a void.
+ */
 const WORKFLOW_METRICS_MEETINGS = new Set(['daily_standup', 'weekly', 'monthly', 'quarterly', 'semi_yearly', 'yearly']);
 
 /**
@@ -471,6 +496,48 @@ async function lastActivityByAgent(env) {
   return out;
 }
 
+/**
+ * OUTPUT per agent, by KIND — the input to computeOutputCensus().
+ *
+ * ── WHY THIS IS A DIFFERENT QUERY FROM lastActivityByAgent() ─────────────
+ *
+ * That one reads `interactions`, which is EVERY ask the Q&A engine makes. This
+ * reads `reports`, which is what the office PRODUCED. The distinction is the
+ * whole point of the census: an agent that asks questions all day has a warm
+ * `interactions` row and may have produced nothing, and that is exactly how the
+ * Designer went two months without ever reading as idle.
+ *
+ * The kind is `event_type` where the improvement loop supplied one (`case_answer`,
+ * `qa_review`, `lead_qa_weekly`, …) and falls back to `type` for the pre-existing
+ * document rows (`status`, `incident`, `gap_hebrew`, `weekly`). Those are the two
+ * axes `database/schema.sql` deliberately keeps separate — WHAT KIND OF DOCUMENT
+ * versus WHAT THE OFFICE DID — and COALESCE takes the more specific one when both
+ * are present, which is the axis a role's `output_kinds` are written against.
+ *
+ * Returns `{}` without D1. An empty map makes every agent read NEVER, which is
+ * loud rather than quiet — the safe direction for a census.
+ */
+async function outputByAgent(env) {
+  if (!env?.DB) return {};
+  const { results } = await env.DB.prepare(
+    `SELECT agent_id,
+            COALESCE(event_type, type) AS kind,
+            COUNT(*) AS n,
+            MAX(created_at) AS last_at
+     FROM reports
+     GROUP BY agent_id, COALESCE(event_type, type)`
+  ).all().catch(() => ({ results: [] }));
+
+  const out = {};
+  for (const r of results || []) {
+    const entry = out[r.agent_id] || (out[r.agent_id] = { lastAt: null, kinds: {} });
+    entry.kinds[r.kind] = (entry.kinds[r.kind] || 0) + Number(r.n || 0);
+    const t = Date.parse(r.last_at);
+    if (!Number.isNaN(t) && (entry.lastAt === null || t > entry.lastAt)) entry.lastAt = t;
+  }
+  return out;
+}
+
 /** The standing agenda for the substantive meetings, in order
  *  (MEETING-PROTOCOL.md 4.2). Item 1 is prepended separately in
  *  buildMeetingPrompt() so a new meeting type cannot omit it. */
@@ -483,13 +550,22 @@ const SUBSTANTIVE_AGENDA = `Then, IN THIS ORDER:
 7. VOTES — every binding decision reached above is put to a vote. ADMINS ONLY vote. The CEO (Agent 11) leads, holds a DOUBLE VOTE and a VETO. Routine work distribution is NOT voted on — only product decisions, conflict resolution, and anything touching the client, or the mechanism stops meaning anything. Record each vote as: the question, who voted which way, the outcome, the date. On a TIE, the meeting decides whether to keep investigating the question, defer it, or drop it — and that resolution is itself recorded.`;
 
 const AGENDA_BUILDERS = {
-  daily_standup: (data) => `Run the OPENING STANDUP — forward-looking, the start of the day. The Workflow (Agent 12) dispatches: he states what is going out to whom today, presents his metrics, and names what is stuck. HE ALSO ASSIGNS REVIEW WORK: any deliverable listed as IN FLIGHT in the context above with reviews still owed gets those reviews assigned TODAY, BY NAME, exactly as build work is assigned. Reviewing is work, not a courtesy someone performs when they notice; an admin with nothing to say abstains explicitly and it is recorded. Each other attendee gives a 1-2 sentence status.\nSession data:\n${JSON.stringify(data.sessionStats)}\nOpen incidents to address: ${JSON.stringify(data.openIncidents)}\n${data.workflowMetrics || ''}`,
+  daily_standup: (data) => `Run the OPENING STANDUP — forward-looking, the start of the day. The Workflow (Agent 12) dispatches: he states what is going out to whom today, presents his metrics, and names what is stuck. HE ALSO ASSIGNS REVIEW WORK: any deliverable listed as IN FLIGHT in the context above with reviews still owed gets those reviews assigned TODAY, BY NAME, exactly as build work is assigned. Reviewing is work, not a courtesy someone performs when they notice; an admin with nothing to say abstains explicitly and it is recorded. Each other attendee gives a 1-2 sentence status.\nSession data:\n${JSON.stringify(data.sessionStats)}\nOpen incidents to address: ${JSON.stringify(data.openIncidents)}\n${data.workflowMetrics || ''}
+${data.outputCensus || ''}`,
   closing_qa_review: (data) => `Run the CLOSING QA REVIEW — backward-looking, the end of the day, on TODAY'S OUTPUT ONLY. This is not a standup and not a planning meeting: do not discuss tomorrow.\nWhat was produced today:\n${JSON.stringify(data.todaysWork)}\nSampled output:\n${JSON.stringify(data.samples)}\nQuality scores recorded today:\n${JSON.stringify(data.quality)}\nThe QA (6) reviews WORK QUALITY; the Team Lead (7) reviews the WORKER MODEL — persona consistency, behavioural drift, context gaps. Produce conclusions specific enough to be written into an agent's character file TONIGHT. The whole point of running this at the end of the day rather than at tomorrow's standup is that conclusions reach the files before the next day opens, so a vague conclusion defeats the entire arrangement.`,
-  weekly: (data) => `Run the weekly meeting. Review last week's metrics:\n${JSON.stringify(data.latestWeek)}\nIncidents: ${JSON.stringify(data.incidents)}\nPending suggestions (decide approve/reject for at least the root and sudo ones): ${JSON.stringify(data.suggestions)}\n${data.workflowMetrics || ''}\n\n${SUBSTANTIVE_AGENDA}`,
-  monthly: (data) => `Run the monthly review. Trends over the last ${data.rangeWeeks} weeks:\n${JSON.stringify(data.history)}\nRecent meetings: ${JSON.stringify(data.pastMeetings)}\n${data.workflowMetrics || ''}\n\n${SUBSTANTIVE_AGENDA}`,
-  quarterly: (data) => `Run the quarterly review. Trends over the last ${data.rangeWeeks} weeks:\n${JSON.stringify(data.history)}\nDiscuss the IT Chief's quarterly equipment/network/programming optimization demands and the Architect's quarterly big-project update. Year stats: ${JSON.stringify(data.yearStats)}`,
-  semi_yearly: (data) => `Run the semi-yearly review. Trends over the last ${data.rangeWeeks} weeks:\n${JSON.stringify(data.history)}\nDiscuss promotion candidates and any rivalry/relationship developments.`,
-  yearly: (data) => `Run the yearly review. Full-year trends:\n${JSON.stringify(data.history)}\nYear stats: ${JSON.stringify(data.yearStats)}\nThis is the year-end meeting: discuss promotion nominations (CEO + admin majority vote), the executive summary, and recommendations for next year.`,
+  weekly: (data) => `Run the weekly meeting. Review last week's metrics:\n${JSON.stringify(data.latestWeek)}\nIncidents: ${JSON.stringify(data.incidents)}\nPending suggestions (decide approve/reject for at least the root and sudo ones): ${JSON.stringify(data.suggestions)}\n${data.workflowMetrics || ''}
+${data.outputCensus || ''}\n\n${SUBSTANTIVE_AGENDA}`,
+  monthly: (data) => `Run the monthly review. Trends over the last ${data.rangeWeeks} weeks:\n${JSON.stringify(data.history)}\nRecent meetings: ${JSON.stringify(data.pastMeetings)}\n${data.workflowMetrics || ''}
+${data.outputCensus || ''}\n\n${SUBSTANTIVE_AGENDA}`,
+  quarterly: (data) => `Run the quarterly review. Trends over the last ${data.rangeWeeks} weeks:\n${JSON.stringify(data.history)}\nDiscuss the IT Chief's quarterly equipment/network/programming optimization demands and the Architect's quarterly big-project update. Year stats: ${JSON.stringify(data.yearStats)}
+${data.workflowMetrics || ''}
+${data.outputCensus || ''}`,
+  semi_yearly: (data) => `Run the semi-yearly review. Trends over the last ${data.rangeWeeks} weeks:\n${JSON.stringify(data.history)}\nDiscuss promotion candidates and any rivalry/relationship developments.
+${data.workflowMetrics || ''}
+${data.outputCensus || ''}`,
+  yearly: (data) => `Run the yearly review. Full-year trends:\n${JSON.stringify(data.history)}\nYear stats: ${JSON.stringify(data.yearStats)}\nThis is the year-end meeting: discuss promotion nominations (CEO + admin majority vote), the executive summary, and recommendations for next year.
+${data.workflowMetrics || ''}
+${data.outputCensus || ''}`,
   emergency_huddle: (data) => `EMERGENCY HUDDLE. Trigger: ${data.trigger}. Triggering agent: ${data.triggerAgentId}. Recent incidents: ${JSON.stringify(data.incidents)}\nDiscuss root cause and produce concrete action items.`,
   audit_session: (data) => `AUDIT SESSION for Agent ${data.auditedAgentId}. Sample cases: ${JSON.stringify(data.recentCases)}\nRecent interactions: ${JSON.stringify(data.interactions)}\nSession stats (7d): ${JSON.stringify(data.sessionStats)}\nQA and Team Lead troubleshoot the sampled cases together with Claude (in character — describe what you'd ask), then rate model performance vs the audited agent's performance (1-10 each) with optimization suggestions for both.`,
   private_coaching: (data) => `PRIVATE COACHING SESSION for Agent ${data.targetAgentId}. Reason: ${data.reason}. Related case: ${JSON.stringify(data.caseData)}\nRecent interactions: ${JSON.stringify(data.interactions)}\nReview the workflow that led to the issue and agree on a documentation/process update.`,
@@ -1013,6 +1089,30 @@ export async function runMeeting(meetingType, env, opts = {}) {
       boardTasks: snapshot.board.tasks,
       activityByAgent: await lastActivityByAgent(env),
       rosterIds: agentsConfig.agents.map((a) => a.id),
+    }));
+
+    /*
+     * THE OUTPUT CENSUS, added 2026-08-10 — rendered BESIDE the four measures,
+     * not folded into them.
+     *
+     * It is a fifth block rather than a fifth measure because it answers a
+     * different question and would be misread as a restatement of measure 2. That
+     * measure reads ACTIVITY (every Q&A ask counts); this reads OUTPUT, by kind.
+     * The Designer had a warm activity row for two months and produced nothing her
+     * role is for, and measure 2 could not have said so.
+     *
+     * `roleKinds` comes from config/capability-manifest.json's `output_kinds` —
+     * the same file the capability audit reads, deliberately, so "what this role
+     * is for" has ONE definition and the census and the audit cannot disagree
+     * about it.
+     */
+    data.outputCensus = renderOutputCensus(computeOutputCensus({
+      rosterIds: agentsConfig.agents.map((a) => a.id),
+      outputByAgent: await outputByAgent(env),
+      roleKinds: Object.fromEntries(
+        Object.entries(capabilityManifest.agents || {}).map(([id, a]) => [Number(id), a.output_kinds || []])
+      ),
+      windowDays: 7,
     }));
   }
 

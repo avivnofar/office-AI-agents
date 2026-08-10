@@ -156,7 +156,15 @@ const QUESTIONS_PATH = 'channel/to-owner/OPEN-QUESTIONS.md';
  */
 const LIFECYCLE_PATH = 'campus/shared/lifecycle/IN-FLIGHT.md';
 
-const CACHE_KEY = 'office-context-cache';
+/**
+ * EXPORTED as of 2026-08-10, for exactly one caller: the owner page's state
+ * endpoint fetches a FRESH snapshot rather than reading this cache (its whole job
+ * is live read state, and a cached answer there would show him our staleness as
+ * the office ignoring him) and then writes the result back here, so the office
+ * gets the benefit of the refresh instead of paying for it twice. Nothing else
+ * should touch the key directly — use getOfficeSnapshot().
+ */
+export const CACHE_KEY = 'office-context-cache';
 /** How long a cached parse stays usable. The board changes on the order of
  *  once a day; re-fetching it on every agent call would spend two GitHub
  *  round-trips per LLM call to learn nothing new. */
@@ -1020,6 +1028,68 @@ export async function fetchOfficeSnapshot(env, { today = new Date().toISOString(
     const files = ownerDir.entries
       .filter((e) => e.type === 'file' && /\.md$/i.test(e.name) && e.name.toUpperCase() !== 'README.MD')
       .sort((a, b) => String(b.name).localeCompare(String(a.name)));
+
+    /* ── ANYTHING IN HERE THE OFFICE CANNOT READ IS AN ERROR, NOT A FILTER ──
+     *
+     * Found live on 2026-08-10, and it is the worst thing this session found.
+     *
+     * `channel/from-owner/` contained `messages-from-aviv/aviv-is-writing-to-the-office.md`,
+     * committed by the owner, reading in full:
+     *
+     *   > this is a test note to see if the office responds. find a way to let me
+     *   > know you've read this.
+     *
+     * **The office never saw it.** Not "read and ignored" — INVISIBLE. Three
+     * independent reasons, and the filter above only knows about one of them: it
+     * was in a SUBDIRECTORY, so `type === 'file'` excluded it before any parser
+     * ran; its filename was not `YYYY-MM-DD-<slug>.md`; and it had no front
+     * matter. A top-level file that fails to parse at least lands in `malformed`
+     * and is reported. A subdirectory landed nowhere at all.
+     *
+     * So the channel built specifically to end the failure *"a message the office
+     * has not read looks exactly like a message the office has read and ignored"*
+     * had a third state nobody had named: **a message the office cannot even see.**
+     * And the message it swallowed was him testing exactly that.
+     *
+     * The filter is unchanged — those entries genuinely cannot be parsed and must
+     * not be guessed at. What changes is that being unreadable is now LOUD. Every
+     * entry in this directory that is not a readable message is reported as an
+     * ERROR, which rides at the top of every prompt until it clears, because an
+     * instruction from the client that nothing mentions is the one failure this
+     * whole channel exists to prevent.
+     *
+     * NOT auto-corrected, deliberately: the office never writes into
+     * `from-owner/`, and moving or renaming the client's own file to make it
+     * parse would be the office editing his words to suit its parser. It is
+     * reported to him instead — the standing rule that reality wins over
+     * documentation but the OWNER decides which side changes.
+     */
+    /*
+     * `README.md` and `.gitkeep` are exempt, and the exemption is narrow on
+     * purpose: they are the directory's own INFRASTRUCTURE — the contract and the
+     * file that makes an empty folder exist in git — and neither could ever be a
+     * message. Everything else is a candidate.
+     *
+     * Keeping the list this short matters more than it looks. An error that fires
+     * on every refresh for something that is fine trains a reader to skip the
+     * whole line, and this line is the only thing standing between an invisible
+     * owner instruction and silence. A false positive here costs the real one.
+     */
+    const OWNER_DIR_INFRASTRUCTURE = new Set(['README.MD', '.GITKEEP']);
+    const unreadableEntries = ownerDir.entries.filter((e) => {
+      if (OWNER_DIR_INFRASTRUCTURE.has(String(e.name).toUpperCase())) return false;
+      if (e.type !== 'file') return true;
+      return !/\.md$/i.test(e.name);
+    });
+    if (unreadableEntries.length) {
+      errors.push(
+        `${OWNER_DIR}/ CONTAINS ${unreadableEntries.length} ENTR${unreadableEntries.length === 1 ? 'Y' : 'IES'} THE OFFICE CANNOT READ AS A MESSAGE`
+        + ` — ${unreadableEntries.map((e) => `${e.name}${e.type === 'dir' ? '/ (a directory: the contract is ONE FILE PER MESSAGE at the top level, so nothing inside it is ever listed)' : ' (not a .md file)'}`).join('; ')}.`
+        + ' THE CLIENT MAY HAVE WRITTEN SOMETHING NOBODY HAS SEEN. This is a THIRD state beyond unread and read-and-ignored:'
+        + ' invisible. It is reported and deliberately NOT auto-corrected — the office does not write into his folder, and renaming'
+        + ' his file to suit our parser would be editing the client\'s words. Reply in channel/from-office/ and ask him to move it.'
+      );
+    }
 
     const capped = files.slice(0, MAX_OWNER_MESSAGES);
     if (files.length > capped.length) {

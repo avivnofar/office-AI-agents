@@ -50,14 +50,22 @@ import { StubAgent } from '../agents/agent-stub.js';
 import { runMeeting, MEETING_TYPES } from './meeting-engine.js';
 import { callCFRouter } from './gemini-client.js';
 import { generateAssignedDailyBatch, persistQuestions } from './qa-engine.js';
-import { getClaudeBudgetStatus, recordClaudeSpend, routeTaskTypeCall, resolveTaskLane, getRoutingQuotaStatus, MODEL_ROUTING } from './model-router.js';
+import { getClaudeBudgetStatus, recordClaudeSpend, routeTaskTypeCall, resolveTaskLane, getRoutingQuotaStatus, resolveImageRoles, MODEL_ROUTING } from './model-router.js';
+// The image lane (2026-08-10, plan 5.1) — the Designer's first means of doing
+// the work the bible has described her doing since 2026-08-05. listImageCapableModels()
+// is a LIVE CATALOG read-back and is imported for the `image_catalog` trigger:
+// AD-030 check 1 says a model ID is verified against the provider's live catalog
+// before anything is attributed to a key, and the only meaningful place to run
+// that check is inside the Worker, with the secret the Worker actually holds.
+import { listImageCapableModels } from './gemini-image-client.js';
+import { renderAssetProvenance, extensionForMime } from './provider-common.js';
 import { collectTodayGapReports, renderGapDigest } from './gap-reports.js';
 import { resolveIssueTarget } from './permission-guard.js';
 // buildOfficeContext + BUDGETS are imported for the office_context_status
 // read-back ONLY (2026-08-10): the meeting and per-agent shapes are the two that
 // actually bind, and a probe that reports only the generous `report` shape cannot
 // tell you that the meeting shape is at 98% and trimming the board out of view.
-import { getOfficeContext, getOfficeSnapshot, officeContextEnabled, buildOfficeContext, BUDGETS as OFFICE_BUDGETS } from './office-context.js';
+import { getOfficeContext, getOfficeSnapshot, fetchOfficeSnapshot, officeContextEnabled, buildOfficeContext, BUDGETS as OFFICE_BUDGETS, CACHE_KEY as OFFICE_SNAPSHOT_CACHE_KEY } from './office-context.js';
 // Same read-back-only rule as the line above (2026-08-10). These two constants
 // are the office's TRANSCRIPTION of two facts that live in the owner's policy
 // file; `office_context_status` compares them against the live parse so a drift
@@ -74,7 +82,14 @@ import {
 // the visual page over it are the office's work and are on the board.
 import {
   READ_LOG_PATH, readKey, parseReadLog, renderReadLog, recordOwnerRead, ageQuestions,
+  parseOwnerMessage,
 } from './owner-channel.js';
+// The owner's PAGE (2026-08-10, REQ-003) — the presentation layer over the
+// channel, which is the office's work. The FOLDER CONTRACT is not: an office that
+// builds its own instruction channel builds the pipe that feeds it. This page
+// adds no `kind`, changes no field, and relaxes no rule — `parseOwnerMessage()`
+// above stands between it and the folder.
+import { renderOwnerPage, buildOwnerMessage, buildOwnerState } from './owner-page.js';
 import {
   ownerChannelEnabled, notifyOwner, selectNotificationItems, recentFailures, OWNER_ISSUE_LABEL,
 } from './owner-notify.js';
@@ -698,6 +713,245 @@ async function processOwnerChannelBlock(env, opts = {}) {
 
   console.log(`[owner-channel] ${today}: ${fresh.length} newly-read message(s), ${items.length} item(s) for the client, notification=${out.notified?.sent ? `sent #${out.notified.seq}` : (out.notified?.reason || 'not sent')}`);
   return { skipped: false, ...out, paused: !!sim.paused };
+}
+
+/* ──────────────────────── The Designer's assets (plan 5.1/5.2) ──────────── */
+
+/**
+ * Where an asset and its provenance note land.
+ *
+ * ── THE PATH IS NOT THE ONE THE PLAN NAMES, AND THAT IS DELIBERATE ───────
+ *
+ * Plan item 5.2 says `campus/agents/the-designer/assets/`. That path does not
+ * exist and never did: the campus was laid out with a `<NN-slug>` convention
+ * (`campus/agents/09-the-designer/`), and 5.2 predates it. Writing to the plan's
+ * literal path would create a second, orphaned Designer folder beside the real
+ * one — so the real one is used and the divergence is FLAGGED rather than
+ * silently reconciled, per the standing rule that the owner decides which side
+ * changes. Recorded in the plan's session log for 2026-08-10.
+ *
+ * ── BACK-OFFICE, NOT THE PUBLIC REPO ─────────────────────────────────────
+ *
+ * Assets are private until the publishing gate says otherwise. `commitFileToRepo()`
+ * refuses a base64 write to the public repo outright, because A10's
+ * pre-publication scan is a text scan that cannot read bytes — see its header.
+ * Putting an image on the Front is `OB-014`'s decision, which is not built.
+ */
+const DESIGNER_ASSET_DIR = 'campus/agents/09-the-designer/assets';
+
+/** Filename-safe slug. Refuses to invent one: an empty slug is the caller's
+ *  error and a generated fallback would produce assets nobody can find by name. */
+function assetSlug(raw) {
+  const slug = String(raw || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60);
+  return slug || null;
+}
+
+/**
+ * ONE asset, end to end: route → generate → commit the bytes → commit the
+ * provenance note.
+ *
+ * ── WHY THIS EXISTS AS A FUNCTION AND NOT AS A TEST SCRIPT ───────────────
+ *
+ * *A lane that resolves is not a lane that works.* The Designer's whole problem
+ * was a capability asserted in a document with no code path behind it, and a
+ * verifier that proves `resolveLane('image')` returns a provider would reproduce
+ * exactly that error one level up — it would prove the TABLE is right and say
+ * nothing about whether an asset can be made. So the proof is a real generation
+ * whose output is a file in a repo, and this is the code path that does it, on
+ * the scheduled runtime, with the credentials production uses.
+ *
+ * ── THE PROVENANCE NOTE IS NOT OPTIONAL AND NOT BEST-EFFORT ──────────────
+ *
+ * The bible requires it: *"always leaving a provenance note (model, date)"*. An
+ * asset committed without one is an asset nobody can regenerate, attribute or
+ * judge against its brief, and it is indistinguishable from a file someone
+ * dropped in the folder. So the note is written from the SAME result object that
+ * produced the bytes — never from the request — and if the note fails to commit
+ * that is reported in the return value rather than swallowed. It is not, however,
+ * allowed to un-commit the asset: a lost note is a lost measurement, a lost asset
+ * is lost work, and the two are not comparable (repo-write.js's own rule).
+ *
+ * @param {object} opts
+ * @param {string} opts.prompt
+ * @param {string} opts.slug   - the asset's filename stem
+ * @param {'draft'|'polish'} [opts.role]
+ * @param {Array} [opts.inputImages] - for a polish pass
+ * @param {boolean} [opts.commit] - false runs the generation and skips both
+ *   writes, for a supervised look before anything lands in a repo.
+ */
+async function runDesignerAsset(env, {
+  prompt,
+  slug,
+  role = null,
+  instruction = null,
+  inputImages = null,
+  imageModel = null,
+  steps = null,
+  commit = true,
+  note = null,
+  polishInstruction = null,
+}) {
+  const safeSlug = assetSlug(slug || prompt);
+  if (!safeSlug) return { ok: false, reason: 'asset_slug_unusable' };
+  if (!prompt && !instruction) return { ok: false, reason: 'no_prompt_or_instruction' };
+
+  const date = todayDateStr();
+
+  const routed = await routeTaskTypeCall(env, 'image', {
+    // Supervised only, exactly like `routing_test` and `guide_block`. The
+    // scheduled path does not reach this function yet — the Designer's daily
+    // block is Phase 6 work and is not built, which is stated rather than
+    // implied by an absent caller.
+    bypassGate: true,
+    role,
+    prompt,
+    instruction,
+    inputImages,
+    imageModel,
+    steps,
+    agentId: 9,
+    eventId: `designer_asset:${safeSlug}`,
+  });
+
+  if (!routed.ok || !routed.result?.base64) {
+    return {
+      ok: false,
+      reason: routed.reason || 'no_image_returned',
+      lane: 'image',
+      role: routed.role ?? role,
+      attempts: routed.attempts,
+    };
+  }
+
+  const result = routed.result;
+  // The extension comes from the SNIFFED type, never from an assumption. The
+  // first asset the office committed was named `.png` and was a JPEG — see
+  // provider-common.js sniffImageMime(). An unknown signature yields `.bin`,
+  // which is obviously wrong and gets looked at, rather than a plausible `.png`
+  // that gets trusted.
+  const ext = extensionForMime(result.mimeType);
+  const assetPath = `${DESIGNER_ASSET_DIR}/${date}-${safeSlug}.${ext}`;
+  const provenancePath = `${DESIGNER_ASSET_DIR}/${date}-${safeSlug}.provenance.md`;
+
+  const provenance = renderAssetProvenance({
+    assetPath,
+    // The prompt that was actually sent, and for a polish pass the instruction —
+    // recorded separately because "make the type larger" and "a logo for the
+    // office" are different facts and a note that merges them cannot be used to
+    // reproduce either.
+    prompt: instruction ? `[${routed.role} instruction] ${instruction}` : prompt,
+    model: result.model,
+    provider: routed.provider,
+    role: routed.role,
+    date,
+    bytes: result.bytes,
+    note: [
+      note,
+      result.revisedPrompt ? `Model's own account of what it produced: ${result.revisedPrompt.replace(/\s+/g, ' ').slice(0, 400)}` : null,
+    ].filter(Boolean).join(' · ') || null,
+  });
+
+  if (!commit) {
+    return { ok: true, committed: false, dryRun: true, assetPath, provenancePath, provenance, bytes: result.bytes, provider: routed.provider, role: routed.role, model: result.model };
+  }
+
+  const assetWrite = await commitFileToRepo(
+    env, BACKOFFICE_REPO_NAME, assetPath, result.base64,
+    `designer: asset ${safeSlug} (${routed.provider}, role ${routed.role})`,
+    { contentIsBase64: true }
+  );
+
+  /*
+   * ── THE POLISH PASS, ON THE DRAFT'S OWN BYTES ──────────────────────────
+   *
+   * Optional, and it is the only thing that proves the role split is real
+   * rather than a naming convention. `polishImage()` is handed THIS draft's
+   * base64 — so if the polish provider were ever silently swapped for the draft
+   * one, the output would be a second unrelated image and the chain would say
+   * so, instead of returning something plausible.
+   *
+   * Both files are kept. The draft is not overwritten by its polish, because
+   * "what the office produced" and "what the office shipped" are different
+   * facts and the Designer's review needs both in front of her. Two assets, two
+   * provenance notes, each naming the role that made it.
+   *
+   * A failed polish does NOT invalidate the draft: the draft is already
+   * committed and is a real asset. The failure is reported in `polish.reason`.
+   */
+  let polish = null;
+  if (polishInstruction) {
+    const polished = await routeTaskTypeCall(env, 'image', {
+      bypassGate: true,
+      role: 'polish',
+      instruction: polishInstruction,
+      inputImages: [{ base64: result.base64, mimeType: result.mimeType }],
+      agentId: 9,
+      eventId: `designer_asset:${safeSlug}:polish`,
+    });
+
+    if (!polished.ok || !polished.result?.base64) {
+      polish = { ok: false, reason: polished.reason || 'no_image_returned', attempts: polished.attempts };
+    } else {
+      const pr = polished.result;
+      const pExt = extensionForMime(pr.mimeType);
+      const pAssetPath = `${DESIGNER_ASSET_DIR}/${date}-${safeSlug}-polished.${pExt}`;
+      const pProvenancePath = `${DESIGNER_ASSET_DIR}/${date}-${safeSlug}-polished.provenance.md`;
+      const pWrite = await commitFileToRepo(
+        env, BACKOFFICE_REPO_NAME, pAssetPath, pr.base64,
+        `designer: polished asset ${safeSlug} (${polished.provider}, role polish)`,
+        { contentIsBase64: true }
+      );
+      const pProvWrite = await commitFileToRepo(
+        env, BACKOFFICE_REPO_NAME, pProvenancePath,
+        renderAssetProvenance({
+          assetPath: pAssetPath,
+          prompt: `[polish instruction] ${polishInstruction}`,
+          model: pr.model,
+          provider: polished.provider,
+          role: polished.role,
+          date,
+          bytes: pr.bytes,
+          note: `Polished FROM \`${assetPath}\` (${result.bytes} bytes, ${result.model}). The draft's own bytes were sent as the input image — this is not a re-generation from the prompt.`
+            + (pr.revisedPrompt ? ` Model's own account: ${pr.revisedPrompt.replace(/\s+/g, ' ').slice(0, 300)}` : ''),
+        }),
+        `designer: provenance for ${safeSlug}-polished`
+      );
+      polish = {
+        ok: !!pWrite.committed,
+        assetPath: pAssetPath,
+        provenancePath: pProvenancePath,
+        provenanceCommitted: !!pProvWrite.committed,
+        bytes: pr.bytes,
+        mimeType: pr.mimeType,
+        provider: polished.provider,
+        model: pr.model,
+        polishedFrom: assetPath,
+      };
+    }
+  }
+
+  const provenanceWrite = await commitFileToRepo(
+    env, BACKOFFICE_REPO_NAME, provenancePath, provenance,
+    `designer: provenance for ${safeSlug}`
+  );
+
+  return {
+    ok: !!assetWrite.committed,
+    committed: !!assetWrite.committed,
+    // Reported, never swallowed: an asset in the repo with no note beside it is
+    // the state the bible forbids, and the caller has to be able to see it.
+    provenanceCommitted: !!provenanceWrite.committed,
+    provenanceReason: provenanceWrite.committed ? null : (provenanceWrite.reason || null),
+    assetPath,
+    provenancePath,
+    bytes: result.bytes,
+    mimeType: result.mimeType,
+    provider: routed.provider,
+    role: routed.role,
+    model: result.model,
+    assetWrite,
+    polish,
+  };
 }
 
 /* ────────────────────────────── Guides pipeline ─────────────────────────── */
@@ -3428,9 +3682,123 @@ export default {
       }
     }
 
+    /*
+     * ── THE OWNER'S PAGE (2026-08-10, REQ-003) ─────────────────────────────
+     *
+     * Served UNAUTHENTICATED and deliberately so: it holds no secret. It is an
+     * empty form until he pastes his token in, and the token lives in that tab's
+     * sessionStorage and travels in `X-Admin-Token` — never in a URL, a referrer
+     * or a server log. A page with the token baked in would put that token into
+     * the public repo's history the first time anybody saved a copy.
+     *
+     * Every WRITE path is under `/api/agents/`, which the block above
+     * authenticates before any handler is reached. There is no second write path.
+     */
+    if (request.method === 'GET' && (url.pathname === '/owner' || url.pathname === '/owner/')) {
+      return new Response(renderOwnerPage({ endpointBase: url.origin }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          // No caching: the page's whole job is to show live read state.
+          'Cache-Control': 'no-store',
+          // It loads nothing from anywhere. Said in a header as well as being
+          // true, so a future edit that adds a CDN script fails in the browser
+          // rather than shipping quietly.
+          'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'none'",
+          'Referrer-Policy': 'no-referrer',
+          'X-Content-Type-Options': 'nosniff',
+        },
+      });
+    }
+
     try {
       if (request.method === 'GET' && url.pathname === '/api/agents/status') {
         return json(await getAllAgentStatuses(env), 200, origin);
+      }
+
+      /*
+       * ── THE OWNER CHANNEL'S READ AND WRITE HALVES ───────────────────────
+       *
+       * `owner-state` is a READ of the same snapshot the agent prompts use — not
+       * a second reading of the same files. Two readers of one folder is the
+       * drift this project keeps finding; the page sees exactly what the office
+       * sees, including the office's own errors reading it.
+       */
+      if (request.method === 'GET' && url.pathname === '/api/agents/owner-state') {
+        /*
+         * FETCHES FRESH, and does NOT read the 30-minute snapshot cache.
+         *
+         * getOfficeSnapshot() would have been the cheaper call and it is the wrong
+         * one here. This page's entire purpose is to answer "has the office read
+         * what I wrote", and a cached answer can say NOT YET READ about a message
+         * the office read twenty minutes ago. That is wrong in the worst possible
+         * direction on this particular surface: it would show him the exact
+         * failure — *a message the office has not read looks like one it read and
+         * ignored* — as an artefact of our own caching.
+         *
+         * The cost is one directory listing plus a handful of GETs, on a page a
+         * human opens by hand. The result is written BACK into the cache, so the
+         * office gets the benefit of the refresh rather than paying for it twice.
+         */
+        const fresh = await fetchOfficeSnapshot(env);
+        if (env.SIM_KV) await env.SIM_KV.put(OFFICE_SNAPSHOT_CACHE_KEY, JSON.stringify(fresh)).catch(() => {});
+        return json({ ok: true, state: buildOwnerState(fresh), _fresh: true }, 200, origin);
+      }
+
+      /*
+       * THE WRITE. The candidate file is built, then run through THE REAL
+       * `parseOwnerMessage()` — the same function that reads the folder — and a
+       * candidate that does not parse is REFUSED and never written.
+       *
+       * That ordering is the whole design. The requirement was that the page must
+       * produce a message the existing parser accepts, and that the parser must
+       * NOT be relaxed to make the page easier. Putting the parser between the
+       * page and the folder makes the first true by construction rather than by
+       * the builder being careful, and it makes the second impossible to give up
+       * accidentally: relaxing the parser to admit a bad page message would
+       * simultaneously relax what the office accepts from him by hand.
+       */
+      if (request.method === 'POST' && url.pathname === '/api/agents/owner-message') {
+        const body = await request.json().catch(() => ({}));
+        const built = buildOwnerMessage({
+          subject: body.subject,
+          body: body.body,
+          kind: body.kind,
+          re: body.re || 'new',
+          date: todayDateStr(),
+        });
+        if (!built.ok) return json({ ok: false, reason: built.reason }, 400, origin);
+
+        // THE GATE. The real parser, unmodified, on the exact bytes about to be
+        // written. Not a schema check that resembles it.
+        const parsed = parseOwnerMessage(built.text, built.filename, null);
+        if (!parsed.ok) {
+          return json({
+            ok: false,
+            reason: `refused by the office's own parser before anything was written: ${parsed.reason}`,
+            _note: 'The parser is the authority and is not relaxed to accept this page. If this ever fires, the PAGE is wrong.',
+          }, 400, origin);
+        }
+
+        const write = await commitFileToRepo(
+          env, BACKOFFICE_REPO_NAME, built.path, built.text,
+          `owner: ${parsed.message.kind} — ${parsed.message.title} (via the owner page)`
+        );
+        if (!write.committed) {
+          return json({ ok: false, reason: `the message parsed but could not be written: ${write.reason || `HTTP ${write.status}`}` }, 502, origin);
+        }
+
+        console.log(`[owner-page] wrote ${built.path} (kind=${parsed.message.kind})`);
+        return json({
+          ok: true,
+          path: built.path,
+          id: parsed.message.id,
+          kind: parsed.message.kind,
+          // Said back to him plainly: the write is the delivery, and the office
+          // reads the folder on its own schedule. No claim that anybody has read
+          // it yet — that is what the read state on the page is for.
+          note: 'Written to back-office. The office reads this folder on every office-context refresh (30-minute cache) and records the read against this message\'s content SHA.',
+        }, 200, origin);
       }
       if (request.method === 'GET' && url.pathname === '/api/agents/sessions') {
         const limit = Number(url.searchParams.get('limit')) || 50;
@@ -3970,11 +4338,98 @@ export default {
               maxTokens: body.maxTokens || 64,
               texts: body.texts,
               personas: body.personas,
+              // The image lane is a ROLES lane: `role` selects draft or polish
+              // and each resolves to exactly one provider. Absent uses the
+              // lane's default_role. Passed through for every lane rather than
+              // special-cased, because resolveLane() ignores it on the others.
+              role: body.role || null,
+              inputImages: body.inputImages,
+              instruction: body.instruction,
+              imageModel: body.imageModel,
+              steps: body.steps,
               eventId: body.eventId || `routing_test:${body.lane}`,
               geminiModel: simulationConfig.GEMINI?.model,
               geminiEndpoint: simulationConfig.GEMINI?.api_endpoint,
               agentId: 'routing-test',
             });
+            // An image result carries megabytes of base64. Returning it through
+            // this endpoint would make a supervised test's own response the
+            // largest thing the Worker ever sends, and a truncated JSON body is
+            // an unreadable test result. Summarised, with the bytes counted so
+            // "did it actually draw something" is still answerable.
+            if (result?.result?.base64) {
+              result = {
+                ...result,
+                result: { ...result.result, base64: `[${result.result.bytes} bytes elided — use {"type":"design_asset"} to write it to a repo]` },
+              };
+            }
+            break;
+          }
+          case 'image_catalog': {
+            // AD-030 CHECK 1, AS AN ENDPOINT. "Does the model ID still exist in
+            // the provider's live catalog?" is the first of four checks that must
+            // be run and REPORTED before an auth failure may even be attributed
+            // to a key — and this project has been burned four times by a model
+            // retired out from under it. Run from inside the Worker, with the
+            // GEMINI_API_KEY the Worker actually holds, because a local test with
+            // a key from a .env tests that key and says nothing about this one.
+            //
+            // Makes NO generation call and costs no image quota. The Cloudflare
+            // side has no equivalent endpoint here: its catalog is read with
+            // `npx wrangler ai models` against the same account, which is a real
+            // read-back and is where the draft model's ID came from.
+            result = {
+              gemini: await listImageCapableModels({ apiKey: env.GEMINI_API_KEY, agentId: 'image-catalog' }),
+              cloudflareDraftModel: MODEL_ROUTING.lanes.image?.roles?.draft
+                ? tokenEconomy.providers?.cloudflare_images?.default_model || null
+                : null,
+              _how_to_read_this: 'defaultModelPresent:false means the configured polish model is NOT in the live catalog — a config fix, NOT a key problem. Read the full body before attributing anything to a credential (AD-030).',
+            };
+            break;
+          }
+          case 'image_status':
+            // Read-back for the image lane: both roles as RESOLVED, the two
+            // providers' quota state, and the fact that neither has an allowance
+            // of its own. No model calls.
+            result = {
+              image: resolveImageRoles(),
+              quota: await getRoutingQuotaStatus(env),
+              sharedAllowances: {
+                'cloudflare-images': tokenEconomy.providers?.cloudflare_images?.shared_allowance_with || null,
+                'gemini-images': tokenEconomy.providers?.gemini_images?.shared_allowance_with || null,
+                _why: 'Neither image provider has an allowance of its own. Cloudflare images spend the same account Neurons as the classification lane; Gemini images spend the same key as Hebrew composition, report drafting and the Notebook-X asks. Heavy Designer output can degrade four chat lanes.',
+              },
+            };
+            break;
+          case 'design_asset': {
+            // THE END-TO-END PROOF, and the Designer's only working path today.
+            // Generates one asset and commits it to back-office WITH the
+            // provenance note the bible requires, through the governed write
+            // path. Body: { prompt, slug, role?, instruction?, inputImages?,
+            //               imageModel?, steps?, commit?, note? }
+            //
+            // `commit: false` runs the generation and writes nothing, for a look
+            // before anything lands in a repo.
+            if (!body.prompt && !body.instruction) {
+              return json({ error: 'design_asset_requires_prompt_or_instruction' }, 400, origin);
+            }
+            result = await runDesignerAsset(env, {
+              prompt: body.prompt,
+              slug: body.slug,
+              role: body.role || null,
+              instruction: body.instruction || null,
+              inputImages: body.inputImages || null,
+              imageModel: body.imageModel || null,
+              steps: body.steps ?? null,
+              commit: body.commit !== false,
+              note: body.note || null,
+              // Optional second pass on the DRAFT'S OWN BYTES — the only thing
+              // that proves the role split is real rather than a naming
+              // convention. Both files are kept; a failed polish leaves the
+              // draft standing.
+              polishInstruction: body.polishInstruction || null,
+            });
+            if (result?.provenance) result.provenance = `[${result.provenance.length} chars — written to ${result.provenancePath}]`;
             break;
           }
           case 'guide_block': {

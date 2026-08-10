@@ -91,6 +91,8 @@ import { callMistral, PROVIDER as MISTRAL_PROVIDER } from './mistral-client.js';
 import { callCohereEmbed, PROVIDER as COHERE_PROVIDER } from './cohere-client.js';
 import { callGroq } from './groq-client.js';
 import { callGemini, callCloudflareFallback } from './gemini-client.js';
+import { callCloudflareImage, PROVIDER as CF_IMAGE_PROVIDER } from './cf-image-client.js';
+import { callGeminiImage, polishImage, PROVIDER as GEMINI_IMAGE_PROVIDER } from './gemini-image-client.js';
 
 /** Must match agent-runner.js's SIM_STATE_KEY. verify-routing.js asserts it does. */
 export const SIM_STATE_KEY = 'simulation-state';
@@ -227,7 +229,100 @@ export const PROVIDER_REGISTRY = {
       }
     },
   },
+
+  /* ── IMAGE PROVIDERS (2026-08-10, plan 5.1) ────────────────────────────
+   *
+   * The office's first image-capable providers. `kind: 'image'` is the guard,
+   * and it is the same mechanism Cohere's `kind: 'embeddings'` has always been:
+   * a provider whose kind does not match the lane's is REFUSED, so an image
+   * model can never serve a chat lane and a chat model can never serve the
+   * image lane — including as a backup, and including through the embodiment
+   * shuffle, which filters on kind independently.
+   *
+   * These two are ROLES of one lane, not a primary and a backup. See
+   * config/model-routing.json's `image` lane and each client's header.
+   * ──────────────────────────────────────────────────────────────────────── */
+  'cloudflare-images': {
+    id: 'cloudflare-images',
+    kind: 'image',
+    role: 'draft',
+    tokenEconomyKey: 'cloudflare_images',
+    secretName: null, // account-scoped AI binding, not a secret
+    checkInputWithinCaps: CF_IMAGE_PROVIDER.checkInputWithinCaps,
+    hasCredential: (env) => !!env?.AI,
+    /*
+     * `?? undefined` on every optional passthrough, and it is not noise.
+     *
+     * A JS default parameter fires on `undefined` and NOT on `null`. Callers on
+     * this path normalise absent fields to null (`body.imageModel || null` in
+     * the trigger), so passing them straight through replaced each client
+     * default with null. The first real image call this router ever made came
+     * back `5007: No such model null or task` — the CATALOG-VERIFIED model ID was
+     * present in the client the whole time and was being overwritten by an
+     * absent request field. A default parameter is not a null guard.
+     */
+    invoke: (env, opts) => callCloudflareImage({
+      ai: env.AI,
+      prompt: opts.prompt,
+      model: opts.imageModel ?? undefined,
+      steps: opts.steps ?? undefined,
+      negativePrompt: opts.negativePrompt ?? undefined,
+      agentId: opts.agentId,
+      onResponse: opts.onResponse,
+    }),
+  },
+  'gemini-images': {
+    id: 'gemini-images',
+    kind: 'image',
+    role: 'polish',
+    tokenEconomyKey: 'gemini_images',
+    secretName: 'GEMINI_API_KEY',
+    checkInputWithinCaps: GEMINI_IMAGE_PROVIDER.checkInputWithinCaps,
+    hasCredential: (env) => !!env?.GEMINI_API_KEY,
+    /*
+     * ONE invoke, TWO capabilities, and the branch is on what the CALLER
+     * supplied rather than on a flag it could forget to set. A `polish` call
+     * carries input images; a bare generation does not. polishImage() itself
+     * refuses an empty image list, so a caller that asks for a polish pass and
+     * sends nothing to polish gets a refusal from the client too — the same
+     * rule enforced in two independent places, because the failure it prevents
+     * (a fresh draft returned under the polish role's name) is silent.
+     */
+    invoke: (env, opts) => {
+      const images = (opts.inputImages || []).filter((i) => i && i.base64);
+      if (images.length || opts.instruction) {
+        return polishImage({
+          apiKey: env.GEMINI_API_KEY,
+          instruction: opts.instruction || opts.prompt,
+          inputImages: images,
+          model: opts.imageModel ?? undefined, // see the draft entry: a default parameter is not a null guard
+          agentId: opts.agentId,
+          onResponse: opts.onResponse,
+        });
+      }
+      return callGeminiImage({
+        apiKey: env.GEMINI_API_KEY,
+        prompt: opts.prompt,
+        model: opts.imageModel,
+        agentId: opts.agentId,
+        onResponse: opts.onResponse,
+      });
+    },
+  },
 };
+
+/**
+ * The kinds a lane may declare. A lane whose kind is not in this set is refused
+ * rather than treated as chat — see resolveLane()'s `lane_kind_unstated` note
+ * for why an absent or unknown kind became a real hazard on 2026-08-10.
+ */
+export const LANE_KINDS = Object.freeze(['chat', 'embeddings', 'image']);
+
+/** The kind the embodiment shuffle may use. Embodiment is a CHAT instrument:
+ *  it exists so the Lead QA can compare how personas read under different
+ *  providers, and an image model has no voice to compare. Named as a constant
+ *  because it is asserted by the verifier and read in two places. */
+export const EMBODIMENT_KIND = 'chat';
 
 /* ────────────────────────────────────────────────────────────────────────
  * LANE RESOLUTION
@@ -236,17 +331,29 @@ export const PROVIDER_REGISTRY = {
 /**
  * Resolves a task type to an ORDERED candidate list.
  *
+ * @param {object} routingConfig
+ * @param {string} taskType
+ * @param {object} [opts]
+ * @param {function} [opts.rng]
+ * @param {function} [opts.knownCapFirst]
+ * @param {string} [opts.role] - for a `mode: 'roles'` lane (today: `image`),
+ *   WHICH ROLE is being asked for. Absent falls back to the lane's
+ *   `default_role`, and a lane with neither is refused rather than guessed at.
+ *   An UNRECOGNISED role is refused — never quietly served by the default —
+ *   because the default would be this router deciding that a request for a
+ *   polish pass may be answered with a fresh draft.
  * @returns {{routable: boolean, lane: string, candidates: string[], mode: string,
- *            kind: string, reason: string|null}}
+ *            kind: string, role: string|null, reason: string|null}}
  *   `routable: false` with a reason for: an unknown task type, a lane marked
- *   non-routable (the Architect), or a lane naming a provider that is not in
- *   the registry. Never throws.
+ *   non-routable (the Architect), a lane that declares no `kind`, a lane naming
+ *   a provider that is not in the registry, or a provider whose kind does not
+ *   match the lane's. Never throws.
  */
-export function resolveLane(routingConfig, taskType, { rng = Math.random, knownCapFirst = null } = {}) {
+export function resolveLane(routingConfig, taskType, { rng = Math.random, knownCapFirst = null, role = null } = {}) {
   const lane = routingConfig?.lanes?.[taskType];
 
   if (!lane) {
-    return { routable: false, lane: taskType, candidates: [], mode: null, kind: null, reason: 'unknown_task_type' };
+    return { routable: false, lane: taskType, candidates: [], mode: null, kind: null, role: null, reason: 'unknown_task_type' };
   }
 
   if (lane.routable === false) {
@@ -256,14 +363,85 @@ export function resolveLane(routingConfig, taskType, { rng = Math.random, knownC
       candidates: [],
       mode: null,
       kind: lane.kind || null,
+      role: null,
       reason: 'lane_never_routed',
+    };
+  }
+
+  /* ── A ROUTABLE LANE MUST DECLARE ITS KIND  (added 2026-08-10) ──────────
+   *
+   * This check did not exist, and until 2026-08-10 its absence was harmless.
+   * The wrong-kind check further down was written `if (lane.kind && ...)`, so a
+   * lane that simply OMITTED the field accepted any provider in the registry —
+   * and every provider was chat or embeddings, so the worst case was an
+   * embeddings model on a text lane, which fails loudly and immediately.
+   *
+   * Adding an IMAGE provider changed that. A kind-less text lane pointed at an
+   * image model would resolve, route, and return an envelope with no `text`
+   * field at all — and routeTask()'s empty-answer guard keys on
+   * `resolved.kind === 'chat'`, so a lane with no kind would ALSO skip the guard
+   * that catches it. Two silent failures compounding: the wrong provider, and
+   * the check that would have caught it switched off by the same missing field.
+   *
+   * A missing kind is now `lane_kind_unstated`, and an unrecognised one is
+   * `unknown_lane_kind`. Refused, not defaulted to 'chat' — the default is
+   * exactly the assumption that would have hidden this.
+   * ──────────────────────────────────────────────────────────────────────── */
+  if (!lane.kind) {
+    return {
+      routable: false,
+      lane: taskType,
+      candidates: [],
+      mode: lane.mode === 'controlled_random' ? 'controlled_random' : (lane.mode || 'ordered'),
+      kind: null,
+      role: null,
+      reason: 'lane_kind_unstated',
+    };
+  }
+  if (!LANE_KINDS.includes(lane.kind)) {
+    return {
+      routable: false,
+      lane: taskType,
+      candidates: [],
+      mode: lane.mode || 'ordered',
+      kind: lane.kind,
+      role: null,
+      reason: `unknown_lane_kind:${lane.kind}`,
     };
   }
 
   let candidates;
   let mode;
+  let resolvedRole = null;
 
-  if (lane.mode === 'controlled_random') {
+  if (lane.mode === 'roles') {
+    /* ── ROLE MODE: two jobs, not two choices for one job ────────────────
+     *
+     * The image lane's providers are a DRAFT provider and a POLISH provider
+     * (owner decision, 2026-08-10). `primary`/`backup` cannot express that —
+     * that pair means "the same job, second choice" — so a role resolves to
+     * exactly ONE candidate and there is no degradation between roles. See the
+     * lane's `_why_a_role_never_degrades_to_the_other_role` note.
+     */
+    mode = 'roles';
+    resolvedRole = role || lane.default_role || null;
+    if (!resolvedRole) {
+      return { routable: false, lane: taskType, candidates: [], mode, kind: lane.kind, role: null, reason: 'role_not_specified_and_no_default' };
+    }
+    const provider = lane.roles?.[resolvedRole];
+    if (!provider) {
+      return {
+        routable: false,
+        lane: taskType,
+        candidates: [],
+        mode,
+        kind: lane.kind,
+        role: resolvedRole,
+        reason: `unknown_lane_role:${resolvedRole}`,
+      };
+    }
+    candidates = [provider];
+  } else if (lane.mode === 'controlled_random') {
     mode = 'controlled_random';
     candidates = shufflePool(lane.pool || [], rng, knownCapFirst);
   } else {
@@ -279,12 +457,24 @@ export function resolveLane(routingConfig, taskType, { rng = Math.random, knownC
       lane: taskType,
       candidates: [],
       mode,
-      kind: lane.kind || null,
+      kind: lane.kind,
+      role: resolvedRole,
       reason: `unknown_provider:${unknown.join(',')}`,
     };
   }
 
-  const wrongKind = candidates.filter((id) => lane.kind && PROVIDER_REGISTRY[id].kind !== lane.kind);
+  /*
+   * THE KIND GUARD. Cohere's `kind: 'embeddings'` is the precedent and the image
+   * providers extend it: an image provider cannot serve a chat lane and a chat
+   * provider cannot serve the image lane, in either direction, including as a
+   * backup and including inside the controlled-random pool.
+   *
+   * The `lane.kind &&` short-circuit this condition used to carry is GONE — it
+   * is now unreachable anyway, because a lane with no kind was refused above.
+   * Removing it is the point: a guard whose condition can be switched off by
+   * omitting a field is a guard with an opt-out nobody documented.
+   */
+  const wrongKind = candidates.filter((id) => PROVIDER_REGISTRY[id].kind !== lane.kind);
   if (wrongKind.length > 0) {
     return {
       routable: false,
@@ -292,15 +482,16 @@ export function resolveLane(routingConfig, taskType, { rng = Math.random, knownC
       candidates: [],
       mode,
       kind: lane.kind,
-      reason: `provider_kind_mismatch:${wrongKind.join(',')}`,
+      role: resolvedRole,
+      reason: `provider_kind_mismatch:${wrongKind.map((id) => `${id}(${PROVIDER_REGISTRY[id].kind})`).join(',')}`,
     };
   }
 
   if (candidates.length === 0) {
-    return { routable: false, lane: taskType, candidates: [], mode, kind: lane.kind || null, reason: 'lane_has_no_providers' };
+    return { routable: false, lane: taskType, candidates: [], mode, kind: lane.kind, role: resolvedRole, reason: 'lane_has_no_providers' };
   }
 
-  return { routable: true, lane: taskType, candidates, mode, kind: lane.kind || 'chat', reason: null };
+  return { routable: true, lane: taskType, candidates, mode, kind: lane.kind, role: resolvedRole, reason: null };
 }
 
 /**
@@ -356,14 +547,49 @@ function shufflePool(pool, rng, knownCapFirst) {
  * The Architect is never included. Callers must not pass agent 10; this
  * function also drops him defensively, by id and by name.
  *
+ * ── THE KIND GUARD, APPLIED HERE INDEPENDENTLY OF resolveLane() ─────────
+ *
+ * A non-chat provider is never embodied. That was already true — the filter
+ * below has always tested `kind === 'chat'` — and it is an INDEPENDENT barrier
+ * rather than a duplicate: resolveLane() refuses a wrong-kind candidate before
+ * the pool ever reaches here, and this refuses one that arrives by any other
+ * route. Two mechanisms, deliberately, because a caller may hand this function a
+ * pool it assembled itself.
+ *
+ * **What changed on 2026-08-10 is that the drop is now RECORDED.** The filter
+ * used to discard silently, and a silent filter on a measurement instrument is
+ * the worst place in this repo for one: a pool of five with two image providers
+ * quietly became a pool of three, the embodiment map still rendered perfectly,
+ * and the Lead QA's cross-embodiment comparison would have been drawing
+ * conclusions from a narrower sample than the config said it had. Worse, an
+ * all-image pool produced `provider: null` for every persona and a map that
+ * looked structurally fine. `poolExcluded` makes the drop visible, and
+ * `poolEmpty` makes the total collapse an explicit fact rather than a column of
+ * nulls a reader has to notice.
+ *
+ * `excluded` still carries PERSONA exclusions only (the Architect). Provider
+ * exclusions go in `poolExcluded`, because "who was not shuffled" and "what they
+ * could not be shuffled onto" are different facts and a caller that wants one
+ * should not have to filter the other out of it.
+ *
  * @param {object} opts
  * @param {Array<{id: number|string, name: string}>} opts.personas
  * @param {string[]} opts.pool - provider ids (non-Anthropic by construction)
  * @param {function} [opts.rng] - injectable for deterministic verification
+ * @param {string} [opts.kind] - the kind the pool must be. Defaults to
+ *   EMBODIMENT_KIND ('chat'); passing anything else yields an empty pool, since
+ *   embodiment compares how a persona READS and an image model has no voice.
  * @returns {{eventId: string|null, assignments: Array<{agentId, agentName, provider}>,
- *            pool: string[], excluded: Array<{agentName, reason}>}}
+ *            pool: string[], excluded: Array<{agentName, reason}>,
+ *            poolExcluded: Array<{provider, kind, reason}>, poolEmpty: boolean}}
  */
-export function assignEmbodiment({ personas = [], pool = [], rng = Math.random, eventId = null } = {}) {
+export function assignEmbodiment({
+  personas = [],
+  pool = [],
+  rng = Math.random,
+  eventId = null,
+  kind = EMBODIMENT_KIND,
+} = {}) {
   const excluded = [];
   const eligible = personas.filter((p) => {
     const isArchitect = String(p.id) === '10' || /architect/i.test(p.name || '');
@@ -371,7 +597,30 @@ export function assignEmbodiment({ personas = [], pool = [], rng = Math.random, 
     return !isArchitect;
   });
 
-  const usable = pool.filter((id) => PROVIDER_REGISTRY[id] && PROVIDER_REGISTRY[id].kind === 'chat');
+  const poolExcluded = [];
+  const usable = [];
+  for (const id of pool) {
+    const provider = PROVIDER_REGISTRY[id];
+    if (!provider) {
+      poolExcluded.push({ provider: id, kind: null, reason: 'not_in_provider_registry' });
+      continue;
+    }
+    if (provider.kind !== kind) {
+      poolExcluded.push({ provider: id, kind: provider.kind, reason: `kind_is_not_${kind}` });
+      continue;
+    }
+    usable.push(id);
+  }
+
+  if (poolExcluded.length) {
+    console.warn(`[routing][embodiment] ${poolExcluded.length} pool entr${poolExcluded.length === 1 ? 'y was' : 'ies were'} dropped from the shuffle: ${poolExcluded.map((p) => `${p.provider}(${p.kind || 'unregistered'}: ${p.reason})`).join(', ')}`);
+  }
+  if (usable.length === 0 && pool.length > 0) {
+    // Loud, because the alternative is a well-formed map full of nulls. An
+    // embodiment map with no providers measures nothing and must not be able to
+    // pass for one that does.
+    console.warn(`[routing][embodiment] NO USABLE PROVIDER of kind "${kind}" in a pool of ${pool.length} — every persona would be assigned null. This measures nothing; the caller is reporting poolEmpty.`);
+  }
 
   const assignments = eligible.map((p) => ({
     agentId: p.id,
@@ -379,7 +628,7 @@ export function assignEmbodiment({ personas = [], pool = [], rng = Math.random, 
     provider: usable.length > 0 ? usable[Math.floor(rng() * usable.length)] : null,
   }));
 
-  return { eventId, assignments, pool: usable, excluded };
+  return { eventId, assignments, pool: usable, excluded, poolExcluded, poolEmpty: usable.length === 0 };
 }
 
 /**
@@ -387,12 +636,29 @@ export function assignEmbodiment({ personas = [], pool = [], rng = Math.random, 
  * (back-office-AI-agents/campus/shared/meetings/<date>-<type>.md, plan item
  * 2.4) and for the console log of a routed event.
  */
-export function renderEmbodimentMap({ eventId, assignments = [], excluded = [] } = {}) {
+export function renderEmbodimentMap({ eventId, assignments = [], excluded = [], poolExcluded = [], poolEmpty = false } = {}) {
   const lines = [`**Embodiment map**${eventId ? ` — event \`${eventId}\`` : ''}`, ''];
   lines.push('| Agent | Played by |');
   lines.push('|---|---|');
   for (const a of assignments) lines.push(`| ${a.agentName} (${a.agentId}) | \`${a.provider || 'none'}\` |`);
   for (const e of excluded) lines.push(`| ${e.agentName} | _not shuffled — ${e.reason}_ |`);
+
+  // The dropped pool entries are rendered INTO the record, not just logged.
+  // A meeting record is where the Lead QA reads the sample she is comparing
+  // across, and a sample that was narrowed has to say so on the same page as
+  // the comparison — otherwise the narrowing lives only in a Worker log nobody
+  // reads next to the conclusion.
+  if (poolExcluded.length) {
+    lines.push('');
+    lines.push(`_Pool narrowed: ${poolExcluded.length} provider(s) excluded from the shuffle — `
+      + `${poolExcluded.map((p) => `\`${p.provider}\` (${p.kind || 'unregistered'}: ${p.reason})`).join(', ')}. `
+      + 'Embodiment is a chat-only instrument; an image or embeddings provider has no voice to compare._');
+  }
+  if (poolEmpty) {
+    lines.push('');
+    lines.push('_**No usable provider in the pool** — every persona above shows `none`. '
+      + 'This map measures NOTHING and must not be read as evidence of cross-embodiment behaviour._');
+  }
   return lines.join('\n');
 }
 
@@ -715,6 +981,7 @@ export async function routeTask({
   rng = Math.random,
   asOf = new Date(),
   personas = null,
+  role = null,
   ...callOpts
 }) {
   const attempts = [];
@@ -726,12 +993,13 @@ export async function routeTask({
 
   const resolved = resolveLane(routingConfig, taskType, {
     rng,
+    role,
     knownCapFirst: (id) => hasKnownCap(tokenEconomy, id),
   });
 
   if (!resolved.routable) {
     console.warn(`[routing] task "${taskType}" is not routable: ${resolved.reason}`);
-    return { ok: false, routed: false, lane: taskType, provider: null, result: null, reason: resolved.reason, attempts };
+    return { ok: false, routed: false, lane: taskType, provider: null, result: null, reason: resolved.reason, attempts, role: resolved.role };
   }
 
   // Controlled-random lanes log their embodiment map before calling, so the
@@ -761,9 +1029,34 @@ export async function routeTask({
 
     let responded = false;
     let responseUsage = null;
+    /*
+     * `responseError` added 2026-08-10, and it is not a convenience.
+     *
+     * Until this line existed, a failed provider call came back as
+     * `{ outcome: 'failed', reason: 'provider_error' }` and the provider's own
+     * message — the status, the code, the sentence naming a retired model —
+     * existed only in a console.warn nobody reads at the moment they need it.
+     * That is AD-030's central lesson turned on this router:
+     *
+     *   A silent fallback converts every upstream failure into the same
+     *   symptom. The response body is the only thing that discriminates a dead
+     *   key from a dead model, and a fallback that discards it has destroyed
+     *   the evidence needed to diagnose it.
+     *
+     * It was found the first time this router was asked to make a real image:
+     * the lane reported `provider_error`, which is true of a bad model ID, a
+     * quota refusal, a missing binding and a transport failure alike — four
+     * different fixes behind one word. The attempt trail now carries the
+     * message, truncated, so a supervised test can read it from the trigger's
+     * own response instead of racing a log tail.
+     */
+    let responseError = null;
+    let responseStatus = null;
     const onResponse = (info) => {
       responded = true;
       responseUsage = info?.usage ?? null;
+      if (info?.error) responseError = String(info.error).slice(0, 300);
+      if (info?.status != null) responseStatus = info.status;
     };
 
     const result = await provider.invoke(env, { ...callOpts, onResponse });
@@ -799,6 +1092,48 @@ export async function routeTask({
      * caught by this.
      */
     const emptyChat = !!result && resolved.kind === 'chat' && !String(result.text || '').trim();
+
+    /* ── AN EMPTY IMAGE IS NOT A SUCCESS EITHER  (added 2026-08-10) ────────
+     *
+     * The same guard, one kind over, added IN THE SAME COMMIT as the image lane
+     * rather than after an incident. That timing is the whole point: the chat
+     * version of this check was written five days after `finishReason` was added
+     * for exactly that purpose and never read, and it took a supervised test on
+     * the live judgment lane to find it. An image provider returning a
+     * well-formed envelope with zero bytes in it is the identical shape, and the
+     * consequence is worse — an empty asset committed to a repo with a
+     * provenance note attached looks, to every later reader, like a real asset
+     * the Designer made.
+     *
+     * Zero bytes is the signal, not `finishReason`: neither provider reliably
+     * reports a finish reason for images (the Workers AI binding is not an HTTP
+     * response this code sees), so a guard that waited for one would never fire.
+     * `finishReason` is still reported in the reason string when a provider does
+     * supply it, because it is the only thing that distinguishes a refusal from
+     * a truncation.
+     */
+    const emptyImage = !!result && resolved.kind === 'image' && !(result.bytes > 0 && String(result.base64 || '').length > 0);
+
+    if (emptyImage) {
+      await recordProviderCall(env, providerId, {
+        confirmed: true,
+        inputTokens: result.usage?.inputTokens ?? 0,
+        outputTokens: result.usage?.outputTokens ?? 0,
+        asOf,
+        period: capFor(tokenEconomy, providerId).period ?? 'day',
+      });
+      attempts.push({ provider: providerId, outcome: 'failed', reason: 'empty_image' });
+      console.warn(
+        `[routing] ${taskType}: ${providerId} returned an empty image `
+        + `(bytes=${result.bytes ?? 0}, finishReason=${result.finishReason ?? 'null'}) — refusing. `
+        + 'An empty asset with a provenance note reads, later, as a real asset.'
+      );
+      // No `continue` past a second candidate here in practice: a `roles` lane
+      // resolves to exactly one provider, so this exits the loop into the
+      // all_candidates_exhausted return. A ROLE DOES NOT DEGRADE TO THE OTHER
+      // ROLE — see config/model-routing.json's image lane.
+      continue;
+    }
 
     if (emptyChat) {
       // The provider answered and spent real tokens — record them on ITS
@@ -837,6 +1172,8 @@ export async function routeTask({
         reason: null,
         attempts,
         embodiment,
+        kind: resolved.kind,
+        role: resolved.role,
       };
     }
 
@@ -849,11 +1186,21 @@ export async function routeTask({
       asOf,
       period: countPeriod,
     });
-    attempts.push({ provider: providerId, outcome: 'failed', reason: responded ? 'provider_error' : 'no_response' });
-    console.warn(`[routing] ${taskType}: ${providerId} returned no result — degrading`);
+    attempts.push({
+      provider: providerId,
+      outcome: 'failed',
+      reason: responded ? 'provider_error' : 'no_response',
+      // The evidence, carried rather than logged and lost. See onResponse above.
+      status: responseStatus,
+      providerMessage: responseError,
+    });
+    console.warn(`[routing] ${taskType}: ${providerId} returned no result — degrading${responseError ? ` (${responseError})` : ''}`);
   }
 
-  console.warn(`[routing] ${taskType}: every candidate denied or failed — skipping, not failing`);
+  console.warn(
+    `[routing] ${taskType}: every candidate denied or failed — skipping, not failing`
+    + (resolved.mode === 'roles' ? `. This is a ROLES lane: role "${resolved.role}" has exactly one provider and does NOT degrade to another role.` : '')
+  );
   return {
     ok: false,
     routed: true,
@@ -863,5 +1210,7 @@ export async function routeTask({
     reason: 'all_candidates_exhausted',
     attempts,
     embodiment,
+    kind: resolved.kind,
+    role: resolved.role,
   };
 }

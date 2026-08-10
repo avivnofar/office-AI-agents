@@ -139,3 +139,177 @@ export function normalizeOpenAiChat({ data, res, source }) {
     rateLimit: parseRateLimitHeaders(res),
   };
 }
+
+/* ────────────────────────────────────────────────────────────────────────
+ * IMAGE PROVIDERS (added 2026-08-10, plan 5.1)
+ *
+ * The Designer (agent 9) is the office's only artist and the bible has said
+ * since 2026-08-05 that *"she generates visual assets through the office's
+ * image-capable providers, always leaving a provenance note (model, date)"*.
+ * No image-capable provider existed anywhere in this repo until this date.
+ * Documentation asserted a capability and no code path supplied it — the same
+ * shape as the unwired gates in ARCHITECTURAL-DECISIONS.md §7, one level up
+ * from code: **a role that was never activated rather than a gate never
+ * called.**
+ *
+ * These two helpers live here, beside normalizeOpenAiChat(), for the reason
+ * this module exists at all: the thing that must not diverge between two
+ * clients is the SHAPE of what they hand back. An image envelope that differs
+ * between providers puts a provider-specific branch into every consumer, and
+ * the provenance note is a bible requirement — one renderer, not two that
+ * drift.
+ * ──────────────────────────────────────────────────────────────────────── */
+
+/**
+ * The envelope EVERY image provider returns, so a caller stays provider-blind
+ * exactly as it does for chat.
+ *
+ * `base64` is the payload and it is deliberately the ONLY representation. The
+ * two providers hand back bytes two different ways — Cloudflare's flux models
+ * return a JSON body with a base64 string, the SDXL family returns a raw PNG
+ * stream, and Gemini returns inline data parts — and a consumer that had to
+ * know which would have to know which provider answered. Base64 is also what
+ * the GitHub Contents API wants, so the one place this is written to a repo
+ * needs no re-encoding step that could corrupt it.
+ *
+ * `finishReason` mirrors the chat envelope on purpose. It was added to the chat
+ * envelope for one stated purpose, was never read for five days, and let an
+ * empty answer through as a success (task-router.js routeTask(), fixed
+ * 2026-08-10). The image path gets the same field AND its consumer in the same
+ * commit — an empty image is checked in routeTask() beside the empty answer.
+ */
+export function imageEnvelope({
+  base64,
+  source,
+  model,
+  mimeType = 'image/png',
+  finishReason = null,
+  usage = null,
+  rateLimit = null,
+  revisedPrompt = null,
+}) {
+  const b64 = String(base64 || '');
+  // Padding-aware, because the byte count is what routeTask()'s empty-image
+  // guard tests and an off-by-two on a decorative field would be invisible.
+  const padding = b64.endsWith('==') ? 2 : (b64.endsWith('=') ? 1 : 0);
+  return {
+    base64: b64,
+    bytes: b64 ? Math.max(0, Math.floor((b64.length * 3) / 4) - padding) : 0,
+    mimeType,
+    model: model || null,
+    source,
+    finishReason,
+    usage,
+    rateLimit,
+    revisedPrompt,
+    // No `text` field, deliberately. routeTask()'s empty-answer guard keys on
+    // `resolved.kind === 'chat'`, so an image result must not carry a `text`
+    // that a future edit could make that guard reach for.
+  };
+}
+
+/**
+ * The image type read from the BYTES, not asserted by the caller.
+ *
+ * ── WHY THIS EXISTS: A FILE WHOSE EXTENSION LIED ─────────────────────────
+ *
+ * Found 2026-08-10, on the very first asset the office ever committed.
+ * `cf-image-client.js` hardcoded `mimeType: 'image/png'` — reasonable, since
+ * every Workers AI image model is documented as returning PNG — and the file
+ * landed in back-office as `2026-08-10-office-mark.png` carrying `ff d8 ff e0
+ * ... JFIF`. It was a JPEG. The bytes were perfect; the NAME was wrong.
+ *
+ * It is a small bug with a shape this project keeps meeting: **a value asserted
+ * by the code that wanted it rather than read from the thing that produced it.**
+ * Nothing would have failed. The image opens in every viewer, because viewers
+ * sniff. It would have been discovered by whichever tool eventually did not —
+ * a build step, a browser with a strict `Content-Type`, or a reviewer wondering
+ * why a PNG was 76KB.
+ *
+ * The Workers AI binding returns bytes and no content type, so the type cannot
+ * be *asked for*. It can be *read*. Returns null when the bytes match nothing
+ * known, and null means UNKNOWN — the caller then says so instead of picking a
+ * plausible extension, which is the whole point.
+ */
+export function sniffImageMime(base64) {
+  const b64 = String(base64 || '');
+  if (!b64) return null;
+  // 12 bytes is enough for every signature below and costs one small decode.
+  let head;
+  try {
+    head = atob(b64.slice(0, 24));
+  } catch {
+    return null;
+  }
+  const b = [];
+  for (let i = 0; i < head.length; i += 1) b.push(head.charCodeAt(i));
+
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'image/png';
+  if (b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return 'image/gif';
+  if (b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46
+      && b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp';
+  if (b[0] === 0x3c && (b[1] === 0x3f || b[1] === 0x73)) return 'image/svg+xml'; // "<?" or "<s"
+  return null;
+}
+
+/** The file extension for a sniffed mime type. Returns 'bin' for an unknown
+ *  type rather than guessing 'png': a file named `.bin` is obviously wrong and
+ *  gets looked at, while a file named `.png` that is not one gets trusted. */
+export function extensionForMime(mimeType) {
+  switch (mimeType) {
+    case 'image/png': return 'png';
+    case 'image/jpeg': return 'jpg';
+    case 'image/gif': return 'gif';
+    case 'image/webp': return 'webp';
+    case 'image/svg+xml': return 'svg';
+    default: return 'bin';
+  }
+}
+
+/**
+ * The provenance note the bible requires on every asset.
+ *
+ * *"always leaving a provenance note (model, date)"* — AGENTS-CHARACTER-CORE-v2.md
+ * AGENT 9, and plan item 5.2 repeats it as *"a one-line provenance note (model,
+ * prompt date)"*. It is rendered by ONE function so an asset committed by the
+ * scheduled path and an asset committed by a supervised trigger cannot carry
+ * two different shapes of note.
+ *
+ * It records the PROMPT as well as the model and the date, which is more than
+ * the bible asks for and is the part that makes the note usable: a model name
+ * and a date tell you what made an asset and not what it was asked for, so the
+ * asset cannot be regenerated or judged against its brief. `role` is recorded
+ * because this lane has two of them and *which role produced this* is the fact
+ * a reviewer needs first.
+ */
+export function renderAssetProvenance({
+  assetPath,
+  prompt,
+  model,
+  provider,
+  role,
+  date,
+  agent = 'Agent 9 — The Designer',
+  bytes = null,
+  note = null,
+}) {
+  const lines = [
+    `# Provenance — ${assetPath}`,
+    '',
+    `- **Asset:** \`${assetPath}\``,
+    `- **Generated by:** ${agent}`,
+    `- **Model:** \`${model}\` (provider \`${provider}\`, image lane role \`${role}\`)`,
+    `- **Date:** ${date}`,
+    `- **Prompt:** ${String(prompt || '').replace(/\s+/g, ' ').trim()}`,
+  ];
+  if (bytes !== null) lines.push(`- **Size:** ${bytes} bytes`);
+  if (note) lines.push(`- **Note:** ${note}`);
+  lines.push('');
+  lines.push('*Required by `AGENTS-CHARACTER-CORE-v2.md` AGENT 9 — "always leaving a'
+    + ' provenance note (model, date)" — and by plan item 5.2. Rendered by'
+    + ' `office-AI-agents/workers/provider-common.js` `renderAssetProvenance()`, which is'
+    + ' the only renderer, so a scheduled asset and a supervised one cannot carry'
+    + ' two different shapes of note.*');
+  return lines.join('\n');
+}

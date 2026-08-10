@@ -1004,6 +1004,131 @@ check('A12 — all four are meeting types the engine can actually run',
 check('A12 — all four get the office context (a meeting that cannot see the office decides nothing)',
   /OFFICE_CONTEXT_MEETINGS = new Set\(\[\s*'daily_standup', 'closing_qa_review', 'weekly', 'monthly'/.test(meSrc11));
 
+/* ════════════════════════════════════════════════════════════════════════
+ * §13. THE OUTPUT CENSUS (added 2026-08-10)
+ *
+ * `computeWorkflowMetrics()`'s measure 2 already asked "who has not worked" and
+ * measured it from ACTIVITY rows — every Q&A ask counts. The Designer produced
+ * nothing her role is for, for two months, and never once read as idle, because
+ * her asks kept the row warm. THE CENSUS IS THE COMPLETION: output, over a
+ * stated window, BY KIND.
+ *
+ * The scenarios below are built around that exact case and carry [FAILS-OLD]
+ * where they distinguish the new measure from the old one — because a test that
+ * merely describes a new function is not a test that catches the bug it was
+ * written for.
+ * ════════════════════════════════════════════════════════════════════════ */
+console.log('\n--- §13. The output census: OUTPUT by kind, not activity ---');
+
+const { computeOutputCensus, renderOutputCensus } = meetingEngine;
+const CENSUS_DAY = 24 * 60 * 60 * 1000;
+const CENSUS_NOW = Date.parse('2026-08-10T12:00:00Z');
+
+check('§13 — computeOutputCensus is exported (the capability manifest names this symbol)',
+  typeof computeOutputCensus === 'function');
+
+/* THE DESIGNER'S CASE, as it actually stood on 2026-08-09: plenty of Q&A output,
+ * none of it a visual_asset. */
+const designerCase = computeOutputCensus({
+  rosterIds: [9, 12],
+  outputByAgent: {
+    9: { lastAt: CENSUS_NOW - (1 * CENSUS_DAY), kinds: { case_answer: 40, gap_hebrew: 3 } },
+    12: { lastAt: CENSUS_NOW - (2 * CENSUS_DAY), kinds: { weekly: 1 } },
+  },
+  roleKinds: { 9: ['visual_asset', 'front_publication', 'design_flag'], 12: ['dispatch', 'weekly', 'board_task'] },
+  windowDays: 7,
+  now: CENSUS_NOW,
+});
+
+/** VERBATIM transcription of the old measure's decision: last ACTIVITY, any kind,
+ *  flagged only when a whole day has passed. */
+const oldIdleTest = (lastAt) => Math.floor((CENSUS_NOW - lastAt) / CENSUS_DAY) >= 1;
+check('§13 [FAILS-OLD] the old measure flagged the Designer only for BEING QUIET, on any activity at all',
+  oldIdleTest(CENSUS_NOW - (1 * CENSUS_DAY)) === true);
+check('§13 [FAILS-OLD] ...and one question that day cleared it, whatever she had actually produced',
+  oldIdleTest(CENSUS_NOW - (2 * 60 * 60 * 1000)) === false);
+
+const nine = designerCase.agents.find((a) => a.agentId === 9);
+check('§13 [new] the Designer is PRODUCING_OFF_ROLE — producing, none of it her job',
+  nine.verdict === 'PRODUCING_OFF_ROLE', JSON.stringify(nine));
+check('§13 [new] ...and she appears in the offRole list, which is what a meeting reads',
+  designerCase.offRole.map((a) => a.agentId).includes(9));
+check('§13 [new] ...and she is NOT in `producing`, so a healthy-looking count cannot absorb her',
+  !designerCase.producing.map((a) => a.agentId).includes(9));
+check('§13 [new] the Workflow, producing a kind his role IS for, reads PRODUCING',
+  designerCase.agents.find((a) => a.agentId === 12).verdict === 'PRODUCING');
+check('§13 [new] the rendered census names the off-role state as the one the old measure could not see',
+  /THIS IS THE STATE THE OLD MEASURE COULD NOT SEE/.test(renderOutputCensus(designerCase)));
+
+/* NEVER vs SILENT — two different facts, and only one is alarming. */
+const neverVsSilent = computeOutputCensus({
+  rosterIds: [1, 2, 13],
+  outputByAgent: {
+    1: { lastAt: CENSUS_NOW - (30 * CENSUS_DAY), kinds: { case_answer: 5 } },
+    2: { lastAt: CENSUS_NOW - (1 * CENSUS_DAY), kinds: { case_answer: 5 } },
+  },
+  roleKinds: { 1: ['case_answer'], 2: ['case_answer'], 13: ['finding', 'security_review'] },
+  windowDays: 7,
+  now: CENSUS_NOW,
+});
+check('§13 — an agent with NO output row ever reads NEVER, not "0 days ago"',
+  neverVsSilent.agents.find((a) => a.agentId === 13).verdict === 'NEVER'
+  && neverVsSilent.agents.find((a) => a.agentId === 13).days === null);
+check('§13 — an agent that produced 30 days ago reads SILENT, with the day count',
+  neverVsSilent.agents.find((a) => a.agentId === 1).verdict === 'SILENT'
+  && neverVsSilent.agents.find((a) => a.agentId === 1).days === 30);
+check('§13 — NEVER and SILENT are reported in separate lists (different problems, different responses)',
+  neverVsSilent.never.length === 1 && neverVsSilent.silent.length === 1);
+
+/* "Could not check" must never share a number with "checked and fine" — this
+ * project's single most-repeated defect shape. */
+const noRoleKinds = computeOutputCensus({
+  rosterIds: [5],
+  outputByAgent: { 5: { lastAt: CENSUS_NOW, kinds: { case_answer: 2 } } },
+  roleKinds: {},
+  windowDays: 7,
+  now: CENSUS_NOW,
+});
+check('§13 — an agent with NO declared output_kinds is reported as uncheckable, not as passing',
+  noRoleKinds.uncheckable.length === 1 && noRoleKinds.offRole.length === 0,
+  JSON.stringify(noRoleKinds.agents));
+check('§13 — ...and its note says the off-role check could NOT run rather than that it passed',
+  /could NOT run/.test(noRoleKinds.agents[0].note || ''));
+check('§13 — ...and the rendered census carries a "could not be checked" section',
+  /COULD NOT BE CHECKED/.test(renderOutputCensus(noRoleKinds)));
+
+/* Dormancy is passed in, never hardcoded. */
+const dormantCensus = computeOutputCensus({
+  rosterIds: [10], outputByAgent: {}, roleKinds: { 10: ['guide_review'] }, now: CENSUS_NOW,
+});
+check('§13 — the Architect is excluded from the alarm lists as deliberately dormant',
+  dormantCensus.never.length === 0 && dormantCensus.dormantExcluded.includes(10));
+check('§13 — ...but he is still IN the per-agent list, so his state is visible rather than hidden',
+  dormantCensus.agents.some((a) => a.agentId === 10 && a.dormant === true));
+
+/* The census must reach a prompt. A measure computed and never rendered is the
+ * defect this whole session is about, and a THIRD instance of it was found HERE
+ * while adding the census: quarterly, semi_yearly and yearly were all in
+ * WORKFLOW_METRICS_MEETINGS and rendered nothing at all. */
+console.log('\n--- §13b. Every meeting that COMPUTES the measures also RENDERS them ---');
+
+const meSrc13 = readFileSync(path.join(root, 'workers/meeting-engine.js'), 'utf8');
+const metricsSet = /WORKFLOW_METRICS_MEETINGS = new Set\(\[([^\]]*)\]/.exec(meSrc13);
+const computeFor = ((metricsSet ? metricsSet[1] : '').match(/'([a-z_]+)'/g) || []).map((x) => x.replace(/'/g, ''));
+check('§13b — WORKFLOW_METRICS_MEETINGS still names six meeting types', computeFor.length === 6, computeFor.join(','));
+for (const m of computeFor) {
+  const builder = new RegExp('^  ' + m + ': \\(data\\) =>([\\s\\S]*?)\\n  [a-z_]+: \\(data\\) =>', 'm').exec(meSrc13)
+    || new RegExp('^  ' + m + ': \\(data\\) =>([\\s\\S]*?)\\n\\};', 'm').exec(meSrc13);
+  check('§13b — "' + m + '" renders data.workflowMetrics (it COMPUTES them; computing into a void is §7.2)',
+    !!builder && /data\.workflowMetrics/.test(builder[1]), m);
+  check('§13b — "' + m + '" renders data.outputCensus too',
+    !!builder && /data\.outputCensus/.test(builder[1]), m);
+}
+check('§13b — the census draws its role kinds from the SAME manifest the capability audit reads',
+  /capability-manifest\.json/.test(meSrc13) && /output_kinds/.test(meSrc13));
+check('§13b — the fix records WHY membership and rendering must agree',
+  /computed, for three meeting types,[\s\S]{0,24}and consumed by nobody/.test(meSrc13));
+
 console.log(`\n${pass}/${pass + fail} checks passed.`);
 if (fail) { console.log(`${fail} FAILED`); process.exit(1); }
 process.exit(0);

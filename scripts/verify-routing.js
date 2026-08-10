@@ -31,9 +31,13 @@ import {
   capFor,
   dailyCapFor,
   hasKnownCap,
+  LANE_KINDS,
+  EMBODIMENT_KIND,
   SIM_STATE_KEY,
   ROUTING_FLAG,
 } from '../workers/task-router.js';
+
+import { DEFAULT_MODEL as cfImageDefaultModel } from '../workers/cf-image-client.js';
 
 const require = createRequire(import.meta.url);
 const routingConfig = require('../config/model-routing.json');
@@ -62,7 +66,7 @@ globalThis.fetch = (...args) => {
 /** Swaps every registry provider for a stub that counts invocations. */
 const INVOCATIONS = [];
 const REAL_INVOKE = {};
-function stubAllProviders({ failing = [], emptyText = [] } = {}) {
+function stubAllProviders({ failing = [], emptyText = [], emptyImage = [] } = {}) {
   INVOCATIONS.length = 0;
   for (const [id, p] of Object.entries(PROVIDER_REGISTRY)) {
     if (!(id in REAL_INVOKE)) REAL_INVOKE[id] = p.invoke;
@@ -71,6 +75,15 @@ function stubAllProviders({ failing = [], emptyText = [] } = {}) {
       if (failing.includes(id)) {
         opts.onResponse?.({ status: 500 });
         return null;
+      }
+      // An IMAGE envelope with zero bytes in it — the image-lane twin of the
+      // empty chat answer below, and the shape that would put an empty asset in
+      // a repo with a provenance note attached. See §8d.
+      if (emptyImage.includes(id)) {
+        return { base64: '', bytes: 0, mimeType: 'image/png', model: 'stub-model', source: id, finishReason: null, usage: {}, rateLimit: {} };
+      }
+      if (p.kind === 'image') {
+        return { base64: 'aGVsbG8=', bytes: 5, mimeType: 'image/png', model: 'stub-model', source: id, finishReason: null, usage: {}, rateLimit: {} };
       }
       // A 200 that carries NO CONTENT. This is what Cerebras' reasoning model
       // actually returns when max_tokens is spent on thinking — a well-formed
@@ -616,6 +629,322 @@ check('the routed conversation excluded the Architect from the map',
   convRouted.embodiment.excluded[0].reason === 'architect_never_shuffled');
 check('task-router.js documents that embodiment is a measurement instrument, not a fallback',
   /MEASUREMENT INSTRUMENT, NOT A FALLBACK/.test(taskRouterSrc));
+
+/* ════════════════════════════════════════════════════════════════════════
+ * 8. THE IMAGE LANE (added 2026-08-10, plan 5.1)
+ *
+ * The Designer (agent 9) had existed for two months and had never worked. Not
+ * blocked — she never had the means. `AGENTS-CHARACTER-CORE-v2.md` AGENT 9 says
+ * she generates visual assets through the office's image-capable providers;
+ * there was no image-capable provider anywhere in this repo. A NEW VARIANT of
+ * the §7 defect family: not a gate that is never called, but A ROLE THAT WAS
+ * NEVER ACTIVATED.
+ *
+ * Three things are proved here, and two of them carry [FAILS-OLD] scenarios
+ * because they close real holes rather than describe a new feature:
+ *
+ *   8a  the lane resolves BY ROLE, and a role does not degrade to the other role
+ *   8b  [FAILS-OLD] a routable lane must DECLARE its kind — the old wrong-kind
+ *       check had an opt-out: omit the field and any provider was accepted
+ *   8c  [FAILS-OLD] the embodiment shuffle RECORDS what it drops for wrong kind
+ *   8d  an empty image is not a success, the same way an empty answer is not
+ * ════════════════════════════════════════════════════════════════════════ */
+console.log('\n=== 8. The image lane — the Designer finally has means ===');
+
+/* ── 8a. Roles, not a primary and a backup ──────────────────────────────── */
+console.log('\n--- 8a. The image lane resolves by ROLE, and a role never degrades ---');
+
+const imageLane = routingConfig.lanes.image;
+check('an `image` lane exists at all (it did not, for two months)', !!imageLane);
+check('the image lane declares mode "roles", not primary/backup',
+  imageLane.mode === 'roles', String(imageLane.mode));
+check('the image lane declares kind "image"', imageLane.kind === 'image', String(imageLane.kind));
+check('"image" is a recognised lane kind', LANE_KINDS.includes('image'), LANE_KINDS.join(','));
+
+const draft = resolveLane(routingConfig, 'image', { role: 'draft' });
+const polish = resolveLane(routingConfig, 'image', { role: 'polish' });
+check('role "draft" is routable', draft.routable === true, draft.reason || '');
+check('role "draft" resolves to Cloudflare (the owner\'s default)',
+  draft.candidates[0] === 'cloudflare-images', draft.candidates.join(','));
+check('role "polish" is routable', polish.routable === true, polish.reason || '');
+check('role "polish" resolves to Gemini (final touches)',
+  polish.candidates[0] === 'gemini-images', polish.candidates.join(','));
+
+// The heart of it. If a role resolved to two candidates, a Cloudflare failure
+// would send a DRAFT to the scarcer polish tier and a polish request would be
+// answered by a fresh draft — a plausible image that is not what was asked for.
+check('role "draft" has EXACTLY ONE candidate — it does not degrade to the polish provider',
+  draft.candidates.length === 1, draft.candidates.join(','));
+check('role "polish" has EXACTLY ONE candidate — it does not degrade to the draft provider',
+  polish.candidates.length === 1, polish.candidates.join(','));
+check('the two roles resolve to DIFFERENT providers (or the split means nothing)',
+  draft.candidates[0] !== polish.candidates[0]);
+check('the lane carries on_unavailable:"fail" — no substitution across roles',
+  imageLane.on_unavailable === 'fail', String(imageLane.on_unavailable));
+
+check('an absent role falls back to the lane\'s declared default_role',
+  resolveLane(routingConfig, 'image').role === imageLane.default_role
+  && resolveLane(routingConfig, 'image').candidates[0] === imageLane.roles[imageLane.default_role],
+  JSON.stringify(resolveLane(routingConfig, 'image')));
+check('...and that default is "draft" (Cloudflare by default — owner decision)',
+  imageLane.default_role === 'draft', String(imageLane.default_role));
+
+// An UNRECOGNISED role is refused, never quietly served by the default. The
+// default would be this router deciding a polish request may get a draft.
+const badRole = resolveLane(routingConfig, 'image', { role: 'retouch' });
+check('an unrecognised role is REFUSED, not served by the default',
+  badRole.routable === false && badRole.reason === 'unknown_lane_role:retouch', JSON.stringify(badRole));
+
+const noDefault = JSON.parse(JSON.stringify(routingConfig));
+delete noDefault.lanes.image.default_role;
+check('a roles lane with no role given and no default is refused rather than guessed at',
+  resolveLane(noDefault, 'image').reason === 'role_not_specified_and_no_default',
+  resolveLane(noDefault, 'image').reason);
+
+check('both image providers are in the registry with kind "image"',
+  PROVIDER_REGISTRY['cloudflare-images']?.kind === 'image'
+  && PROVIDER_REGISTRY['gemini-images']?.kind === 'image');
+check('neither image provider is reachable from ANY chat lane',
+  EXPECTED.filter(([l]) => l !== 'embeddings').every(([lane]) =>
+    !resolveLane(routingConfig, lane).candidates.some((id) => PROVIDER_REGISTRY[id].kind === 'image')));
+check('the conversation pool contains no image provider',
+  !routingConfig.lanes.conversation.pool.some((id) => PROVIDER_REGISTRY[id]?.kind === 'image'),
+  routingConfig.lanes.conversation.pool.join(','));
+
+// Both directions of the kind guard, each proved by pointing a lane the wrong
+// way on purpose — the same technique the Anthropic barrier is proved with.
+const chatLaneWithImageProvider = JSON.parse(JSON.stringify(routingConfig));
+chatLaneWithImageProvider.lanes.judgment.primary = 'cloudflare-images';
+const cliResolved = resolveLane(chatLaneWithImageProvider, 'judgment');
+check('a CHAT lane pointed at an image provider is REFUSED',
+  cliResolved.routable === false, JSON.stringify(cliResolved));
+check('...and refuses specifically as provider_kind_mismatch, naming the kind it got',
+  cliResolved.reason.startsWith('provider_kind_mismatch') && /image/.test(cliResolved.reason), cliResolved.reason);
+
+const imageLaneWithChatProvider = JSON.parse(JSON.stringify(routingConfig));
+imageLaneWithChatProvider.lanes.image.roles.draft = 'groq';
+const ilcResolved = resolveLane(imageLaneWithChatProvider, 'image', { role: 'draft' });
+check('the IMAGE lane pointed at a chat provider is REFUSED (the guard runs both ways)',
+  ilcResolved.routable === false && ilcResolved.reason.startsWith('provider_kind_mismatch'), JSON.stringify(ilcResolved));
+
+const imageLaneWithEmbeddings = JSON.parse(JSON.stringify(routingConfig));
+imageLaneWithEmbeddings.lanes.image.roles.polish = 'cohere';
+check('the image lane pointed at the EMBEDDINGS provider is refused too',
+  resolveLane(imageLaneWithEmbeddings, 'image', { role: 'polish' }).routable === false);
+
+/* ── 8b. A routable lane must declare its kind  [FAILS-OLD] ──────────────
+ *
+ * The wrong-kind check was written `if (lane.kind && PROVIDER_REGISTRY[id].kind
+ * !== lane.kind)`. A lane that simply OMITTED `kind` therefore accepted any
+ * provider in the registry — a guard with an opt-out nobody documented.
+ *
+ * It was harmless while every provider was chat or embeddings. Adding an image
+ * provider made it a real hazard TWICE OVER: a kind-less text lane pointed at an
+ * image model would resolve and route, AND routeTask()'s empty-answer guard keys
+ * on `resolved.kind === 'chat'`, so the same missing field that let the wrong
+ * provider in also switched off the check that catches what it returns.
+ *
+ * Proved against a VERBATIM transcription of the old condition rather than
+ * described, per this repo's standing rule: *a test that describes a fix is not a
+ * test that catches a bug.* */
+console.log('\n--- 8b. A routable lane must DECLARE its kind  [FAILS-OLD] ---');
+
+const kindlessLane = JSON.parse(JSON.stringify(routingConfig));
+kindlessLane.lanes.judgment = { primary: 'cloudflare-images', backup: 'mistral' }; // no `kind`
+
+/** VERBATIM transcription of the pre-change wrong-kind condition. */
+const oldWrongKind = (lane, candidateIds) =>
+  candidateIds.filter((id) => lane.kind && PROVIDER_REGISTRY[id].kind !== lane.kind);
+
+const oldVerdictForKindless = oldWrongKind(kindlessLane.lanes.judgment, ['cloudflare-images', 'mistral']);
+check('[FAILS-OLD] the old condition finds NOTHING wrong with an image provider on a kind-less judgment lane',
+  oldVerdictForKindless.length === 0, JSON.stringify(oldVerdictForKindless));
+check('[FAILS-OLD] ...so the old code would have ROUTED a judgment call to an image model',
+  oldVerdictForKindless.length === 0);
+check('[FAILS-OLD] ...and would ALSO have skipped the empty-answer guard, which keys on kind === "chat"',
+  (kindlessLane.lanes.judgment.kind || null) !== 'chat');
+
+const kindlessResolved = resolveLane(kindlessLane, 'judgment');
+check('[new] a lane with no `kind` is REFUSED as lane_kind_unstated',
+  kindlessResolved.routable === false && kindlessResolved.reason === 'lane_kind_unstated', JSON.stringify(kindlessResolved));
+check('[new] ...and yields zero candidates, so nothing downstream can use it',
+  kindlessResolved.candidates.length === 0);
+
+const bogusKind = JSON.parse(JSON.stringify(routingConfig));
+bogusKind.lanes.judgment.kind = 'multimodal';
+check('[new] an UNRECOGNISED kind is refused rather than treated as chat',
+  resolveLane(bogusKind, 'judgment').reason === 'unknown_lane_kind:multimodal',
+  resolveLane(bogusKind, 'judgment').reason);
+
+check('[new] every routable lane in the SHIPPED config declares a recognised kind',
+  Object.entries(routingConfig.lanes)
+    .filter(([, l]) => l.routable !== false)
+    .every(([, l]) => LANE_KINDS.includes(l.kind)),
+  Object.entries(routingConfig.lanes).filter(([, l]) => l.routable !== false && !LANE_KINDS.includes(l.kind)).map(([k]) => k).join(','));
+
+check('[new] the `lane.kind &&` short-circuit is gone from the wrong-kind check',
+  !/lane\.kind && PROVIDER_REGISTRY\[id\]\.kind !== lane\.kind/.test(taskRouterSrc));
+
+/* ── 8c. The shuffle records what it drops  [FAILS-OLD] ──────────────────
+ *
+ * assignEmbodiment() has always filtered the pool to chat providers. The filter
+ * was correct and SILENT — and a silent filter on a measurement instrument is the
+ * worst place in this repo for one. A five-provider pool containing two image
+ * providers quietly became three, the map still rendered perfectly, and the Lead
+ * QA's cross-embodiment comparison would have drawn conclusions from a narrower
+ * sample than the config said it had. An all-image pool produced `provider: null`
+ * for every persona and a map that looked structurally fine. */
+console.log('\n--- 8c. The embodiment shuffle RECORDS its wrong-kind drops  [FAILS-OLD] ---');
+
+const MIXED_POOL = ['groq', 'cloudflare-images', 'gemini', 'gemini-images', 'cohere'];
+const mixed = assignEmbodiment({ personas: PERSONAS, pool: MIXED_POOL, rng: seededRng(5), eventId: 'evt-mixed' });
+
+/** VERBATIM transcription of the pre-change pool filter. */
+const oldUsable = MIXED_POOL.filter((id) => PROVIDER_REGISTRY[id] && PROVIDER_REGISTRY[id].kind === 'chat');
+check('[FAILS-OLD] the old filter got the RIGHT pool — it was never wrong about which providers to use',
+  JSON.stringify(oldUsable) === JSON.stringify(['groq', 'gemini']), oldUsable.join(','));
+check('[FAILS-OLD] ...but it returned NO record of the three it dropped — nothing anywhere said the sample narrowed',
+  // The old return shape was { eventId, assignments, pool, excluded } and
+  // `excluded` held persona exclusions only. There was no field a caller could
+  // read to learn that 3 of 5 pool entries were discarded.
+  ['eventId', 'assignments', 'pool', 'excluded'].every((k) => k in mixed)
+  && !['eventId', 'assignments', 'pool', 'excluded'].includes('poolExcluded'));
+
+check('[new] the shuffle still uses only chat providers', JSON.stringify(mixed.pool) === JSON.stringify(['groq', 'gemini']), mixed.pool.join(','));
+check('[new] and now RECORDS all three drops in poolExcluded', mixed.poolExcluded.length === 3, JSON.stringify(mixed.poolExcluded));
+check('[new] each drop names the provider AND the kind it actually was',
+  mixed.poolExcluded.every((p) => p.provider && p.kind && p.reason),
+  JSON.stringify(mixed.poolExcluded));
+check('[new] the two image providers are named as image, not lumped in as "other"',
+  mixed.poolExcluded.filter((p) => p.kind === 'image').map((p) => p.provider).sort().join(',') === 'cloudflare-images,gemini-images',
+  JSON.stringify(mixed.poolExcluded));
+check('[new] persona exclusions stay in `excluded` and are not mixed in with provider drops',
+  mixed.excluded.length === 1 && mixed.excluded[0].reason === 'architect_never_shuffled');
+check('[new] an unregistered pool id is recorded too, not silently ignored',
+  assignEmbodiment({ personas: [{ id: 1, name: 'A' }], pool: ['groq', 'not-a-provider'], rng: seededRng(1) })
+    .poolExcluded.some((p) => p.provider === 'not-a-provider' && p.reason === 'not_in_provider_registry'));
+
+// The total collapse: a pool with nothing usable in it. The old code produced a
+// well-formed map full of nulls, which is indistinguishable from a working one.
+const allImage = assignEmbodiment({ personas: PERSONAS, pool: ['cloudflare-images', 'gemini-images'], rng: seededRng(9) });
+check('[new] an all-image pool reports poolEmpty:true rather than a map full of nulls',
+  allImage.poolEmpty === true && allImage.pool.length === 0);
+check('[new] ...and the rendered map SAYS it measures nothing',
+  /measures NOTHING/.test(renderEmbodimentMap(allImage)));
+check('[new] a narrowed (but not empty) map records the narrowing in the RECORD, not only in a log',
+  /Pool narrowed/.test(renderEmbodimentMap(mixed)) && /cloudflare-images/.test(renderEmbodimentMap(mixed)));
+check('[new] a clean pool renders no narrowing note at all (no false alarm)',
+  !/Pool narrowed|measures NOTHING/.test(renderEmbodimentMap(
+    assignEmbodiment({ personas: PERSONAS, pool: routingConfig.lanes.conversation.pool, rng: seededRng(2) })
+  )));
+check('EMBODIMENT_KIND is "chat" — an image model has no voice to compare',
+  EMBODIMENT_KIND === 'chat', EMBODIMENT_KIND);
+check('asking the shuffle for a non-chat kind yields an empty pool',
+  assignEmbodiment({ personas: PERSONAS, pool: routingConfig.lanes.conversation.pool, kind: 'image', rng: seededRng(1) }).poolEmpty === true);
+
+/* ── 8d. An empty image is not a success ────────────────────────────────── */
+console.log('\n--- 8d. An empty image is not a success (the empty-answer guard, one kind over) ---');
+
+stubAllProviders();
+const drafted = await routeTask({
+  env: onEnv({}), taskType: 'image', routingConfig, tokenEconomy, role: 'draft', prompt: 'a logo',
+});
+check('a routed draft returns an image envelope from the draft provider',
+  drafted.ok === true && drafted.provider === 'cloudflare-images' && drafted.result.bytes > 0, JSON.stringify(drafted.attempts));
+check('...and the result reports the lane kind and the role that produced it',
+  drafted.kind === 'image' && drafted.role === 'draft', `${drafted.kind}/${drafted.role}`);
+check('the image result carries NO `text` field, so the empty-answer guard cannot reach for one',
+  !('text' in drafted.result), Object.keys(drafted.result).join(','));
+
+stubAllProviders({ emptyImage: ['cloudflare-images'] });
+const emptyDraft = await routeTask({
+  env: onEnv({}), taskType: 'image', routingConfig, tokenEconomy, role: 'draft', prompt: 'a logo',
+});
+check('a zero-byte image is treated as a FAILED attempt, not a success',
+  emptyDraft.attempts[0].outcome === 'failed' && emptyDraft.attempts[0].reason === 'empty_image',
+  JSON.stringify(emptyDraft.attempts));
+check('...and the lane does NOT silently substitute the other role',
+  emptyDraft.ok === false && emptyDraft.reason === 'all_candidates_exhausted' && emptyDraft.provider === null,
+  JSON.stringify(emptyDraft));
+check('...and the polish provider was never invoked for a failed draft',
+  !INVOCATIONS.includes('gemini-images'), INVOCATIONS.join(','));
+
+/* A polish call carries its text in `instruction`, not `prompt`. This assertion
+ * is the one that caught a real defect on 2026-08-10 before it ever ran live:
+ * the router calls each provider's checkInputWithinCaps() uniformly against the
+ * caller's whole options object, and gemini-image-client's read only `prompt` —
+ * so every legitimate polish call was refused with "no prompt" and the provider
+ * was never reached. A cap check the router calls uniformly must accept every
+ * shape the router can hand it. Kept as two separate checks, because "the lane
+ * did not degrade" passed even while the provider was never invoked at all —
+ * a scenario passing for the wrong reason. */
+stubAllProviders();
+const okPolish = await routeTask({
+  env: onEnv({}), taskType: 'image', routingConfig, tokenEconomy, role: 'polish',
+  instruction: 'make the type larger', inputImages: [{ base64: 'aGk=' }],
+});
+check('a polish call whose text is in `instruction` REACHES the provider (the cap check reads it)',
+  okPolish.ok === true && INVOCATIONS.join(',') === 'gemini-images', `${okPolish.reason || 'ok'} / invoked=${INVOCATIONS.join(',')}`);
+check('...and the prompt-only cap refusal is gone from the polish path',
+  !(okPolish.attempts || []).some((a) => a.outcome === 'refused_caps'), JSON.stringify(okPolish.attempts));
+
+stubAllProviders({ failing: ['gemini-images'] });
+const failedPolish = await routeTask({
+  env: onEnv({}), taskType: 'image', routingConfig, tokenEconomy, role: 'polish',
+  instruction: 'make the type larger', inputImages: [{ base64: 'aGk=' }],
+});
+check('a failed POLISH does not fall back to a fresh draft',
+  failedPolish.ok === false && failedPolish.reason === 'all_candidates_exhausted');
+check('...and the draft provider was never invoked for it',
+  INVOCATIONS.join(',') === 'gemini-images', INVOCATIONS.join(','));
+
+/* ── 8e. A DEFAULT PARAMETER IS NOT A NULL GUARD ─────────────────────────
+ *
+ * Found by the first real image call this router ever made, 2026-08-10, which
+ * came back `5007: No such model null or task`. The catalog-verified model ID was
+ * sitting in the client the whole time; the trigger normalises absent body fields
+ * to `null` (`body.imageModel || null`), the registry passed that straight
+ * through, and a JS default parameter fires on `undefined` and not on `null`. So
+ * the verified default was overwritten by an absent request field.
+ *
+ * This asserts on the REGISTRY's passthrough rather than on a client, because the
+ * registry is where the coercion has to happen — every optional field a caller may
+ * omit crosses that boundary. Checked against the real invoke functions, with a
+ * fake AI binding that records what model it was handed. */
+console.log('\n--- 8e. An absent request field must not overwrite a verified default ---');
+
+for (const [id, invoke] of Object.entries(REAL_INVOKE)) PROVIDER_REGISTRY[id].invoke = invoke;
+
+let handedModel = 'NOT-CALLED';
+const recordingEnv = {
+  ...fakeEnv({ enabled: true }),
+  AI: { run: async (model) => { handedModel = model; return { image: 'aGVsbG8=' }; } },
+};
+await PROVIDER_REGISTRY['cloudflare-images'].invoke(recordingEnv, {
+  prompt: 'a logo', imageModel: null, steps: null, negativePrompt: null, agentId: 9,
+});
+check('a null `imageModel` from a caller does NOT reach the provider as null',
+  handedModel !== null && handedModel !== 'null', String(handedModel));
+check('...it falls back to the CATALOG-VERIFIED default model instead',
+  handedModel === cfImageDefaultModel, `${handedModel} vs ${cfImageDefaultModel}`);
+check('...and the shipped config names that same model (one fact, two copies, asserted equal)',
+  tokenEconomy.providers.cloudflare_images.default_model === cfImageDefaultModel,
+  `${tokenEconomy.providers.cloudflare_images.default_model} vs ${cfImageDefaultModel}`);
+check('every optional image passthrough in the registry is null-coerced, not passed raw',
+  (taskRouterSrc.match(/opts\.(imageModel|steps|negativePrompt) \?\? undefined/g) || []).length >= 4,
+  String((taskRouterSrc.match(/opts\.(imageModel|steps|negativePrompt) \?\? undefined/g) || []).length));
+
+// The gate still governs the new lane. A lane added after the switch shipped is
+// exactly the shape that gets forgotten by a kill switch.
+stubAllProviders();
+const imageOff = await routeTask({
+  env: fakeEnv({ enabled: false }), taskType: 'image', routingConfig, tokenEconomy, role: 'draft', prompt: 'a logo',
+});
+check('the image lane obeys routing_enabled like every other lane',
+  imageOff.ok === false && imageOff.reason === 'routing_disabled', JSON.stringify(imageOff));
+check('no image provider was invoked while the switch was off', INVOCATIONS.length === 0, INVOCATIONS.join(','));
+
+check('nothing in the image-lane tests reached the network', NETWORK_TRIPWIRE.length === 0, NETWORK_TRIPWIRE.join(','));
 
 /* ── 7. Config integrity ────────────────────────────────────────────────── */
 console.log('\n--- Config integrity ---');
