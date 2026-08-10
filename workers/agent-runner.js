@@ -94,6 +94,15 @@ import {
   ownerChannelEnabled, notifyOwner, selectNotificationItems, recentFailures, OWNER_ISSUE_LABEL,
 } from './owner-notify.js';
 import { improvementLoopEnabled } from './improvement-loop.js';
+import {
+  learningLoopEnabled, writeActiveContextAmendment, writeJournalEntry, appendAdaptation,
+} from './context-editor.js';
+import {
+  proposeChange, recordProbationAction, probationsDueForDecision, openProbationsForAgent,
+  applyDecision, applyMissedMeetingFall, PROBATION_ACTIONS_TARGET, MAX_CONCURRENT_PER_AGENT,
+} from './probation.js';
+import { recordDecision, meetingMissedFalls, reviewTheReviewers, canBlameProvider } from './probation-review.js';
+import { runCrossEmbodimentComparison, renderComparisonFinding } from './embodiment-comparison.js';
 import { architectLiaisonEnabled, processArchitectLiaisonBlock } from './architect-liaison.js';
 import { runChoreRotationSlot } from './chore-runner.js';
 import { checkGeminiPacingSlot } from './gemini-pacer.js';
@@ -380,7 +389,7 @@ async function getSimulationState(env) {
  */
 async function updateSimulationState(env, patch) {
   const current = await getSimulationState(env);
-  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled', 'improvement_loop_enabled', 'architect_liaison_enabled', 'office_context_enabled', 'action_items_to_board_enabled', 'report_pipeline_enabled', 'owner_channel_enabled'];
+  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled', 'improvement_loop_enabled', 'architect_liaison_enabled', 'office_context_enabled', 'action_items_to_board_enabled', 'report_pipeline_enabled', 'owner_channel_enabled', 'learning_loop_enabled'];
   const next = { ...current };
   const rejected = [];
   for (const key of Object.keys(patch)) {
@@ -4077,6 +4086,117 @@ export default {
             };
             break;
           }
+          case 'learning_loop_toggle':
+            // The write half of the loop's kill switch (workers/context-editor.js
+            // learningLoopEnabled(), also read by probation.js). Body:
+            // { enabled: true|false }. SHIPPED OFF. While off (or absent), every
+            // exported write function in context-editor.js/probation.js returns
+            // {written:false|proposed:false, reason:'learning_loop_disabled'}
+            // without touching the network or D1 — no active-context.md,
+            // journal.md or adaptations file is ever fetched or written.
+            result = await updateSimulationState(env, { learning_loop_enabled: !!body.enabled });
+            break;
+          case 'learning_loop_status': {
+            // Read-back: the flag, plus open probations (never their content —
+            // A3: "the agent is not told" — this is an admin/owner endpoint, not
+            // agent-facing, but the same discipline is kept so no code path ever
+            // prints a probationary entry as ordinary text an agent's prompt
+            // could pick up secondhand).
+            const flagOn = await learningLoopEnabled(env);
+            let openByAgent = null;
+            let dueForDecision = null;
+            if (env.DB && flagOn) {
+              const probe = await env.DB.prepare(
+                `SELECT agent_id, aspect, entered_at, action_count, rounds FROM probation WHERE status='open' ORDER BY agent_id`
+              ).all().catch(() => null);
+              openByAgent = probe?.results ?? null;
+              dueForDecision = (await probationsDueForDecision(env).catch(() => [])).map((r) => ({ id: r.id, agentId: r.agent_id, aspect: r.aspect, actionCount: r.action_count }));
+            }
+            result = {
+              learningLoopEnabled: flagOn,
+              probationActionsTarget: PROBATION_ACTIONS_TARGET,
+              maxConcurrentPerAgent: MAX_CONCURRENT_PER_AGENT,
+              openProbations: openByAgent,
+              dueForDecision,
+            };
+            break;
+          }
+          case 'learning_loop_active_context_write':
+            // Supervised single write — the gate is NOT bypassed here
+            // (unlike guide_block/owner_channel_block): this writes to
+            // back-office, a real repo, and the flag itself is the only
+            // gate that should ever need bypassing for a real conclusion.
+            // Body: { actorId, targetAgentId, content, aspect? }. If `aspect`
+            // is present this ALSO opens a probation (A3) via proposeChange();
+            // without it, this writes directly via writeActiveContextAmendment()
+            // for a one-off supervised proof (Phase 1.4 of the 2026-08-10
+            // learning-loop session — see that session's report for the real
+            // conclusion this proved against a live agent file).
+            result = body.aspect
+              ? await proposeChange(env, { actorId: body.actorId, targetAgentId: body.targetAgentId, aspect: body.aspect, content: body.content })
+              : await writeActiveContextAmendment(env, { actorId: body.actorId, targetAgentId: body.targetAgentId, content: body.content });
+            break;
+          case 'learning_loop_journal_write':
+            // Body: { actorId, agentId, content }. Self-write only — see
+            // context-editor.js writeJournalEntry()'s header for the one
+            // exception (the roll-off mechanism), which this endpoint cannot
+            // reach (it always passes the real actorId through).
+            result = await writeJournalEntry(env, { actorId: body.actorId, agentId: body.agentId, content: body.content });
+            break;
+          case 'learning_loop_adaptation_write':
+            // Body: { actorId, agentId, topic, content }.
+            result = await appendAdaptation(env, { actorId: body.actorId, agentId: body.agentId, topic: body.topic, content: body.content });
+            break;
+          case 'learning_loop_probation_decide': {
+            // Body: { probationId, outcome, decidedBy, teamLeadBehavior,
+            // qaQualityMetrics, evidence } for a real decision, OR
+            // { probationId, checkMissed: true } to only check (never apply)
+            // whether a due-and-unmet probation would fall.
+            if (body.checkMissed) {
+              const row = env.DB ? await env.DB.prepare('SELECT * FROM probation WHERE id = ?').bind(body.probationId).first() : null;
+              result = row
+                ? meetingMissedFalls({ actionCount: row.action_count, target: PROBATION_ACTIONS_TARGET, meetingHeld: false })
+                : { falls: false, reason: 'no such probation row' };
+              break;
+            }
+            const validated = recordDecision({
+              probationId: body.probationId, outcome: body.outcome, decidedBy: body.decidedBy,
+              teamLeadBehavior: body.teamLeadBehavior, qaQualityMetrics: body.qaQualityMetrics, evidence: body.evidence,
+            });
+            if (!validated.valid) { result = { applied: false, reason: validated.reason }; break; }
+            result = await applyDecision(env, {
+              probationId: validated.decision.probationId, outcome: validated.decision.outcome,
+              decidedBy: validated.decision.decidedBy, decidingActorId: validated.decision.decidedBy,
+              evidence: { teamLeadBehavior: validated.decision.teamLeadBehavior, qaQualityMetrics: validated.decision.qaQualityMetrics, ...validated.decision.evidence },
+            });
+            break;
+          }
+          case 'learning_loop_probation_fall':
+            // Applies a missed-meeting fall for real (see meetingMissedFalls()
+            // above for the check-only counterpart). Body: { probationId }.
+            result = await applyMissedMeetingFall(env, { probationId: body.probationId, decidingActorId: body.decidingActorId });
+            break;
+          case 'learning_loop_review_the_reviewers':
+            // Pure validation, no D1 write of its own — a caller records the
+            // resulting record wherever office meetings are already recorded.
+            // Body: { flaggedReviewer, reviewingPair, decidedBy, architectOpinion }.
+            result = reviewTheReviewers(body);
+            break;
+          case 'learning_loop_provider_blame_check':
+            // Pure threshold check, A3's "blaming the provider" rule. Body:
+            // { failingAgentIds, failingDates, embodimentComparisonDone }.
+            result = canBlameProvider(body);
+            break;
+          case 'learning_loop_embodiment_comparison':
+            // Runs the Lead QA's cross-embodiment comparison against LIVE D1
+            // data. Read-only — no write, no model call. Body: {} (optional
+            // { render: true } for the Markdown finding instead of raw JSON).
+            result = await runCrossEmbodimentComparison(env);
+            if (result.ok) {
+              result.generatedAt = new Date().toISOString();
+              if (body.render) result = { ...result, rendered: renderComparisonFinding(result) };
+            }
+            break;
           case 'office_context_toggle':
             // Office-context kill switch (workers/office-context.js
             // officeContextEnabled()): flips SIM_KV simulation-state

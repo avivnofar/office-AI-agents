@@ -410,6 +410,9 @@ const ALLOW_LIST_TO_TRIGGER = {
   // which is the check working exactly as its header describes, on the first new
   // switch since it was written.
   owner_channel_enabled: 'owner_channel_toggle',
+  // Added 2026-08-10 with the learning loop's write path (workers/context-
+  // editor.js, probation.js) — same session, later in the day.
+  learning_loop_enabled: 'learning_loop_toggle',
 };
 const allowListMatch = /const allowedKeys = \[([^\]]+)\]/.exec(arSrc0);
 const allowListKeys = allowListMatch

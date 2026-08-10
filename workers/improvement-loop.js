@@ -363,6 +363,28 @@ export async function recordOfficeEvent(env, fields) {
       .bind(id, r.agent_id, r.type, r.title, r.content, r.severity, r.project, r.event_type, r.embodiment_model, r.track, r.quality)
       .run();
 
+    // ── PROBATION ACTION COUNT (A3, 2026-08-10) ─────────────────────────────
+    // "Measured over 20 actions — actions, not days." A `case_answer` row IS
+    // one action, so this is the one real place to count them. Deliberately
+    // its OWN try/catch, nested inside this function's outer one: a probation
+    // bookkeeping failure must never be reported as "the case_answer failed
+    // to record" — the INSERT above already succeeded, and that is the fact
+    // this function exists to protect. See workers/probation.js
+    // recordProbationAction() for what it does with the count. Dynamic
+    // import (not a top-level one) to avoid a circular import — probation.js
+    // -> context-editor.js -> repo-write.js, none of which import this file,
+    // but a static import here would still make improvement-loop.js's own
+    // load order depend on a module three files away for a feature most
+    // callers never touch.
+    if (r.event_type === 'case_answer') {
+      try {
+        const { recordProbationAction } = await import('./probation.js');
+        await recordProbationAction(env, r.agent_id);
+      } catch (err) {
+        console.warn(`[improvement-loop] probation action count failed, continuing: ${err?.message || err}`);
+      }
+    }
+
     return { recorded: true, id, eventType: r.event_type, track: r.track, embodimentModel: r.embodiment_model, quality: r.quality };
   } catch (err) {
     // Deliberately swallowed. A capture failure must not take down a cron

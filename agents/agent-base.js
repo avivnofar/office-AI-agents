@@ -529,7 +529,13 @@ export class AgentBase {
     // process, not the outcome. `followup_depth` carries the story instead.
     //
     // `result.source` is what ACTUALLY answered, including after a lane
-    // degraded to its backup — not the provider that was asked for.
+    // degraded to its backup — not the provider that was asked for. **This
+    // was aspirational until 2026-08-10**: neither _askDataCenter() nor
+    // _askNotebookX() actually set `.source` before that date, so this line
+    // silently fell through to `lastModelSource` (a follow-up-question
+    // artifact, not the answer's provider) — see the "source ADDED
+    // 2026-08-10" notes on both functions above for the measured effect and
+    // the fix.
     // ── THE ASK THAT NEVER HAPPENED IS A DIFFERENT EVENT (2026-08-10) ──────
     //
     // This line used to write EVERY outcome as `case_answer`, including the ones
@@ -669,7 +675,12 @@ export class AgentBase {
     const gap = detectCapabilityGap({ project: 'notebook-x', quality, notebookAnswerFound });
     await this.flagCapabilityGap({ project: 'notebook-x', gap, quality, query, responseText, kbSlug, caseId });
 
-    return { ok: notebookAnswerFound, quality, response: responseText, tool_used: 'notebook-x' };
+    // `source` ADDED 2026-08-10 — see the "cross-embodiment-comparison" fix
+    // note on _askDataCenter() below for why. Gemini answered (or, when no
+    // notebook covers the topic, Gemini still answered — `notebookAnswerFound`
+    // is about COVERAGE, not about which provider was asked); there is no
+    // fallback path here to record a substitution for.
+    return { ok: notebookAnswerFound, quality, response: responseText, tool_used: 'notebook-x', source: 'gemini' };
   }
 
   /**
@@ -782,7 +793,33 @@ export class AgentBase {
     const gap = detectCapabilityGap({ project: 'data-center', ok, quality });
     await this.flagCapabilityGap({ project: 'data-center', gap, quality, query, responseText, caseId });
 
-    return { ok, quality, response: responseText };
+    // `source` ADDED 2026-08-10, found while building the Lead QA's
+    // cross-embodiment comparison (plan 1.5 / capability-audit's
+    // `cross-embodiment-comparison`).
+    //
+    // Neither this function nor _askNotebookX() ever set `.source` on their
+    // return value. askAssignedProject()'s capture line reads
+    // `result?.source || this.lastModelSource`, so with `.source` always
+    // undefined it fell through to `lastModelSource` — a field only ever set
+    // by queryGroqRouted()/queryGeminiDirect(), i.e. by a FOLLOW-UP-QUESTION
+    // generation call, not by the scored answer itself. On agents that never
+    // needed a follow-up this tick, `lastModelSource` was stale or null from
+    // whatever this agent instance last did. Measured 2026-08-10: of 58
+    // case_answer rows, 35 carried embodiment_model=NULL and the 23 non-null
+    // ones were the provider that phrased a follow-up QUESTION, never the
+    // provider that produced the scored ANSWER — so the comparison this field
+    // exists for had never once compared the right thing.
+    //
+    // This function only reaches here via a real Claude call (the two skip
+    // paths above return early with their own `skipped: true` result and
+    // never fall through) — there is no fallback provider for data-center
+    // (see this function's header: "no fallback model substitutes for Claude
+    // here"), so the source is unconditionally 'claude'.
+    //
+    // Go-forward fix only, per A15: existing rows are not rewritten, and any
+    // pre-2026-08-10 embodiment_model value is not reliable evidence of what
+    // actually answered.
+    return { ok, quality, response: responseText, source: 'claude' };
   }
 
   /**

@@ -272,12 +272,13 @@
     "cross-embodiment-comparison": {
       "what": "The Lead QA's signature instrument: compare report quality across agents AND across embodiment models — 'this persona is more consistent under that provider'.",
       "supplied_by": {
-        "kind": "none",
-        "ref": null,
-        "why": "THE INPUTS EXIST AND THE COMPARISON DOES NOT. assignEmbodiment() shuffles and logs the map, and reports.embodiment_model records which provider actually answered — both real, both collecting. Nothing reads them and compares. Plan items 1.5 and 2.7. This is the shape §7 of ARCHITECTURAL-DECISIONS.md is about, seen from the producing end: data collected correctly, for a stated purpose, and consumed by nobody."
+        "kind": "module",
+        "ref": "workers/embodiment-comparison.js",
+        "symbol": "runCrossEmbodimentComparison",
+        "caveat": "BUILT 2026-08-10 (learning-loop session). Run against the live table the same day: 58 case_answer rows, only 23 reliably embodiment-attributed (see the 2026-08-10 agent-base.js fix below), and even those are too thin to support a real cross-provider finding yet (1 embodiment over the n=5 floor). The reader itself is SUPPLIED; the FINDING it can currently produce is 'insufficient sample' — reported honestly rather than manufactured, per this module's own header."
       },
-      "exercised_by": null,
-      "cost": "n/a",
+      "exercised_by": "scripts/verify-learning-loop.js",
+      "cost": "none — one D1 read",
       "agents": [8]
     },
     "gate-call-audit": {
@@ -316,24 +317,50 @@
     "active-context-amendment": {
       "what": "The Team Lead's product: an approved amendment written PERMANENTLY into that agent's active-context.md, the same night the closing review reaches its conclusion.",
       "supplied_by": {
-        "kind": "none",
-        "ref": null,
-        "why": "NO CODE PATH WRITES active-context.md. Grep the whole of workers/ and agents/ for the filename: zero hits. The closing QA review's whole design argument is that conclusions reach the files BEFORE the next day opens — 'the whole point of running this at the end of the day rather than at tomorrow's standup' — and nothing carries them there. The files are real, curated by hand, and read into prompts; the write half of the loop is absent."
+        "kind": "module",
+        "ref": "workers/context-editor.js",
+        "symbol": "writeActiveContextAmendment",
+        "caveat": "BUILT 2026-08-10 (learning-loop session, OFFICE-POLICY.md A2/A3). Gated behind SIM_KV `learning_loop_enabled`, shipped OFF — the owner has not yet turned it on. One real conclusion was written and read back from campus/agents/04-the-trainee/active-context.md the same session as proof (see that session's report); the flag was then restored to off. Every change enters via probation.js proposeChange() and is measured over 20 actions before it is permanent (A3) — see probation-review.js for the decision mechanism."
       },
-      "exercised_by": null,
-      "cost": "n/a",
+      "exercised_by": "scripts/verify-learning-loop.js",
+      "cost": "none — GitHub Contents API via BACKOFFICE_REPO_TOKEN",
       "agents": [7, 6]
     },
     "agent-journal": {
       "what": "Each agent's own free writing, append-only — named in the bible for several personas and present as a file for all thirteen.",
       "supplied_by": {
-        "kind": "none",
-        "ref": null,
-        "why": "NO CODE PATH WRITES journal.md. Zero hits across workers/ and agents/. The Perfectionist 'treats her journal and her carefully curated bookmarks as sacred texts'; she has never written in it."
+        "kind": "module",
+        "ref": "workers/context-editor.js",
+        "symbol": "writeJournalEntry",
+        "caveat": "BUILT 2026-08-10, same session and same gate as active-context-amendment. Self-write only (an agent writes its own, never another's) with one exception: the active-context 8KB roll-off archives the oldest entries here on the agent's behalf."
       },
-      "exercised_by": null,
-      "cost": "n/a",
+      "exercised_by": "scripts/verify-learning-loop.js",
+      "cost": "none — GitHub Contents API via BACKOFFICE_REPO_TOKEN",
       "agents": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13]
+    },
+    "adaptations-write": {
+      "what": "The agent itself, or a reviewer, sharpening a local adaptations/<topic>.md — append only, never deletion (A2).",
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/context-editor.js",
+        "symbol": "appendAdaptation",
+        "caveat": "BUILT 2026-08-10. Structurally append-only — the function has no parameter that accepts a full-file replacement, which is what makes 'never deletion' true by construction rather than convention (proven by scripts/verify-learning-loop.js §6, not merely asserted)."
+      },
+      "exercised_by": "scripts/verify-learning-loop.js",
+      "cost": "none — GitHub Contents API via BACKOFFICE_REPO_TOKEN",
+      "agents": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13]
+    },
+    "active-context-probation": {
+      "what": "A3's whole mechanism: a change to active context enters provisionally (measured over 20 actions, ≤3 concurrent per agent on distinct aspects, the agent never told), then a short meeting of three decides kept/dropped/extended — with a missed meeting falling as a PROCESS failure, and reviewing-the-reviewers escalating to the CEO with the Architect's opinion.",
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/probation.js",
+        "symbol": "proposeChange",
+        "caveat": "BUILT 2026-08-10. workers/office-policy.js's header claimed A3 'already has its own code' the same day it was written — that was false until this module landed. Decision validation (recordDecision, meetingMissedFalls, reviewTheReviewers, canBlameProvider) is workers/probation-review.js, pure logic, imports nothing."
+      },
+      "exercised_by": "scripts/verify-learning-loop.js",
+      "cost": "none — D1 + one GitHub write per proposed change",
+      "agents": [6, 7, 8, 10, 11]
     },
     "code-write-warehouse": {
       "what": "Write code — the single deliberate repo-scoped exception to the global no-code-write rule.",

@@ -50,7 +50,18 @@
  * gap, which is a different question from this one).
  */
 
-import projectPermissions from '../config/project-permissions.json';
+// `with { type: 'json' }` added 2026-08-10 — the same fix permission-guard.js
+// already carries an explanatory header for (see that file's 2026-07-12
+// note): a bare JSON import here made this module unimportable by plain
+// `node` (ERR_IMPORT_ATTRIBUTE_MISSING on current Node), which is why every
+// verifier that needed this file's logic tested it by reading its SOURCE
+// TEXT instead of calling it (verify-security-scan.js, verify-report-
+// pipeline.js). scripts/verify-learning-loop.js is the first verifier that
+// needs to actually CALL commitFileToRepo(), so the gap became worth
+// closing rather than working around a fourth time. Wrangler/esbuild accept
+// the attribute the same as a bare import — proven by `wrangler deploy
+// --dry-run` in the same session this was added, not merely assumed.
+import projectPermissions from '../config/project-permissions.json' with { type: 'json' };
 import { resolveRepoWrite } from './permission-guard.js';
 import { scanOutbound, renderScanRefusal } from './security-scan.js';
 
