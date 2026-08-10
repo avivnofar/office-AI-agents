@@ -55,6 +55,15 @@
       "description": "Hebrew composition — capability-gap notes and internal summaries, in the flagging agent's own voice.",
       "_why": "Hebrew here is INTERNAL only. The Front is English only (owner decision, 2026-08-05), so this lane never touches published content. Gemini stays primary; workers/gemini-pacer.js's 20s spacing on Notebook-X asks remains in force and routing does not get to spend the headroom that pacing deliberately leaves."
     },
+    "front_localization": {
+      "primary": "gemini",
+      "backup": "mistral",
+      "kind": "chat",
+      "description": "Front localization — re-voicing internal Hebrew office material (capability-gap notes, meeting minutes, report summaries) into English narrative for the public Front. Closes the `front-localization` capability CAPABILITY-TOOLBOX.md listed UNSUPPLIED against Agent 9 since 2026-08-10.",
+      "_new_lane_not_an_extension_and_why": "A NEW lane, deliberately, not a parameter added to `hebrew_composition`. `hebrew_composition` WRITES Hebrew; this is the only thing in this repo that carries content the other direction, and the two must never be reachable from the same call site under the same name — a caller asking for `front_localization` by name cannot be silently handed a Hebrew-writing prompt by a future edit that merges the two. Same reasoning `report_drafting` used when it was split out from `routine_volume` rather than reusing it with a flag.",
+      "_why_gemini_primary": "Same providers as `hebrew_composition` (gemini primary, mistral backup) — Gemini is already the office's proven multilingual, in-persona composer, not merely the default pick. Sharing the pool means front_localization draws against the SAME already-paced Gemini key as `hebrew_composition`, `report_drafting`, the image `polish` role and the Notebook-X asks (see `image._shared_allowances_stated_up_front`) — a fifth consumer on a key `workers/gemini-pacer.js` already paces at 20s. Stated here so a future session does not add a sixth without reading this.",
+      "_no_production_caller_yet": "Same shape as the `embeddings` lane before it had a caller: built, verified, resolvable, and reachable only through `workers/localization-engine.js` `localizeForFront()` and the supervised `{\"type\":\"localization_test\"}` trigger today. The Front page that will call it in production is OB-013's to build, not this session's."
+    },
     "report_drafting": {
       "primary": "gemini",
       "backup": "mistral",

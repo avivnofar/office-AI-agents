@@ -247,14 +247,15 @@
       "agents": [9]
     },
     "front-localization": {
-      "what": "Hebrew internal material translated AND re-voiced on its way to an English-only Front — a localization step, not a polish step.",
+      "what": "Internal Hebrew material RE-VOICED (not translated) into English narrative on its way to the English-only Front — a localization step, not a polish step.",
       "supplied_by": {
-        "kind": "none",
-        "ref": null,
-        "why": "NOT BUILT. Plan 6.2 names it explicitly and no lane or module performs it. `hebrew_composition` writes Hebrew; nothing carries it the other way. A future session must not read the presence of a Hebrew lane as the presence of a localization step — they are opposite directions."
+        "kind": "module",
+        "ref": "workers/localization-engine.js",
+        "symbol": "localizeForFront",
+        "caveat": "SUPPLIED, and NOT YET a production caller — same shape as `semantic-search` below. Proved live 2026-08-11 against a real Hebrew capability-gap note (reports/gaps/data-center/2026-07-20.md, The Team Lead's voice), routed through the new `front_localization` lane, provider mistral (backup; gemini primary was paced). Reachable today only through the module itself and the supervised `{\"type\":\"localization_test\"}` admin trigger. The Front page that will call it in production is OB-013's to build."
       },
-      "exercised_by": null,
-      "cost": "n/a",
+      "exercised_by": "scripts/verify-localization-engine.js",
+      "cost": "Gemini free tier primary, Mistral backup — same shared pool as `hebrew_composition` (see `config/model-routing.json`'s `front_localization` lane)",
       "agents": [9]
     },
     "semantic-search": {

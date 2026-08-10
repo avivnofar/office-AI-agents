@@ -105,6 +105,7 @@ import { recordDecision, meetingMissedFalls, reviewTheReviewers, canBlameProvide
 import { runCrossEmbodimentComparison, renderComparisonFinding } from './embodiment-comparison.js';
 import { architectLiaisonEnabled, processArchitectLiaisonBlock } from './architect-liaison.js';
 import { runChoreRotationSlot } from './chore-runner.js';
+import { localizeForFront } from './localization-engine.js';
 import { checkGeminiPacingSlot } from './gemini-pacer.js';
 import { callClaudeMessages } from './claude-client.js';
 import {
@@ -4573,6 +4574,27 @@ export default {
             }
             result = await commitFileToRepo(env, WAREHOUSE_REPO_NAME, body.path, body.content, body.message, {
               explicitCodeTask: body.explicitCodeTask !== false,
+            });
+            break;
+          }
+          case 'localization_test': {
+            // Supervised end-to-end proof for the front-localization lane
+            // (OB-013's UNSUPPLIED capability, closed 2026-08-11). Same
+            // shape as `routing_test`/`guide_block`: one real call, gate
+            // bypassed at the routeTask() level only insofar as the caller
+            // supplies real content — routing_enabled itself still gates it,
+            // matching every other production-shaped lane (front_localization
+            // has no bypass of its own, deliberately, since it is meant to
+            // become a real production caller later, not stay a supervised-only
+            // path like routing_test's raw lane probe).
+            // Body: { hebrewText, agentName?, sourceKind? }
+            if (!body.hebrewText) {
+              return json({ error: 'localization_test_requires_hebrewText' }, 400, origin);
+            }
+            result = await localizeForFront(env, body.hebrewText, {
+              agentName: body.agentName || null,
+              sourceKind: body.sourceKind || null,
+              eventId: `localization_test:${Date.now()}`,
             });
             break;
           }
