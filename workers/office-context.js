@@ -53,6 +53,15 @@
  * and it is recorded there rather than restated as if it were new.
  */
 
+/*
+ * The ONE import in this file, added 2026-08-10. `deliverable-lifecycle.js`
+ * imports nothing itself (asserted by scripts/verify-lifecycle.js §11), so this
+ * does not reintroduce the JSON-import problem the block below describes: plain
+ * `node` can still import this module, and the verifier still exercises the real
+ * code rather than a mirror of it.
+ */
+import { parseInFlight, inFlightSections } from './deliverable-lifecycle.js';
+
 /**
  * Local token estimate — NOT imported from provider-common.js, deliberately.
  *
@@ -112,6 +121,24 @@ const REQUIREMENTS_PATH = 'docs/CLIENT-REQUIREMENTS.md';
  */
 const QUESTIONS_PATH = 'channel/to-owner/OPEN-QUESTIONS.md';
 
+/**
+ * The deliverable-lifecycle digest (opened 2026-08-10, contract in
+ * workers/deliverable-lifecycle.js).
+ *
+ * WHY IT IS READ HERE. Dispatch worked from 2026-08-09 and nothing then did the
+ * work, because after a build there was no next step and no way for the office
+ * to see that a built thing was waiting on it. `tasks/office-site/` sat
+ * build-complete and unreviewed from 2026-08-07. This is the file that makes a
+ * deliverable in review VISIBLE — to a meeting that must assign the reviews, to
+ * an agent who owes one, and to the weekly report.
+ *
+ * It lives in back-office because the Worker CANNOT READ THE WAREHOUSE, where
+ * the authoritative record is: `WAREHOUSE_REPO_TOKEN` is deliberately unset and
+ * stays unset. `scripts/lifecycle.mjs` rewrites this file wholesale from the
+ * warehouse records on every run.
+ */
+const LIFECYCLE_PATH = 'campus/shared/lifecycle/IN-FLIGHT.md';
+
 const CACHE_KEY = 'office-context-cache';
 /** How long a cached parse stays usable. The board changes on the order of
  *  once a day; re-fetching it on every agent call would spend two GitHub
@@ -133,10 +160,44 @@ export const CACHE_TTL_MS = 30 * 60 * 1000;
  * client-requirements status most belongs.
  */
 export const BUDGETS = Object.freeze({
-  meeting: 3500,
+  meeting: 4600,
   agent: 400,
-  report: 6000,
+  report: 8000,
 });
+
+/**
+ * ── RAISED AGAIN 2026-08-10, WITH THE DELIVERABLE LIFECYCLE ──────────────
+ *
+ * `meeting` 3,500 -> 4,600 and `report` 6,000 -> 8,000. Measured, not guessed,
+ * against the real board (43 tasks), the real requirements file, the real
+ * questions file and the real IN-FLIGHT digest on 2026-08-10:
+ *
+ *     one deliverable, IN-REVIEW      full untrimmed shape  3,593
+ *     one deliverable, GAPS-RAISED    full untrimmed shape  4,277
+ *     three deliverables, GAPS-RAISED full untrimmed shape  5,944
+ *
+ * At 3,500 the GAPS-RAISED case fitted at 3,488 — and fitted by TRIMMING the
+ * requirement detail as well as the board-stuck list. That is the same failure
+ * mode the 1,200 -> 3,500 raise was made for: a shape that "fits" while the
+ * fitter quietly removes the thing agenda item 1 is about. **The percentage was
+ * never the number that mattered; what the fitter had to cut to reach it is.**
+ *
+ * 4,600 clears the one-deliverable GAPS-RAISED shape with ~7.5% headroom — the
+ * same headroom the previous raise chose. It does NOT clear three deliverables
+ * at once, and that is deliberate rather than an oversight: the fitter then
+ * trims the gap agenda by item, lowest priority first, and says so. A budget
+ * that scales with however much work is in flight is not a budget.
+ *
+ * `report` is FREE — sites 3 and 4 are string templates that make no model
+ * call — so it goes to 8,000, clearing the three-deliverable case with room.
+ * The report pipeline's own reviewer context is a different ceiling entirely
+ * (`report-pipeline.js` DIRECT_REVIEW_CONTEXT_TOKENS, 131,000).
+ *
+ * `agent` STAYS AT 400 and OB-030 keeps its open half. What changed for an
+ * agent is targeted instead: the `own-review` section renders THIS agent's own
+ * outstanding review obligation at `headline` priority, so it survives every
+ * trim. One line, not the picture.
+ */
 
 /**
  * ── `meeting` RAISED 1,200 -> 3,500 ON 2026-08-10. THIS CLOSES OB-030. ────
@@ -319,6 +380,22 @@ export function parseBoard(markdown) {
       // blocked" rule broken by the mechanism meant to implement it.
       dispatched: plain(boardField(block, 'Dispatched')) || null,
       offered: plain(boardField(block, 'Offered')) || null,
+      // ── THE THIRD MARKER, ADDED 2026-08-10 ────────────────────────────
+      //
+      // `Stage:` is the deliverable lifecycle's projection onto the board —
+      // where a BUILT thing has got to in the review loop (see
+      // workers/deliverable-lifecycle.js). It exists because the office cannot
+      // read the warehouse: `WAREHOUSE_REPO_TOKEN` is deliberately unset and
+      // stays unset, so this one line is how a meeting learns that a
+      // deliverable is sitting in IN-REVIEW waiting on four admins.
+      //
+      // IT IS THE SAME KIND OF THING `Dispatched:` AND `Offered:` ARE, and it
+      // keeps the same rule: **not a state, and it moves no state count.**
+      // A board task whose deliverable is in review is still IN-PROGRESS,
+      // because the office still owes work on it. Letting a Stage value into
+      // the counts would give the board two grammars for "what is this task",
+      // which is the drift the single `State:` field exists to prevent.
+      stage: plain(boardField(block, 'Stage')) || null,
     });
   }
 
@@ -531,14 +608,15 @@ async function fetchBackOfficeFile(env, filePath) {
  */
 export async function fetchOfficeSnapshot(env) {
   if (!env?.BACKOFFICE_REPO_TOKEN) {
-    return { fetched_at: Date.now(), board: null, requirements: null, questions: null, errors: ['BACKOFFICE_REPO_TOKEN is not configured — office context cannot be read'] };
+    return { fetched_at: Date.now(), board: null, requirements: null, questions: null, lifecycle: null, errors: ['BACKOFFICE_REPO_TOKEN is not configured — office context cannot be read'] };
   }
 
   const errors = [];
-  const [boardFile, reqFile, questionsFile] = await Promise.all([
+  const [boardFile, reqFile, questionsFile, lifecycleFile] = await Promise.all([
     fetchBackOfficeFile(env, BOARD_PATH),
     fetchBackOfficeFile(env, REQUIREMENTS_PATH),
     fetchBackOfficeFile(env, QUESTIONS_PATH),
+    fetchBackOfficeFile(env, LIFECYCLE_PATH),
   ]);
 
   let board = null;
@@ -574,7 +652,21 @@ export async function fetchOfficeSnapshot(env) {
     else errors.push(`open-questions parse failed: ${parsed.reason}`);
   }
 
-  return { fetched_at: Date.now(), board, requirements, questions, errors };
+  // Same rule the questions channel keeps, and for the same reason: a 404 here
+  // is the HEALTHY empty state — the office has nothing in the review loop —
+  // and reporting it as an error would put a permanent complaint into every
+  // prompt for as long as that were true. Any OTHER failure stays loud.
+  let lifecycle = null;
+  if (lifecycleFile.reason) {
+    if (!/HTTP 404/.test(lifecycleFile.reason)) errors.push(lifecycleFile.reason);
+    else lifecycle = { ok: true, records: [], counts: { total: 0 }, malformed: [] };
+  } else {
+    const parsed = parseInFlight(lifecycleFile.text);
+    if (parsed.ok) lifecycle = parsed;
+    else errors.push(`lifecycle parse failed: ${parsed.reason}`);
+  }
+
+  return { fetched_at: Date.now(), board, requirements, questions, lifecycle, errors };
 }
 
 /* ──────────────────────────────── Rendering ───────────────────────────── */
@@ -716,6 +808,7 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
   const board = snapshot?.board || null;
   const requirements = snapshot?.requirements || null;
   const questions = snapshot?.questions || null;
+  const lifecycle = snapshot?.lifecycle || null;
 
   // `questions` is NOT in this guard, deliberately. An office with a readable
   // questions file and no readable board has no office context worth the name —
@@ -839,6 +932,82 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
     }
   }
 
+  // ── DELIVERABLES IN FLIGHT (added 2026-08-10) ──────────────────────────
+  //
+  // Three sections, not one, because they are three different acts and a
+  // meeting given one blob does all of them badly:
+  //
+  //   deliverables  — what exists and where it has got to.
+  //   review-work   — WHO OWES WHAT, worded as an assignment. Owner-stated:
+  //                   *admins are assigned review tasks in the morning meeting,
+  //                   the same way any other work is assigned — reviewing is
+  //                   work, not a courtesy someone performs when they notice.*
+  //   gap-agenda    — the gaps themselves, because *gaps go to a meeting* and a
+  //                   meeting handed a COUNT cannot decide anything.
+  //
+  // They sit at `status` priority, above task titles: a deliverable waiting on
+  // five named admins is more actionable than the list of open board tasks, and
+  // if something has to be cut it should be the recitation, not the assignment.
+  if (lifecycle && lifecycle.records.length) {
+    const built = inFlightSections(lifecycle.records, { names: opts.agentNames || {} });
+
+    // ── WHAT *THIS* AGENT OWES, AT HEADLINE PRIORITY ────────────────────
+    //
+    // The `agent` shape is 400 tokens and measured 305 before this feature; it
+    // already drops the board titles, the projects and the requirement detail
+    // entirely. Everything below therefore never reaches a single agent, and a
+    // reviewer who cannot see that he owes a review will not write one.
+    //
+    // So the one fact an individual agent needs rides at `headline`, which is
+    // dropped last and never trimmed: HIS OWN outstanding review. This is
+    // exactly what `own-tasks` already does for the board, applied to review
+    // work — and it is deliberately ONE LINE rather than the whole picture,
+    // because raising the `agent` budget is the open half of OB-030 and needs a
+    // per-day cost figure this session did not measure.
+    if (opts.agentId) {
+      const owed = lifecycle.records.filter((r) => (r.owed_by || []).includes(opts.agentId));
+      if (owed.length) {
+        sections.push({
+          label: 'own-review',
+          priority: PRIORITY.headline,
+          text: `YOU OWE A REVIEW: ${owed.map((r) => `\`${r.slug}\` r${r.round} — ${(r.required || []).includes(opts.agentId) ? 'a FULL REASONED REVIEW' : 'a brief comment OR an explicit ABSTENTION'}`).join('; ')}. Assigned as work, not offered. Nothing to say? Abstain explicitly — your silence will never be read as approval, it is recorded as an outstanding obligation blocking the deliverable.`,
+        });
+      }
+    }
+
+    // ── PRIORITY `titles`, NOT `status`, AND IT WAS MEASURED ────────────
+    //
+    // These went in at `status` first, and the live read-back caught the cost:
+    // the 400-token agent shape started dropping `questions-headline` as well,
+    // so an agent stopped being told the office has four open questions with
+    // the owner. That is a REGRESSION I INTRODUCED, not an acceptable trade —
+    // the whole-office deliverable picture is meeting-and-report content, and
+    // what an individual agent needs is HIS OWN obligation, which rides at
+    // `headline` above and survives every trim.
+    //
+    // At `titles` they sit beside the board's own task list — the same class of
+    // thing, cut at the same point — and the questions headline keeps its place.
+    if (built.flight) {
+      sections.push({ label: 'deliverables', priority: PRIORITY.titles, header: built.flight.header, items: built.flight.items });
+    }
+    if (built.assignments) {
+      sections.push({ label: 'review-work', priority: PRIORITY.titles, header: built.assignments.header, items: built.assignments.items });
+    }
+    if (built.agenda) {
+      sections.push({ label: 'gap-agenda', priority: PRIORITY.titles, header: built.agenda.header, items: built.agenda.items });
+    }
+  } else if (lifecycle) {
+    // Said explicitly rather than omitted. "Nothing is in review" and "the
+    // office cannot see what is in review" are different facts, and the second
+    // one belongs in the errors section instead — which is where an unreadable
+    // digest already lands.
+    sections.push({
+      label: 'deliverables',
+      priority: PRIORITY.titles,
+      text: 'DELIVERABLES IN FLIGHT — none. No built deliverable is currently in the review loop.',
+    });
+  }
+
   if (projects.length) {
     sections.push({
       label: 'projects',
@@ -926,6 +1095,7 @@ export async function getOfficeContext(env, { shape = 'agent', agentId = null, a
     ...(snapshot?.requirements?.malformed || []),
     ...(snapshot?.board?.malformed || []),
     ...(snapshot?.questions?.malformed || []),
+    ...(snapshot?.lifecycle?.malformed || []),
   ];
   if (malformed.length) {
     console.warn(`[office-context] ${shape} built from UNREADABLE input — ${malformed.join(' | ')}`);

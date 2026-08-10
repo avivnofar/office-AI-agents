@@ -60,8 +60,11 @@ different surface — the Worker cron is live, the nightly Action is
 currently manually disabled:
 
 ### 1. Cloudflare Worker cron (live — the Q&A engine's schedule)
-Fires every 30 minutes, **02:00–16:30 Israel time** (`*/30 0-13,23 * * *`
-UTC), every day — covering the owner's 02:00–16:30 activity window. Each
+Fires every 30 minutes, **08:00–18:00 Israel time** (`*/30 5-14 * * *` plus
+`0 15 * * *` UTC, 21 ticks a day), every day — **office hours**. ~~02:00–16:30,
+covering the owner's own activity window~~ — struck 2026-08-10: the window was
+narrowed to office hours on 2026-08-07 and this page kept publishing the old
+one. The config was right; this text was stale. Each
 tick checks `config/daily-schedule.json` and runs whatever block is due —
 question batches (spread across six slots through the day so asks trickle
 out rather than burst, with Notebook-X calls additionally paced ~20s apart

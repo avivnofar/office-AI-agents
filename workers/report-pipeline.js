@@ -706,6 +706,35 @@ export function buildFactPack(f = {}) {
   }
   push('');
 
+  push('=== 4a-bis. DELIVERABLES IN FLIGHT (source: back-office campus/shared/lifecycle/IN-FLIGHT.md) ===');
+  // ── ADDED 2026-08-10 WITH THE DELIVERABLE LIFECYCLE ────────────────────
+  //
+  // Section 4 counted BOARD TASKS and could say nothing about what the office
+  // had actually BUILT. week-07 is the evidence: it reported 34 board tasks and
+  // never mentioned that `tasks/office-site/` had been finished for two days and
+  // reviewed by nobody, because no fact in the pack could have told it.
+  //
+  // ABSENT AND EMPTY ARE DIFFERENT, and the two branches below keep them apart —
+  // the §7.6 rule this pipeline exists to enforce. "Nothing is in review" is a
+  // measurement; "the digest could not be read" is a failure, and a report that
+  // renders the second as the first is exactly what the structural gate refuses.
+  if (f.lifecycle) {
+    if (!f.lifecycle.records.length) {
+      push('NONE — no built deliverable is in the review loop. This is a REAL measurement, not an absent one: the digest was read and it is empty. Do NOT write UNVERIFIED for this.');
+    } else {
+      push(`${f.lifecycle.records.length} deliverable(s) in flight. A board task can be IN-PROGRESS while its deliverable sits in review; the two are different facts and section 4 counts the first.`);
+      for (const r of f.lifecycle.records) {
+        push(`- ${r.slug}${r.board_task ? ` (${r.board_task})` : ''} [${r.stage}, round ${r.round}] waiting on ${r.waiting_on}`);
+        push(`  gaps: ${r.open_gaps} open, ${r.awaiting_vote} AWAITING A VOTE, ${r.unclassified} unclassified. Reviews still owed by: ${(r.owed_by || []).map((x) => `Agent ${x}`).join(', ') || 'nobody'}.`);
+        if (!r.converging) push(`  ^ NOT CONVERGING: ${r.convergence_note}. Report this as a finding; there is no cap on review rounds.`);
+        for (const x of (r.refusals || [])) push(`  ${x}`);
+      }
+    }
+  } else {
+    push('UNREADABLE — the deliverable-lifecycle digest could not be read this cycle. Say so; do NOT report the office as having built nothing.');
+  }
+  push('');
+
   push('=== 4b. PROJECTS THE OFFICE IS RESPONSIBLE FOR (source: config/office-projects.json) ===');
   if (f.projects?.length) {
     for (const p of f.projects) push(`- ${p.name} (${p.visibility}) — ${p.role}`);

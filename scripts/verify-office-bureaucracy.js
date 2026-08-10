@@ -137,9 +137,16 @@ check('BUDGETS.agent is 400 as specified', officeContext.BUDGETS.agent === 400);
 // tasks, 1 of 5 projects, 1 of 8 requirements and 1 of 12 stuck items. The
 // shape's full untrimmed size is 3,236; 3,500 clears it with headroom. See the
 // measured curve in office-context.js's BUDGETS note.
-check('BUDGETS.meeting is 3500 as specified (OB-030, 2026-08-10)', officeContext.BUDGETS.meeting === 3500);
-check('the meeting budget clears the shape\'s full untrimmed size, so nothing is hidden from a meeting',
-  officeContext.BUDGETS.meeting >= 3236);
+// 3,500 -> 4,600 LATER THE SAME DAY, with the deliverable lifecycle. With one
+// deliverable at GAPS-RAISED the shape measures 4,277 untrimmed, and at 3,500 it
+// "fitted" at 3,488 by trimming the REQUIREMENT DETAIL — the thing agenda item 1
+// is about. Same lesson as OB-030's, one raise later: the percentage was never
+// the number that mattered; what the fitter had to cut to reach it is.
+check('BUDGETS.meeting is 4600 as specified (2026-08-10, the lifecycle raise)', officeContext.BUDGETS.meeting === 4600);
+check('the meeting budget clears the shape\'s full untrimmed size WITH a deliverable in the loop',
+  officeContext.BUDGETS.meeting >= 4277);
+check('the report budget clears the three-deliverable shape — it is free, it makes no model call',
+  officeContext.BUDGETS.report >= 5944);
 
 const snapshot = { fetched_at: Date.now(), board, requirements: reqs, errors: [] };
 
@@ -162,8 +169,29 @@ check('report shape fits its budget', reportShape.tokens <= officeContext.BUDGET
 // have left the suite asserting an ordering it was no longer testing. The
 // fixture is scaled instead, so the claim is still made under a board that
 // genuinely binds every budget.
+//
+// 110 -> DERIVED, LATER THE SAME DAY. The budget moved again (3,500 -> 4,600
+// with the deliverable lifecycle) and 110 tasks stopped binding it, in exactly
+// the same way, for exactly the same reason — the second time in one day that a
+// hand-picked fixture size silently stopped testing what it claims to test.
+//
+// So the size is no longer hand-picked. It is DERIVED FROM THE BUDGETS, and it
+// has to satisfy TWO conditions at once, not one — which the first derived
+// attempt got wrong and the suite caught: a board sized only to bind the meeting
+// budget also bound the REPORT budget, breaking the very next check, whose whole
+// claim is that the report shape is the unbound one.
+//
+// So the fixture is sized to land STRICTLY BETWEEN the two budgets: big enough
+// that the meeting shape trims, small enough that the report shape does not.
+// The midpoint does that for any pair, and the ~39-tokens-per-task divisor is
+// measured on this fixture's own shape (110 tasks produced 4,331 tokens).
+//
+// BOTH conditions are then ASSERTED rather than assumed, because a fixture that
+// fails either one turns the checks below into checks that pass for the wrong
+// reason — which is exactly how this line came to need fixing twice in a day.
+const BIG_BOARD_TASKS = Math.ceil(((officeContext.BUDGETS.meeting + officeContext.BUDGETS.report) / 2) / 39);
 const bigBoard = officeContext.parseBoard(
-  Array.from({ length: 110 }, (_, i) => `### OB-${String(i + 1).padStart(3, '0')} — Task number ${i + 1} with a deliberately long title to consume budget
+  Array.from({ length: BIG_BOARD_TASKS }, (_, i) => `### OB-${String(i + 1).padStart(3, '0')} — Task number ${i + 1} with a deliberately long title to consume budget
 
 - **Assignee:** Agent ${(i % 9) + 1} — Somebody
 - **State:** ${i % 3 === 0 ? 'READY' : i % 3 === 1 ? 'IN-PROGRESS' : 'BLOCKED'}
@@ -176,6 +204,9 @@ const bigSnap = { fetched_at: Date.now(), board: bigBoard, requirements: reqs, e
 const bigAgent = officeContext.buildOfficeContext(bigSnap, 'agent', { agentId: 3 });
 const bigMeeting = officeContext.buildOfficeContext(bigSnap, 'meeting');
 const bigReport = officeContext.buildOfficeContext(bigSnap, 'report');
+check(`the fixture (${BIG_BOARD_TASKS} tasks) actually BINDS the meeting budget — a fixture that does not bind makes the ordering check below pass for the wrong reason`,
+  bigMeeting.trimmed.length > 0 || bigMeeting.dropped.length > 0,
+  `trimmed=${bigMeeting.trimmed.join(',')} dropped=${bigMeeting.dropped.join(',')}`);
 check('under a board big enough to bind, report > meeting > agent',
   bigReport.tokens > bigMeeting.tokens && bigMeeting.tokens > bigAgent.tokens,
   `agent=${bigAgent.tokens} meeting=${bigMeeting.tokens} report=${bigReport.tokens}`);

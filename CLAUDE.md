@@ -21,6 +21,7 @@
 > | `workers/architect-liaison.js` | files an unattended Architect session into D1 so the office can see the night happened. Switch `architect_liaison_enabled`, **live ON** |
 > | `workers/meeting-decisions.js` | meeting action items → the board's inbox. Switch `action_items_to_board_enabled`, **live ON** |
 > | `workers/task-router.js` | task-type routing. Switch `routing_enabled` — **LIVE ON since 2026-08-10.** This row used to read "absent = OFF — the one below that is still what this file says it is". That is no longer true: all seven switches now read back ON. |
+> | `workers/deliverable-lifecycle.js` | **(2026-08-10)** what happens to a deliverable AFTER it is built: eight stages, one forward exit, and that exit is the **CEO**. Build → admin review → gaps to a **meeting** → discussion and a **binding vote** → improvement round → back to review → … → CEO approval. **No cap on rounds**; a deliverable going round without converging is a *finding*, not a reason to stop or to ship. Pure — imports nothing. **No switch of its own**, deliberately: it rides on `office_context_enabled`, which is ON. Its writer is `scripts/lifecycle.mjs`; its record lives in `warehouse-office-AI-agents/tasks/<slug>/STATE.json` and **the Worker cannot write it — `WAREHOUSE_REPO_TOKEN` is deliberately unset and this design does not need it.** |
 >
 > **The two claims in this file most likely to mislead:**
 > - It describes the repo as if the Q&A engine were the whole of it. The office
@@ -67,7 +68,18 @@ reader with no prior context.
   (service binding to `data-center-api`, since Workers can't `fetch()`
   another Worker's `*.workers.dev` URL directly — error 1042), `AI`
   (Cloudflare Workers AI, account-scoped, no extra credentials).
-- **Cron**: `*/30 0-13,23 * * *` UTC (= 02:00-16:30 IDT), drives
+- **Cron**: `*/30 5-14 * * *` **plus** `0 15 * * *` UTC (= **08:00-18:00
+  IDT**, 21 ticks/day — OFFICE HOURS). ~~`*/30 0-13,23 * * *` (02:00-16:30
+  IDT)~~ — **struck 2026-08-10.** The window was narrowed to office hours on
+  **2026-08-07** and this line was never updated, so it published the old
+  window for three days. **The config is right and this documentation was
+  stale; nothing about the cron was changed to fix it.** The second expression
+  exists solely to catch the 18:00 boundary tick without also firing at 18:30,
+  which a single `*/30 5-15` would — so a reader who sees two expressions and
+  "tidies" them into one has silently dropped or added a tick. See
+  `config/daily-schedule.json`'s `_office_hours_retime_2026_08_06` block for
+  why every `case_batch` moved with it, and `wrangler.toml`'s own comment.
+  Drives
   `scheduled()` -> `runScheduledBlock()`, a no-op unless
   `config/daily-schedule.json` has a block at that exact time/day. State
   for an in-progress simulated day persists in `SIM_KV` (`daily-cycle-state`)
@@ -786,6 +798,11 @@ site, not merely defined nearby.
   proven rather than claimed (new)
 - `scripts/verify-guide-engine.js` — dry-run verification for the Guides
   pipeline (new)
+- `workers/deliverable-lifecycle.js` / `scripts/lifecycle.mjs` /
+  `scripts/verify-lifecycle.js` — the deliverable lifecycle (2026-08-10): the
+  review loop the office runs after a build, the one tool that writes a
+  lifecycle record, and the 147-check verifier that proves the old
+  build-then-Architect *line* approves a record the loop refuses
 - **The 2026-08-10 additions**, listed here because the flagged block at the top
   of this file explains why the rest of them are not:
   - `workers/office-context.js` `parseOpenQuestions()` — the office→owner

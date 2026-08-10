@@ -879,6 +879,10 @@ async function buildReportFacts(env, { reportType, periodLabel, dateStr, agentRo
   const snapshot = await getOfficeSnapshot(env, { allowFetch: true });
   const board = snapshot?.board || null;
   const requirements = snapshot?.requirements || null;
+  // The deliverable-lifecycle digest (2026-08-10). Passed straight through:
+  // buildFactPack() distinguishes `null` (unreadable) from an empty record list
+  // (nothing in review), and collapsing the two here would defeat that.
+  const lifecycle = snapshot?.lifecycle || null;
 
   // Meeting decisions and conflicts this period.
   //
@@ -1169,6 +1173,7 @@ async function buildReportFacts(env, { reportType, periodLabel, dateStr, agentRo
     daysRemaining: daysUntil(due),
     decisions,
     board,
+    lifecycle,
     projects: officeProjects.projects,
     workflowMetrics: null,
     agentRows: periodAgentRows,
@@ -3414,6 +3419,21 @@ export default {
               errors: snapshot?.errors ?? ['no snapshot returned at all'],
               board: snapshot?.board
                 ? { counts: snapshot.board.counts, malformed: snapshot.board.malformed ?? [] }
+                : null,
+              // The deliverable-lifecycle digest (2026-08-10). Reported here
+              // for the same reason every other source is: a status probe that
+              // cannot show a source cannot tell you whether that source is
+              // reaching the office, and a new source invisible to the one
+              // endpoint that exists to see sources is §7.2 arriving with the
+              // feature meant to be watched. ABSENT and EMPTY are kept apart —
+              // `null` means the digest could not be read; `records: 0` means
+              // nothing is in the review loop, which is a real measurement.
+              lifecycle: snapshot?.lifecycle
+                ? {
+                    records: snapshot.lifecycle.records.length,
+                    inFlight: snapshot.lifecycle.records.map((r) => `${r.slug} [${r.stage} r${r.round}] owed by ${(r.owed_by || []).join(',') || 'nobody'} · ${r.open_gaps} gaps, ${r.awaiting_vote} awaiting a vote`),
+                    malformed: snapshot.lifecycle.malformed ?? [],
+                  }
                 : null,
               requirements: snapshot?.requirements
                 ? {
