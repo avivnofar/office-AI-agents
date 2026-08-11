@@ -44,7 +44,7 @@ import relationships from '../config/relationships.json';
 import officeProjects from '../config/office-projects.json';
 import { callGemini, callCloudflareFallback } from './gemini-client.js';
 import { callGroq } from './groq-client.js';
-import { commitFileToRepo, REPO_NAME, BACKOFFICE_REPO_NAME } from './repo-write.js';
+import { commitFileToRepo, BACKOFFICE_REPO_NAME } from './repo-write.js';
 import { getOfficeContext, getOfficeSnapshot } from './office-context.js';
 import {
   addOfficeDays, normalizeActionItems, renderBoardTask,
@@ -1010,13 +1010,19 @@ ${overridesList}
  */
 async function commitMeetingReport(env, meetingType, markdown) {
   const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const path = `reports/meetings/${meetingType}-${stamp}.md`;
+  // Moved to back-office 2026-08-11 (plan 0.4, stage 1 of 5): raw meeting
+  // minutes are internal plumbing, not visitor content — DOC-POLICY.md's
+  // "campus/shared/meetings/<date>-<type>.md" convention, with the full
+  // stamp appended (not just the date) so same-day, same-type meetings
+  // (e.g. two ad hoc audits) never collide.
+  const dateStr = stamp.slice(0, 10);
+  const path = `campus/shared/meetings/${dateStr}-${meetingType}-${stamp}.md`;
   return commitFileToRepo(
     env,
-    REPO_NAME,
+    BACKOFFICE_REPO_NAME,
     path,
     markdown,
-    `chore(agents): ${meetingType} meeting report ${stamp} [skip ci]`
+    `chore(office): ${meetingType} meeting report ${stamp} [skip ci]`
   );
 }
 

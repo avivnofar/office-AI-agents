@@ -263,5 +263,37 @@ for (const repo of mappedRepos) {
   console.log(`[${ok ? 'PASS' : 'FAIL'}] ${repo.padEnd(28)} key=${key ?? '(none)'} secret=${secret ?? '(none)'} inPermissionsJson=${inPerms}`);
 }
 
+/* ───────────────────────────────────────────────────────────────────────────
+ * PUBLISHING SPLIT (plan 0.4) — CALL-SITE REGRESSION CHECK, stage 1/5:
+ * meeting reports, moved 2026-08-11.
+ *
+ * resolveRepoWrite() itself can't tell "a meeting report" from any other
+ * markdown write — both office-AI-agents and back-office-AI-agents are
+ * legitimate targets at the guard level (see the repo-write scenarios
+ * above), so a scenario table alone proves only that BOTH remain reachable,
+ * not which one meeting-engine.js actually calls. This reads the real
+ * source of commitMeetingReport() and asserts it targets
+ * BACKOFFICE_REPO_NAME, not REPO_NAME. Before this session's edit this
+ * check would have FAILED both assertions — the function passed REPO_NAME
+ * and wrote to `reports/meetings/<type>-<stamp>.md` in the public repo.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+console.log('\n-- Publishing-split call-site check (0.4 stage 1: meeting reports) --');
+{
+  const meetingEngineSrc = fs.readFileSync(path.join(REPO_ROOT, 'workers', 'meeting-engine.js'), 'utf8');
+  const fnMatch = meetingEngineSrc.match(/async function commitMeetingReport\([\s\S]*?\n}\n/);
+  const fnBody = fnMatch ? fnMatch[0] : '';
+  const callSiteChecks = [
+    ['commitMeetingReport() found in workers/meeting-engine.js', !!fnMatch],
+    ['targets BACKOFFICE_REPO_NAME', /\bBACKOFFICE_REPO_NAME\b/.test(fnBody)],
+    ['does NOT target REPO_NAME (the pre-2026-08-11 public-repo call)', !/\bREPO_NAME\b/.test(fnBody)],
+    ['path uses campus/shared/meetings/ (DOC-POLICY.md 2.4 convention)', /campus\/shared\/meetings\//.test(fnBody)],
+  ];
+  for (const [label, ok] of callSiteChecks) {
+    pass = pass && ok;
+    console.log(`[${ok ? 'PASS' : 'FAIL'}] ${label}`);
+  }
+}
+
 console.log(`\n${pass ? 'All scenarios matched expectations.' : 'MISMATCH — see FAIL lines above.'}`);
 process.exit(pass ? 0 : 1);

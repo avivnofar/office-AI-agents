@@ -170,7 +170,7 @@ binding = "AI"
 # config/token-economy.json's graduated_rollout_throttle, see
 # TOKEN-BUDGET.md's 2026-07-18 activation entry.
 [triggers]
-# RESTORED 2026-07-19 evening after the stale-DO-state incident fixes were
-# verified live (micro-test + supervised block-by-block day 24, both clean —
-# see TOKEN-BUDGET.md's 2026-07-19 entries).
+# RESTORED 2026-08-11 after plan 0.4 stage 1 (meeting reports -> back-office)
+# verified live: real write landed in back-office, read back via git pull;
+# public repo's reports/meetings/ confirmed unaffected.
 crons = ["*/30 5-14 * * *", "0 15 * * *"]
