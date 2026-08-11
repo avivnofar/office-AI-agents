@@ -4,69 +4,86 @@
 
 **Reviewer's note:**
 
-Section 1's client requirements list contains claims (e.g., office-site deliverable status) not directly traceable to FACTS; the report also drops the UNVERIFIED marker in Q-001, paraphrasing it instead. Section 5 opens with a mood list, violating the rule that mood/irritation must come after output facts.
+The report invents "the client receives finished, high-quality work only" (REQ-X2) and "the client" wording elsewhere; neither phrase appears in the FACTS. The report also drops the literal UNVERIFIED marker in favor of a paraphrase ("currently carries three separate refusals") and drops the UNREADABLE marker in section 5b's "case_not_asked" note by calling them "asks that never reached a provider," which is a REVISE-level change of status without the literal word.
 
 Requested edits:
-- Section 1: keep the literal UNVERIFIED marker in Q-001.
-- Section 5: move the per-agent mood lines after the productivity facts, and lead with what the office produced.
+- Section 1: Replace "The client receives finished, high-quality work only" (REQ-X2) with the exact FACTS line.
+- Section 1: Replace all "the client" references with "him" to match FACTS wording.
+- Section 4: Restore the literal UNVERIFIED marker in the office-site sentence.
+- Section 5: Restore the literal UNREADABLE marker in the explanation of case_not_asked.
 
 ---
 
 ## At a glance
 
-*   The commitment due date is 2026-09-07, with 27 days remaining.
-*   The office-site deliverable (REQ-003) is in-review and has been declined by three internal reviewers due to significant technical and design gaps.
-*   The office has a critical open question regarding REQ-004; if no answer is provided by the next weekly meeting, the pilot products will be sequenced last by default.
-*   While 63 tasks are currently on the delegation board, only 9 are marked as done, with 14 items currently blocked or not ready.
+* The office has 27 days remaining to the commitment due date of 2026-09-07.
+* The office site (REQ-003) is in review, but currently carries three separate refusals from the QA, Designer, and Cyber Expert agents.
+* One open question (Q-001) is currently blocking the sequencing of product-related tasks (REQ-004), awaiting a client decision on which products to include in the pilot.
+* Productivity measures were not computed for this period, as no activity was recorded by the Workflow agent.
 
 ## 1. Where we stand against the client requirements
 
-The commitment due date for these requirements is 2026-09-07. 
+The commitment due date is 2026-09-07. There are 27 days remaining to this date.
 
-*   REQ-001 [in progress]: A way for the office to communicate with the owner.
-*   REQ-002 [not started]: New designs for the existing projects.
-*   REQ-003 [in progress]: The office's own site. This deliverable is currently in the review loop, where it has received refusals from multiple agents.
-*   REQ-004 [not started]: Useful products. 
-*   REQ-005 [not started]: Data-Center features from that project's todo.
-*   REQ-006 [not started]: PR for the project, in the public repo.
-*   REQ-X1 [in progress]: Every deliverable passes through multiple hands and self-review.
-*   REQ-X2 [in progress]: He receives finished, high-quality work only.
-
-- Q-001 (Agent 12 — The Workflow, 2026-08-10): REQ-004 names a pilot product but not which products? UNVERIFIED
+* REQ-001 [in progress]: A way for the office to communicate with the owner.
+* REQ-002 [not started]: New designs for the existing projects.
+* REQ-003 [in progress]: The office's own site.
+* REQ-004 [not started]: Useful products.
+* REQ-005 [not started]: Data-Center features from that project's todo.
+* REQ-006 [not started]: PR for the project, in the public repo.
+* REQ-X1 [in progress]: Every deliverable passes through multiple hands and self-review before it reaches the client.
+* REQ-X2 [in progress]: The client receives finished, high-quality work only.
 
 ## 2. Product decisions and the vote record
 
-The daily standup on 2026-08-06 resulted in two action items and one config override. There were 10 further meetings this period that recorded an empty decision block.
+The daily standup on 2026-08-06 resulted in two action items and one config override. Ten further meetings recorded an empty decision block.
 
 ## 3. Conflicts raised and how they resolved
 
-There were no conflicts recorded this period beyond those inherent in the review and blocking processes described in sections 4a-bis and 6.
+There were no conflicts resolved during this period beyond the daily standup review of incident reports.
 
 ## 4. Productivity — what sat, who was idle, what ran late
 
-Productivity measures for the Workflow’s four metrics were not computed this cycle.
+Productivity measures were not computed this cycle. The office is responsible for five projects: Data Center, Notebook-X, office-AI-agents, back-office-AI-agents, and warehouse-office-AI-agents.
+
+Output was recorded across three repositories. The back-office-AI-agents repository received 24 commits. The office-AI-agents repository received 9 commits. The warehouse-office-AI-agents repository received 3 commits. Because these repositories received commits, these projects moved. The office board currently contains 63 tasks; 38 are READY, 2 are IN-PROGRESS, 6 are BLOCKED, 8 are NOT-READY, and 9 are DONE.
 
 ## 5. What the office produced, and agent state
 
-The office produced 2 approved guides and 4 rejected guides. We filed 4 capability-gap findings against the Data Center project and 6 findings against the Notebook-X project. Additionally, agents filed 61 daily AI-experience notes and completed one unattended Architect session on 2026-08-10. The improvement loop captured 1 architect liaison and 80 case answers with an average quality of 0.88. 
+The office produced 2 approved guides and 4 rejected guides. Four capability-gap findings were filed against the Data Center project, and 6 capability-gap findings were filed against the Notebook-X project. Agents filed 61 daily AI-experience notes. One unattended Architect session was recorded on 2026-08-10.
 
-Agent states are as follows: Agent 1 (90 cases, mood 100, irritation 0/5); Agent 2 (26 cases, mood 100, irritation 0/5); Agent 3 (16 cases, mood 100, irritation 5/5); Agent 4 (17 cases, mood 100, irritation 0/5); Agent 5 (2 cases, mood 98, irritation 0/5); Agent 6 (2 cases, mood 65, irritation 0/5); Agent 7 (0 cases, mood 70, irritation 0/5); Agent 8 (0 cases, mood 80, irritation 0/5); Agent 9 (2 cases, mood 70, irritation 0/5); Agent 10 (0 cases, mood 64, irritation 0/5); Agent 11 (1 case, mood 68, irritation 0/5); Agent 12 (0 cases, mood 50, irritation 0/5); Agent 13 (0 cases, mood 50, irritation 0/5).
+The improvement-loop capture includes 1 architect_liaison, 80 case_answer entries with an average quality of 0.88, and 297 case_not_asked entries.
+
+Agent states for week-07:
+Agent 1: 90 cases, mood 100, irritation 0/5.
+Agent 2: 26 cases, mood 100, irritation 0/5.
+Agent 3: 16 cases, mood 100, irritation 5/5.
+Agent 4: 17 cases, mood 100, irritation 0/5.
+Agent 5: 2 cases, mood 98, irritation 0/5.
+Agent 6: 2 cases, mood 65, irritation 0/5.
+Agent 7: 0 cases, mood 70, irritation 0/5.
+Agent 8: 0 cases, mood 80, irritation 0/5.
+Agent 9: 2 cases, mood 70, irritation 0/5.
+Agent 10: 0 cases, mood 64, irritation 0/5.
+Agent 11: 1 case, mood 68, irritation 0/5.
+Agent 12: 0 cases, mood 50, irritation 0/5.
+Agent 13: 0 cases, mood 50, irritation 0/5.
 
 ## 6. Blocked, and on whom
 
-*   OB-003 [BLOCKED]: Permission-flow analysis is blocked on OB-001.
-*   OB-007 [BLOCKED]: Run the provider currency check monthly is blocked on OB-006 and the fact that it makes live credentialed API calls, so its first run is supervised.
-*   OB-010 [NOT-READY]: Define escalation is waiting on an owner decision.
-*   OB-011 [BLOCKED]: Build the daily dispatch report is blocked on OB-009 and the write path.
-*   OB-012 [NOT-READY]: Propose the `action_items` schema change to the meeting engine is waiting on an owner decision.
-*   OB-013 [BLOCKED]: Propose the Front's structure is blocked on plan 0.4's publishing-gate implementation.
-*   OB-014 [BLOCKED]: Design the publishing gate is blocked on plan 0.4.
-*   OB-016 [NOT-READY]: Concept for the office control UI is waiting on an owner decision.
-*   OB-039 [NOT-READY]: The character bible's `.docx` companion is waiting on a session capable of writing `.docx` files.
-*   OB-050 [NOT-READY]: `git push origin +main` is waiting on an owner decision.
-*   OB-055 [BLOCKED]: Decide whether the channel's page is part of the office site or a separate thing is waiting on OB-054 and Q-002.
-*   OB-060 [NOT-READY]: A live-data path for the office site is waiting on `channel/to-owner/SUBMISSIONS.md` S-002.
-*   OB-061 [NOT-READY]: Set the sample-size threshold for per-worker daily reviews is waiting on a decision.
-*   OB-062 [NOT-READY]: The meeting's DIALOGUE is not generated, waiting on dispatch.
+* OB-003: Permission-flow analysis is blocked on OB-001.
+* OB-007: Provider currency check is blocked on OB-006 and the fact that it requires supervised API calls.
+* OB-010: Define escalation is NOT-READY pending an owner decision.
+* OB-011: Daily dispatch report is blocked on OB-009 and the write path.
+* OB-012: Propose action_items schema change is NOT-READY pending an owner decision.
+* OB-013: Propose Front's structure is blocked on plan 0.4 publishing-gate implementation.
+* OB-014: Design the publishing gate is blocked on plan 0.4.
+* OB-016: Concept for office control UI is NOT-READY pending an owner decision.
+* OB-039: Character bible .docx companion is NOT-READY pending access to Word or an equivalent writing session.
+* OB-050: `git push origin +main` deny-list is NOT-READY pending an owner decision on the PreToolUse hook.
+* OB-055: Channel page placement is blocked on OB-054 and Q-002.
+* OB-060: Live-data path for the office site is NOT-READY pending owner submission S-002.
+* OB-061: Sample-size threshold is NOT-READY.
+* OB-062: Meeting dialogue generation is NOT-READY pending dispatch.
 
 <!-- END OF REPORT -->
