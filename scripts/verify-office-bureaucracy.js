@@ -530,6 +530,108 @@ check('agents 12 and 13 are now real assignees the normaliser accepts',
   meetingEngine.normalizeActionItems([{ ...good, agent_id: 12 }], { rosterIds: roster }).items.length === 1 &&
   meetingEngine.normalizeActionItems([{ ...good, agent_id: 13 }], { rosterIds: roster }).items.length === 1);
 
+/* ═══════════ §4b context_amendments — the closing_qa_review consumer ═══ */
+section('§4b context_amendments normaliser (2026-08-11)');
+
+const goodAmend = { agent_id: 3, aspect: 'firewall-rule-citation', content: 'When a case cites a firewall rule, name the specific rule number before recommending a change.', proposed_by: 6 };
+let ca = meetingEngine.normalizeContextAmendments([goodAmend], { rosterIds: roster });
+check('a complete amendment passes', ca.items.length === 1 && ca.dropped.length === 0, JSON.stringify(ca.dropped));
+
+ca = meetingEngine.normalizeContextAmendments([{ ...goodAmend, proposed_by: 7 }], { rosterIds: roster });
+check('the Team Lead (7) may also propose', ca.items.length === 1);
+
+ca = meetingEngine.normalizeContextAmendments([{ ...goodAmend, agent_id: undefined }], { rosterIds: roster });
+check('agent_id absent → DROPPED, never defaulted', ca.items.length === 0 && ca.dropped.length === 1);
+
+ca = meetingEngine.normalizeContextAmendments([{ ...goodAmend, agent_id: 99 }], { rosterIds: roster });
+check('agent_id outside the roster → DROPPED', ca.items.length === 0 && /not in the roster/.test(ca.dropped[0].reason));
+
+ca = meetingEngine.normalizeContextAmendments([{ ...goodAmend, proposed_by: 5 }], { rosterIds: roster });
+check('proposed_by outside {6,7} → DROPPED (only QA/Team Lead may amend another agent\'s context)',
+  ca.items.length === 0 && /proposed_by must be/.test(ca.dropped[0].reason));
+
+ca = meetingEngine.normalizeContextAmendments([{ ...goodAmend, agent_id: 6, proposed_by: 6 }], { rosterIds: roster });
+check('[A2] agent_id === proposed_by → DROPPED — no agent may amend its own active context',
+  ca.items.length === 0 && /A2 forbids/.test(ca.dropped[0].reason), ca.dropped[0]?.reason);
+
+ca = meetingEngine.normalizeContextAmendments([{ ...goodAmend, aspect: '' }], { rosterIds: roster });
+check('aspect empty → DROPPED', ca.items.length === 0);
+
+ca = meetingEngine.normalizeContextAmendments([{ ...goodAmend, content: '' }], { rosterIds: roster });
+check('content empty → DROPPED (nothing to measure)', ca.items.length === 0);
+
+ca = meetingEngine.normalizeContextAmendments(['just be better'], { rosterIds: roster });
+check('a bare string → DROPPED, not crashed on', ca.items.length === 0 && ca.dropped.length === 1);
+
+check('meeting-engine.js applyMeetingEffects gates context_amendments on learningLoopEnabled, not a new switch',
+  read('workers/meeting-engine.js').includes('await learningLoopEnabled(env)') &&
+  read('workers/meeting-engine.js').includes('normalizeContextAmendments(decisions.context_amendments'));
+check('the consumer calls proposeChange(), not a direct D1/context write of its own',
+  read('workers/meeting-engine.js').includes('await proposeChange(env,'));
+check('closing_qa_review is wired into the schedule, not only definable',
+  read('config/daily-schedule.json').includes('"meeting_type": "closing_qa_review"'));
+
+/* ═══ §4c parseMeetingResponse — the marker bug, from the actual live run ═══ */
+section('§4c parseMeetingResponse marker tolerance [FAILS-OLD]');
+
+// VERBATIM (only whitespace-trimmed for readability) from the FIRST live
+// closing_qa_review run this schedule change produced, 2026-08-11. The old
+// exact-marker parser returned every array empty for this text — including
+// context_amendments, even though a real, policy-compliant proposal sits
+// right there in it.
+const realLiveTranscript = `**CLOSED QA REVIEW TRANSCRIPT**
+
+Agent 6 — The QA: Alright, let's review today's output.
+
+**ADDITIONAL OPINIONS**
+
+Agent 8 — The Lead QA: I'd like to propose an amendment to the Worker model's active context.
+
+**DECISIONS**
+---
+{
+  "summary": "The office discussed the worker model's limitations.",
+  "mood_effects": [{ "agent_id": 6, "delta": 10, "reason": "clarification" }],
+  "irritation_effects": [],
+  "state_changes": [],
+  "action_items": [],
+  "context_amendments": [
+    { "agent_id": 1, "aspect": "firewall_action", "content": "When a case cites a firewall rule, name the specific rule number before recommending a change.", "proposed_by": 6 }
+  ],
+  "config_overrides": [],
+  "suggestion_decisions": []
+}
+---`;
+
+const oldParseWouldHave = (text) => text.indexOf('---DECISIONS---') !== -1;
+check('[FAILS-OLD] the exact-marker rule finds NO marker in the real transcript (the bug, reproduced)',
+  oldParseWouldHave(realLiveTranscript) === false);
+
+const parsed = meetingEngine.parseMeetingResponse(realLiveTranscript);
+check('[new] the lenient marker finds "**DECISIONS**" and recovers the block',
+  parsed.decisions.summary === "The office discussed the worker model's limitations.");
+check('[new] context_amendments — the whole point of today\'s wiring — is recovered, not empty',
+  parsed.decisions.context_amendments.length === 1 &&
+  parsed.decisions.context_amendments[0].agent_id === 1 &&
+  parsed.decisions.context_amendments[0].proposed_by === 6,
+  JSON.stringify(parsed.decisions.context_amendments));
+check('[new] the transcript half is still cleanly separated from the JSON',
+  parsed.transcript.includes('CLOSED QA REVIEW TRANSCRIPT') && !parsed.transcript.includes('"summary"'));
+check('[new] mood_effects survived the same recovery',
+  parsed.decisions.mood_effects.length === 1 && parsed.decisions.mood_effects[0].agent_id === 6);
+
+// The exact marker still works, unchanged, and takes priority over the
+// lenient fallback when both could match.
+const exactMarkerText = 'Transcript here.\n---DECISIONS---\n{"summary":"exact path","mood_effects":[],"irritation_effects":[],"state_changes":[],"action_items":[],"context_amendments":[],"config_overrides":[],"suggestion_decisions":[]}\n---END---';
+check('the exact "---DECISIONS---" marker still parses byte-for-byte as before',
+  meetingEngine.parseMeetingResponse(exactMarkerText).decisions.summary === 'exact path');
+
+check('ordinary transcript prose that merely DISCUSSES decisions does not false-positive the lenient marker',
+  meetingEngine.parseMeetingResponse('Agent 6: Let\'s review our decisions from yesterday and move on.').decisions.summary === '');
+
+check('malformed JSON after a real marker still degrades to emptyDecisions(), never throws',
+  (() => { try { return JSON.stringify(meetingEngine.parseMeetingResponse('x\n---DECISIONS---\nnot json\n---END---').decisions) === JSON.stringify(meetingEngine.emptyDecisions()); } catch { return false; } })());
+
 /* ═══════════════ §5 the board task renderer ═══════════════════════════ */
 section('§5 board task rendering');
 

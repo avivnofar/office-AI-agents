@@ -113,11 +113,13 @@
       "agents": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13]
     },
     "meeting-decision-to-board": {
-      "what": "Turn a meeting's action items into board tasks, refusing an item the meeting did not actually decide.",
+      "what": "Turn a meeting's action items into REAL board tasks — allocated an OB-NNN id and appended to BOARD.md itself, not merely shaped into a proposal — refusing an item the meeting did not actually decide.",
       "supplied_by": { "kind": "module", "ref": "workers/meeting-decisions.js", "symbol": "normalizeActionItems" },
+      "also": "campus/agents/12-the-workflow/automation/promote-inbox.js (back-office-AI-agents) — the actual promotion step: allocates the next OB-NNN, appends the task to BOARD.md in its own format, and records the outcome in board/inbox/PROMOTED-LOG.md so a promoted, a refused and a never-processed proposal are distinguishable",
       "exercised_by": "scripts/verify-office-bureaucracy.js",
       "cost": "none — local computation",
-      "agents": [12]
+      "agents": [12],
+      "_updated": "2026-08-11 (Make the Pipe Conduct session). Until this date `normalizeActionItems()` only produced a shaped PROPOSAL in board/inbox/ — nothing ever turned it into a real board task. `campus/shared/board/inbox/README.md` had described the promotion step ('the Workflow accepts or rejects each item and allocates a real OB-NNN id') since 2026-08-07 with nothing performing it. Proven live: the three Phase-6 report-improvement proposals sitting in the inbox since the prior session are now OB-064/OB-065/OB-066 on the real board."
     },
     "productivity-picture": {
       "what": "The Workflow's four measures: unstarted work, agents not working, work past its metric line, free capacity. Deliberately never averaged into one number.",

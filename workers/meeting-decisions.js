@@ -148,6 +148,163 @@ export function renderBoardTask(item, { id, meetingType, dateStr, agentName, sou
 `;
 }
 
+/* ──────────────────────────── Response parsing ─────────────────────────── */
+// Moved here from meeting-engine.js on 2026-08-11 — same reason every other
+// pure decision function lives in this file (see the module header): plain
+// `node` cannot load meeting-engine.js (it imports config JSON at module
+// scope), and a parser this load-bearing needs a real regression test
+// against a captured live transcript, not a text-proximity check on source.
+
+export function emptyDecisions() {
+  return {
+    summary: '',
+    mood_effects: [],
+    irritation_effects: [],
+    state_changes: [],
+    action_items: [],
+    context_amendments: [],
+    config_overrides: [],
+    suggestion_decisions: [],
+  };
+}
+
+/**
+ * Locates the DECISIONS marker. Exact match first — `---DECISIONS---`,
+ * byte-for-byte what the prompt specifies — and ONLY when that is absent
+ * does a lenient fallback run.
+ *
+ * WHY THE FALLBACK EXISTS (found 2026-08-11, first live run of the newly-
+ * scheduled closing_qa_review): the exact-marker parser silently discarded a
+ * real, otherwise-compliant decisions block — the model wrote `**DECISIONS**`
+ * instead of the literal marker, `text.indexOf(marker)` returned -1, and
+ * EVERY array came back empty, including a genuine, policy-compliant
+ * `context_amendments` proposal sitting right there in the model's own text.
+ * Same shape this project keeps finding elsewhere (checkCodeWriteAllowedForModel(),
+ * finishReason): a contract stated in a prompt with zero tolerance in the
+ * code that is supposed to honour it the moment the model misses it by one
+ * character.
+ *
+ * The fallback matches a line that is just the word DECISIONS, optionally
+ * wrapped in markdown emphasis/heading/quote punctuation — narrow enough
+ * that it will not fire inside ordinary transcript prose (which discusses
+ * decisions in sentences, never as an isolated line), and permissive enough
+ * to survive `**DECISIONS**`, `## DECISIONS`, `> DECISIONS`, etc.
+ */
+export function findDecisionsMarker(text) {
+  const exact = '---DECISIONS---';
+  const idx = text.indexOf(exact);
+  if (idx !== -1) return { idx, length: exact.length };
+
+  const lenient = /^[\s>]*[-*_#]{0,4}\s*DECISIONS\s*[-*_#]{0,4}\s*$/im.exec(text);
+  return lenient ? { idx: lenient.index, length: lenient[0].length } : { idx: -1, length: 0 };
+}
+
+/**
+ * Splits a meeting's raw model response into its transcript and its
+ * DECISIONS JSON block. See findDecisionsMarker() for the marker-tolerance
+ * fix and its header for why it exists.
+ */
+export function parseMeetingResponse(text) {
+  const endMarker = '---END---';
+  const { idx, length } = findDecisionsMarker(text);
+
+  if (idx === -1) {
+    return { transcript: text.trim(), decisions: emptyDecisions() };
+  }
+
+  const transcript = text.slice(0, idx).trim();
+  let jsonChunk = text.slice(idx + length);
+  const endIdx = jsonChunk.indexOf(endMarker);
+  if (endIdx !== -1) jsonChunk = jsonChunk.slice(0, endIdx);
+
+  // Located by OUTERMOST braces rather than assumed to start immediately
+  // after the marker — the same live run that motivated the lenient marker
+  // above also wrote a stray "---" line between "**DECISIONS**" and the
+  // actual `{...}`, which an immediate-slice would have handed to
+  // JSON.parse() as leading garbage and failed on.
+  const firstBrace = jsonChunk.indexOf('{');
+  const lastBrace = jsonChunk.lastIndexOf('}');
+
+  let decisions = emptyDecisions();
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    try {
+      decisions = { ...emptyDecisions(), ...JSON.parse(jsonChunk.slice(firstBrace, lastBrace + 1)) };
+    } catch {
+      decisions = emptyDecisions();
+    }
+  }
+
+  return { transcript, decisions };
+}
+
+/* ──────────────────── Context amendments → probation (A2/A3) ───────────── */
+
+/**
+ * THE MISSING CONSUMER, closed 2026-08-11. closing_qa_review's own prompt
+ * has always promised "conclusions specific enough to be written into an
+ * agent's character file TONIGHT" (meeting-engine.js AGENDA_BUILDERS) — but
+ * until this function existed, applyMeetingEffects() had no branch that
+ * wrote anything to active context from ANY meeting's decisions. The exact
+ * shape action_items was in before 2026-08-07: promised in a prompt,
+ * produced by the model, read by nobody.
+ *
+ * REFUSES rather than guesses, same posture as normalizeActionItems() and
+ * owner-channel.js's parseOwnerMessage() — a malformed or policy-violating
+ * entry here would either corrupt an agent's live prompt or violate A2's
+ * "no agent modifies its own active context" in code, not just in theory.
+ *
+ * @returns {{items: Array, dropped: Array<{item: any, reason: string}>}}
+ */
+export function normalizeContextAmendments(rawItems, { rosterIds, proposerIds = [6, 7] }) {
+  const items = [];
+  const dropped = [];
+
+  for (const raw of Array.isArray(rawItems) ? rawItems : []) {
+    if (!raw || typeof raw !== 'object') {
+      dropped.push({ item: raw, reason: 'not an object' });
+      continue;
+    }
+
+    const agentId = Number(raw.agent_id);
+    if (!Number.isInteger(agentId)) {
+      dropped.push({ item: raw, reason: 'agent_id missing or not an integer — REFUSED, never defaulted' });
+      continue;
+    }
+    if (!rosterIds.includes(agentId)) {
+      dropped.push({ item: raw, reason: `agent_id ${agentId} is not in the roster (${rosterIds.join(',')})` });
+      continue;
+    }
+
+    const proposedBy = Number(raw.proposed_by);
+    if (!Number.isInteger(proposedBy) || !proposerIds.includes(proposedBy)) {
+      dropped.push({ item: raw, reason: `proposed_by must be one of ${proposerIds.join(',')} (the QA/Team Lead) — got ${raw.proposed_by}` });
+      continue;
+    }
+    // A2: "No agent modifies its own active context." Enforced here, in
+    // code, not left to the prompt's own instruction to hold.
+    if (agentId === proposedBy) {
+      dropped.push({ item: raw, reason: `agent_id equals proposed_by (${agentId}) — A2 forbids an agent amending its own active context` });
+      continue;
+    }
+
+    const aspect = String(raw.aspect || '').trim();
+    if (!aspect) {
+      dropped.push({ item: raw, reason: 'aspect is empty — required so two concurrent changes on the same agent are distinguishable (A3)' });
+      continue;
+    }
+
+    const content = String(raw.content || '').trim();
+    if (!content) {
+      dropped.push({ item: raw, reason: 'content is empty — a probation entry with nothing to measure is not an entry' });
+      continue;
+    }
+
+    items.push({ agentId, proposedBy, aspect, content });
+  }
+
+  return { items, dropped };
+}
+
 /* ─────────────────── The Workflow's productivity picture ───────────────── */
 
 /**

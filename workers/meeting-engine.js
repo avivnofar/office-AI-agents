@@ -50,11 +50,18 @@ import {
   addOfficeDays, normalizeActionItems, renderBoardTask,
   computeWorkflowMetrics, renderWorkflowMetrics,
   computeOutputCensus, renderOutputCensus,
+  normalizeContextAmendments,
+  parseMeetingResponse, emptyDecisions,
 } from './meeting-decisions.js';
 // B5 (2026-08-10) — refusal recording, office-wide. The meeting is where a QA
 // rejects, an admin objects and the Workflow bounces something, and it is the
 // one moment those are visible to code. See recordMeetingRefusals().
 import { recordRefusalEvent } from './improvement-loop.js';
+// context_amendments consumer (2026-08-11) — see applyMeetingEffects() below.
+// No circular import: context-editor.js only imports repo-write.js, and
+// probation.js only imports context-editor.js — neither reaches back here.
+import { learningLoopEnabled } from './context-editor.js';
+import { proposeChange } from './probation.js';
 
 /*
  * The pure half of the action-items pipeline and the Workflow's metrics live
@@ -69,6 +76,8 @@ export {
   addOfficeDays, normalizeActionItems, renderBoardTask,
   computeWorkflowMetrics, renderWorkflowMetrics,
   computeOutputCensus, renderOutputCensus,
+  normalizeContextAmendments,
+  parseMeetingResponse, emptyDecisions,
 } from './meeting-decisions.js';
 
 const SIM_STATE_KEY = 'simulation-state';
@@ -582,6 +591,7 @@ Respond in two parts:
   "irritation_effects": [{ "agent_id": <int>, "delta": <int -2..2>, "reason": "<short reason>" }],
   "state_changes": [{ "agent_id": <int>, "field": "isHappy|isAngry|isPanic|panicLevel|isComplacent", "value": <bool|number>, "reason": "<short reason>" }],
   "action_items": [{ "agent_id": <int>, "task": "<one imperative sentence>", "delivered": "<the ARTIFACT that will exist>", "due_days": <int office-days>, "decided": <bool>, "open_question": "<if decided is false, what was left unsettled>" }],
+  "context_amendments": [{ "agent_id": <int>, "aspect": "<short slug, e.g. 'escalation-tone'>", "content": "<the exact text to add to that agent's active context>", "proposed_by": <int, the agent id actually proposing it — the QA or the Team Lead, never the target agent itself> }],
   "config_overrides": [{ "agent_id": <int>, "overrides": { "<config_key>": <value> }, "reason": "<short reason>" }],
   "suggestion_decisions": [{ "suggestion_id": "<id or empty>", "decision": "approved|rejected", "reason": "<short reason>" }],
   "refusals": [{ "agent_id": <int>, "declined": "<what this character declined, in one clause>", "character_line": "<the line of THEIR OWN character or role this refusal came from, quoted or closely paraphrased from their persona above>" }]
@@ -599,7 +609,13 @@ RULES FOR action_items — these are ENFORCED, and an item breaking them is DROP
 - "agent_id" is REQUIRED and must be a real staff id. If you cannot say who owns an item, DO NOT INVENT AN OWNER — omit the item. An unowned action item is not an action item.
 - "delivered" must name an ARTIFACT that will exist, not an activity. "Audit the gates" is an activity and will be dropped. "A table in findings/gate-call-audit.md with one row per gate and a CALLED/NOT-CALLED/UNPROVEN verdict" is an artifact. The test: could two people disagree about whether it exists?
 - "decided": use FALSE when the meeting did NOT settle the item, and put the unsettled part in "open_question". This is a real and expected outcome, not a failure — say so rather than manufacturing agreement. A decided:false item is recorded as NOT-READY and a person resolves it.
-- "due_days" counts OFFICE-DAYS from dispatch (a day the office is open; Saturday is not one).`;
+- "due_days" counts OFFICE-DAYS from dispatch (a day the office is open; Saturday is not one).
+
+RULES FOR context_amendments — OFFICE-POLICY A2/A3. This is ONLY meaningful for the Closing QA Review, where the QA (6) reviews work quality and the Team Lead (7) reviews the worker model:
+- "agent_id" is the OTHER agent this change is about. NEVER the QA or the Team Lead proposing it — A2: "No agent modifies its own active context." An entry where agent_id equals proposed_by is DROPPED.
+- "proposed_by" must be 6 (the QA) or 7 (the Team Lead) — those are the only two roles this policy lets change another agent's context.
+- "content" is the EXACT text to add — specific enough to change behaviour, not a vague impression. "Be more careful" is not usable; "when a case cites a firewall rule, name the specific rule number before recommending a change" is.
+- Every entry here enters PROBATION, not a permanent change — do not write as though this is final. If nothing concrete changed today, the correct answer is an empty array, not a manufactured entry to fill it.`;
 
 /**
  * Meeting types that get the office's own work in their prompt.
@@ -687,42 +703,13 @@ function buildMeetingPrompt(meetingType, attendeeSnapshots, data, opts) {
 }
 
 /* ──────────────────────────── Response parsing ─────────────────────────── */
-
-function parseMeetingResponse(text) {
-  const marker = '---DECISIONS---';
-  const endMarker = '---END---';
-  const idx = text.indexOf(marker);
-
-  if (idx === -1) {
-    return { transcript: text.trim(), decisions: emptyDecisions() };
-  }
-
-  const transcript = text.slice(0, idx).trim();
-  let jsonChunk = text.slice(idx + marker.length);
-  const endIdx = jsonChunk.indexOf(endMarker);
-  if (endIdx !== -1) jsonChunk = jsonChunk.slice(0, endIdx);
-
-  let decisions;
-  try {
-    decisions = JSON.parse(jsonChunk.trim());
-  } catch {
-    decisions = emptyDecisions();
-  }
-
-  return { transcript, decisions: { ...emptyDecisions(), ...decisions } };
-}
-
-function emptyDecisions() {
-  return {
-    summary: '',
-    mood_effects: [],
-    irritation_effects: [],
-    state_changes: [],
-    action_items: [],
-    config_overrides: [],
-    suggestion_decisions: [],
-  };
-}
+// parseMeetingResponse(), findDecisionsMarker() and emptyDecisions() moved to
+// meeting-decisions.js on 2026-08-11 — same reason every other pure decision
+// function lives there (this module's header): it imports config JSON at
+// module scope, so plain `node` cannot load it, and a parser this important
+// needs a real regression test against a captured live transcript, not a
+// text-proximity check on the source. Re-exported below via the existing
+// `export { ... } from './meeting-decisions.js'` block.
 
 /* ──────────────────── Action items -> board tasks (I/O) ────────────────── */
 
@@ -906,6 +893,30 @@ async function applyMeetingEffects(meetingType, attendeeSnapshots, decisions, en
       await writeActionItemsToBoard(env, { meetingType, items, dropped }).catch((err) => {
         console.warn(`[meeting-engine] action_items board write threw: ${err.message}`);
       });
+    }
+  }
+
+  // context_amendments -> probation (A2/A3), closed 2026-08-11. See
+  // normalizeContextAmendments() for why this is validated in code rather
+  // than trusted from the model, and the module header note on why
+  // closing_qa_review had produced conclusions with nowhere to go until now.
+  // Gated on the SAME switch as every other probation write
+  // (learning_loop_enabled) — this is not a new kill switch, it is the
+  // existing one finally having a real caller for this meeting type.
+  if (await learningLoopEnabled(env)) {
+    const rosterIds = agentsConfig.agents.map((a) => a.id);
+    const { items, dropped } = normalizeContextAmendments(decisions.context_amendments, { rosterIds });
+    for (const d of dropped) console.warn(`[meeting-engine] context_amendment DROPPED: ${d.reason}`);
+    for (const item of items) {
+      const result = await proposeChange(env, {
+        actorId: item.proposedBy,
+        targetAgentId: item.agentId,
+        aspect: item.aspect,
+        content: item.content,
+      }).catch((err) => ({ proposed: false, reason: `threw: ${err.message}` }));
+      if (!result.proposed) {
+        console.warn(`[meeting-engine] context_amendment for agent ${item.agentId} (${item.aspect}) NOT entered into probation: ${result.reason}`);
+      }
     }
   }
 

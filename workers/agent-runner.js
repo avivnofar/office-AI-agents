@@ -1336,24 +1336,71 @@ async function reportPipelineOn(env) {
 /**
  * Output ceilings, sized against the REPORT and not against a case answer.
  *
- * A report of 550-950 words is roughly 730-1,270 tokens, and the review
- * response carries the whole report again after its DECISION/NOTES header.
- * Both are bounded rather than generous: the review's total must leave room
- * for the fact pack and the draft inside the routing-off reviewer's
- * 8,192-token context (see report-pipeline.js estimateReviewFit()).
+ * STALE AS OF 2026-08-10, kept only as the historical reason
+ * REPORT_DRAFT_MAX_TOKENS is bounded rather than generous: this used to say
+ * the review's total must leave room inside the routing-off reviewer's
+ * 8,192-token TOTAL context. That model (Groq `llama3-8b-8192`) was found
+ * decommissioned 2026-08-09; the routing-off reviewer is now
+ * `llama-3.1-8b-instant` at 131,072 tokens, and DIRECT_REVIEW_CONTEXT_TOKENS
+ * (report-pipeline.js) was raised to 131,000 to match on 2026-08-10 (OB-037).
+ * Neither draft nor review is squeezed by context size any more on either
+ * path — see REPORT_REVIEW_MAX_TOKENS below for what actually still
+ * constrains the review call today, which is a different thing entirely.
  */
 const REPORT_DRAFT_MAX_TOKENS = 1800;
-// 500, down from 1,600 (2026-08-09). The old figure had to hold a whole
-// re-emitted report, because the review contract asked for one; the reviewer
-// now returns a DECISION, a NOTE and an optional EDITS list, which is ~200-350
-// tokens, and 500 is headroom on that rather than a whole document's budget.
+// RAISED 500 -> 3500 (2026-08-11). Read this before lowering it again — the
+// 500 figure was sized for a different reviewer than the one now holding the
+// lane, and the mismatch is exactly what made the judgment lane look dead.
 //
-// This is not a saving, it is the fix's other half. Every token reserved here
-// is a token the fact pack, the draft and the ASSEMBLED persona prompt cannot
-// have inside the routing-off reviewer's 8,192-token TOTAL context — and the
-// first live run measured 8,347 against that ceiling. Releasing 1,100 tokens
-// is what puts the corrected measurement back under it.
-const REPORT_REVIEW_MAX_TOKENS = 500;
+// ── WHAT 500 WAS ACTUALLY MEASURING, AND WHY IT STOPPED APPLYING ─────────
+//
+// 500 (down from 1,600 on 2026-08-09) was sized against the VISIBLE reply:
+// "the reviewer now returns a DECISION, a NOTE and an optional EDITS list,
+// which is ~200-350 tokens, and 500 is headroom on that." True for the
+// routing-off reviewer, Groq's `llama-3.1-8b-instant` — a non-reasoning
+// model whose `max_tokens` counts only the text it emits.
+//
+// It stopped being true the moment routing went live and the judgment
+// lane's primary became Cerebras' `gpt-oss-120b` — a REASONING model whose
+// invisible deliberation is charged against the SAME `max_tokens` budget as
+// the visible reply (cerebras-client.js's header). 500 was never headroom
+// for that model; it was frequently not even enough to finish thinking
+// before the budget ran out, which returns EMPTY content with
+// `finishReason: "length"` — not a short answer, no answer — and
+// routeTask()'s empty-answer guard (2026-08-10) correctly treats that as a
+// failure and falls to Mistral. Every review looked like a dead lane
+// because the number chosen for a different model was still in place.
+//
+// ── MEASURED, NOT GUESSED, AGAINST THE REAL PAYLOAD (2026-08-11) ─────────
+//
+// Live `routing_test` calls against the judgment lane, review system prompt,
+// and a review-shaped fact pack matching production's real size
+// (BOARD_TASKS_IN_PACK=60, ~4,600-5,000 input tokens):
+//
+//   maxTokens  512  -> content ""     finishReason "length"  (empty — degrades to Mistral, confirming the live symptom)
+//   maxTokens 3000  -> content real   finishReason "stop"    1,000 output tokens spent
+//
+// A SMALLER prompt (~1,000 input tokens) showed the same shape spends a
+// WIDELY VARIABLE amount of hidden reasoning run to run — 494 tokens on one
+// call, 980 on a near-identical repeat — so a floor with only ~2x margin
+// over one measurement is not safe; the next call can double.
+//
+// 3,500 is ~3.5x the largest measured spend (1,000) on the real-sized
+// payload, which is the same margin ratio cerebras-client.js's own
+// MIN_OUTPUT_TOKENS applied for the same reason (~3.3x its largest
+// measurement). Cerebras has no per-request output cap
+// (`maxOutputTokensPerRequest: null` — see CEREBRAS_LIMITS) and free-tier
+// headroom is 1,000,000 tokens/minute, so there is no cost reason to keep
+// this tight. estimateReviewFit() still checks the TOTAL against
+// DIRECT_REVIEW_CONTEXT_TOKENS (131,000) before any call is sent, so this
+// number cannot silently blow that ceiling — raising it here only widens
+// the room the reasoning has to work in, exactly as the diagnosis requires.
+//
+// This is NOT a substitute for the router's own empty-answer guard or its
+// substitution logging (task-router.js routeTask(), 2026-08-10/11) — those
+// stay in place to catch whatever this floor does not, and to make any
+// future substitution loud rather than quietly measuring the wrong model.
+const REPORT_REVIEW_MAX_TOKENS = 3500;
 
 /**
  * Assembles the fact pack: everything the drafter is allowed to state.
@@ -1702,9 +1749,13 @@ async function callReportModel(env, plan, { prompt, systemPrompt, maxTokens, age
       agentId: `report-${plan.lane}`,
     });
     if (!routed.ok) return { text: null, provider: routed.provider || null, planned: null, reason: routed.reason || 'routed_call_failed' };
-    // The router already reports its own degradation in `attempts`; the first
-    // attempt is the lane's primary, i.e. what was planned.
-    const plannedProvider = routed.attempts?.[0]?.provider ?? null;
+    // task-router.js routeTask() now computes and logs the substitution
+    // itself (2026-08-11) — `plannedProvider` is the lane's table-order
+    // primary, not re-derived from `attempts[0]` here any more. Kept as a
+    // fallback only for a routed result somehow missing the field (it never
+    // should on the current router, but a caller-side null default is
+    // cheaper than a caller that throws on it).
+    const plannedProvider = routed.plannedProvider ?? routed.attempts?.[0]?.provider ?? null;
     return { text: routed.result?.text ?? null, provider: routed.provider, planned: plannedProvider, reason: null };
   }
 
@@ -3177,6 +3228,21 @@ export async function runWorkDayCycle(env) {
     }
   }
 
+  // Closing QA review — same schedule-presence guard as the standup above.
+  // This whole function is the NON-FUNCTIONAL full-day path (see CLAUDE.md
+  // "How to run a simulation day manually" — production runs the per-block
+  // runScheduledBlock() path, which carries the real 2026-08-11 wiring).
+  // Mirrored here anyway so the two paths do not silently diverge on which
+  // meeting types a "day" actually runs.
+  let closingQaReview = null;
+  if (schedule.blocks.some((b) => b.type === 'meeting' && b.meeting_type === 'closing_qa_review')) {
+    try {
+      closingQaReview = await runMeeting('closing_qa_review', env);
+    } catch (err) {
+      closingQaReview = { error: err.message };
+    }
+  }
+
   const sidePlotStarted = await maybeStartSidePlots(env, { day: nextDay, summary, cases, standup });
   const sidePlotUpdates = await advanceSidePlots(env, nextDay);
 
@@ -3415,6 +3481,17 @@ export async function runScheduledBlock(env, israelTime, dayOfWeek) {
         cycle.results.aiExperience = await runDailyAiExperienceReports(env, agentInstances, agentStats);
       } else if (block.type === 'meeting' && block.meeting_type === 'daily_standup') {
         cycle.results.standup = await runMeeting('daily_standup', env);
+      } else if (block.type === 'meeting' && block.meeting_type === 'closing_qa_review') {
+        // OFFICE-POLICY A12/A3, wired to the schedule 2026-08-11. The meeting
+        // type, its data gatherer (gatherClosingQaReview()) and its
+        // context_amendments consumer (applyMeetingEffects()) all existed
+        // already; nothing in config/daily-schedule.json ever called it, so
+        // "conclusions reach the character files before the next day opens"
+        // had never once happened on a real cron tick. See OB-062 for the
+        // adjacent, still-open gap this does NOT close: the separate
+        // three-person PROBATION DECISION meeting (kept/dropped/extended
+        // after 20 actions) still has no dialogue generation of its own.
+        cycle.results.closingQaReview = await runMeeting('closing_qa_review', env);
       } else if (block.type === 'spare_time') {
         await ensureAgentInstances(true);
         for (const [, agent] of agentInstances) {

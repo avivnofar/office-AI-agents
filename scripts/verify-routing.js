@@ -498,6 +498,16 @@ check('a FAILING primary (not denied — it answered badly) degrades to the back
   failedOver.ok === true && failedOver.provider === 'mistral', JSON.stringify(failedOver.attempts));
 check('the failed primary is still counted as an attempt (a failed call spent rate allowance)',
   failedOver.attempts[0].outcome === 'failed');
+check('[new] the router marks the substitution itself, at the source — a caller needs no attempts[0] archaeology',
+  failedOver.substituted === true && failedOver.plannedProvider === 'cerebras', JSON.stringify({ substituted: failedOver.substituted, plannedProvider: failedOver.plannedProvider }));
+
+stubAllProviders();
+const noSub = await routeTask({
+  env: onEnv({}), taskType: 'judgment', routingConfig, tokenEconomy, prompt: 'score this',
+});
+check('[new] the primary answering directly is NOT reported as a substitution',
+  noSub.ok === true && noSub.provider === 'cerebras' && noSub.substituted === false && noSub.plannedProvider === 'cerebras',
+  JSON.stringify({ provider: noSub.provider, substituted: noSub.substituted, plannedProvider: noSub.plannedProvider }));
 
 stubAllProviders({ failing: ['cohere'] });
 const embedFail = await routeTask({

@@ -47,6 +47,7 @@
       { "time": "16:00", "type": "guide_draft", "label": "Guides pipeline: Gemini draft (ordered after 'report' so today's gap digests already exist)", "ref": "guides_program" },
       { "time": "16:00", "type": "owner_channel", "label": "Owner channel: record what was read from channel/from-owner/, then notify the client (gated by owner_channel_enabled — SHIPPED OFF 2026-08-10)", "ref": "owner_channel_program" },
       { "time": "16:30", "type": "meeting", "meeting_type": "daily_standup", "label": "Daily standup (existing meeting-engine.js type)" },
+      { "time": "16:30", "type": "meeting", "meeting_type": "closing_qa_review", "label": "Closing QA review — QA (6) on work quality, Team Lead (7) on persona/worker-model, backward-looking on today's output only. Wired to the schedule 2026-08-11 (OFFICE-POLICY A12/A3, learning_loop_enabled) — the meeting type and its data gatherer already existed; this line is what makes it run. Placed after daily_standup, before the day's remaining housekeeping, so it stays inside the day's LAST array-time group without moving guide_review out of the final array slot (block_order_is_load_bearing above)." },
       { "time": "16:30", "type": "spare_time", "label": "Spare time: coworker interaction or idle (token-saving)", "ref": "spare_time_program" },
       { "time": "16:30", "type": "guide_review", "label": "Guides pipeline: Architect (Claude) review + finalize/commit", "ref": "guides_program" }
     ]
@@ -67,6 +68,7 @@
       { "time": "11:30", "type": "guide_verify", "label": "Guides pipeline: weekly verification pass (Claude + web_search, 1-2 queue items). MOVED HERE FROM SATURDAY 08:00 on 2026-08-10 — see saturday_schedule._rest_day_2026_08_10.", "ref": "guides_program" },
       { "time": "12:00", "type": "weekly_summary", "label": "Weekly executive summary meeting + PDF/Excel generation", "ref": "weekly_summary_program" },
       { "time": "12:00", "type": "meeting", "meeting_type": "daily_standup", "label": "Daily standup (existing meeting-engine.js type)" },
+      { "time": "12:00", "type": "meeting", "meeting_type": "closing_qa_review", "label": "Closing QA review — same wiring as full_day_schedule's 16:30 entry; Friday is a work day (short) so today's output still gets reviewed before the week closes." },
       { "time": "12:00", "type": "spare_time", "label": "Spare time: coworker interaction or idle (token-saving)", "ref": "spare_time_program" },
       { "time": "12:00", "type": "guide_review", "label": "Guides pipeline: Architect (Claude) review + finalize/commit", "ref": "guides_program" }
     ]

@@ -887,8 +887,16 @@ check('[new] EDITS are RECORDED, NEVER APPLIED — nothing rewrites the draft be
     drafterName: 'The Workflow', drafterProvider: 'gemini', reviewerName: 'The QA', reviewerProvider: 'groq',
     reviewerEdits: '- tighten section 3',
   })));
-check('[new] the review output budget dropped now that no report is re-emitted (the other half of the fit fix)',
-  /const REPORT_REVIEW_MAX_TOKENS = 500;/.test(runnerSrc));
+// RAISED AGAIN 2026-08-11, and this check raised with it — see
+// agent-runner.js's own comment on REPORT_REVIEW_MAX_TOKENS for why 500
+// (right for a non-reasoning reviewer that only emits DECISION/NOTES/EDITS)
+// stopped being enough the moment the judgment lane's primary became a
+// reasoning model whose thinking is charged against the same budget. The
+// property this check still needs to hold — "not a whole re-emitted
+// report's worth of tokens" — holds at 3,500 exactly as it held at 500; this
+// is not the 1,600-token pre-fix figure returning.
+check('[new] the review output budget still is not sized for a whole re-emitted report (the other half of the fit fix)',
+  /const REPORT_REVIEW_MAX_TOKENS = 3500;/.test(runnerSrc) && !/const REPORT_REVIEW_MAX_TOKENS = 1600;/.test(runnerSrc));
 
 /* ══════════════════════════════════════════════════════════════════════════
  * §7  THE PIPELINE CONTRACT IN THE RUNNER

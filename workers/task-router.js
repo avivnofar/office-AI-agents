@@ -1163,11 +1163,42 @@ export async function routeTask({
         period: countPeriod,
       });
       attempts.push({ provider: providerId, outcome: 'ok' });
+
+      /* ── SUBSTITUTION, MADE LOUD AT THE SOURCE (2026-08-11) ────────────────
+       *
+       * Until this line, an answering backup was visible only to a caller
+       * willing to re-derive it from `attempts[0]` — which report-pipeline.js
+       * does (its own providerLabel()/noteProviderSubstitution()), and no
+       * other routed caller does, because nothing forced it to. A primary
+       * that never answers and a backup that quietly covers for it is
+       * CORRECT behaviour — that is what the backup is for — but it must not
+       * be indistinguishable from the primary having answered, on a
+       * measurement instrument whose whole job is recording which provider
+       * actually spoke (config/model-routing.json `_why_random`).
+       *
+       * `resolved.candidates[0]` is the lane's PLANNED primary — table order,
+       * never reordered by this router (see resolveLane()'s own comment).
+       * Every ROUTABLE lane reaches this point with at least one candidate,
+       * so the comparison is always meaningful here, unlike report-pipeline's
+       * copy of this logic which has to allow for a null plan.
+       */
+      const plannedProvider = resolved.candidates[0];
+      const substituted = providerId !== plannedProvider;
+      if (substituted) {
+        console.warn(
+          `[routing] ${taskType}: SUBSTITUTED — planned "${plannedProvider}", answered "${providerId}". `
+          + `${plannedProvider} did not respond (${attempts.filter((a) => a.provider === plannedProvider).map((a) => a.reason).join(', ') || 'see attempts'}). `
+          + 'The call succeeded and the caller is unaffected, but any embodiment or quality figure attributed to the planned provider is wrong for this call.'
+        );
+      }
+
       return {
         ok: true,
         routed: true,
         lane: taskType,
         provider: providerId,
+        plannedProvider,
+        substituted,
         result,
         reason: null,
         attempts,
