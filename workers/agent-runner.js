@@ -3112,11 +3112,16 @@ export async function runWorkDayCycle(env) {
     return null;
   });
   const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office, branches);
+  // Moved to back-office 2026-08-11 (plan 0.4, stage 2 of 5): the daily
+  // summary publishes the internal delegation board and the office's open
+  // owner-questions WITH their full escalation reasoning — operational
+  // material per DOC-POLICY.md's private list, not visitor content. Same
+  // guarded path meeting reports use (stage 1), same campus/shared/ layout.
   const report = isOffDay
     ? { committed: false, skipped: true, reason: 'rest_day_zero_write', policy: 'OFFICE-POLICY.md A13' }
     : await commitFileToRepo(
-      env, REPO_NAME, `reports/daily/day-${pad(nextDay, 3)}-summary.md`, markdown,
-      `chore(agents): day ${nextDay} summary [skip ci]`
+      env, BACKOFFICE_REPO_NAME, `campus/shared/daily/day-${pad(nextDay, 3)}-summary.md`, markdown,
+      `chore(office): day ${nextDay} summary [skip ci]`
     );
 
   return {
@@ -3478,11 +3483,16 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
     return null;
   });
   const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office, branches);
+  // Moved to back-office 2026-08-11 (plan 0.4, stage 2 of 5): the daily
+  // summary publishes the internal delegation board and the office's open
+  // owner-questions WITH their full escalation reasoning — operational
+  // material per DOC-POLICY.md's private list, not visitor content. Same
+  // guarded path meeting reports use (stage 1), same campus/shared/ layout.
   const report = isOffDay
     ? { committed: false, skipped: true, reason: 'rest_day_zero_write', policy: 'OFFICE-POLICY.md A13' }
     : await commitFileToRepo(
-      env, REPO_NAME, `reports/daily/day-${pad(nextDay, 3)}-summary.md`, markdown,
-      `chore(agents): day ${nextDay} summary [skip ci]`
+      env, BACKOFFICE_REPO_NAME, `campus/shared/daily/day-${pad(nextDay, 3)}-summary.md`, markdown,
+      `chore(office): day ${nextDay} summary [skip ci]`
     );
 
   return {

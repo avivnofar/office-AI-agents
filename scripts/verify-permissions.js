@@ -295,5 +295,36 @@ console.log('\n-- Publishing-split call-site check (0.4 stage 1: meeting reports
   }
 }
 
+/* ───────────────────────────────────────────────────────────────────────────
+ * PUBLISHING SPLIT (plan 0.4) — CALL-SITE REGRESSION CHECK, stage 2/5:
+ * daily summaries, moved 2026-08-11.
+ *
+ * TWO call sites write `day-NNN-summary.md`: the live per-block cron path
+ * (finalizeScheduledDay()) and the documented-non-functional {"type":"day"}
+ * whole-day path (runWorkDayCycle()) — see CLAUDE.md's "How to run a
+ * simulation day manually". Dead code that still names the wrong repo is a
+ * live bug the day someone repairs the other path, so both are checked, not
+ * just the one cron actually calls. Before this session's edit both call
+ * sites passed REPO_NAME and wrote to `reports/daily/` in the public repo.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+console.log('\n-- Publishing-split call-site check (0.4 stage 2: daily summaries) --');
+{
+  const runnerSrc = fs.readFileSync(path.join(REPO_ROOT, 'workers', 'agent-runner.js'), 'utf8');
+  const dayWriteRe = /commitFileToRepo\(\s*\n\s*env,\s*(\w+),\s*`([^`]*day-\$\{pad\(nextDay, 3\)\}-summary\.md)`/g;
+  const matches = [...runnerSrc.matchAll(dayWriteRe)];
+  const callSiteChecks = [
+    ['both day-summary call sites found (finalizeScheduledDay + runWorkDayCycle)', matches.length === 2],
+    ['every call site targets BACKOFFICE_REPO_NAME', matches.every((m) => m[1] === 'BACKOFFICE_REPO_NAME')],
+    ['no call site targets bare REPO_NAME (the pre-2026-08-11 public-repo call)', !matches.some((m) => m[1] === 'REPO_NAME')],
+    ['every call site uses campus/shared/daily/ (parallels stage 1\'s campus/shared/meetings/)', matches.every((m) => m[2].startsWith('campus/shared/daily/'))],
+    ['no call site still targets reports/daily/ (the old public path)', !matches.some((m) => m[2].startsWith('reports/daily/'))],
+  ];
+  for (const [label, ok] of callSiteChecks) {
+    pass = pass && ok;
+    console.log(`[${ok ? 'PASS' : 'FAIL'}] ${label}`);
+  }
+}
+
 console.log(`\n${pass ? 'All scenarios matched expectations.' : 'MISMATCH — see FAIL lines above.'}`);
 process.exit(pass ? 0 : 1);
