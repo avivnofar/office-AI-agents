@@ -96,6 +96,15 @@
       "cost": "none — local computation",
       "agents": [6, 8]
     },
+    "hebrew-executive-summary": {
+      "what": "OFFICE-POLICY A9: a short Hebrew headline on the daily report (names a concrete item needing attention or says explicitly there is none) and a Hebrew executive-summary layer prepended above the English weekly report body — not a translation, a judgement of what the owner needs to know.",
+      "supplied_by": { "kind": "module", "ref": "workers/hebrew-summary.js", "symbol": "buildWeeklySummaryPrompt" },
+      "also": "workers/agent-runner.js composeDailyHeadline() (daily half) and runReportPipeline()'s weekly-only Hebrew step (both call the DIRECT queryGeminiDirect() path, never the routed hebrew_composition lane)",
+      "exercised_by": "scripts/verify-hebrew-summary.js",
+      "cost": "Gemini free tier, direct call only",
+      "agents": [12],
+      "_added": "2026-08-11 (Audit-and-Fix session, Phase 4). SCOPE CAVEAT, stated where the audit can see it: the daily half is NOT literally 'entirely' Hebrew — a short Hebrew block is prepended above the still-English operational log (case stats, standup transcript, schedule/branch sections), which stays English because it is a template with no model call, deliberately kept that way so it renders for free even on a Saturday A13 forbids spending tokens on. Full 'entirely' conversion is a larger rewrite this session did not take on; see the module's own header."
+    },
     "meeting-participation": {
       "what": "Hold a meeting to the standing agenda, with the office's real state in the prompt.",
       "supplied_by": { "kind": "module", "ref": "workers/meeting-engine.js", "symbol": "runMeeting" },
@@ -126,13 +135,14 @@
       "_added": "2026-08-10. Completes the `idle` measure in computeWorkflowMetrics(), which read ACTIVITY rather than OUTPUT — so an agent whose Q&A asks kept its activity row warm never read as idle however little it produced."
     },
     "capability-audit": {
-      "what": "For every agent: does a code path supply the means its role requires? The role-level form of the Cyber Expert's standing question.",
+      "what": "For every agent: does a code path supply the means its role requires? The role-level form of the Cyber Expert's standing question. Now RECURRING (weekly, .github/workflows/weekly-capability-audit.yml) and its findings reach the board as tasks, not only a findings document.",
       "supplied_by": { "kind": "module", "ref": "workers/capability-audit.js", "symbol": "auditCapabilities" },
-      "also": "scripts/capability-audit.mjs (the runner that builds the supply index from the repo)",
+      "also": "scripts/capability-audit.mjs (the runner that builds the supply index from the repo); auditFindingsToBoardItems() (same module) shapes findings for the board; workers/agent-runner.js's capability_audit_findings admin trigger writes them via the existing meeting action-items board-inbox path",
       "exercised_by": "scripts/verify-capability-audit.js",
       "cost": "none — reads files, calls no provider",
       "agents": [13],
-      "_added": "2026-08-10"
+      "_added": "2026-08-10",
+      "_updated": "2026-08-11 (Phase 5): weekly cron + board-task write added. Was: a one-off manual run whose findings went to stdout/a markdown file only."
     },
     "board-read": {
       "what": "Read the delegation board, the client requirements and the owner's open questions into every prompt, refusing a malformed task rather than counting it.",
@@ -150,11 +160,13 @@
       "agents": [6, 9, 10, 11, 13]
     },
     "owner-channel-read": {
-      "what": "Read the owner's messages, refuse a malformed one, and keep a read record that separates unread from read-and-ignored by content SHA.",
+      "what": "Read the owner's messages, refuse a malformed one, and keep a read record that separates unread from read-and-ignored by content SHA. An optional `to:` field addresses one agent; the rest see it collapse to a count instead of full text in their own per-call prompt (meetings/reports stay unscoped).",
       "supplied_by": { "kind": "module", "ref": "workers/owner-channel.js", "symbol": "parseOwnerMessage" },
+      "also": "messageAddressesAgent() (same file) — the addressee matcher",
       "exercised_by": "scripts/verify-owner-channel.js",
       "cost": "none — GitHub reads",
-      "agents": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13]
+      "agents": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13],
+      "_updated": "2026-08-11 (Phase 3): addressee scoping added. Was: every message reached every agent in full, always."
     },
     "owner-channel-write": {
       "what": "A page the owner can type into whose message reaches channel/from-owner/ in the contract's format, authenticated, with the read state visible back to him.",
@@ -166,11 +178,13 @@
       "_added": "2026-08-10. REQ-003's delivery half. The office builds the PRESENTATION layer only; the folder contract itself is the owner's, because an office that builds its own instruction channel builds the pipe that feeds it."
     },
     "owner-notification": {
-      "what": "Reach the owner: one GitHub Issue a day plus a Sunday heartbeat sent even when there is nothing to report, which is the only thing that makes silence informative.",
+      "what": "Reach the owner: one GitHub Issue a day plus a Sunday heartbeat sent even when there is nothing to report, which is the only thing that makes silence informative. An unanswered notification Issue itself now climbs the same FRESH/STANDING/OVERDUE/ESCALATED ladder questions and submissions already use, and re-surfaces in the next notification once it clears OVERDUE.",
       "supplied_by": { "kind": "module", "ref": "workers/owner-notify.js", "symbol": "notifyOwner" },
+      "also": "workers/owner-channel.js classifyOwnerIssueReadback() — reads back every owner-channel Issue's reply state (a comment, or the owner closing it himself) via the GitHub API",
       "exercised_by": "scripts/verify-owner-channel.js",
       "cost": "none — GitHub API",
-      "agents": [5, 12]
+      "agents": [5, 12],
+      "_updated": "2026-08-11 (Phase 1.2): the escalation ladder now covers Issues, not only questions/submissions. Was: an Issue with no reply was never checked back on at all."
     },
     "submissions-ledger": {
       "what": "Submit finished work with a recommendation (A8), with an age ladder so an unanswered entry rises instead of going quiet.",
