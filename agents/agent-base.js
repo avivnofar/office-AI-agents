@@ -250,7 +250,7 @@ export class AgentBase {
     let officeBlock = '';
     try {
       const office = await getOfficeContext(this.env, {
-        shape: 'agent', agentId: this.id, projects: officeProjects.projects,
+        shape: 'agent', agentId: this.id, agentName: this.config?.name || null, projects: officeProjects.projects,
         // A11 rank filtering (2026-08-10). `clearance` already exists on every
         // agent in agents-config.json and already routes fileSuggestion(); this
         // is the same tier driving what the agent is SHOWN. Passing the config

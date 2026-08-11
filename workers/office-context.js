@@ -1283,14 +1283,22 @@ function boardCountLine(counts) {
  *
  * @param {object} snapshot  from fetchOfficeSnapshot()
  * @param {'meeting'|'agent'|'report'} shape
- * @param {object} [opts]  {agentId, clearance, projects} — agentId narrows the
- *                          'agent' shape to that agent's own tasks; clearance
+ * @param {object} [opts]  {agentId, agentName, clearance, projects} — agentId
+ *                          narrows the 'agent' shape to that agent's own
+ *                          tasks AND (2026-08-11, Phase 3) scopes addressed
+ *                          owner messages, together with agentName; clearance
  *                          drives A11 rank filtering; projects is the list from
  *                          config/office-projects.json, passed in
  * @returns {{text: string|null, degraded: boolean, reason: string|null, tokens: number, dropped: string[]}}
  */
 export function buildOfficeContext(snapshot, shape, opts = {}) {
   const projects = opts.projects || [];
+  // Phase 3 (2026-08-11): who an ADDRESSED owner message reaches. Empty for
+  // any shape/opts that doesn't identify a specific agent — ownerMessageSections()
+  // treats an empty candidate list as "matches nothing addressed", which is
+  // correct: a meeting/report shape ignores this anyway (see that function),
+  // and an 'agent' call with no agentId has nothing to scope BY.
+  const ownerCandidates = opts.agentId != null ? [opts.agentId, opts.agentName].filter((v) => v != null) : [];
   /*
    * A11: an `agent` shape for a non-admin is a DIFFERENT shape, with its own
    * budget and its own section set. Meetings and reports are unaffected — a
@@ -1340,7 +1348,7 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
      * only occupant of would be a trim for its own sake.
      */
     const ownerOnly = snapshot?.owner?.classified
-      ? ownerMessageSections(snapshot.owner.classified, { shape }).map(renderSection).filter(Boolean).join('\n')
+      ? ownerMessageSections(snapshot.owner.classified, { shape, candidates: ownerCandidates }).map(renderSection).filter(Boolean).join('\n')
       : '';
     return {
       text: ownerOnly ? `${policyOnly.text}\n\n${ownerOnly}` : policyOnly.text,
@@ -1378,7 +1386,7 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
    * in this function and is not stylistic ordering.
    */
   if (snapshot?.owner?.classified) {
-    for (const s of ownerMessageSections(snapshot.owner.classified, { shape })) {
+    for (const s of ownerMessageSections(snapshot.owner.classified, { shape, candidates: ownerCandidates })) {
       sections.push({ ...s, priority: PRIORITY.headline });
     }
   }
@@ -1770,7 +1778,7 @@ export async function getOfficeSnapshot(env, { allowFetch = false } = {}) {
   return snapshot;
 }
 
-export async function getOfficeContext(env, { shape = 'agent', agentId = null, clearance = null, allowFetch = false, snapshot: given = undefined, projects = [], agentNames = {}, today = undefined } = {}) {
+export async function getOfficeContext(env, { shape = 'agent', agentId = null, agentName = null, clearance = null, allowFetch = false, snapshot: given = undefined, projects = [], agentNames = {}, today = undefined } = {}) {
   /*
    * THE POLICY HAS NO SWITCH OF ITS OWN, deliberately — the same decision
    * deliverable-lifecycle.js took on 2026-08-10 and for the same reason. It
@@ -1794,7 +1802,7 @@ export async function getOfficeContext(env, { shape = 'agent', agentId = null, c
   // have rendered names since the lifecycle landed. Threaded through 2026-08-10
   // while the signature was being changed anyway; it is a legibility fix, not a
   // behaviour change — the ids were correct, they were just harder to read.
-  const built = buildOfficeContext(snapshot, shape, { agentId, clearance, projects, agentNames, today });
+  const built = buildOfficeContext(snapshot, shape, { agentId, agentName, clearance, projects, agentNames, today });
   if (built.degraded) {
     console.warn(`[office-context] degraded (${shape}): ${built.reason}`);
   }

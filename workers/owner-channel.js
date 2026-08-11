@@ -204,12 +204,44 @@ export function parseOwnerMessage(text, filename, sha = null) {
       kind,
       status: statusRaw,
       re: frontField(front, 're') || 'new',
+      // `to:` (2026-08-11, Phase 3) — OPTIONAL, unvalidated free text (an
+      // agent id, a name, a role slug — whatever the owner writes). Absent
+      // means GENERAL: the message reaches every rank in full, unchanged
+      // from before this field existed. Present means ADDRESSED: only the
+      // matching agent sees it in full — see messageAddressesAgent() below.
+      // Not in OWNER_KINDS/OWNER_STATUSES-style enum on purpose — the owner
+      // should never get a REFUSED message because he wrote "Designer"
+      // instead of "9".
+      to: frontField(front, 'to') || null,
       title: titleMatch ? titleMatch[1].trim() : slug.replace(/-/g, ' '),
       body,
       acted: acted ? acted[1].trim() : null,
       sha: sha || null,
     },
   };
+}
+
+/**
+ * Does an owner message's `to:` field address THIS agent?
+ *
+ * Pure string match — this module imports no agent config (its whole-file
+ * rule), so it does not resolve "designer" to 9 itself. The caller (which
+ * already knows its own identity — agent-base.js has `this.id` and
+ * `this.config.name`) supplies whatever it wants matched against: an id
+ * number, a name, a key. Both sides are normalized the same way (lower-
+ * cased, a leading "the " stripped) so `to: designer`, `to: Designer`,
+ * `to: "The Designer"` and `to: 9` all match agent 9 if the caller passes
+ * `[9, 'The Designer']` as candidates.
+ *
+ * No `to:` at all means GENERAL — reaches everyone, always true.
+ */
+export function messageAddressesAgent(to, candidates = []) {
+  if (!to) return true;
+  const norm = String(to).trim().toLowerCase().replace(/^the\s+/, '');
+  return candidates.some((c) => {
+    if (c === null || c === undefined || c === '') return false;
+    return String(c).trim().toLowerCase().replace(/^the\s+/, '') === norm;
+  });
 }
 
 /* ─────────────────────────── The read record ───────────────────────────── */
@@ -451,9 +483,16 @@ function bodyForShape(message, shape) {
  * wants — so it is in STANDARD_SECTIONS. Rank filtering decides who sees the
  * office's own chatter, never who sees the client's instructions.
  *
+ * `candidates` (2026-08-11, Phase 3) — identifiers for the agent THIS call is
+ * building context for (e.g. `[9, 'The Designer']`), used to scope ADDRESSED
+ * messages. Only meaningful for the `agent` shape: meetings and reports are
+ * a multi-agent/owner-facing forum, not one persona's prompt, so they still
+ * see every message regardless of addressee — scoping is about who a single
+ * agent's prompt reaches, not about hiding office state from a meeting.
+ *
  * @returns {Array} sections in `office-context.js`'s shape
  */
-export function ownerMessageSections(classified, { shape = 'agent' } = {}) {
+export function ownerMessageSections(classified, { shape = 'agent', candidates = [] } = {}) {
   const sections = [];
   const c = classified.counts;
 
@@ -474,17 +513,40 @@ export function ownerMessageSections(classified, { shape = 'agent' } = {}) {
 
   if (!classified.unactioned.length) return sections;
 
+  // Addressed vs general — ONLY scoped for the `agent` shape. An addressed
+  // message not meant for this agent drops out of the full-text list and
+  // collapses into a count, the exact pattern `acted` messages already use
+  // above: never silently dropped (the count is the receipt it happened),
+  // never rendered as if it were this agent's business.
+  const visible = shape === 'agent'
+    ? classified.unactioned.filter((m) => messageAddressesAgent(m.to, candidates))
+    : classified.unactioned;
+  const elsewhere = classified.unactioned.length - visible.length;
+
+  if (!visible.length) {
+    if (elsewhere) {
+      sections.push({
+        label: 'owner-messages-addressed-elsewhere',
+        priority: 0,
+        text: `${elsewhere} owner message(s) awaiting action are addressed to (an)other agent(s) — not shown here.`,
+      });
+    }
+    return sections;
+  }
+
   sections.push({
     label: 'owner-messages',
     priority: 0,
     header: 'THE OWNER HAS WRITTEN TO THE OFFICE — this OUTRANKS the delegation board.'
       + ' Urgency is the client\'s to assign and nobody else\'s; a message here is that urgency arriving directly'
-      + ' instead of through a board task. Do what it says before you pick up board work',
-    items: classified.unactioned.map((m) => {
+      + ' instead of through a board task. Do what it says before you pick up board work'
+      + (elsewhere ? ` (${elsewhere} more addressed to (an)other agent(s), not shown here).` : ''),
+    items: visible.map((m) => {
       const state = m.readAt
         ? `READ ${m.readAt} AND NOT YET ACTED ON`
         : 'NOT YET READ BY THE OFFICE';
-      return `- [${m.kind.toUpperCase()}] ${m.id} (${m.date}) — ${m.title} — ${state}\n`
+      const addressee = m.to ? ` — ADDRESSED TO: ${m.to}` : ' — general, for everyone';
+      return `- [${m.kind.toUpperCase()}] ${m.id} (${m.date}) — ${m.title} — ${state}${addressee}\n`
         + `  ${bodyForShape(m, shape).replace(/\n/g, '\n  ')}`;
     }),
   });

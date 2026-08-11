@@ -27,7 +27,7 @@ import {
   classifyOwnerMessages, ownerMessageSections,
   AGE_LADDER, daysBetween, escalationFor,
   parseSubmissions, submissionSections, ageQuestions,
-  classifyOwnerIssueReadback,
+  classifyOwnerIssueReadback, messageAddressesAgent,
 } from '../workers/owner-channel.js';
 import {
   ownerChannelEnabled, notifyOwner, selectNotificationItems,
@@ -185,6 +185,61 @@ section('§3 precedence — the owner outranks the board');
   );
   check('"the owner has written nothing" is SAID, not omitted (it must not look like an unread channel)',
     /has not written to the office/.test(none.text));
+}
+
+/* ══ §3b addressed vs general owner messages (2026-08-11, Phase 3) ══ */
+section('§3b `to:` — addressed messages reach their addressee, general messages reach everyone');
+
+{
+  check('parseOwnerMessage reads an optional `to:` field', parseOwnerMessage(MSG({ to: 'designer' }), '2026-08-11-a.md').message.to === 'designer');
+  check('…absent `to:` parses as null (general)', parseOwnerMessage(MSG(), '2026-08-11-a.md').message.to === null);
+
+  check('messageAddressesAgent: no `to:` matches ANY candidate set, including empty', messageAddressesAgent(null, []) && messageAddressesAgent(null, [9]));
+  check('…matches by numeric id', messageAddressesAgent('9', [9, 'The Designer']));
+  check('…matches by name, case-insensitively', messageAddressesAgent('DESIGNER', [9, 'The Designer']));
+  check('…matches "The Designer" against a bare "designer" candidate (leading "the " stripped both sides)', messageAddressesAgent('The Designer', [9, 'designer']));
+  check('…does NOT match a different agent', !messageAddressesAgent('designer', [7, 'The Team Lead']));
+  check('…a typo\'d addressee matches NOBODY rather than falling back to general', !messageAddressesAgent('desginer', [9, 'The Designer']));
+
+  const general = parseOwnerMessage(MSG({ to: null }, '# General policy\n\nEveryone follow this.'), '2026-08-11-general.md', 'g1').message;
+  const toDesigner = parseOwnerMessage(MSG({ to: 'designer', date: '2026-08-11' }, '# Ship the new banner\n\nUse the new palette.'), '2026-08-11-banner.md', 'd1').message;
+  const classified = classifyOwnerMessages([general, toDesigner], parseReadLog(''));
+
+  const forDesigner = ownerMessageSections(classified, { shape: 'agent', candidates: [9, 'The Designer'] });
+  const itemsForDesigner = forDesigner.find((s) => s.label === 'owner-messages')?.items.join('\n') || '';
+  check('the ADDRESSEE sees the addressed message in full', /Ship the new banner/.test(itemsForDesigner) && /Use the new palette/.test(itemsForDesigner));
+  check('…and sees the general message too', /General policy/.test(itemsForDesigner));
+
+  const forTrainee = ownerMessageSections(classified, { shape: 'agent', candidates: [4, 'The Trainee'] });
+  const itemsForTrainee = forTrainee.find((s) => s.label === 'owner-messages')?.items.join('\n') || '';
+  check('a NON-addressee still sees the general message (general reaches everyone, unchanged)', /General policy/.test(itemsForTrainee));
+  check('…but NOT the text addressed to someone else', !/Ship the new banner/.test(itemsForTrainee) && !/new palette/.test(itemsForTrainee));
+  check('…it collapses to a COUNT instead — the same shape acted messages already use, never silently dropped',
+    /1 more addressed to \(an\)other agent/.test(forTrainee.find((s) => s.label === 'owner-messages')?.header || ''));
+
+  const onlyAddressed = classifyOwnerMessages([toDesigner], parseReadLog(''));
+  const forSomeoneElse = ownerMessageSections(onlyAddressed, { shape: 'agent', candidates: [4, 'The Trainee'] });
+  check('when EVERYTHING is addressed elsewhere, the count still renders (never a silent empty section)',
+    /1 owner message\(s\) awaiting action are addressed to \(an\)other agent\(s\)/.test(forSomeoneElse.find((s) => s.label === 'owner-messages-addressed-elsewhere')?.text || ''));
+  check('…and the full-text "owner-messages" section is simply absent, not empty', !forSomeoneElse.some((s) => s.label === 'owner-messages'));
+
+  // Meetings/reports are NOT scoped by addressee — a multi-agent forum sees everything.
+  const meetingSections = ownerMessageSections(classified, { shape: 'meeting', candidates: [4, 'The Trainee'] });
+  const meetingItems = meetingSections.find((s) => s.label === 'owner-messages')?.items.join('\n') || '';
+  check('a MEETING shape ignores candidates entirely — sees the addressed message too, regardless of who is asking',
+    /Ship the new banner/.test(meetingItems));
+
+  // End-to-end through buildOfficeContext(), the real call path agent-base.js uses.
+  const snap = {
+    today: '2026-08-11', board: null, requirements: null, questions: null, lifecycle: null,
+    policy: null, owner: { classified }, submissions: null, errors: [],
+  };
+  const designerCtx = buildOfficeContext(snap, 'agent', { agentId: 9, agentName: 'The Designer', clearance: 'specialist', today: '2026-08-11' });
+  check('buildOfficeContext threads agentId/agentName through to the real scoping (the actual agent-base.js call shape)',
+    /Ship the new banner/.test(designerCtx.text));
+  const traineeCtx = buildOfficeContext(snap, 'agent', { agentId: 4, agentName: 'The Trainee', clearance: 'standard', today: '2026-08-11' });
+  check('…and a different agentId genuinely changes what is rendered — not a flag that is threaded but never read',
+    !/Ship the new banner/.test(traineeCtx.text) && /addressed to \(an\)other agent/.test(traineeCtx.text));
 }
 
 /* ═════════════════ §4 the age ladder — it does not go quiet ═════════════ */
