@@ -606,20 +606,42 @@ check('qa-engine.js getActiveQaAgents() carries the in_case_rotation clause',
 const active = agentsConfig.agents.filter(
   (a) => (a.status === 'active' || a.status === 'specified') && a.id !== 10 && a.in_case_rotation !== false
 );
-check('the Q&A rotation is still 10 agents', active.length === 10, `got ${active.length}`);
+// 2026-08-11 (Phase 2, owner decision): admins 5,6,7,8,9,11 removed from the
+// case rotation too — they solve support cases and their real roles (review,
+// design, dispatch, judgment) went unenforced since the Q&A engine predates
+// the bureaucracy. Rotation dropped from 10 to 4: only the field workers.
+check('the Q&A rotation is now 4 agents (down from 10, six admins removed 2026-08-11)', active.length === 4, `got ${active.length}`);
+check('…and they are exactly the four field workers, 1-4', active.map((a) => a.id).sort().join(',') === '1,2,3,4');
 check('Workflow (12) is NOT in the Q&A rotation', !active.some((a) => a.id === 12));
 check('Cyber Expert (13) is NOT in the Q&A rotation', !active.some((a) => a.id === 13));
 check('the Architect (10) exclusion is unchanged', !active.some((a) => a.id === 10));
+check('admins 5,6,7,8,9,11 are NOT in the Q&A rotation',
+  ![5, 6, 7, 8, 9, 11].some((id) => active.some((a) => a.id === id)));
 
 // FAILS-OLD: run the pre-change filter against today's config.
 const oldActive = agentsConfig.agents.filter((a) => (a.status === 'active' || a.status === 'specified') && a.id !== 10);
-check('[FAILS-OLD] the pre-change filter admits 12 and 13 into the Q&A rotation',
-  oldActive.some((a) => a.id === 12) && oldActive.some((a) => a.id === 13),
+check('[FAILS-OLD pre-2026-08-07] the pre-change filter admits 12, 13 AND the six admins into the Q&A rotation',
+  oldActive.some((a) => a.id === 12) && oldActive.some((a) => a.id === 13)
+  && [5, 6, 7, 8, 9, 11].every((id) => oldActive.some((a) => a.id === id)),
   `old=${oldActive.length} new=${active.length}`);
-check('[FAILS-OLD] ...which is a Track A regression of exactly 2 agents',
-  oldActive.length - active.length === 2);
-check('the ten pre-existing rotation agents are byte-for-byte unaffected by the new clause',
-  agentsConfig.agents.filter((a) => a.id <= 11).every((a) => a.in_case_rotation === undefined));
+check('[FAILS-OLD pre-2026-08-07] ...which is a Track A regression of exactly 8 agents (2 non-rotation admins + the 6 case-solving admins)',
+  oldActive.length - active.length === 8);
+
+// FAILS-OLD (2026-08-07 to 2026-08-10, yesterday's live production filter):
+// the in_case_rotation clause existed but only 12/13 carried it — admins
+// 5,6,7,8,9,11 still passed and were pulled into the rotation. This is the
+// exact bug Phase 2 fixes, demonstrated against the SAME clause the source
+// still carries (the source's regex match above did not change — only the
+// config's per-agent flags did).
+const oldActivePreP2 = agentsConfig.agents.filter(
+  (a) => (a.status === 'active' || a.status === 'specified') && a.id !== 10 && ![12, 13].includes(a.id)
+);
+check('[FAILS-OLD pre-Phase-2] admins 5,6,7,8,9,11 WOULD still be in the rotation under yesterday\'s exclusion set',
+  [5, 6, 7, 8, 9, 11].every((id) => oldActivePreP2.some((a) => a.id === id))
+  && oldActivePreP2.length === 10,
+  `pre-Phase-2 rotation would be ${oldActivePreP2.length} agents (the exact bug) vs today's ${active.length}`);
+check('the four field-worker agents are byte-for-byte unaffected by the new clause',
+  [1, 2, 3, 4].every((id) => agentsConfig.agents.find((a) => a.id === id).in_case_rotation === undefined));
 
 check('the Architect is now seated at the weekly meeting', relationships.meeting_default_attendees.weekly.includes(10));
 check('the Workflow is seated at the weekly meeting', relationships.meeting_default_attendees.weekly.includes(12));

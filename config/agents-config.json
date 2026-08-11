@@ -425,6 +425,8 @@
       "clearance": "sudo",
       "can_generate_assets": true,
       "status": "specified",
+      "in_case_rotation": false,
+      "roster_note": "Removed from the daily Q&A case rotation 2026-08-11 (Audit-and-Fix session, Phase 2, owner decision) — admins solve support cases and their real roles (review, design, dispatch, judgment) went unenforced since the Q&A engine predated the bureaucracy. He still makes model calls for his own function: hard-case coaching, emergency-huddle convening, meetings. Same mechanism agents 12/13 already used (in_case_rotation:false), extended here to the rest of the admin tier.",
       "purpose": "Hard cases — network optimization, firewall, application-layer issues, and client escalations.",
       "character": "Has the authority that comes from having solved problems no one else could. The person the office calls when clients are escalating. Speaks in precise technical language and does not repeat himself. His approval is rare and therefore meaningful; his disappointment is quiet and therefore devastating.",
       "model": "gemini-3.1-flash-lite",
@@ -442,8 +444,8 @@
         "overtime": "regular"
       },
       "quotas": {
-        "cases_per_day_min": 20,
-        "cases_per_day_max": 20
+        "cases_per_day_min": 0,
+        "cases_per_day_max": 0
       },
       "model_usage_rate": 0.15,
       "model_usage_rate_happy": 1,
@@ -518,6 +520,8 @@
       "clearance": "sudo",
       "can_generate_assets": true,
       "status": "specified",
+      "in_case_rotation": false,
+      "roster_note": "Removed from the daily Q&A case rotation 2026-08-11 (Audit-and-Fix session, Phase 2, owner decision) — admins solve support cases and their real roles (review, design, dispatch, judgment) went unenforced since the Q&A engine predated the bureaucracy. He still makes model calls for his own function: agent audits, weekly review, guide review/authorship (firewall/vpn). Same mechanism agents 12/13 already used (in_case_rotation:false), extended here to the rest of the admin tier.",
       "purpose": "Agent audits and model optimization — no standard IT cases.",
       "character": "Has made a career of finding what others missed. Not unkind, but relentless. Believes documentation is the difference between a good team and a great one. His audit sessions are dreaded and respected in equal measure — he takes no pleasure in finding mistakes, but great pleasure in seeing them fixed.",
       "model": "gemini-3.1-flash-lite",
@@ -537,8 +541,8 @@
         "model_optimization"
       ],
       "quotas": {
-        "cases_per_day_min": 20,
-        "cases_per_day_max": 20
+        "cases_per_day_min": 0,
+        "cases_per_day_max": 0
       },
       "model_usage_rate": 0.25,
       "model_usage_rate_happy": 1,
@@ -609,6 +613,8 @@
       "clearance": "sudo",
       "can_generate_assets": true,
       "status": "specified",
+      "in_case_rotation": false,
+      "roster_note": "Removed from the daily Q&A case rotation 2026-08-11 (Audit-and-Fix session, Phase 2, owner decision) — admins solve support cases and their real roles (review, design, dispatch, judgment) went unenforced since the Q&A engine predated the bureaucracy. She still makes model calls for her own function: coaching, audits, standup, guide review/authorship (windows/ai/linux/cloud). Same mechanism agents 12/13 already used (in_case_rotation:false), extended here to the rest of the admin tier.",
       "purpose": "Increase agent productivity and development — no standard IT cases.",
       "character": "Carries the team's collective mood the way others carry their own. The first to notice when someone is struggling and the last to give up on them. Her optimism is strategic — a tool to unlock potential in others. Direct when she needs to be, and knows when to push and when to wait.",
       "model": "gemini-3.1-flash-lite",
@@ -627,8 +633,8 @@
         "agent_management"
       ],
       "quotas": {
-        "cases_per_day_min": 20,
-        "cases_per_day_max": 20
+        "cases_per_day_min": 0,
+        "cases_per_day_max": 0
       },
       "model_usage_rate": 0.05,
       "model_usage_rate_happy": 0.65,
@@ -695,6 +701,8 @@
       "clearance": "sudo",
       "can_generate_assets": true,
       "status": "specified",
+      "in_case_rotation": false,
+      "roster_note": "Removed from the daily Q&A case rotation 2026-08-11 (Audit-and-Fix session, Phase 2, owner decision) — admins solve support cases and their real roles (review, design, dispatch, judgment) went unenforced since the Q&A engine predated the bureaucracy. He still makes model calls for his own function: project-wide audits, report review (judgment lane), guide review/authorship (cybersecurity/networking), cross-embodiment comparison. Same mechanism agents 12/13 already used (in_case_rotation:false), extended here to the rest of the admin tier.",
       "purpose": "Audits agents, model, workflows, and supporting technologies project-wide.",
       "character": "Has the patience of someone who has audited hundreds of processes and found the flaw in all of them. Doesn't react to small things because he's learned to see the pattern beneath them. His long-term perspective means his happiness and irritation move slowly — but when they do, everyone notices.",
       "model": "gemini-3.1-flash-lite",
@@ -718,8 +726,8 @@
         "technology_audit"
       ],
       "quotas": {
-        "cases_per_day_min": 20,
-        "cases_per_day_max": 20
+        "cases_per_day_min": 0,
+        "cases_per_day_max": 0
       },
       "model_usage_rate": 0.15,
       "model_usage_rate_happy": 0.75,
@@ -780,6 +788,8 @@
       "clearance": "specialist",
       "can_generate_assets": true,
       "status": "specified",
+      "in_case_rotation": false,
+      "roster_note": "Removed from the daily Q&A case rotation 2026-08-11 (Audit-and-Fix session, Phase 2, owner decision) — admins solve support cases and their real roles (review, design, dispatch, judgment) went unenforced since the Q&A engine predated the bureaucracy. She still makes model calls for her own function: design audits, asset generation, front-publishing-gate work, localization. Same mechanism agents 12/13 already used (in_case_rotation:false), extended here to the rest of the admin tier.",
       "track": "specialist",
       "purpose": "Design audits of the GitHub repository and the Claude app.",
       "character": "Sees the world in layouts, whitespace, and color ratios. Has opinions about button padding. Tracks visual trends the way others track news. When inspired, produces at a pace that astonishes everyone; when not, produces reports documenting exactly what would inspire her.",
@@ -802,8 +812,8 @@
         "ai_usage_training"
       ],
       "quotas": {
-        "cases_per_day_min": 20,
-        "cases_per_day_max": 20
+        "cases_per_day_min": 0,
+        "cases_per_day_max": 0
       },
       "model_usage_rate": 0.15,
       "extended_session_chance": 0.7,
@@ -957,6 +967,8 @@
       "clearance": "root",
       "can_generate_assets": true,
       "status": "specified",
+      "in_case_rotation": false,
+      "roster_note": "Removed from the daily Q&A case rotation 2026-08-11 (Audit-and-Fix session, Phase 2, owner decision) — admins solve support cases and their real roles (review, design, dispatch, judgment) went unenforced since the Q&A engine predated the bureaucracy. She still makes model calls for her own function: leading every meeting, votes/veto, deliverable-lifecycle approval (the one forward exit), executive summaries. Same mechanism agents 12/13 already used (in_case_rotation:false), extended here to the rest of the admin tier.",
       "purpose": "Leads every meeting and spearheads the project; final decision authority.",
       "character": "Has the rare quality of making everyone in the room feel simultaneously seen and strategically deployed. Delegates with precision, votes with calculation, and charms with authenticity. Her anger is a managed instrument; her happiness is contagious and she knows it. She has been underestimated before and found it useful.",
       "model": "gemini-3.1-flash-lite",
@@ -977,8 +989,8 @@
         "strategy"
       ],
       "quotas": {
-        "cases_per_day_min": 20,
-        "cases_per_day_max": 20
+        "cases_per_day_min": 0,
+        "cases_per_day_max": 0
       },
       "model_usage_rate": 0.1,
       "vote_weight": 2,

@@ -24,6 +24,7 @@ const require = createRequire(import.meta.url);
 const agentsConfig = require('../config/agents-config.json');
 const tokenEconomy = require('../config/token-economy.json');
 const aiToolsConfig = require('../config/ai-tools.json');
+const simulationConfig = require('../config/simulation-config.json');
 
 let pass = 0;
 let fail = 0;
@@ -84,8 +85,9 @@ function getActiveQaAgentsMirror() {
   );
 }
 const activeAgents = getActiveQaAgentsMirror();
-check('exactly 10 active Q&A agents (13 on roster, minus dormant Architect, minus Workflow/Cyber who are meetings-only)',
-  activeAgents.length === 10, `got ${activeAgents.length}`);
+check('exactly 4 active Q&A agents (13 on roster, minus dormant Architect, minus Workflow/Cyber who are meetings-only, minus the six admins removed 2026-08-11)',
+  activeAgents.length === 4, `got ${activeAgents.length}`);
+check('…and they are exactly agents 1-4, the field workers', activeAgents.map((a) => a.id).sort().join(',') === '1,2,3,4');
 check('Architect (10) is NOT in the active list', !activeAgents.some((a) => a.id === 10));
 
 // TRACK A REGRESSION GUARD, added 2026-08-07 with the 11→13 roster change.
@@ -98,16 +100,60 @@ check('Workflow (12) is on the roster', agentsConfig.agents.some((a) => a.id ===
 check('Cyber Expert (13) is on the roster', agentsConfig.agents.some((a) => a.id === 13));
 check('Workflow (12) is NOT in the Q&A case rotation', !activeAgents.some((a) => a.id === 12));
 check('Cyber Expert (13) is NOT in the Q&A case rotation', !activeAgents.some((a) => a.id === 13));
-check('the pre-existing ten are unchanged by the new clause — none of 1-9,11 carries in_case_rotation',
-  agentsConfig.agents.filter((a) => a.id <= 11).every((a) => a.in_case_rotation === undefined));
 
-// FAILS-OLD: the pre-2026-08-07 filter had no in_case_rotation clause. Run it
-// against today's config and it admits 12 — which is the regression this
-// clause exists to prevent, demonstrated rather than described.
-const oldFilter = agentsConfig.agents.filter((a) => (a.status === 'active' || a.status === 'specified') && a.id !== 10);
-check('[FAILS-OLD] the pre-change filter WOULD have pulled 12 and 13 into the case rotation',
-  oldFilter.some((a) => a.id === 12) && oldFilter.some((a) => a.id === 13),
-  `old filter returned ${oldFilter.length} agents vs the new filter's ${activeAgents.length}`);
+// PHASE 2 REGRESSION GUARD, added 2026-08-11 (Audit-and-Fix session, owner
+// decision): admins solve support cases — their real roles (review, design,
+// dispatch, judgment) were defined and never enforced, because the Q&A
+// engine predates the bureaucracy. Agents 5,6,7,8,9,11 now carry
+// in_case_rotation:false, the exact mechanism already proven for 12/13.
+check('agents 5,6,7,8,9,11 (the admin tier) all carry in_case_rotation:false',
+  [5, 6, 7, 8, 9, 11].every((id) => agentsConfig.agents.find((a) => a.id === id).in_case_rotation === false));
+check('…and none of them is in the active list', ![5, 6, 7, 8, 9, 11].some((id) => activeAgents.some((a) => a.id === id)));
+check('agents 1-4 (the field workers) are unaffected — still undefined, still in rotation',
+  [1, 2, 3, 4].every((id) => agentsConfig.agents.find((a) => a.id === id).in_case_rotation === undefined));
+
+// FAILS-OLD (pre-2026-08-07): no in_case_rotation clause at all. Run it
+// against today's config and it admits everyone but the dormant Architect —
+// 12, 13 AND all six admins — which is the regression this clause exists to
+// prevent, demonstrated rather than described.
+const oldFilterNoClause = agentsConfig.agents.filter((a) => (a.status === 'active' || a.status === 'specified') && a.id !== 10);
+check('[FAILS-OLD pre-2026-08-07] the pre-change filter WOULD have pulled 12, 13 AND the six admins into the case rotation',
+  oldFilterNoClause.some((a) => a.id === 12) && oldFilterNoClause.some((a) => a.id === 13)
+  && [5, 6, 7, 8, 9, 11].every((id) => oldFilterNoClause.some((a) => a.id === id)),
+  `old filter returned ${oldFilterNoClause.length} agents vs the new filter's ${activeAgents.length}`);
+
+// FAILS-OLD (2026-08-07 to 2026-08-10, before Phase 2): in_case_rotation
+// clause existed but only 12/13 were flagged — this is yesterday's live
+// production behaviour, and it is EXACTLY the bug Phase 2 fixes: admins
+// 5,6,7,8,9,11 pass this filter and are pulled into the case rotation
+// alongside the four field workers.
+const oldFilterPreP2 = agentsConfig.agents.filter(
+  (a) => (a.status === 'active' || a.status === 'specified') && a.id !== 10
+    && ![12, 13].includes(a.id) // the ONLY exclusion Phase < 2's filter knew about
+);
+check('[FAILS-OLD pre-Phase-2] admins 5,6,7,8,9,11 WOULD still show up as case-rotation-eligible under yesterday\'s filter',
+  [5, 6, 7, 8, 9, 11].every((id) => oldFilterPreP2.some((a) => a.id === id)),
+  `pre-Phase-2 filter returned ${oldFilterPreP2.length} agents (should have been 10, the exact bug) vs today's ${activeAgents.length}`);
+
+// Volume/load consequence of Phase 2 (2026-08-11): computeDailyQuestionVolume()
+// (workers/agent-runner.js) reads cases_per_day_total from config — it has no
+// agent-count term at all, so the DAILY TOTAL is unchanged by this change.
+// generateAssignedDailyBatch() (workers/qa-engine.js) round-robins that same
+// total across activeAgents.length — mirrored here rather than imported, per
+// this file's header comment on why qa-engine.js can't be plain-Node imported.
+{
+  const dailyTotal = simulationConfig.cases_per_day_total || 200;
+  const roundRobinShare = (n) => Array.from({ length: dailyTotal }, (_, i) => i % n)
+    .reduce((counts, agentIdx) => { counts[agentIdx] = (counts[agentIdx] || 0) + 1; return counts; }, {});
+  const newShares = Object.values(roundRobinShare(activeAgents.length));
+  const oldShares = Object.values(roundRobinShare(10)); // yesterday's active-agent count
+  check(`the daily TOTAL (${dailyTotal}) is unchanged — computeDailyQuestionVolume() has no agent-count term`,
+    dailyTotal === (simulationConfig.cases_per_day_total || 200));
+  check(`[FAILS-OLD] each of the 4 remaining field agents' per-day share roughly TRIPLES: was ~${oldShares[0]}/agent across 10, now ~${newShares[0]}/agent across 4`,
+    newShares[0] > oldShares[0] * 2, `old=${oldShares[0]} new=${newShares[0]}`);
+  check('…the six removed admins now get exactly 0 cases/day (down from their prior ~1/10th share each)',
+    activeAgents.every((a) => ![5, 6, 7, 8, 9, 11].includes(a.id)));
+}
 
 for (const agent of activeAgents) {
   check(`agent ${agent.id} (${agent.name}) has topic_affinity (array)`, Array.isArray(agent.topic_affinity));
