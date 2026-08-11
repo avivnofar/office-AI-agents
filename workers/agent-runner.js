@@ -127,6 +127,12 @@ import {
   DRAFTER_AGENT_ID, REVIEWER_AGENT_ID, REPORT_TYPES, estimateReviewFit, pickDraftLane,
   LATEST_INDEX_PATH, parseLatestIndex, renderLatestIndex, addToLatestIndex, wordCount,
 } from './report-pipeline.js';
+// OFFICE-POLICY.md A9, wired 2026-08-11 (Audit-and-Fix session, Phase 4) —
+// see that file's header for what "wired" does and does not mean here.
+import {
+  HEBREW_SYSTEM_PROMPT, buildDailyHeadlinePrompt, withDailyHeadline,
+  buildWeeklySummaryPrompt, withWeeklySummary,
+} from './hebrew-summary.js';
 
 const ALLOWED_ORIGINS = ['https://avivnofar.github.io', 'http://localhost:3000', 'http://127.0.0.1:5500'];
 
@@ -2012,11 +2018,35 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
       };
     }
 
+    // ── OFFICE-POLICY A9: the weekly Hebrew executive summary ─────────────
+    // Runs against the STRUCTURALLY-APPROVED English body — validateReportBody()
+    // above already checked exactly this text, and prepending Hebrew after
+    // that check (never before) means the gate keeps checking precisely what
+    // it always checked. "Only Gemini writes Hebrew": always the DIRECT
+    // queryGeminiDirect() path below, never routed, regardless of
+    // routing_enabled — same rule agent-base.js's flagCapabilityGap() keeps.
+    // A failed composition degrades to publishing the English body alone,
+    // loudly logged — same "a report that cannot be produced is a logged
+    // skip, never a broken cron tick" posture the rest of this pipeline uses.
+    let reportWithHebrew = finalReport;
+    if (reportType === 'weekly') {
+      const hebrewCall = await callReportModel(
+        env,
+        { mode: 'direct', path: 'queryGeminiDirect', provider: 'gemini', agentId: row.drafter_agent_id },
+        { prompt: buildWeeklySummaryPrompt(finalReport, { periodLabel }), systemPrompt: HEBREW_SYSTEM_PROMPT, maxTokens: 500 }
+      );
+      if (hebrewCall.text) {
+        reportWithHebrew = withWeeklySummary(finalReport, hebrewCall.text);
+      } else {
+        console.warn(`[report-pipeline] A9 Hebrew executive summary NOT composed — ${hebrewCall.reason || 'no text returned'}. Publishing the English body alone.`);
+      }
+    }
+
     const drafterConfig = getAgentConfig(row.drafter_agent_id);
     const reviewerConfig = getAgentConfig(plan.review.agentId);
     const finalMarkdown = renderReportFile({
       reportType, periodLabel, dateStr,
-      finalReport,
+      finalReport: reportWithHebrew,
       drafterName: drafterConfig?.name || `Agent ${row.drafter_agent_id}`,
       drafterProvider: row.drafter_provider,
       reviewerName: reviewerConfig?.name || `Agent ${plan.review.agentId}`,
@@ -2322,6 +2352,34 @@ function renderOfficeSection(office) {
     return `\n## The Office's Own Work\n\n⚠️ **Could not be read this cycle** — ${office.reason || 'reason not reported'}.\nThis section is missing, not empty. Do not read its absence as "no office work".\n`;
   }
   return `\n## The Office's Own Work\n\n${office.text}\n`;
+}
+
+/**
+ * OFFICE-POLICY A9's daily half. Composes the short Hebrew headline and
+ * prepends it — see workers/hebrew-summary.js's header for exactly what
+ * "Hebrew, entirely" does and does not mean here.
+ *
+ * Called ONLY when `!isOffDay` — a Saturday render still happens (free,
+ * template-only, per the A13 comment at this function's call sites) but
+ * MUST NOT spend a model call, since nothing is committed on a rest day and
+ * a call whose result is thrown away is exactly the kind of spend A13
+ * exists to prevent. Agent 12 (The Workflow) composes it — his declared
+ * role is running the delegation board and naming what is stuck, the same
+ * question this headline answers, and he is not a persona-flavored voice
+ * the way a gap note's flagging agent is.
+ */
+async function composeDailyHeadline(env, markdown, isOffDay) {
+  if (isOffDay) return markdown;
+  const hebrewCall = await callReportModel(
+    env,
+    { mode: 'direct', path: 'queryGeminiDirect', provider: 'gemini', agentId: 12 },
+    { prompt: buildDailyHeadlinePrompt(markdown), systemPrompt: HEBREW_SYSTEM_PROMPT, maxTokens: 300 }
+  );
+  if (!hebrewCall.text) {
+    console.warn(`[daily-summary] A9 Hebrew headline NOT composed — ${hebrewCall.reason || 'no text returned'}. Publishing the English body alone.`);
+    return markdown;
+  }
+  return withDailyHeadline(markdown, hebrewCall.text);
 }
 
 function renderDailySummary(yearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office, branches) {
@@ -3171,6 +3229,10 @@ export async function runWorkDayCycle(env) {
     return null;
   });
   const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office, branches);
+  // OFFICE-POLICY A9 (2026-08-11) — see composeDailyHeadline()'s comment for
+  // why this runs AFTER the free render and is guarded on isOffDay: no model
+  // call whose result would be thrown away on a rest day.
+  const markdownWithHeadline = await composeDailyHeadline(env, markdown, isOffDay);
   // Moved to back-office 2026-08-11 (plan 0.4, stage 2 of 5): the daily
   // summary publishes the internal delegation board and the office's open
   // owner-questions WITH their full escalation reasoning — operational
@@ -3179,7 +3241,7 @@ export async function runWorkDayCycle(env) {
   const report = isOffDay
     ? { committed: false, skipped: true, reason: 'rest_day_zero_write', policy: 'OFFICE-POLICY.md A13' }
     : await commitFileToRepo(
-      env, BACKOFFICE_REPO_NAME, `campus/shared/daily/day-${pad(nextDay, 3)}-summary.md`, markdown,
+      env, BACKOFFICE_REPO_NAME, `campus/shared/daily/day-${pad(nextDay, 3)}-summary.md`, markdownWithHeadline,
       `chore(office): day ${nextDay} summary [skip ci]`
     );
 
@@ -3542,6 +3604,10 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
     return null;
   });
   const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office, branches);
+  // OFFICE-POLICY A9 (2026-08-11) — see composeDailyHeadline()'s comment for
+  // why this runs AFTER the free render and is guarded on isOffDay: no model
+  // call whose result would be thrown away on a rest day.
+  const markdownWithHeadline = await composeDailyHeadline(env, markdown, isOffDay);
   // Moved to back-office 2026-08-11 (plan 0.4, stage 2 of 5): the daily
   // summary publishes the internal delegation board and the office's open
   // owner-questions WITH their full escalation reasoning — operational
@@ -3550,7 +3616,7 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
   const report = isOffDay
     ? { committed: false, skipped: true, reason: 'rest_day_zero_write', policy: 'OFFICE-POLICY.md A13' }
     : await commitFileToRepo(
-      env, BACKOFFICE_REPO_NAME, `campus/shared/daily/day-${pad(nextDay, 3)}-summary.md`, markdown,
+      env, BACKOFFICE_REPO_NAME, `campus/shared/daily/day-${pad(nextDay, 3)}-summary.md`, markdownWithHeadline,
       `chore(office): day ${nextDay} summary [skip ci]`
     );
 
