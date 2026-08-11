@@ -349,7 +349,7 @@
         "kind": "module",
         "ref": "workers/context-editor.js",
         "symbol": "writeJournalEntry",
-        "caveat": "BUILT 2026-08-10, same session and same gate as active-context-amendment. Self-write only (an agent writes its own, never another's) with one exception: the active-context 8KB roll-off archives the oldest entries here on the agent's behalf."
+        "caveat": "BUILT 2026-08-10, same session and same gate as active-context-amendment. Self-write only (an agent writes its own, never another's) with one exception: the active-context 8KB roll-off archives the oldest entries here on the agent's behalf. WIRED TO REAL ACTION SITES 2026-08-11 (The Journal session): agent-base.js askAssignedProject() buffers one raw fragment per case (plan/actual/capabilities/problems) and agent-runner.js processCaseBatch() flushes it as one commit per agent per batch tick (not per case — see agent-base.js's _journalBuffer comment for the subrequest-budget reasoning); meeting-engine.js runMeeting() writes one entry per attendee per meeting directly. Before this date writeJournalEntry() was called only by the roll-off path — PROJECT-SPEC-TABLES.md's 2026-08-10 entry flagged that gap explicitly; this closes it."
       },
       "exercised_by": "scripts/verify-learning-loop.js",
       "cost": "none — GitHub Contents API via BACKOFFICE_REPO_TOKEN",

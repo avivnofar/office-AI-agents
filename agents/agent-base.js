@@ -18,6 +18,7 @@ import { getClaudeBudgetStatus, recordClaudeSpend, getClaudeCallsToday, CLAUDE_M
 import { checkGeminiPacingSlot } from '../workers/gemini-pacer.js';
 import { detectCapabilityGap } from '../workers/gap-reports.js';
 import { recordOfficeEvent } from '../workers/improvement-loop.js';
+import { writeJournalEntry } from '../workers/context-editor.js';
 import { getOfficeContext } from '../workers/office-context.js';
 // The office's own projects, as data. office-context.js deliberately imports
 // no JSON (its verifier must be able to `import` it under plain node), so the
@@ -68,6 +69,55 @@ export class AgentBase {
     this.configOverrides = {};
 
     this.session = null;
+
+    // journal.md capture (OFFICE-POLICY.md, "the journal" — 2026-08-11).
+    // Raw per-action fragments accumulate here as the agent works through a
+    // case batch, then flushJournal() commits them in ONE writeJournalEntry
+    // call per agent per batch tick — not one commit per case. journal.md
+    // is GitHub-Contents-API-backed (read-modify-write, two subrequests per
+    // commit); a per-case commit on a 40-case batch would add up to 80
+    // subrequests to a single Worker invocation on top of everything else
+    // that tick already does, and this project has already hit Cloudflare's
+    // subrequest ceiling once ({"type":"day"}, see CLAUDE.md). Batching by
+    // agent-per-tick keeps the entry granularity (one fragment per action,
+    // nothing summarized) while keeping the commit count at O(agents), not
+    // O(cases).
+    this._journalBuffer = [];
+  }
+
+  /**
+   * Records one raw, unsummarized fragment for journal.md — "what was
+   * planned, what actually happened, which capabilities/lanes were used,
+   * and anything that went wrong or was unclear" (OFFICE-POLICY.md's
+   * journal requirement). Buffered in memory only; flushJournal() is what
+   * actually commits. Never throws — a journal fragment is never allowed
+   * to affect the real work it is describing.
+   */
+  _recordJournalFragment(fragment) {
+    try {
+      this._journalBuffer.push(String(fragment || '').trim());
+    } catch {
+      // never let journal bookkeeping affect the case pipeline
+    }
+  }
+
+  /**
+   * Commits every fragment buffered since the last flush as ONE journal.md
+   * entry (one dated section, multiple actions inside it — see
+   * _journalBuffer's comment for why this is batched rather than per-case).
+   * No-ops silently if nothing was buffered, if learning_loop_enabled is
+   * off (writeJournalEntry's own gate), or on any write failure — a lost
+   * journal entry must never surface as a case-pipeline error.
+   */
+  async flushJournal() {
+    if (!this._journalBuffer.length) return { written: false, reason: 'nothing buffered' };
+    const content = this._journalBuffer.join('\n\n---\n\n');
+    this._journalBuffer = [];
+    try {
+      return await writeJournalEntry(this.env, { actorId: this.id, agentId: this.id, content });
+    } catch (err) {
+      return { written: false, reason: `journal flush threw: ${err.message}` };
+    }
   }
 
   /* ───────────────────────── 1. State machine ───────────────────────── */
@@ -580,6 +630,32 @@ export class AgentBase {
         kb_slug: opts.kbSlug || null,
       }),
     });
+
+    // journal.md capture — buffered here, committed by flushJournal() (see
+    // that method's comment for why this is per-agent-per-batch, not
+    // per-call). Placed at the SAME unit-of-work boundary as
+    // recordOfficeEvent() just above (post-followups, one entry per case,
+    // not per model call) so the two records describe the same action —
+    // but this one is raw prose for a human to read later, not a D1 row for
+    // a query to aggregate. Deliberately NOT gated on quality, gap status,
+    // or outcome: OFFICE-POLICY.md's requirement is every action, including
+    // the ones that went fine, because a problem that recurs quietly across
+    // many "fine" actions is exactly the signal a review-only log would miss.
+    const capabilityLine = notAsked
+      ? `not asked — ${result?.reason || 'unstated reason'}`
+      : `${opts.project === 'notebook-x' ? 'Notebook-X/Gemini' : 'data-center/Claude'} via ${result?.source || this.lastModelSource || 'unknown lane'}${depth ? `, ${depth} follow-up(s)` : ''}`;
+    const problemLine = notAsked
+      ? `the ask never reached a provider (${result?.reason || 'unstated'})`
+      : typeof result?.quality === 'number' && result.quality < 0.65
+        ? `answer landed in the ${result.quality < 0.3 ? 'weak' : 'unclear'} band (quality ${result.quality.toFixed(2)}) — ${depth ? `chased with ${depth} follow-up(s)` : 'no follow-up available at this persona’s followup_depth'}`
+        : 'none — answer scored clear';
+    this._recordJournalFragment(
+      `**${opts.caseId || 'case'}** (${opts.project || 'data-center'}${opts.kbSlug ? `/${opts.kbSlug}` : ''}, mode: ${mode})\n` +
+      `- Planned: ask "${lastQuery === query ? query : `${query}\" then follow up with \"${lastQuery}`}"\n` +
+      `- Happened: ${notAsked ? 'not asked' : `got an answer, quality ${typeof result?.quality === 'number' ? result.quality.toFixed(2) : 'n/a'}`}${!notAsked && result?.response ? ` — "${String(result.response).slice(0, 240).replace(/\s+/g, ' ')}${String(result.response).length > 240 ? '…' : ''}"` : ''}\n` +
+      `- Capabilities/lanes used: ${capabilityLine}\n` +
+      `- Problems/unclear: ${problemLine}`
+    );
 
     return result;
   }

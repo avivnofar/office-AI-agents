@@ -2708,6 +2708,17 @@ async function processCaseBatch(env, batchCases, agentInstances, agentStats) {
         stats.escalations += 1;
       }
     }
+
+    // journal.md — one commit per agent per batch tick, covering every case
+    // that agent just handled (see agent-base.js's _journalBuffer comment
+    // for why this is batched here rather than committed per-case inside
+    // askAssignedProject itself). Never allowed to affect case handling —
+    // flushJournal() already swallows its own errors, this is belt-and-braces.
+    try {
+      await agent.flushJournal();
+    } catch {
+      // journal bookkeeping must never fail a case batch
+    }
   }
 }
 

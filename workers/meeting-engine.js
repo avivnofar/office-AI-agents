@@ -60,7 +60,7 @@ import { recordRefusalEvent } from './improvement-loop.js';
 // context_amendments consumer (2026-08-11) — see applyMeetingEffects() below.
 // No circular import: context-editor.js only imports repo-write.js, and
 // probation.js only imports context-editor.js — neither reaches back here.
-import { learningLoopEnabled } from './context-editor.js';
+import { learningLoopEnabled, writeJournalEntry } from './context-editor.js';
 import { proposeChange } from './probation.js';
 
 /*
@@ -1217,6 +1217,36 @@ export async function runMeeting(meetingType, env, opts = {}) {
   // separate facts and the more fragile one goes first.
   const refusals = await recordMeetingRefusals(meetingType, attendeeSnapshots, decisions, env)
     .catch((err) => { console.warn(`[meeting-engine] refusal recording failed: ${err?.message}`); return { recorded: 0, lost: 0, error: err?.message }; });
+
+  // journal.md capture for meeting attendance — OFFICE-POLICY.md's journal
+  // requirement covers every action, not only the case pipeline (see
+  // agent-base.js's askAssignedProject for the case-side hook). Meetings
+  // have no persistent agent instance here (this module works off plain
+  // snapshots/ids, not AgentBase objects), so this writes directly via
+  // writeJournalEntry rather than through an agent's buffer — one commit
+  // per attendee per meeting is acceptable volume (meetings run a handful
+  // of times a day at most, unlike the hundreds of daily cases). Best-effort
+  // and never allowed to affect the meeting's own outcome: every failure is
+  // swallowed, never thrown.
+  for (const snap of attendeeSnapshots) {
+    try {
+      const nameEsc = String(snap.config?.name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const lineMatch = new RegExp(`\\*\\*${nameEsc}[^*]*\\*\\*:?\\s*(.+)`, 'i').exec(transcript || '');
+      const refusal = Array.isArray(decisions?.refusals) ? decisions.refusals.find((r) => r?.agent_id === snap.id) : null;
+      await writeJournalEntry(env, {
+        actorId: snap.id,
+        agentId: snap.id,
+        content:
+          `**${meetingType} meeting**\n` +
+          `- Planned: attend the ${meetingType} meeting\n` +
+          `- Happened: ${lineMatch ? `"${lineMatch[1].trim().slice(0, 300)}"` : 'no individually attributable line found in the transcript'}\n` +
+          `- Capabilities/lanes used: ${modelResult?.source || (GEMINI_MEETING_TYPES.has(meetingType) ? 'gemini' : 'groq')} composed the meeting\n` +
+          `- Problems/unclear: ${refusal ? `declined "${refusal.declined}" — ${refusal.character_line || 'no character line given'}` : 'none recorded for this agent'}`,
+      });
+    } catch (err) {
+      console.warn(`[meeting-engine] journal write failed for agent ${snap.id}: ${err?.message}`);
+    }
+  }
 
   const dbId = await persistMeeting(env, { meetingType, attendees: attendeeIds, transcript, decisions });
 
