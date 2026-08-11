@@ -82,7 +82,7 @@ import {
 // the visual page over it are the office's work and are on the board.
 import {
   READ_LOG_PATH, readKey, parseReadLog, renderReadLog, recordOwnerRead, ageQuestions,
-  parseOwnerMessage,
+  parseOwnerMessage, classifyOwnerIssueReadback,
 } from './owner-channel.js';
 // The owner's PAGE (2026-08-10, REQ-003) — the presentation layer over the
 // channel, which is the office's work. The FOLDER CONTRACT is not: an office that
@@ -552,6 +552,40 @@ async function fileGitHubIssue(env, repoName, { title, body, labels }) {
   return { created: res.ok, status: res.status };
 }
 
+/**
+ * Reads back owner-channel Issues (label `owner-channel` — #36, #37, ...)
+ * for `classifyOwnerIssueReadback()`. The read-back half of Phase 1.2
+ * (2026-08-11 audit-and-fix session): a notification Issue with no comment
+ * and not closed had nothing checking it, ever. Read-only — no-ops to `[]`
+ * without env.GITHUB_TOKEN or on any request failure, same fail-quiet-but-
+ * logged shape `fetchAssetBoard()` below uses for a public read.
+ */
+async function fetchOwnerChannelIssues(env, repoName) {
+  const tokenSecret = REPO_TO_TOKEN_SECRET[repoName];
+  if (!tokenSecret || !env?.[tokenSecret]) return [];
+  const url = `https://api.github.com/repos/${REPO_OWNER}/${repoName}/issues?labels=${encodeURIComponent(OWNER_ISSUE_LABEL)}&state=all&per_page=50`;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${env[tokenSecret]}`,
+        'User-Agent': 'data-center-agent-sim',
+        Accept: 'application/vnd.github+json',
+      },
+    });
+    if (!res.ok) {
+      console.warn(`[owner-channel] could not read back owner-channel Issues — HTTP ${res.status}`);
+      return [];
+    }
+    const data = await res.json();
+    return (Array.isArray(data) ? data : []).map((it) => ({
+      number: it.number, title: it.title, createdAt: it.created_at, state: it.state, comments: it.comments,
+    }));
+  } catch (err) {
+    console.warn(`[owner-channel] could not read back owner-channel Issues — ${err?.message || err}`);
+    return [];
+  }
+}
+
 /** Reads reports/asset-pipeline/board.json from the repo (read-only, public). Returns { items: [] } on any failure. */
 async function fetchAssetBoard(env) {
   const url = `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/master/reports/asset-pipeline/board.json`;
@@ -708,9 +742,19 @@ async function processOwnerChannelBlock(env, opts = {}) {
   // accident.
   const isHeartbeatDay = opts.forceHeartbeat || new Date(`${today}T00:00:00Z`).getUTCDay() === 0;
 
+  // Phase 1.2 (2026-08-11): the escalation ladder now covers owner-channel
+  // Issues too, not only questions and submissions. Read back every
+  // `[Office #N]` Issue's reply state before composing this cycle's
+  // notification, so an unanswered one rises instead of going quiet.
+  const issueReadback = classifyOwnerIssueReadback(
+    await fetchOwnerChannelIssues(env, REPO_NAME), today
+  );
+  out.issueReadback = issueReadback;
+
   const items = selectNotificationItems({
     submissions: snapshot.submissions?.submissions || [],
     questions: ageQuestions(snapshot.questions?.questions || [], today),
+    issueReadback,
   });
 
   out.notified = await notifyOwner(env, {
@@ -719,6 +763,21 @@ async function processOwnerChannelBlock(env, opts = {}) {
 
   if (out.notified && out.notified.sent === false && !out.notified.skipped) {
     out.errors.push(`OWNER NOTIFICATION #${out.notified.seq ?? '?'} FAILED — ${out.notified.reason}. The office has NOT reached the client.`);
+  }
+
+  // Closing the loop (Phase 1.2): a replied-to Issue is recorded as evidence
+  // the office read and acted on it, not left to infer from silence. An
+  // unanswered one that just climbed a rung is named specifically, so this
+  // line is itself the read-back record the daily report/console history
+  // can point to — the same "recorded, not merely logged and forgotten"
+  // requirement this project already applies to read receipts and failures.
+  const repliedTo = issueReadback.filter((ir) => ir.hasReply);
+  const nowEscalated = issueReadback.filter((ir) => !ir.hasReply && ir.escalation?.inNotification);
+  if (repliedTo.length) {
+    console.log(`[owner-channel] read-back: Issue(s) ${repliedTo.map((ir) => `#${ir.number}`).join(', ')} have a reply (comment or closed) — acted on, not re-notified.`);
+  }
+  if (nowEscalated.length) {
+    console.log(`[owner-channel] read-back: Issue(s) ${nowEscalated.map((ir) => `#${ir.number} (${ir.escalation.rung}, ${ir.escalation.days}d)`).join(', ')} unanswered — rising in this cycle's notification instead of going quiet.`);
   }
 
   console.log(`[owner-channel] ${today}: ${fresh.length} newly-read message(s), ${items.length} item(s) for the client, notification=${out.notified?.sent ? `sent #${out.notified.seq}` : (out.notified?.reason || 'not sent')}`);

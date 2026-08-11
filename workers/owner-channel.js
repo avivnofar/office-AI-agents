@@ -723,6 +723,46 @@ export function ageQuestions(questions, today) {
 }
 
 /**
+ * The same ladder, applied to owner-channel GitHub Issues (#36, #37, ... —
+ * `[Office #N]`). Phase 1.2 of the 2026-08-11 audit-and-fix session found
+ * the exact gap this closes: #37 was opened awaiting a decision and nothing
+ * ever checked whether it got one — the ball was in the owner's court and
+ * there was no read-back. `escalationFor()` already takes any `YYYY-MM-DD`
+ * date, so an Issue's `created_at` ages exactly like a question or a
+ * submission does; this is the SAME mechanism, not a second one.
+ *
+ * "Has a reply" is comment activity, OR the owner closing it himself.
+ * `buildIssueBody()` (owner-notify.js) tells the owner directly that
+ * closing the Issue "changes nothing" — the office never treats a closure
+ * as an action taken on its own initiative, and it never closes an
+ * owner-channel Issue itself (the session hard rule this file's caller
+ * observes). So any closed owner-channel Issue was closed BY HIM, and that
+ * is real reply signal even though the documented reply path is the repo,
+ * not the tracker — a comment or a close are both lower-friction than
+ * editing markdown and are exactly the kind of reply that would otherwise
+ * go unread.
+ *
+ * `issues` is raw GitHub issue data already fetched by the caller:
+ * `{ number, title, createdAt, state, comments }` — this module stays pure
+ * (imports nothing) so the network call lives in agent-runner.js, same
+ * split every other GitHub-touching function in this file uses.
+ */
+export function classifyOwnerIssueReadback(issues, today) {
+  return (issues || []).map((it) => {
+    const hasReply = (Number(it.comments) || 0) > 0 || it.state === 'closed';
+    const createdDate = String(it.createdAt || '').slice(0, 10);
+    return {
+      number: it.number,
+      title: it.title,
+      state: it.state,
+      comments: Number(it.comments) || 0,
+      hasReply,
+      escalation: hasReply ? null : escalationFor(createdDate, today),
+    };
+  });
+}
+
+/**
  * The office-context sections for the office→owner direction.
  *
  * Two sections and not one, because a submission and a question are different

@@ -367,8 +367,15 @@ export async function notifyOwner(env, deps, { items = [], today, isHeartbeatDay
  *
  * This is the ONE place the channel decides what is worth a person's attention,
  * so the rule is written here in full rather than spread across two callers.
+ *
+ * `issueReadback` (2026-08-11, Phase 1.2) is
+ * `owner-channel.js`'s `classifyOwnerIssueReadback()` output — a PREVIOUS
+ * notification of ours (`[Office #N]`) that got no reply. It follows the
+ * same "only once it climbs the ladder" rule as a question, for the same
+ * reason: a fresh Issue is expected to sit for a day or two, and repeating
+ * it immediately would be noise, not escalation.
  */
-export function selectNotificationItems({ submissions = [], questions = [] } = {}) {
+export function selectNotificationItems({ submissions = [], questions = [], issueReadback = [] } = {}) {
   const items = [];
 
   for (const s of submissions) {
@@ -396,6 +403,21 @@ export function selectNotificationItems({ submissions = [], questions = [] } = {
       fallback: q.escalation.takeFallback
         ? `ALREADY TAKEN (14+ days, per the age ladder — the entry stays OPEN and keeps being asked): ${q.fallback}`
         : q.fallback,
+    });
+  }
+
+  for (const ir of issueReadback) {
+    if (ir.hasReply || !ir.escalation?.inNotification) continue;
+    items.push({
+      id: `Issue #${ir.number}`,
+      title: ir.title,
+      age: `${ir.escalation.rung}${ir.escalation.days === null ? ' — open date unreadable' : ` — ${ir.escalation.days} day(s) unanswered`}`,
+      did: 'This is a previous notification of ours (a GitHub Issue) that has had no reply — no comment, and it has not been closed.',
+      recommend: null,
+      decision: 'Same as it originally asked — repeated here because it is now overdue, not because anything changed.',
+      fallback: ir.escalation.takeFallback
+        ? 'ALREADY TAKEN (14+ days, per the age ladder): the Issue stays open and keeps being surfaced until it gets a reply.'
+        : null,
     });
   }
 

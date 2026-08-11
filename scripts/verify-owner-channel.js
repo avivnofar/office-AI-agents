@@ -27,6 +27,7 @@ import {
   classifyOwnerMessages, ownerMessageSections,
   AGE_LADDER, daysBetween, escalationFor,
   parseSubmissions, submissionSections, ageQuestions,
+  classifyOwnerIssueReadback,
 } from '../workers/owner-channel.js';
 import {
   ownerChannelEnabled, notifyOwner, selectNotificationItems,
@@ -224,6 +225,57 @@ section('§4 the age ladder — an entry that ages gets LOUDER');
   check('…and a risen question is RE-SURFACED in its own headline section, not merely relabelled',
     /ASKED AND NOT ANSWERED/.test(later.text) && !later.dropped.includes('questions-overdue'));
   check('…saying the fallback was TAKEN and the question is STILL OPEN', /FALLBACK HAS BEEN TAKEN and the question is STILL OPEN/.test(later.text));
+}
+
+/* ═══ §4b owner-channel Issues — the ladder now covers them too (2026-08-11, Phase 1.2) ═══ */
+section('§4b an owner-channel Issue with no reply climbs the SAME ladder, and rises in the next notification');
+
+{
+  const fresh = classifyOwnerIssueReadback(
+    [{ number: 37, title: 'awaiting your decision', createdAt: '2026-08-11', state: 'open', comments: 0 }],
+    '2026-08-11',
+  );
+  check('[FAILS-OLD] before this session, NOTHING read an Issue back — an unanswered #37 was invisible to the office forever',
+    fresh[0].hasReply === false && fresh[0].escalation.rung === 'FRESH');
+
+  const escalated = classifyOwnerIssueReadback(
+    [{ number: 37, title: 'awaiting your decision', createdAt: '2026-08-11', state: 'open', comments: 0 }],
+    '2026-08-25',
+  );
+  check('…14 days unanswered climbs to ESCALATED, same ladder as questions/submissions', escalated[0].escalation.rung === 'ESCALATED');
+  check('…takeFallback fires at the same rung the ladder defines everywhere else', escalated[0].escalation.takeFallback === true);
+
+  const commented = classifyOwnerIssueReadback(
+    [{ number: 37, title: 'x', createdAt: '2026-08-11', state: 'open', comments: 1 }],
+    '2026-08-25',
+  );
+  check('a COMMENT counts as a reply even though the documented channel is the repo — lower friction than editing markdown, and otherwise unread forever',
+    commented[0].hasReply === true && commented[0].escalation === null);
+
+  const closedByOwner = classifyOwnerIssueReadback(
+    [{ number: 36, title: 'x', createdAt: '2026-08-01', state: 'closed', comments: 0 }],
+    '2026-08-25',
+  );
+  check('a CLOSED Issue counts as a reply — the office never closes an owner-channel Issue itself, so a closure came from him',
+    closedByOwner[0].hasReply === true);
+
+  const untouchedHeartbeat = classifyOwnerIssueReadback(
+    [{ number: 36, title: 'heartbeat', createdAt: '2026-08-10', state: 'open', comments: 0 }],
+    '2026-08-11',
+  );
+  const items = selectNotificationItems({ submissions: [], questions: [], issueReadback: untouchedHeartbeat });
+  check('a 1-day-old unanswered Issue does NOT repeat itself the very next cycle — only OVERDUE+ enters the notification', items.length === 0);
+
+  const overdueIssue = classifyOwnerIssueReadback(
+    [{ number: 37, title: 'awaiting your decision', createdAt: '2026-08-01', state: 'open', comments: 0 }],
+    '2026-08-11',
+  );
+  const risen = selectNotificationItems({ submissions: [], questions: [], issueReadback: overdueIssue });
+  check('…but an OVERDUE-or-later unanswered Issue DOES rise into the next notification, named by number', risen.length === 1 && risen[0].id === 'Issue #37');
+  check('…carrying its age so the owner sees it is a repeat, not a new ask', /OVERDUE|ESCALATED/.test(risen[0].age));
+
+  const repliedNotRepeated = selectNotificationItems({ submissions: [], questions: [], issueReadback: commented });
+  check('a REPLIED-TO Issue is never re-notified, no matter how old', repliedNotRepeated.length === 0);
 }
 
 /* ════════════ §5 submissions — finished work, or it is refused ══════════ */
