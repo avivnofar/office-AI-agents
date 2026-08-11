@@ -235,6 +235,54 @@ export function auditCapabilities(manifest, supplyIndex, { dormantAgents = [10] 
 }
 
 /**
+ * Findings -> board-task shape (2026-08-11, Phase 5 — the weekly audit).
+ *
+ * One item per non-SUPPLIED capability, attributed to `agents[0]` (the
+ * manifest's own attribution, not a guess — a shared capability names every
+ * agent it covers and the rest are named in the task text so nobody reading
+ * the board loses that). Shaped exactly as `workers/meeting-decisions.js`'s
+ * `normalizeActionItems()` expects, so the SAME board-inbox write path
+ * meeting action items already use (`writeActionItemsToBoard()`,
+ * agent-runner.js) can carry these too — this is not a new board-writing
+ * mechanism, it is the existing one fed a new source.
+ *
+ * `decided: true` on every item: the audit finding IS the decision that a
+ * gap exists (it is a fact about the repo, not a proposal needing a vote),
+ * so the resulting task reaches the board as READY rather than
+ * NOT-READY-pending-a-meeting. UNPROVEN gets a shorter due-days window than
+ * UNSUPPLIED: writing a verifier for code that already exists is normally
+ * faster than building a whole new code path.
+ */
+export function auditFindingsToBoardItems(audit) {
+  const items = [];
+  for (const cap of audit?.capabilities || []) {
+    if (cap.verdict === 'SUPPLIED') continue;
+    const agentId = Number(cap.agents?.[0]);
+    if (!Number.isInteger(agentId)) continue;
+    const shared = (cap.agents || []).slice(1);
+    // `task` doubles as the board heading (renderBoardTask() uses it for
+    // both `### id — task` and the Task: line) — kept short on purpose,
+    // unlike the manifest's own longer "what"/"reason" prose. The reason
+    // lives in `delivered` instead, where it explains what closes the gap
+    // rather than padding the title every reader of the board sees first.
+    items.push({
+      agent_id: agentId,
+      task: `Capability audit: "${cap.id}" is ${cap.verdict}`
+        + `${shared.length ? ` (shared with agent(s) ${shared.join(', ')})` : ''}`,
+      delivered: (cap.verdict === 'UNSUPPLIED'
+        ? `a real code path supplying "${cap.id}"`
+        : `a verifier that actually exercises "${cap.id}" — currently SUPPLIED but nothing runs it`)
+        + `, named in config/capability-manifest.json and resolved to SUPPLIED by scripts/capability-audit.mjs. `
+        + `${cap.what || ''}${cap.reason ? ` Why it's ${cap.verdict.toLowerCase()} today: ${cap.reason}` : ''}`,
+      due_days: cap.verdict === 'UNSUPPLIED' ? 10 : 5,
+      decided: true,
+      open_question: null,
+    });
+  }
+  return items;
+}
+
+/**
  * ROLE CLAIM vs SUPPLIED CAPABILITY — the load-bearing half.
  *
  * Everything above audits capabilities the manifest already knows about. This

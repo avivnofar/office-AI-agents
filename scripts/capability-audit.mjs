@@ -36,7 +36,7 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
-import { auditCapabilities, auditRoleClaims, renderAudit } from '../workers/capability-audit.js';
+import { auditCapabilities, auditRoleClaims, renderAudit, auditFindingsToBoardItems } from '../workers/capability-audit.js';
 
 const require = createRequire(import.meta.url);
 const manifest = require('../config/capability-manifest.json');
@@ -160,7 +160,16 @@ const args = process.argv.slice(2);
 const outIdx = args.indexOf('--out');
 const today = new Date().toISOString().slice(0, 10);
 
-if (args.includes('--json')) {
+if (args.includes('--findings')) {
+  // 2026-08-11 (Phase 5) — the weekly capability audit becomes recurring
+  // work. This prints the exact body `.github/workflows/
+  // weekly-capability-audit.yml` POSTs to the deployed Worker's
+  // `{"type":"capability_audit_findings"}` admin trigger, which normalizes
+  // and writes them to the board inbox via the SAME path meeting action
+  // items already use. See workers/capability-audit.js's
+  // auditFindingsToBoardItems() for the shaping rule.
+  console.log(JSON.stringify({ type: 'capability_audit_findings', items: auditFindingsToBoardItems(audit) }));
+} else if (args.includes('--json')) {
   console.log(JSON.stringify({ audit, roleClaims }, null, 2));
 } else {
   const doc = renderAudit(audit, roleClaims, { date: today });

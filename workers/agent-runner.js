@@ -47,7 +47,8 @@ import { StandardAgent } from '../agents/agent-3-standard.js';
 import { TraineeAgent } from '../agents/agent-4-trainee.js';
 import { StubAgent } from '../agents/agent-stub.js';
 
-import { runMeeting, MEETING_TYPES } from './meeting-engine.js';
+import { runMeeting, MEETING_TYPES, writeActionItemsToBoard, actionItemsToBoardEnabled } from './meeting-engine.js';
+import { normalizeActionItems } from './meeting-decisions.js';
 import { callCFRouter } from './gemini-client.js';
 import { generateAssignedDailyBatch, persistQuestions } from './qa-engine.js';
 import { getClaudeBudgetStatus, recordClaudeSpend, routeTaskTypeCall, resolveTaskLane, getRoutingQuotaStatus, resolveImageRoles, MODEL_ROUTING } from './model-router.js';
@@ -4752,6 +4753,43 @@ export default {
               return json({ error: 'guide_block_requires_block_draft_review_or_verify' }, 400, origin);
             }
             result = await guideHandlers[body.block]();
+            break;
+          }
+          case 'capability_audit_findings': {
+            // Phase 5 (2026-08-11): the capability audit becomes RECURRING
+            // WEEKLY work the Cyber Expert (agent 13) owns, not a one-off run.
+            // The audit itself needs the filesystem to answer "does this code
+            // path exist" (scripts/capability-audit.mjs's own header — a
+            // Worker has none), so it cannot run inside this Worker. What CAN
+            // run here is the write: a new GitHub Actions workflow
+            // (.github/workflows/weekly-capability-audit.yml) runs the real
+            // audit weekly, shapes non-SUPPLIED capabilities into board-task
+            // items via capability-audit.js's auditFindingsToBoardItems()
+            // (plain-node loadable, same file the CI script imports), and
+            // POSTs them here. This endpoint does exactly what a meeting's
+            // SIXTH BRANCH already does with action_items — normalize, then
+            // write to the board inbox — reusing that mechanism rather than
+            // building a second one. Gated on the SAME switch meeting action
+            // items use: a capability-audit board write is the identical
+            // write path, so it pauses with it.
+            // Body: { items: [...] } — already shaped by
+            // auditFindingsToBoardItems(), NOT raw capability-audit output.
+            if (!(await actionItemsToBoardEnabled(env))) {
+              result = { skipped: true, reason: 'action_items_to_board_disabled' };
+              break;
+            }
+            if (!Array.isArray(body.items)) {
+              return json({ error: 'capability_audit_findings_requires_items_array' }, 400, origin);
+            }
+            const rosterIds = agentsConfig.agents.map((a) => a.id);
+            const { items, dropped } = normalizeActionItems(body.items, { rosterIds });
+            for (const d of dropped) console.warn(`[capability-audit] finding DROPPED: ${d.reason}`);
+            result = (items.length || dropped.length)
+              ? await writeActionItemsToBoard(env, {
+                meetingType: 'capability_audit', items, dropped,
+                sourceLabel: 'the weekly capability audit (Agent 13)',
+              })
+              : { committed: false, skipped: true, reason: 'no_findings' };
             break;
           }
           case 'block':

@@ -123,11 +123,18 @@ export function normalizeActionItems(rawItems, { rosterIds }) {
 
 /** Renders one validated action item as a board task block in the board's
  *  documented format (campus/shared/board/README.md). */
-export function renderBoardTask(item, { id, meetingType, dateStr, agentName }) {
+export function renderBoardTask(item, { id, meetingType, dateStr, agentName, sourceLabel = null }) {
   const state = item.decided ? 'READY' : 'NOT-READY';
+  // sourceLabel (2026-08-11, Phase 5): the "Source:" line's default is
+  // byte-identical to before (`meeting ${dateStr} (${meetingType})`, below).
+  // The "blocked by" sentence's default now names WHICH meeting rather than
+  // just "the meeting" — a small, deliberate wording improvement made while
+  // this was being touched anyway, not a behavior change any verifier
+  // depends on (checked: no script asserts the old exact string).
+  const label = sourceLabel || `the ${meetingType} meeting`;
   const blockedBy = item.decided
     ? 'nothing'
-    : `**an owner decision.** The meeting did not settle this. Open question: ${item.openQuestion || 'not stated by the meeting — a person must establish what was left undecided before this can be dispatched.'}`;
+    : `**an owner decision.** ${label[0].toUpperCase()}${label.slice(1)} did not settle this. Open question: ${item.openQuestion || 'not stated — a person must establish what was left undecided before this can be dispatched.'}`;
 
   return `### ${id} — ${item.task}
 
@@ -135,9 +142,9 @@ export function renderBoardTask(item, { id, meetingType, dateStr, agentName }) {
 - **State:** ${state}
 - **Metric:** ${item.dueDays} office-days from dispatch (${addOfficeDays(dateStr, item.dueDays)} if dispatched today) · delivered = ${item.delivered}
 - **Blocked by:** ${blockedBy}
-- **Source:** meeting ${dateStr} (${meetingType})
+- **Source:** ${sourceLabel || `meeting ${dateStr} (${meetingType})`}
 - **Task:** ${item.task}
-- **Notes:** *(${dateStr}, opened by the ${meetingType} meeting via the action_items pipeline)*${item.decided ? '' : ' The meeting reported `decided: false` — this is a real outcome, not a parse failure. It reaches the board as NOT-READY by design, because removing a meeting\'s ability to say "we did not decide" is what forces it to fabricate a decision.'}
+- **Notes:** *(${dateStr}, opened by ${label} via the action_items pipeline)*${item.decided ? '' : ' `decided: false` is a real outcome, not a parse failure. It reaches the board as NOT-READY by design, because removing the ability to say "not decided yet" is what forces a fabricated decision.'}
 `;
 }
 

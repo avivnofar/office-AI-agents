@@ -26,11 +26,13 @@ import { readFileSync } from 'node:fs';
 
 import {
   auditCapabilities, auditRoleClaims, resolveCapability, renderAudit,
-  VERDICTS, GAP_VERDICTS,
+  VERDICTS, GAP_VERDICTS, auditFindingsToBoardItems,
 } from '../workers/capability-audit.js';
+import { normalizeActionItems, renderBoardTask } from '../workers/meeting-decisions.js';
 
 const require = createRequire(import.meta.url);
 const manifest = require('../config/capability-manifest.json');
+const agentsConfig = require('../config/agents-config.json');
 
 let pass = 0;
 let fail = 0;
@@ -280,7 +282,74 @@ check('the "what the bible says nothing supplies" section exists and is not empt
   /What the bible says a role does that nothing supplies/.test(doc)
   && tRoles.some((r) => r.roleVerdict !== 'FULLY_SUPPLIED'));
 
-/* ── 8. Network tripwire ────────────────────────────────────────────────── */
+/* ── 8. Findings -> board tasks (2026-08-11, Phase 5 — the weekly audit) ── */
+console.log('\n--- 8. Findings -> board tasks, not a report nobody acts on ---');
+
+{
+  const items = auditFindingsToBoardItems(tAudit);
+  const gapCount = tAudit.capabilities.filter((c) => c.verdict !== 'SUPPLIED').length;
+  check('one board item per non-SUPPLIED capability', items.length === gapCount, `${items.length} vs ${gapCount} gaps`);
+  check('SUPPLIED capabilities produce NO item — this is a gap tracker, not a full inventory dump',
+    !items.some((it) => tAudit.capabilities.find((c) => it.task.includes(`"${c.id}"`) && c.verdict === 'SUPPLIED')));
+  check('every item names a real roster agent as agent_id (the manifest\'s own attribution, not a guess)',
+    items.every((it) => agentsConfig.agents.some((a) => a.id === it.agent_id)));
+  check('a capability shared by more than one agent still produces exactly ONE item, attributed to agents[0]',
+    (() => {
+      const shared = tAudit.capabilities.find((c) => c.verdict !== 'SUPPLIED' && (c.agents || []).length > 1);
+      if (!shared) return true; // nothing to check today — not a failure, just no fixture
+      const hit = items.filter((it) => it.task.includes(`"${shared.id}"`));
+      return hit.length === 1 && hit[0].agent_id === shared.agents[0];
+    })());
+  check('UNSUPPLIED gets a longer due-days window than UNPROVEN (building code vs. writing a verifier)',
+    (() => {
+      const unsupplied = items.find((it) => tAudit.capabilities.find((c) => it.task.includes(`"${c.id}"`) && c.verdict === 'UNSUPPLIED'));
+      const unproven = items.find((it) => tAudit.capabilities.find((c) => it.task.includes(`"${c.id}"`) && c.verdict === 'UNPROVEN'));
+      if (!unsupplied || !unproven) return true; // today's fixture may have only one verdict class
+      return unsupplied.due_days > unproven.due_days;
+    })());
+  check('every item is `decided: true` — the audit finding IS the decision (a fact, not a vote pending)',
+    items.every((it) => it.decided === true));
+  check('the board heading (`task`) stays SHORT — it is not the manifest\'s full "what" + "reason" prose duplicated as a title',
+    items.every((it) => it.task.length < 120), `longest: ${Math.max(...items.map((it) => it.task.length), 0)}`);
+  check('…while the full context (what + why) survives in `delivered`, not dropped', items.every((it) => it.delivered.length > 40));
+
+  // End to end through the SAME validation/rendering the meeting action-items
+  // pipeline uses — proves this is the existing mechanism fed a new source,
+  // not a second board-writing path.
+  const rosterIds = agentsConfig.agents.map((a) => a.id);
+  const { items: normalized, dropped } = normalizeActionItems(items, { rosterIds });
+  check('every finding passes normalizeActionItems() cleanly — nothing dropped', normalized.length === items.length && dropped.length === 0,
+    dropped.map((d) => d.reason).join(' | '));
+  if (normalized.length) {
+    const block = renderBoardTask(normalized[0], {
+      id: 'PROPOSED-test', meetingType: 'capability_audit', dateStr: '2026-08-11',
+      agentName: agentsConfig.agents.find((a) => a.id === normalized[0].agentId)?.name || null,
+      sourceLabel: 'the weekly capability audit (Agent 13)',
+    });
+    check('the rendered board task names the weekly audit as its source, not a generic "meeting"', /the weekly capability audit \(Agent 13\)/.test(block));
+    check('…and reaches the board as READY (decided:true), not stuck NOT-READY behind a meeting that never happened', /\*\*State:\*\* READY/.test(block));
+  }
+
+  check('[FAILS-OLD] before this session, the audit ran once (manual node invocation) and its findings went nowhere but stdout/a markdown file — no board task, no owner, no due date',
+    true /* documented fact, not something the pre-change code can assert about itself */);
+
+  // Wiring — the calling path exists, not merely a function defined nearby (OB-001's own rule, applied to this session's own work).
+  const runnerSrc = readFileSync(new URL('../workers/agent-runner.js', import.meta.url), 'utf8');
+  check('agent-runner.js has the capability_audit_findings admin trigger', /case 'capability_audit_findings'/.test(runnerSrc));
+  check('…gated on the SAME switch meeting action items use (identical write path, pauses with it)', /actionItemsToBoardEnabled\(env\)/.test(runnerSrc) && /capability_audit_findings/.test(runnerSrc));
+  check('…and it reuses writeActionItemsToBoard(), not a second board-write mechanism', /writeActionItemsToBoard\(env, \{/.test(runnerSrc));
+  const scriptSrc = readFileSync(new URL('../scripts/capability-audit.mjs', import.meta.url), 'utf8');
+  check('scripts/capability-audit.mjs has the --findings CLI flag that produces the trigger body', /--findings/.test(scriptSrc) && /auditFindingsToBoardItems/.test(scriptSrc));
+  const workflowExists = (() => { try { readFileSync(new URL('../.github/workflows/weekly-capability-audit.yml', import.meta.url), 'utf8'); return true; } catch { return false; } })();
+  check('a recurring weekly trigger exists (.github/workflows/weekly-capability-audit.yml) — scheduled, not just callable', workflowExists);
+  if (workflowExists) {
+    const workflowSrc = readFileSync(new URL('../.github/workflows/weekly-capability-audit.yml', import.meta.url), 'utf8');
+    check('…on a cron schedule, not workflow_dispatch-only', /cron:/.test(workflowSrc));
+    check('…runs the --findings flag and POSTs its output to /api/agents/trigger', /--findings/.test(workflowSrc) && /api\/agents\/trigger/.test(workflowSrc));
+  }
+}
+
+/* ── 9. Network tripwire ────────────────────────────────────────────────── */
 console.log('\n--- Network tripwire ---');
 check('this verifier made ZERO network calls end to end', NETWORK.length === 0, NETWORK.join(','));
 

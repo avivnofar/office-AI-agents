@@ -1,0 +1,96 @@
+name: Weekly Capability Audit (Agent 13)
+
+# Phase 5, 2026-08-11 (Audit-and-Fix session): the capability audit becomes
+# RECURRING WEEKLY work the Cyber Expert (agent 13) owns, not a one-off run.
+# His standing question is "is this gate actually on the calling path" —
+# applied here to roles, the same way the one-off 2026-08-10 run found the
+# Designer's two-month gap. A weekly cadence finds the NEXT one.
+#
+# Runs OUTSIDE the Worker on purpose: `scripts/capability-audit.mjs`'s own
+# header explains why — a Worker has no filesystem, and the audit's whole
+# question ("does this code path exist") can only be answered by reading the
+# code. This job has the checked-out repo; the Worker does not.
+#
+# Findings go to the board AS TASKS, not into a report nobody acts on — the
+# exact failure this mechanism exists to avoid reproducing. `node
+# scripts/capability-audit.mjs --findings` shapes non-SUPPLIED capabilities
+# into board-task items (workers/capability-audit.js
+# auditFindingsToBoardItems()) and this workflow POSTs them to the deployed
+# Worker's `{"type":"capability_audit_findings"}` admin trigger, which
+# normalizes and writes them to the SAME board-inbox path meeting action
+# items already use (workers/meeting-engine.js writeActionItemsToBoard()) —
+# not a new write mechanism. The Workflow (Agent 12) accepts or rejects them
+# from there and allocates real OB-NNN ids, same as any other proposed task.
+
+on:
+  schedule:
+    # Sunday 06:00 UTC — before the office's own Sunday work begins, so a
+    # fresh finding is on the board before the week it concerns starts.
+    - cron: '0 6 * * 0'
+  workflow_dispatch:
+
+jobs:
+  capability-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Check configuration
+        id: config
+        run: |
+          if [ -n "${{ vars.AGENTS_API_BASE }}" ] && [ -n "${{ secrets.ADMIN_TOKEN }}" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Skip notice
+        if: steps.config.outputs.ready != 'true'
+        run: |
+          echo "### Weekly Capability Audit" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Skipped: set the \`AGENTS_API_BASE\` repo variable and the \`ADMIN_TOKEN\` secret to enable (see DEPLOY.md). No new secret is required beyond what \`agent-reports.yml\` already uses." >> "$GITHUB_STEP_SUMMARY"
+
+      # No filesystem access needed beyond this checkout — the audit reads
+      # config/capability-manifest.json and workers/*.js source directly.
+      #
+      # `|| true` on both: capability-audit.mjs's own exit code is
+      # NON-ZERO when an agent cannot work at all (its own documented
+      # signal for a caller that wants to gate on it) — the opposite of a
+      # reason to skip posting, since that is exactly the moment findings
+      # matter most. stdout is already fully written to the file before the
+      # process exits either way.
+      - name: Run the audit and shape findings
+        if: steps.config.outputs.ready == 'true'
+        run: node scripts/capability-audit.mjs --findings > /tmp/findings.json || true
+
+      - name: Also render the human-readable findings document (for the run log)
+        if: steps.config.outputs.ready == 'true'
+        run: node scripts/capability-audit.mjs > /tmp/findings.md || true
+
+      - name: Post findings to the board inbox
+        if: steps.config.outputs.ready == 'true'
+        run: |
+          curl -sf -X POST "${{ vars.AGENTS_API_BASE }}/api/agents/trigger" \
+            -H "X-Admin-Token: ${{ secrets.ADMIN_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d @/tmp/findings.json \
+            -o /tmp/result.json
+
+      - name: Summary
+        if: steps.config.outputs.ready == 'true'
+        run: |
+          echo "### Weekly Capability Audit — result" >> "$GITHUB_STEP_SUMMARY"
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/result.json >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "<details><summary>Full findings document</summary>" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/findings.md >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "</details>" >> "$GITHUB_STEP_SUMMARY"
