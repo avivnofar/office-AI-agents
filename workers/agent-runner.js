@@ -2253,7 +2253,16 @@ async function advanceSidePlots(env, currentDay) {
 
     if (isFinal) {
       const markdown = renderSidePlotReport(plot, typeConfig, newLog);
-      await commitFileToRepo(env, REPO_NAME, plot.report_path, markdown, `chore(agents): ${plot.type} side plot resolved [skip ci]`);
+      // Moved to back-office 2026-08-11 (plan 0.4, stage 4 of 5). Plots
+      // already active before this change carry a report_path stamped at
+      // startSidePlot() time under the pre-migration `reports/side-plots/`
+      // prefix (D1 rows are not rewritten, per A15) — normalized here so an
+      // in-flight plot still lands on the current campus/shared/ convention
+      // instead of that stale prefix inside the new repo.
+      const reportPath = plot.report_path.startsWith('reports/side-plots/')
+        ? plot.report_path.replace('reports/side-plots/', 'campus/shared/side-plots/')
+        : plot.report_path;
+      await commitFileToRepo(env, BACKOFFICE_REPO_NAME, reportPath, markdown, `chore(office): ${plot.type} side plot resolved [skip ci]`);
     }
 
     updates.push({ id: plot.id, type: plot.type, dayOffset, stage: stage.event, status });
@@ -2461,7 +2470,7 @@ function renderScheduleSection(scheduleInfo) {
 
 ## Weekly Executive Summary (Friday)
 
-Generated \`reports/weekly/week-${pad(weeklySummary.weekNumber, 2)}-{summary.md,data.csv,public-summary.md}\`.
+Generated \`campus/shared/weekly/week-${pad(weeklySummary.weekNumber, 2)}-{summary.md,data.csv,public-summary.md}\` (back-office — plan 0.4 stage 3).
 
 **Product version bumps:**
 ${bumpLines}`;
@@ -2816,7 +2825,7 @@ async function generateWeeklySummary(env, yearState, weekNumber) {
 
   const md = `# Weekly Executive Summary — Week ${weekNumber}
 
-*Permission: private/special (AI staff + owner). See reports/weekly/week-${pad(weekNumber, 2)}-public-summary.md for the public excerpt.*
+*Permission: private/special (AI staff + owner). See campus/shared/weekly/week-${pad(weekNumber, 2)}-public-summary.md (back-office) for the public excerpt.*
 
 ## Executive Summary
 
@@ -2884,11 +2893,18 @@ ${agentRows.length} staff roles, handling support cases with AI-assisted
 diagnostics. No customer-facing issues to report.
 `;
 
-  const base = 'reports/weekly';
+  // Moved to back-office 2026-08-11 (plan 0.4, stage 3 of 5): this is the RAW
+  // weekly trio — string-template output, no review — per
+  // docs/handoffs/0.4-STAGED-PLAN.md's table. It is NOT the reviewed
+  // `week-NN-report.md` from runReportPipeline(), which stays public. Even
+  // `-public-summary.md` moves: DOC-POLICY.md's stance is that only REVIEWED
+  // content publishes until the gate (OB-014) exists, and this file is
+  // unreviewed regardless of its name. Same guarded path stages 1-2 use.
+  const base = 'campus/shared/weekly';
   const files = {
-    summary: await commitFileToRepo(env, REPO_NAME, `${base}/week-${pad(weekNumber, 2)}-summary.md`, md, `chore(agents): week ${weekNumber} executive summary [skip ci]`),
-    csv: await commitFileToRepo(env, REPO_NAME, `${base}/week-${pad(weekNumber, 2)}-data.csv`, csv, `chore(agents): week ${weekNumber} data export [skip ci]`),
-    public: await commitFileToRepo(env, REPO_NAME, `${base}/week-${pad(weekNumber, 2)}-public-summary.md`, publicMd, `chore(agents): week ${weekNumber} public summary [skip ci]`),
+    summary: await commitFileToRepo(env, BACKOFFICE_REPO_NAME, `${base}/week-${pad(weekNumber, 2)}-summary.md`, md, `chore(office): week ${weekNumber} executive summary [skip ci]`),
+    csv: await commitFileToRepo(env, BACKOFFICE_REPO_NAME, `${base}/week-${pad(weekNumber, 2)}-data.csv`, csv, `chore(office): week ${weekNumber} data export [skip ci]`),
+    public: await commitFileToRepo(env, BACKOFFICE_REPO_NAME, `${base}/week-${pad(weekNumber, 2)}-public-summary.md`, publicMd, `chore(office): week ${weekNumber} public summary [skip ci]`),
   };
 
   let weeklyMeeting = null;
@@ -3199,9 +3215,10 @@ export async function runWorkDayCycle(env) {
   if (milestoneKey === 'day_365' && milestoneMeeting && !milestoneMeeting.error) {
     const yearNumber = newStats.year_number || 1;
     const promoMarkdown = renderPromotionResults(yearNumber, milestoneMeeting);
+    // Moved to back-office 2026-08-11 (plan 0.4, stage 5 of 5).
     await commitFileToRepo(
-      env, REPO_NAME, `reports/promotion-results-year-${yearNumber}.md`, promoMarkdown,
-      `chore(agents): year ${yearNumber} promotion results [skip ci]`
+      env, BACKOFFICE_REPO_NAME, `campus/shared/promotions/promotion-results-year-${yearNumber}.md`, promoMarkdown,
+      `chore(office): year ${yearNumber} promotion results [skip ci]`
     );
   }
 
@@ -3547,9 +3564,10 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
   if (milestoneKey === 'day_365' && milestoneMeeting && !milestoneMeeting.error) {
     const yearNumber = newStats.year_number || 1;
     const promoMarkdown = renderPromotionResults(yearNumber, milestoneMeeting);
+    // Moved to back-office 2026-08-11 (plan 0.4, stage 5 of 5).
     await commitFileToRepo(
-      env, REPO_NAME, `reports/promotion-results-year-${yearNumber}.md`, promoMarkdown,
-      `chore(agents): year ${yearNumber} promotion results [skip ci]`
+      env, BACKOFFICE_REPO_NAME, `campus/shared/promotions/promotion-results-year-${yearNumber}.md`, promoMarkdown,
+      `chore(office): year ${yearNumber} promotion results [skip ci]`
     );
   }
 

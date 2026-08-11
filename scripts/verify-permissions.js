@@ -326,5 +326,90 @@ console.log('\n-- Publishing-split call-site check (0.4 stage 2: daily summaries
   }
 }
 
+/* ───────────────────────────────────────────────────────────────────────────
+ * PUBLISHING SPLIT (plan 0.4) — CALL-SITE REGRESSION CHECK, stage 3/5: the
+ * weekly RAW trio, moved 2026-08-11. This is generateWeeklySummary()'s three
+ * commitFileToRepo() calls — distinct from the REVIEWED
+ * `reports/weekly/week-NN-report.md` (workers/report-pipeline.js), which
+ * stays public and is untouched by this check. Before this session's edit
+ * all three call sites passed REPO_NAME and wrote to `reports/weekly/` in
+ * the public repo, including `-public-summary.md` despite its name — the
+ * file is raw/unreviewed regardless, per DOC-POLICY.md.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+console.log('\n-- Publishing-split call-site check (0.4 stage 3: weekly raw trio) --');
+{
+  const runnerSrc = fs.readFileSync(path.join(REPO_ROOT, 'workers', 'agent-runner.js'), 'utf8');
+  const fnMatch = runnerSrc.match(/async function generateWeeklySummary\([\s\S]*?\n}\n/);
+  const fnBody = fnMatch ? fnMatch[0] : '';
+  const weeklyWriteRe = /commitFileToRepo\(env, (\w+), `\$\{base\}\/(week-\$\{pad\(weekNumber, 2\)\}-[\w.-]+)`/g;
+  const matches = [...fnBody.matchAll(weeklyWriteRe)];
+  const callSiteChecks = [
+    ['generateWeeklySummary() found in workers/agent-runner.js', !!fnMatch],
+    ['all three writes found (summary.md, data.csv, public-summary.md)', matches.length === 3],
+    ['every call site targets BACKOFFICE_REPO_NAME', matches.every((m) => m[1] === 'BACKOFFICE_REPO_NAME')],
+    ['no call site targets bare REPO_NAME (the pre-2026-08-11 public-repo call)', !matches.some((m) => m[1] === 'REPO_NAME')],
+    ["base uses campus/shared/weekly/ (parallels stage 1/2's campus/shared/)", /const base = 'campus\/shared\/weekly'/.test(fnBody)],
+    ['no call site still targets reports/weekly/ (the old public path)', !/reports\/weekly/.test(fnBody)],
+  ];
+  for (const [label, ok] of callSiteChecks) {
+    pass = pass && ok;
+    console.log(`[${ok ? 'PASS' : 'FAIL'}] ${label}`);
+  }
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+ * PUBLISHING SPLIT (plan 0.4) — CALL-SITE REGRESSION CHECK, stage 4/5: side
+ * plots, moved 2026-08-11. advanceSidePlots()'s single resolve-time commit —
+ * config/side-plots.json's output_path templates were moved in the same
+ * edit, and this checks the actual commit call, not the config alone (a
+ * config-only check can't tell whether the call site still hardcodes the
+ * old repo/prefix).
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+console.log('\n-- Publishing-split call-site check (0.4 stage 4: side plots) --');
+{
+  const runnerSrc = fs.readFileSync(path.join(REPO_ROOT, 'workers', 'agent-runner.js'), 'utf8');
+  const fnMatch = runnerSrc.match(/async function advanceSidePlots\([\s\S]*?\n}\n/);
+  const fnBody = fnMatch ? fnMatch[0] : '';
+  const sideCfg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'config', 'side-plots.json'), 'utf8'));
+  const outputPaths = Object.values(sideCfg.side_plot_types).map((t) => t.output_path);
+  const callSiteChecks = [
+    ['advanceSidePlots() found in workers/agent-runner.js', !!fnMatch],
+    ['resolve-time commit targets BACKOFFICE_REPO_NAME', /commitFileToRepo\(env, BACKOFFICE_REPO_NAME,/.test(fnBody)],
+    ['does NOT target REPO_NAME (the pre-2026-08-11 public-repo call)', !/commitFileToRepo\(env, REPO_NAME,/.test(fnBody)],
+    ['legacy reports/side-plots/ report_path values are normalized at commit time', /reports\/side-plots\//.test(fnBody) && /campus\/shared\/side-plots\//.test(fnBody)],
+    ['config/side-plots.json: every output_path uses campus/shared/side-plots/', outputPaths.length > 0 && outputPaths.every((p) => p.startsWith('campus/shared/side-plots/'))],
+    ['config/side-plots.json: output_dir uses campus/shared/side-plots/', sideCfg._meta.output_dir === 'campus/shared/side-plots/'],
+  ];
+  for (const [label, ok] of callSiteChecks) {
+    pass = pass && ok;
+    console.log(`[${ok ? 'PASS' : 'FAIL'}] ${label}`);
+  }
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+ * PUBLISHING SPLIT (plan 0.4) — CALL-SITE REGRESSION CHECK, stage 5/5:
+ * promotions, moved 2026-08-11. Two call sites (finalizeScheduledDay() +
+ * runWorkDayCycle()), same "both, dead code included" reasoning as stage 2.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+console.log('\n-- Publishing-split call-site check (0.4 stage 5: promotions) --');
+{
+  const runnerSrc = fs.readFileSync(path.join(REPO_ROOT, 'workers', 'agent-runner.js'), 'utf8');
+  const promoWriteRe = /commitFileToRepo\(\s*\n\s*env,\s*(\w+),\s*`([^`]*promotion-results-year-\$\{yearNumber\}\.md)`/g;
+  const matches = [...runnerSrc.matchAll(promoWriteRe)];
+  const callSiteChecks = [
+    ['both promotion-results call sites found (finalizeScheduledDay + runWorkDayCycle)', matches.length === 2],
+    ['every call site targets BACKOFFICE_REPO_NAME', matches.every((m) => m[1] === 'BACKOFFICE_REPO_NAME')],
+    ['no call site targets bare REPO_NAME (the pre-2026-08-11 public-repo call)', !matches.some((m) => m[1] === 'REPO_NAME')],
+    ['every call site uses campus/shared/promotions/', matches.every((m) => m[2].startsWith('campus/shared/promotions/'))],
+  ];
+  for (const [label, ok] of callSiteChecks) {
+    pass = pass && ok;
+    console.log(`[${ok ? 'PASS' : 'FAIL'}] ${label}`);
+  }
+}
+
 console.log(`\n${pass ? 'All scenarios matched expectations.' : 'MISMATCH — see FAIL lines above.'}`);
 process.exit(pass ? 0 : 1);

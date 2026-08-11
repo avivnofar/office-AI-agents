@@ -2,8 +2,8 @@
   "_meta": {
     "version": "0.1.0",
     "status": "specified",
-    "description": "Multi-day work-related side plots that add narrative texture to the simulation. Each active side plot spans 2-5 simulated days, involves 2-4 agents, and is logged to agents/reports/side-plots/. Triggered/advanced by agent-runner.js's scheduled() during the daily work-day cycle, narrated via meeting-engine.js's model calls when a side plot reaches a meeting-relevant stage.",
-    "output_dir": "reports/side-plots/",
+    "description": "Multi-day work-related side plots that add narrative texture to the simulation. Each active side plot spans 2-5 simulated days, involves 2-4 agents, and is logged to back-office campus/shared/side-plots/ (moved 2026-08-11, plan 0.4 stage 4 of 5 — was reports/side-plots/ in the public repo). Triggered/advanced by agent-runner.js's scheduled() during the daily work-day cycle, narrated via meeting-engine.js's model calls when a side plot reaches a meeting-relevant stage.",
+    "output_dir": "campus/shared/side-plots/",
     "filename_template": "{{type}}-{{start_date}}.md"
   },
 
@@ -22,7 +22,7 @@
         { "day": 5, "event": "Resolution: Agent 10 returns with an improved version of the rejected suggestion, OR Agent 8's audit validates the release — rivalry tension reduced by one stage either way." }
       ],
       "resolution": "Apply relationships.json rivalries['architect-vs-lead-qa'].resolution_paths; never resolves via Agent 10 bypassing authority.",
-      "output_path": "reports/side-plots/rivalry_escalation-{{start_date}}.md"
+      "output_path": "campus/shared/side-plots/rivalry_escalation-{{start_date}}.md"
     },
 
     "pip_drama": {
@@ -39,7 +39,7 @@
         { "day": 5, "event": "Resolution: PIP graduated (mood/metrics recover) or extended for another simulated month — recorded in `promotions` table (track='pip')." }
       ],
       "resolution": "Outcome recorded via meeting-engine.js pip_session decisions.config_overrides and the `promotions` table.",
-      "output_path": "reports/side-plots/pip_drama-{{start_date}}.md"
+      "output_path": "campus/shared/side-plots/pip_drama-{{start_date}}.md"
     },
 
     "breakthrough": {
@@ -54,7 +54,7 @@
         { "day": 3, "event": "Optional follow-on: the agent fileSuggestion()s a write-up of the approach based on the breakthrough." }
       ],
       "resolution": "Mood boost applied to the breakthrough agent and a smaller boost to attendees of the recognizing standup/meeting.",
-      "output_path": "reports/side-plots/breakthrough-{{start_date}}.md"
+      "output_path": "campus/shared/side-plots/breakthrough-{{start_date}}.md"
     },
 
     "bonus_day_drama": {
@@ -69,7 +69,7 @@
         { "day": 3, "event": "Resolution: suggestions reviewed at the next weekly meeting; if multiple are approved, this can chain into a 'breakthrough' side plot for Agent 2." }
       ],
       "resolution": "fileSuggestion() outputs reviewed in the weekly meeting's suggestion_decisions.",
-      "output_path": "reports/side-plots/bonus_day_drama-{{start_date}}.md"
+      "output_path": "campus/shared/side-plots/bonus_day_drama-{{start_date}}.md"
     },
 
     "inspiration_event": {
@@ -85,7 +85,7 @@
         { "day": 4, "event": "Resolution: Designer's happiness level resets to the current UI fondness value (per agent_9.states.INSPIRED.effects), ending the event." }
       ],
       "resolution": "agent_9 happiness reset to current fondness; any shipped UI changes logged.",
-      "output_path": "reports/side-plots/inspiration_event-{{start_date}}.md"
+      "output_path": "campus/shared/side-plots/inspiration_event-{{start_date}}.md"
     },
 
     "comparison_event": {
@@ -100,7 +100,7 @@
         { "day": 3, "event": "Resolution: getModelUsageAdjustment() may nudge the agent's effective model_usage_rate (+/-0.05) based on the rolling win rate; QA (6) may pick up a strong external_better streak as an audit_session topic." }
       ],
       "resolution": "model_usage_rate delta applied via configOverrides; optionally seeds the next audit_session's agenda.",
-      "output_path": "reports/side-plots/comparison_event-{{start_date}}.md"
+      "output_path": "campus/shared/side-plots/comparison_event-{{start_date}}.md"
     },
 
     "meeting_tension": {
@@ -115,7 +115,7 @@
         { "day": 3, "event": "Resolution: a follow-up 1:1 (private_coaching) or a positive HAPPY event for one of the affected agents defuses the tension." }
       ],
       "resolution": "Irritation decays via normal resolveIrritation()/resetWeeklyState() flow, or is resolved early by a HAPPY event for an affected agent.",
-      "output_path": "reports/side-plots/meeting_tension-{{start_date}}.md"
+      "output_path": "campus/shared/side-plots/meeting_tension-{{start_date}}.md"
     }
   },
 

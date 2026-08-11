@@ -118,10 +118,10 @@
   },
 
   "weekly_summary_program": {
-    "description": "Friday 12:00. Generates the week's executive package and bumps product versions for any asset_pipeline items that reached 'implemented' this week.",
+    "description": "Friday 12:00. Generates the week's executive package and bumps product versions for any asset_pipeline items that reached 'implemented' this week. This is the RAW trio (string-template, no review) — distinct from the REVIEWED `reports/weekly/week-NN-report.md` produced by workers/report-pipeline.js, which stays public. Moved to back-office 2026-08-11 (plan 0.4 stage 3 of 5) — the `agents/reports/weekly/` paths below were already stale pre-migration (pre-2026-06-19 repo-split prefix); corrected to the actual runtime location in the same edit that moved it.",
     "outputs": [
       {
-        "file": "agents/reports/weekly/week-{{week_number}}-summary.md",
+        "file": "campus/shared/weekly/week-{{week_number}}-summary.md",
         "format": "markdown, ~10 sections, print-ready (consistent with the existing index.html PDF Export convention — open and use the browser's Print to PDF for an actual 10-page PDF).",
         "sections": [
           "Executive Summary",
@@ -138,14 +138,14 @@
         "permission_level": "private/special — internal weekly package, not for public distribution."
       },
       {
-        "file": "agents/reports/weekly/week-{{week_number}}-data.csv",
+        "file": "campus/shared/weekly/week-{{week_number}}-data.csv",
         "format": "CSV (Excel-openable, no xlsx binary dependency per CLAUDE.md 'no build step, ever'). One row per agent: cases handled, mood start/end, irritation events, happy events, app-call count, comparisons, quality avg.",
         "permission_level": "private/special"
       },
       {
-        "file": "agents/reports/weekly/week-{{week_number}}-public-summary.md",
+        "file": "campus/shared/weekly/week-{{week_number}}-public-summary.md",
         "format": "short markdown, business-facing excerpt (clean framing, no internal mood/score detail).",
-        "permission_level": "public"
+        "permission_level": "private/special — RAW and unreviewed, so it moved with the rest of the trio (DOC-POLICY.md: only reviewed content publishes until the gate, OB-014, exists); the name predates that rule."
       }
     ]
   },

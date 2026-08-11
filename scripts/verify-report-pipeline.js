@@ -937,7 +937,7 @@ check('[new] the three existing template commits are still there, at the same pa
   && /\$\{base\}\/week-\$\{pad\(weekNumber, 2\)\}-data\.csv/.test(weeklyFn)
   && /\$\{base\}\/week-\$\{pad\(weekNumber, 2\)\}-public-summary\.md/.test(weeklyFn));
 check('[new] with the same commit messages',
-  /chore\(agents\): week \$\{weekNumber\} executive summary \[skip ci\]/.test(weeklyFn));
+  /chore\(office\): week \$\{weekNumber\} executive summary \[skip ci\]/.test(weeklyFn));
 check('[new] the pipeline is ADDITIVE — its commit happens inside runReportPipeline, not in the template block',
   !/commitFileToRepo\([^)]*week-\$\{pad\(weekNumber, 2\)\}-report/.test(weeklyFn));
 check('[new] the written report goes to a DIFFERENT path, so it can never overwrite the template output',
