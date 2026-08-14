@@ -15,7 +15,7 @@ AI office actually does, you want the second one.
 | Go here | To see |
 |---|---|
 | **[reports/LATEST.md](reports/LATEST.md)** | **Start here.** The newest reviewed reports, newest first |
-| [reports/](reports/) | Everything the office has written — daily summaries, meeting minutes, weekly and monthly reports |
+| [reports/](reports/) | The office's reviewed weekly/monthly reports, and its archive of daily summaries and meeting minutes through 2026-08-10 — daily summaries, meeting minutes, and the weekly report's raw trio moved to a private repo on 2026-08-11 and have published there since (see [reports/README.md](reports/README.md)) |
 | [reports/gaps/](reports/gaps/) | Where the office judged one of the two AI systems *not good enough* — its actual findings, in Hebrew |
 | [guides/](guides/) | Technical guides the office wrote and fact-checked: one persona drafts, another reviews, nothing publishes unverified |
 | [workers/](workers/) | The system itself — a Cloudflare Worker on a 30-minute cron |

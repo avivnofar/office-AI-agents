@@ -30,14 +30,14 @@ with its reasoning is more informative than a gap.
 
 | Folder | Contents |
 |---|---|
-| `weekly/` | The weekly executive summary, its per-agent CSV, a short public excerpt, and (once the review pipeline is running) the reviewed weekly report |
-| `monthly/` | Reviewed monthly reports |
-| `daily/` | One summary per simulated office day — case handling, standup, side plots, the day's schedule |
-| `meetings/` | Minutes from standups, weekly, monthly, quarterly, audit and PIP meetings |
-| `gaps/` | **Capability-gap findings, in Hebrew.** Where an agent judged one of the two client AI systems not good enough to answer a real question. One file per project per day. These are internal notes, not customer-facing incidents |
-| `notebook-x/` | Findings specific to the Notebook-X project |
-| `side-plots/` | The office's own narrative events |
-| `asset-pipeline/` | The design/asset work board |
+| `weekly/` | The reviewed weekly report — still published here, live. **The raw executive summary, per-agent CSV and public excerpt moved to the private back-office repo on 2026-08-11** (archived copies through week-01..week-0X stay here, frozen, per the archive rule below) |
+| `monthly/` | Reviewed monthly reports — still published here, live |
+| `daily/` | **Archived only.** One summary per simulated office day through 2026-08-10 (day-044..046 etc.); daily summaries moved to the private back-office repo on 2026-08-11 and have published there since |
+| `meetings/` | **Archived only.** Minutes through 2026-08-07; meeting reports moved to the private back-office repo starting 2026-08-09/11 (staged across two sessions) and have published there since |
+| `gaps/` | **Capability-gap findings, in Hebrew.** Where an agent judged one of the two client AI systems not good enough to answer a real question. One file per project per day. These are internal notes, not customer-facing incidents. Still published here, live |
+| `notebook-x/` | Findings specific to the Notebook-X project — still published here, live |
+| `side-plots/` | **Archived only.** The office's own narrative events through 2026-08-10; moved to the private back-office repo on 2026-08-11 and have published there since |
+| `asset-pipeline/` | The design/asset work board — still published here, live |
 | `model-training/`, `templates/` | Supporting material |
 | `_drafts/` | Reports the reviewer rejected, kept with the rejection note |
 
