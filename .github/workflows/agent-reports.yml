@@ -1,5 +1,19 @@
 name: Agent Simulation — Weekly Report
 
+# ── DISABLED (gh workflow disable, 2026-07-07T20:35:07+03:00) ────────────
+# Confirmed 2026-08-14 (audit א.6): the `reports/weekly/*-weekly-summary.md`
+# glob this workflow commits to has zero matches in this repo's git
+# history, ever -- the same "swallow the empty case" shape as
+# archive-architect.yml (here: `git diff --cached --quiet ||`, so an
+# empty diff still exits the step successfully) let every run report
+# "success" with nothing to show for it. Inherited from an earlier
+# "complete migration ... from data-center" (see git log) predating the
+# current 13-agent office; the `week_reset` trigger type it POSTs to
+# `/api/agents/trigger` is still live in workers/agent-runner.js, but the
+# current office's own report-pipeline.js (workers/agent-runner.js
+# runReportPipeline(), fixed 2026-08-14) is the actual successor for
+# weekly reporting now -- cron-driven from inside the Worker, not an
+# external GitHub Action polling it. Left disabled rather than fixed.
 on:
   schedule:
     - cron: "0 8 * * 2"   # Every Tuesday at 08:00 UTC

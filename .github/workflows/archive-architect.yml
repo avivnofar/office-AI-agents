@@ -1,5 +1,25 @@
 name: Archive Architect - Daily Research
 
+# ── DISABLED (gh workflow disable, 2026-07-07T20:35:23+03:00) ────────────
+# Confirmed 2026-08-14 (audit א.6): every run in this workflow's history
+# reports "success", but zero files have ever landed under
+# reports/architect-suggestions/ in this repo's git history. Three things
+# mask that silently: the commit step ends in `|| echo "Nothing to
+# commit"`, so an empty run still exits 0; the dedup guard checks for the
+# existence of a file this workflow has never actually created, so both
+# scheduling windows stay eligible to fire on the same day; and nothing
+# anywhere reports the discrepancy. It predates the current 13-agent
+# office (back-office-AI-agents, built from 2026-08-05) by a month --
+# added 2026-07-05 for a "Smart Archive" research+email flow
+# (agents/architect_agent.py, Gemini + Resend) that the current office's
+# own Architect agent (campus/agents/10-the-architect/, back-office repo)
+# has since superseded with a real midnight-run automation. Left disabled
+# rather than fixed: the underlying capability (daily unattended research
+# with an owner-facing suggestion) is not this session's to re-litigate --
+# if still wanted, it is the current Architect's own automation, not this
+# file, that should carry it. Re-enabling this file as-is would only
+# resume the same silent no-op.
+#
 # Israel time (Asia/Jerusalem) is UTC+3 in summer (DST) and UTC+2 in
 # winter. GitHub Actions cron is always UTC and does not shift with DST,
 # so 15:00 Israel time maps to a different UTC hour across the year.
