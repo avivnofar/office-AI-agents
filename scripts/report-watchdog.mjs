@@ -66,6 +66,16 @@ const GH_ROOT = path.resolve(ROOT, '..');
 const OWNER = 'avivnofar';
 const PUBLIC_REPO = 'office-AI-agents';
 
+// ── FIXED 2026-08-14 (audit א.5) ────────────────────────────────────────
+// This watchdog checked `reports/daily` in the PUBLIC repo. Stage 2 of 0.4
+// (2026-08-11) moved daily summaries to `campus/shared/daily` in the
+// PRIVATE back-office repo, and this file was never touched -- so it has
+// printed a false "did not report" every non-Saturday since, exactly the
+// failure mode its own header warns about: "a watchdog whose first output
+// is a false alarm is a watchdog the owner learns to skim."
+const BACKOFFICE_REPO = 'back-office-AI-agents';
+const DAILY_SUMMARY_PATH = 'campus/shared/daily';
+
 /**
  * The three repos, and the local checkout each is expected at. Named here
  * rather than discovered, so a repo that has gone missing from the machine is a
@@ -119,43 +129,50 @@ function isRestDay(now = new Date()) {
  * stale checkout answers a question nobody asked. Falls back to the local tree
  * ONLY to say so explicitly, never to report a pass on its own.
  *
- * The repo is public, so this needs no token. That is deliberate: a check whose
- * failure mode includes "the secret expired" has a second way to go quiet.
+ * back-office-AI-agents is PRIVATE (unlike the public repo this check used to
+ * read), so the plain unauthenticated `fetch()` the old code used cannot read
+ * it at all — every call would return 404, indistinguishable from "no commit
+ * found" without a token. Shelling out to the `gh` CLI (already used by `git`
+ * calls elsewhere in this file, same execFileSync + argument-array pattern —
+ * never a shell string) reuses whatever credential is already authenticated
+ * on this machine (`gh auth status`) rather than this script managing its own
+ * token — one fewer secret that can silently expire.
  */
 async function checkReports(dateStr) {
   const result = { date: dateStr, method: null, daily: null, ok: false, detail: null };
 
-  const url = `https://api.github.com/repos/${OWNER}/${PUBLIC_REPO}/commits?path=reports/daily&since=${dateStr}T00:00:00Z&per_page=20`;
+  const apiPath = `repos/${OWNER}/${BACKOFFICE_REPO}/commits?path=${DAILY_SUMMARY_PATH}&since=${dateStr}T00:00:00Z&per_page=20`;
   try {
-    const res = await fetch(url, {
-      headers: { 'User-Agent': 'office-report-watchdog', Accept: 'application/vnd.github+json' },
-    });
-    if (!res.ok) {
-      return { ...result, method: 'github-api', ok: null, detail: `GitHub API returned HTTP ${res.status} — the check could not be performed` };
-    }
-    const commits = await res.json();
+    const raw = execFileSync('gh', ['api', apiPath], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const commits = JSON.parse(raw);
     result.method = 'github-api';
     result.daily = Array.isArray(commits) ? commits.length : 0;
     result.ok = result.daily > 0;
     result.detail = result.ok
-      ? `${result.daily} commit(s) touching reports/daily since ${dateStr}T00:00Z — most recent "${commits[0]?.commit?.message?.split('\n')[0] ?? '?'}"`
-      : `NO commit touched reports/daily since ${dateStr}T00:00Z. The office did not report today.`;
+      ? `${result.daily} commit(s) touching ${DAILY_SUMMARY_PATH} since ${dateStr}T00:00Z — most recent "${commits[0]?.commit?.message?.split('\n')[0] ?? '?'}"`
+      : `NO commit touched ${DAILY_SUMMARY_PATH} since ${dateStr}T00:00Z. The office did not report today.`;
     return result;
   } catch (err) {
-    // Offline. Say what the local tree shows AND say it is not the answer.
-    const dir = path.join(ROOT, 'reports', 'daily');
+    // Either `gh` failed to reach the API (offline, not authenticated) or the
+    // API itself returned a non-2xx status (gh exits non-zero either way, and
+    // includes the HTTP status in its stderr when it is an API-level failure
+    // rather than a connection failure) — both collapse to "the check could
+    // not be performed", never a pass. Say what the local tree shows AND say
+    // it is not the answer.
+    const dir = path.join(GH_ROOT, BACKOFFICE_REPO, ...DAILY_SUMMARY_PATH.split('/'));
     const local = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.md')) : [];
     let newest = null;
     for (const f of local) {
       const st = fs.statSync(path.join(dir, f));
       if (!newest || st.mtimeMs > newest.mtimeMs) newest = { f, mtimeMs: st.mtimeMs };
     }
+    const ghDetail = String(err.stderr || err.message || err).trim().split('\n')[0];
     return {
       ...result,
       method: 'offline',
       ok: null,
-      detail: `Could not reach the GitHub API (${err.message}). The check WAS NOT PERFORMED. `
-        + `For information only, the LOCAL checkout's newest reports/daily file is `
+      detail: `Could not read ${BACKOFFICE_REPO} via \`gh api\` (${ghDetail}). The check WAS NOT PERFORMED. `
+        + `For information only, the LOCAL checkout's newest ${DAILY_SUMMARY_PATH} file is `
         + `${newest ? `${newest.f} (mtime ${new Date(newest.mtimeMs).toISOString()})` : 'none'} — a local tree can be days stale and is not evidence either way.`,
     };
   }
