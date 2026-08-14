@@ -1,21 +1,10 @@
-# STRUCTURALLY REFUSED WEEKLY REPORT — week-07
+# REJECTED WEEKLY REPORT — week-07
 
-**Drafted by:** The Workflow · **Reviewed by:** The QA · **Date:** 2026-08-11
+**Drafted by:** The Workflow · **Reviewed by:** The QA · **Date:** 2026-08-14
 
 **Reviewer's note:**
 
-The reviewer returned APPROVE. The structural gate refused to publish anyway, so this report did NOT ship.
-
-The row stays `drafted` — re-triggering the block retries this same draft cleanly, and nothing here was rejected by a persona.
-
-
-**Reviewer's note (an APPROVE):**
-
-All statements are supported by the provided FACTS, required markers are correctly handled, client requirement section includes the due date, and the report is concise and well‑structured.
-
-**Structural refusals:**
-
-- the facts carried 3 UNVERIFIED/UNREADABLE marker(s) and the report carries none — a marker was dropped. The contract is the literal word, not the conveyed meaning (see countUnverified()); a sentence that means "we could not establish this" without containing UNVERIFIED or UNREADABLE does not satisfy it.
+The report includes unsupported claims, such as stating the office‑site was declined “due to structural and security concerns” and asserting “no other conflicts were recorded,” which are not directly traceable to any line in the provided FACTS.
 
 ---
 
