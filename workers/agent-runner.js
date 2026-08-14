@@ -1879,9 +1879,27 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
   let due = null;
 
   if (row) {
-    factPack = row.fact_pack || '';
+    // ── Recompute BOTH together, never one alone (fixed 2026-08-14) ────────
+    // Previously: `due` was rebuilt fresh on every recovery/retry, but
+    // `factPack` was reused unchanged from the stored row -- so the fresh due
+    // DATE could validate fine while the frozen factPack still carried the
+    // "days remaining" figure computed at the ORIGINAL draft time, which any
+    // redraft prompt (structural-retry below, or a reviewer REVISE) would
+    // keep re-feeding to the drafter verbatim. Live evidence, audit א.3:
+    // reports/_drafts/weekly-week-07.md says "27 days remaining", correct on
+    // 2026-08-11 and stale (should read 24) by 2026-08-14 -- because
+    // validateReportBody() only checks that the DUE DATE STRING appears in
+    // the body, never the day-count prose, so the drift was structurally
+    // invisible. Both values now come from the SAME buildReportFacts() call,
+    // and the refreshed pack is persisted back onto the row so a LATER retry
+    // sees the same fresh numbers too, not another stale copy.
     const facts = await buildReportFacts(env, { reportType, periodLabel, dateStr, agentRows, pipelineSummary, sinceIso });
+    factPack = facts.factPack;
     due = facts.due;
+    if (factPack !== row.fact_pack) {
+      await updateReportRow(env, row.id, { factPack });
+      row = { ...row, fact_pack: factPack };
+    }
   } else {
     const facts = await buildReportFacts(env, { reportType, periodLabel, dateStr, agentRows, pipelineSummary, sinceIso });
     factPack = facts.factPack;
@@ -1980,6 +1998,11 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
 
   let decision = parseReportReviewDecision(review.text);
   let revisionCount = row.revision_count || 0;
+  // Set below only when a REJECT is the result of the structural gate
+  // exhausting its one revision round, never a persona's own judgement — so
+  // the final rejected artifact can still say so, distinctly, even though
+  // status now resolves to 'rejected' rather than lingering in 'drafted'.
+  let structuralReasonsForReject = null;
   // Visible, not silent: a reviewer emitting a report body means something is
   // still asking it to, and the only way that becomes known is a log line.
   if (decision.reEmitted) {
@@ -2041,68 +2064,92 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
     //
     // The gate below is UNCHANGED and every check in it still runs — it is
     // now simply pointed at the text the drafter actually wrote.
-    const finalReport = row.draft_content || '';
-    const structural = validateReportBody(finalReport, {
+    let finalReport = row.draft_content || '';
+    let structural = validateReportBody(finalReport, {
       // Full project objects, not just names: the consistency check matches the
       // fact pack's attribution (by key, `notebook-x`) against the report's
       // prose (by name, `Notebook-X`), and names alone cannot do that.
       factPack, due, projects: officeProjects.projects,
     });
-    if (!structural.ok) {
-      console.warn(`[report-pipeline] APPROVE refused structurally: ${structural.reasons.join(' | ')}`);
 
-      // ── THE REFUSAL IS SAVED, NOT JUST LOGGED (fixed 2026-08-09) ─────
-      //
-      // This path used to return here, before commitFileToRepo() and before
-      // updateReportRow(). Rule 3 — a report that did not publish is saved
-      // with the reason — governed the REJECT branch only, so this failure
-      // class left evidence in a console line and nowhere else, and
-      // Cloudflare no longer retains those. It did not even persist which
-      // provider answered.
-      //
-      // The file is headed as a STRUCTURAL REFUSAL rather than a rejection,
-      // because the reviewer approved: writing "REJECTED" over an approving
-      // reviewer's own note would make the artifact misreport the event.
-      const drafterCfg = getAgentConfig(row.drafter_agent_id);
-      const reviewerCfg = getAgentConfig(plan.review.agentId);
-      const refusalNote = [
-        `The reviewer returned APPROVE. The structural gate refused to publish anyway, so this report did NOT ship.`,
-        `The row stays \`drafted\` — re-triggering the block retries this same draft cleanly, and nothing here was rejected by a persona.`,
-        decision.notes ? `\n**Reviewer's note (an APPROVE):**\n\n${decision.notes}` : '',
-        decision.edits ? `\n**Reviewer's edits (recorded, never applied):**\n\n${decision.edits}` : '',
-      ].filter(Boolean).join('\n\n');
-      const refusalPath = rejectedReportPath(reportType, periodLabel);
-      const refusalCommit = await commitFileToRepo(
-        env, REPO_NAME, refusalPath,
-        renderRejectedReportFile({
-          reportType, periodLabel, dateStr,
-          headline: `STRUCTURALLY REFUSED ${reportType.toUpperCase()} REPORT`,
-          draftContent: finalReport,
-          reviewNotes: refusalNote,
-          structuralReasons: structural.reasons,
-          drafterName: drafterCfg?.name || `Agent ${row.drafter_agent_id}`,
-          reviewerName: reviewerCfg?.name || `Agent ${plan.review.agentId}`,
+    // ── THE STRUCTURAL REJECTION REASON NOW REACHES THE DRAFTER (fixed 2026-08-14) ──
+    //
+    // Previously: on a structural refusal the row stayed 'drafted' untouched
+    // and the reasons were only ever written into review_notes -- nothing
+    // read them back. The NEXT invocation's recovery path
+    // (`if (row) {...}` above) re-reviewed the IDENTICAL stored
+    // draft_content, unchanged, against the SAME facts -- so a reviewer that
+    // approved once would tend to approve the same text again, and the
+    // structural gate would refuse it again for the identical reason,
+    // forever. Confirmed byte-identical stuck drafts on 2026-08-11 and
+    // 2026-08-14 (audit א.1/א.2) — only the review notes reached anyone; the
+    // structural gate's OWN reason never reached the one party who could act
+    // on it, the drafter.
+    //
+    // This reuses the SAME "one revision round, exactly one" discipline the
+    // reviewer-driven REVISE path above already enforces via `revisionCount`
+    // — a structural refusal gets exactly one chance to be corrected, with
+    // the real reason routed into the redraft prompt, before it is recorded
+    // as a final REJECT rather than left stuck in 'drafted' for an identical
+    // retry to loop on.
+    if (!structural.ok && revisionCount < 1) {
+      console.warn(`[report-pipeline] APPROVE refused structurally: ${structural.reasons.join(' | ')} — attempting the one revision round with the reason routed to the drafter`);
+      const structuralRevised = await callReportModel(env, plan.draft, {
+        prompt: buildReportDraftPrompt(factPack, {
+          reportType, periodLabel,
+          priorDraft: {
+            draftContent: finalReport,
+            reviewNotes: `STRUCTURAL REFUSAL (an automated check, not the reviewer's judgement — the reviewer had APPROVED this draft): ${structural.reasons.join(' | ')}`,
+          },
         }),
-        `chore(agents): ${reportType} report refused by the structural gate — ${periodLabel} [skip ci]`
-      );
-      // Status deliberately NOT patched: the row stays 'drafted' for a clean
-      // retry. The reviewer's judgement was not the problem, so this is not a
-      // rejection — but the provider that answered and the reasons it was
-      // refused are now on the row instead of only in a log.
-      await updateReportRow(env, row.id, {
-        reviewerProvider: review.provider,
-        reviewNotes: [decision.notes, `STRUCTURAL REFUSAL: ${structural.reasons.join(' | ')}`].filter(Boolean).join('\n\n'),
-        revisionCount,
+        systemPrompt: REPORT_DRAFT_SYSTEM,
+        maxTokens: REPORT_DRAFT_MAX_TOKENS,
       });
+      const structuralNextDraft = structuralRevised.text || finalReport;
+      revisionCount = 1;
+      await updateReportRow(env, row.id, { draftContent: structuralNextDraft, revisionCount });
+      row = { ...row, draft_content: structuralNextDraft, revision_count: 1 };
+      noteProviderSubstitution('structural-revision-draft', structuralRevised.planned, structuralRevised.provider, substitutions);
 
-      return {
-        ran: false, reason: 'approve_failed_structural_check', structural: structural.reasons, providerSubstitutions: substitutions,
-        path: refusalPath, committed: refusalCommit.committed,
-        reviewerProvider: review.provider, revisionCount,
-        notes: (decision.notes || '').slice(0, 300),
+      review = await runReview(structuralNextDraft, true);
+      if (!review.text) return { ran: false, reason: `structural_revision_review_failed: ${review.reason || 'no text returned'}` };
+      noteProviderSubstitution('structural-revision-review', review.planned, review.provider, substitutions);
+      decision = parseReportReviewDecision(review.text);
+      // A REVISE here would ask for a SECOND round — there is no third round
+      // anywhere else in this pipeline, so this does not get one either.
+      if (decision.decision === 'REVISE') decision = { ...decision, decision: 'REJECT' };
+
+      if (decision.decision === 'APPROVE') {
+        finalReport = row.draft_content || '';
+        structural = validateReportBody(finalReport, { factPack, due, projects: officeProjects.projects });
+      }
+    }
+
+    if (decision.decision === 'APPROVE' && !structural.ok) {
+      // FINAL: either the one revision round just ran and still failed
+      // structurally, or it was already spent earlier (a reviewer-driven
+      // REVISE) before this draft ever reached this gate. Either way there
+      // is no round left — recorded as a REJECT via `decision.decision` so
+      // the unconditional REJECT branch below persists status='rejected'
+      // (never left 'drafted' for an identical retry to loop on).
+      console.warn(`[report-pipeline] APPROVE refused structurally (final — revision round ${revisionCount >= 1 ? 'used' : 'unavailable'}): ${structural.reasons.join(' | ')}`);
+      structuralReasonsForReject = structural.reasons;
+      decision = {
+        ...decision,
+        decision: 'REJECT',
+        notes: [decision.notes, `STRUCTURAL REFUSAL (automated check, not the reviewer's judgement): ${structural.reasons.join(' | ')}`].filter(Boolean).join('\n\n'),
       };
     }
 
+    // Everything from here on publishes -- and only runs if the decision is
+    // STILL 'APPROVE'. It may have just been flipped to 'REJECT' above (the
+    // one revision round ran and still failed structurally, or had already
+    // been spent). When flipped, this nested block is skipped entirely and
+    // execution falls through to the unconditional REJECT branch at the
+    // bottom of the function, which persists status='rejected' using
+    // `row.draft_content` (the revised text, if a structural revision ran)
+    // and `decision.notes` (now carrying the structural reason).
+    if (decision.decision === 'APPROVE') {
     // ── OFFICE-POLICY A9: the weekly Hebrew executive summary ─────────────
     // Runs against the STRUCTURALLY-APPROVED English body — validateReportBody()
     // above already checked exactly this text, and prepending Hebrew after
@@ -2181,9 +2228,15 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
     }
 
     return { ran: true, decision: 'APPROVE', path, committed: commit.committed, indexed, revisionCount, drafterProvider: row.drafter_provider, reviewerProvider: review.provider, providerSubstitutions: substitutions };
+    } // end: if (decision.decision === 'APPROVE') -- the nested, post-structural-retry check
   }
 
   // ── REJECT: saved with its note, and the pipeline moves on. ───────────
+  // A REJECT that originated from an exhausted structural revision round
+  // (structuralReasonsForReject set above) still gets its own headline and
+  // its reasons carried structurally, not just folded into prose — the
+  // reviewer approved this draft; only the automated gate refused it, and
+  // the artifact should not read as if a persona rejected its own approval.
   const drafterConfig = getAgentConfig(row.drafter_agent_id);
   const reviewerConfig = getAgentConfig(plan.review.agentId);
   const rejectedMarkdown = renderRejectedReportFile({
@@ -2191,6 +2244,9 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
     draftContent: row.draft_content, reviewNotes: noteWithEdits(decision),
     drafterName: drafterConfig?.name || `Agent ${row.drafter_agent_id}`,
     reviewerName: reviewerConfig?.name || `Agent ${plan.review.agentId}`,
+    ...(structuralReasonsForReject
+      ? { headline: `STRUCTURALLY REFUSED ${reportType.toUpperCase()} REPORT (revision round exhausted)`, structuralReasons: structuralReasonsForReject }
+      : {}),
   });
   const path = rejectedReportPath(reportType, periodLabel);
   const commit = await commitFileToRepo(

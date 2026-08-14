@@ -482,27 +482,49 @@ check('[new] and it is assembled ONCE — the same string is handed to the call 
 check('[new] every pre-existing queryGroqRouted() caller is unaffected (the option defaults to absent)',
   /opts\.assembledSystemPrompt\s*\n?\s*\?\?/.test(read('agents/agent-base.js')));
 
-/* ── THE STRUCTURAL REFUSAL LEAVES AN ARTIFACT (fixed 2026-08-09) ────────
- * agent-runner.js returned before commitFileToRepo() and before
- * updateReportRow() on this path, so the whole failure class left evidence in
- * one console line — and Cloudflare no longer retains those. It did not even
- * persist which provider answered. Rule 3 governed the REJECT branch only. */
-section('§5d  A structurally refused report is SAVED, not merely logged');
+/* ── THE STRUCTURAL REFUSAL NOW REACHES THE DRAFTER (fixed 2026-08-14) ───
+ * Previously (fixed 2026-08-09): a structural refusal committed a
+ * "STRUCTURALLY REFUSED" artifact, persisted the provider, and left the row
+ * 'drafted' for "a clean retry" — but nothing ever fed the reason back to
+ * the drafter, so the next retry re-reviewed the IDENTICAL stored draft and
+ * could fail identically forever. Confirmed byte-identical stuck drafts on
+ * 2026-08-11 and 2026-08-14 (audit א.1/א.2) — the 2026-08-09 fix solved
+ * "the refusal leaves no evidence" and left "the refusal never resolves"
+ * completely untouched.
+ *
+ * The fix reuses the SAME one-revision-round mechanism the reviewer-driven
+ * REVISE path already enforces via `revisionCount`: a structural refusal now
+ * gets exactly one redraft attempt with `structural.reasons` — not just the
+ * reviewer's own notes — routed into the drafter's prompt. If that also
+ * fails (or the round was already spent), the outcome becomes a REJECT,
+ * with a distinct headline so the artifact still does not misreport an
+ * automated refusal as the reviewer's own judgement. */
+section('§5d  A structural refusal now reaches the drafter, and resolves');
 
-const refusalBlock = runnerSrc.slice(
-  runnerSrc.indexOf('APPROVE refused structurally'),
-  runnerSrc.indexOf("reason: 'approve_failed_structural_check'")
+const structuralRetryBlock = runnerSrc.slice(
+  runnerSrc.indexOf('THE STRUCTURAL REJECTION REASON NOW REACHES THE DRAFTER'),
+  runnerSrc.indexOf('Everything from here on publishes')
 );
-check('[FAILS-OLD] the refusal path now commits a file before it returns',
-  /commitFileToRepo\(/.test(refusalBlock) && /rejectedReportPath\(reportType, periodLabel\)/.test(refusalBlock));
-check('[FAILS-OLD] with the structural reasons in it, via the existing renderer',
-  /renderRejectedReportFile\(\{/.test(refusalBlock) && /structuralReasons: structural\.reasons,/.test(refusalBlock));
-check('[FAILS-OLD] and persists the provider that answered, which was previously lost entirely',
-  /updateReportRow\(env, row\.id, \{\s*\n\s*reviewerProvider: review\.provider,/.test(refusalBlock));
-check('[new] the row still stays "drafted" — a refusal is not a rejection and must retry cleanly',
-  !/status: '(rejected|approved)'/.test(refusalBlock));
-check('[new] the saved file does NOT claim the reviewer rejected a report it approved',
-  /headline: `STRUCTURALLY REFUSED/.test(refusalBlock));
+check('[new] the structural reasons -- not just the reviewer\'s notes -- are routed into the redraft prompt',
+  /reviewNotes: `STRUCTURAL REFUSAL \(an automated check, not the reviewer's judgement[\s\S]{0,80}\$\{structural\.reasons\.join\(' \| '\)\}/.test(structuralRetryBlock));
+check('[new] the redraft goes through buildReportDraftPrompt with a priorDraft, the same mechanism the REVISE path uses',
+  /buildReportDraftPrompt\(factPack, \{\s*\n\s*reportType, periodLabel,\s*\n\s*priorDraft: \{\s*\n\s*draftContent: finalReport,/.test(structuralRetryBlock));
+check('[new] the redraft is gated to revisionCount < 1 -- exactly one round, same discipline as the REVISE path',
+  /if \(!structural\.ok && revisionCount < 1\)/.test(structuralRetryBlock));
+check('[new] the redrafted row is persisted (draft_content + revisionCount) before the re-review, so a crash mid-retry does not lose the attempt',
+  /await updateReportRow\(env, row\.id, \{ draftContent: structuralNextDraft, revisionCount \}\);/.test(structuralRetryBlock));
+check('[new] the re-review runs through the SAME runReview() the first pass used',
+  /review = await runReview\(structuralNextDraft, true\);/.test(structuralRetryBlock));
+check('[new] a second REVISE from the retry becomes a REJECT too -- no third round anywhere',
+  /if \(decision\.decision === 'REVISE'\) decision = \{ \.\.\.decision, decision: 'REJECT' \};/.test(structuralRetryBlock));
+check('[new] after exhausting the round, a still-failing structural check FLIPS the decision to REJECT (not left drafted)',
+  /if \(decision\.decision === 'APPROVE' && !structural\.ok\) \{/.test(structuralRetryBlock)
+  && /decision: 'REJECT',/.test(structuralRetryBlock));
+check('[new] the flip records WHICH revision-round state it happened in, for the log',
+  /revisionCount >= 1 \? 'used' : 'unavailable'/.test(structuralRetryBlock));
+check('[new] the saved file still does NOT claim the reviewer rejected a report it approved',
+  /STRUCTURALLY REFUSED \$\{reportType\.toUpperCase\(\)\} REPORT \(revision round exhausted\)/.test(runnerSrc)
+  && /structuralReasons: structuralReasonsForReject/.test(runnerSrc));
 check('[new] renderRejectedReportFile() honours that headline and still defaults to REJECTED',
   (() => {
     const args = {
@@ -517,6 +539,48 @@ check('[new] renderRejectedReportFile() honours that headline and still defaults
       && /a marker was dropped/.test(structuralFile)
       && /^# REJECTED WEEKLY REPORT — week-07/.test(rejectFile);
   })());
+
+/* ── A FULLY CLEAN PACK COUNTS ZERO GENUINE MARKERS (fixed 2026-08-14) ────
+ * The audit's own acceptance test, verbatim: a fact pack where NOTHING was
+ * genuinely unverified must count zero markers, not the 2 MARKER_RULE alone
+ * used to contribute unconditionally. Built through the REAL buildFactPack(),
+ * not a hand-written string — every branch that could render UNVERIFIED or
+ * UNREADABLE is given real, present data instead, including the two "REAL
+ * ZERO, do not write UNVERIFIED" branches (dispatchedCount: 0, an empty
+ * lifecycle.records list) that were themselves silent contributors to the
+ * old bug. */
+section('§5d-bis  A fully clean fact pack counts ZERO genuine markers');
+
+const CLEAN_REQUIREMENTS = {
+  ok: true, due: '2026-09-07', malformed: [],
+  requirements: [{ id: 'REQ-001', title: 'x', status: 'in progress', urgent: false, crossCutting: false }],
+};
+const cleanPack = rp.buildFactPack({
+  reportType: 'weekly', periodLabel: 'week-08', dateStr: '2026-08-14',
+  requirements: CLEAN_REQUIREMENTS,
+  daysRemaining: 24,
+  questions: { counts: { total: 1, open: 0, closed: 1 }, questions: [] },
+  board: { counts: { total: 1, READY: 1 }, tasks: [{ id: 'OB-001', state: 'READY', assignee: 'Agent 13', title: 'a' }] },
+  dispatchedCount: 0, inProgressCount: 0, offeredCount: 0,
+  lifecycle: { records: [] },
+  artifacts: ['Guides: 2 approved.'],
+  repoWrites: ['office-AI-agents: 12 file(s) committed.'],
+  agentRows: [{ agentId: 1, name: 'Agent 1', weeklyCases: 3, mood: 80, irritation: 0 }],
+  captureSummary: 'Improvement-loop capture: 12 case_answer entries, average quality 0.86.',
+  blocked: [],
+  pipelineSummary: 'No pipeline items.',
+  projects: [{ key: 'notebook-x', name: 'Notebook-X', role: 'client project', visibility: 'private' }],
+});
+check('[new] the clean pack still contains MARKER_RULE\'s own two occurrences (raw countUnverified stays > 0)',
+  rp.countUnverified(cleanPack) >= 2);
+check('[new] ...and still hits the two "REAL ZERO, do not write UNVERIFIED" boilerplate lines',
+  /Do NOT write UNVERIFIED for this\./.test(cleanPack));
+check('[FAILS-OLD] but the GENUINE marker count is zero — nothing in this period was actually unverified',
+  rp.countGenuineMarkers(cleanPack) === 0);
+check('[FAILS-OLD] proof this is a real fix, not a description of one: raw countUnverified() on the SAME clean pack is > 0',
+  rp.countUnverified(cleanPack) > rp.countGenuineMarkers(cleanPack));
+check('[new] a genuine marker elsewhere in the SAME pack still counts -- stripping boilerplate does not strip real facts',
+  rp.countGenuineMarkers(cleanPack + '\nUNREADABLE — a new section this test does not know about.') === 1);
 
 /* ── THE MARKER CONTRACT IS THE LITERAL TOKEN (settled 2026-08-09) ───────
  * The first live draft did not disobey. DRAFT_SYSTEM demanded the markers "in
@@ -784,8 +848,8 @@ check('[new] the runner warns, records the substitution, and returns it to its c
   /function noteProviderSubstitution\(role, planned, actual, sink\)/.test(runnerSrc)
   && /PROVIDER SUBSTITUTED on the \$\{role\} call/.test(runnerSrc)
   && /providerSubstitutions: substitutions/.test(runnerSrc));
-check('[new] every model call in the pipeline is checked, not just the first',
-  (runnerSrc.match(/noteProviderSubstitution\('/g) || []).length === 4);
+check('[new] every model call in the pipeline is checked, not just the first (draft, review, revision x2, structural-revision x2)',
+  (runnerSrc.match(/noteProviderSubstitution\('/g) || []).length === 6);
 check('[new] it reaches the D1 row too',
   /PROVIDER SUBSTITUTIONS: \$\{substitutions\.map/.test(runnerSrc));
 check('[new] but NOT the revision prompt — an operations fact is not a note about the prose',
@@ -868,8 +932,8 @@ check('[FAILS-OLD] the SAME reviewer response now publishes the stored draft thr
 check('[new] the parser exposes NO finalReport field — the publish path cannot read one',
   !('finalReport' in rp.parseReportReviewDecision(REAL_8B_REVIEW)));
 check('[new] the publish path reads the STORED DRAFT, not the reviewer\'s output',
-  /const finalReport = row\.draft_content \|\| '';/.test(runnerSrc)
-  && /const structural = validateReportBody\(finalReport, \{/.test(runnerSrc));
+  /let finalReport = row\.draft_content \|\| '';/.test(runnerSrc)
+  && /let structural = validateReportBody\(finalReport, \{/.test(runnerSrc));
 check('[new] and the gate it goes through is the identical one — every check still runs',
   /validateReportBody\(finalReport, \{[\s\S]{0,500}?factPack, due, projects: officeProjects\.projects,/.test(runnerSrc));
 check('[new] the review contract no longer asks the reviewer for the report',
@@ -907,8 +971,9 @@ check('[new] runReportPipeline() checks the gate FIRST and returns before any wo
   /async function runReportPipeline\([\s\S]{0,400}?if \(!bypassGate && !\(await reportPipelineOn\(env\)\)\)[\s\S]{0,200}?return \{ ran: false, skipped: true, reason: 'report_pipeline_disabled' \}/.test(runnerSrc));
 check('[new] exactly one revision round — a second REVISE becomes a REJECT',
   /if \(decision\.decision === 'REVISE'\) decision = \{ \.\.\.decision, decision: 'REJECT' \}/.test(runnerSrc));
-check('[new] a structurally-failed APPROVE leaves the row drafted (not rejected, not published)',
-  /approve_failed_structural_check/.test(runnerSrc) && !/status: 'rejected'[\s\S]{0,200}approve_failed_structural_check/.test(runnerSrc));
+check('[FAILS-OLD] a structurally-failed APPROVE no longer leaves the row drafted forever -- it resolves to REJECT once the revision round is exhausted',
+  !/approve_failed_structural_check/.test(runnerSrc)
+  && /if \(decision\.decision === 'APPROVE' && !structural\.ok\) \{[\s\S]{0,900}?decision: 'REJECT',/.test(runnerSrc));
 check('[new] the self-QA check runs against the provider that ANSWERED, not the one planned',
   /assertDistinctReviewer\(\{[\s\S]{0,200}draftProvider: row\.drafter_provider,\s*reviewProvider: review\.provider/.test(runnerSrc));
 check('[new] the pipeline never opens a GitHub Issue and never emails the owner',
@@ -1364,6 +1429,32 @@ const rejectedOnlyRows = [
 ];
 check('[new] a period with only rejected rows (never approved) is NOT refused',
   approvedSelect(rejectedOnlyRows, 'weekly', 'week-09') === null);
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * §N-bis  RECOVERY RECOMPUTES factPack AND due TOGETHER, NEVER ONE ALONE
+ * (fixed 2026-08-14, audit א.3) — previously the recovery/retry path
+ * (`if (row) {...}`) rebuilt `due` fresh via buildReportFacts() on every
+ * call but reused `row.fact_pack` UNCHANGED, so the frozen pack's "days
+ * remaining" prose could go stale relative to the freshly-computed due date
+ * it was validated alongside. Live evidence: reports/_drafts/weekly-week-07.md
+ * said "27 days remaining", correct 2026-08-11, stale (should read 24) by
+ * 2026-08-14 — invisible to validateReportBody(), which only checks that the
+ * due DATE STRING appears in the body, never the day-count prose.
+ * ═════════════════════════════════════════════════════════════════════════ */
+section('§N-bis  Recovery recomputes factPack and due together, never one alone');
+
+const recoveryBlock = runnerSrc.slice(
+  runnerSrc.indexOf('Recompute BOTH together, never one alone'),
+  runnerSrc.indexOf('} else {', runnerSrc.indexOf('Recompute BOTH together, never one alone'))
+);
+check('[FAILS-OLD] factPack is no longer read from the stale stored row.fact_pack on recovery',
+  !/factPack = row\.fact_pack \|\| '';/.test(recoveryBlock));
+check('[new] factPack now comes from the SAME buildReportFacts() call due is drawn from',
+  /const facts = await buildReportFacts\(env, \{ reportType, periodLabel, dateStr, agentRows, pipelineSummary, sinceIso \}\);\s*\r?\n\s*factPack = facts\.factPack;\s*\r?\n\s*due = facts\.due;/.test(recoveryBlock));
+check('[new] the refreshed pack is persisted back onto the row, so a LATER retry does not read another stale copy',
+  /if \(factPack !== row\.fact_pack\)/.test(recoveryBlock) && /await updateReportRow\(env, row\.id, \{ factPack \}\);/.test(recoveryBlock));
+check('[new] updateReportRow() now accepts a factPack patch key (fact_pack column) -- the write above has somewhere to land',
+  /\['factPack', 'fact_pack'\]/.test(read('workers/report-pipeline.js')));
 
 /* ══════════════════════════════════════════════════════════════════════════ */
 section('─────────────────────────────────────────────────────────────');

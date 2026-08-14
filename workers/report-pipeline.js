@@ -1014,6 +1014,46 @@ export function countUnverified(text) {
   return m ? m.length : 0;
 }
 
+/**
+ * The fact pack's OWN boilerplate — MARKER_RULE, and the handful of
+ * instruction/negative-example lines buildFactPack() pushes alongside a
+ * REAL zero or a REAL value (e.g. "Do NOT write UNVERIFIED for this.") —
+ * itself contains the literal words countUnverified() matches. MARKER_RULE
+ * alone contributes 2 to any factPack, unconditionally, which used to make
+ * `countUnverified(factPack) > 0` true for EVERY report regardless of
+ * whether the period actually had anything genuinely unverified (audit א.1:
+ * measured `countUnverified(MARKER_RULE) = 2`, `countUnverified(buildFactPack(...)) = 10`,
+ * so `packMarkers > 0` never varied with the real data). Listed verbatim so
+ * a genuine data marker (e.g. "UNREADABLE — the client requirements could
+ * not be read this cycle.") is never accidentally matched by a fragment of
+ * one of these and stripped along with it.
+ */
+export const MARKER_RULE_BOILERPLATE = [
+  MARKER_RULE,
+  'Section 1 must report this as a defect AND must contain the literal word UNVERIFIED when it does. ',
+  '  ^ Zero dispatched is a REAL measurement, not an absent one: the board records dispatch and none happened this period. Do NOT write UNVERIFIED for this.',
+  '  ^ When section 4 states this, the sentence must contain the literal word UNVERIFIED. Writing "the board could not be read" or "the office does not record dispatch" without that word does not satisfy the marker rule.',
+  'NONE — no built deliverable is in the review loop. This is a REAL measurement, not an absent one: the digest was read and it is empty. Do NOT write UNVERIFIED for this.',
+  'No repo write has been recorded this period. NOTE: durable recording of repo writes began 2026-08-10 — for any period before that the correct statement is UNVERIFIED, not zero, and section 5 above will still name output that was written somewhere.',
+];
+
+/**
+ * The number of GENUINE UNVERIFIED/UNREADABLE markers in a fact pack — every
+ * occurrence of MARKER_RULE_BOILERPLATE removed first, so a fully clean
+ * period (no genuine gap anywhere) counts zero, not two. This is what the
+ * duplicate-publish-style structural gate below should have been counting
+ * all along; countUnverified() itself is unchanged and still matches the
+ * literal token everywhere else (the drafted BODY, which never contains
+ * this boilerplate, is still measured with countUnverified() directly).
+ */
+export function countGenuineMarkers(text) {
+  let stripped = String(text || '');
+  for (const boilerplate of MARKER_RULE_BOILERPLATE) {
+    stripped = stripped.split(boilerplate).join('');
+  }
+  return countUnverified(stripped);
+}
+
 /* ── TWO CHECKS ADDED 2026-08-09, AFTER THE FIRST PUBLISHED REPORT ───────
  *
  * The first report to clear this gate said, in section 4:
@@ -1202,11 +1242,21 @@ export function validateReportBody(finalReport, { factPack = '', due = null, pro
     );
   }
 
-  const packMarkers = countUnverified(factPack);
+  // ── FIXED 2026-08-14 (audit א.1) ────────────────────────────────────────
+  // packMarkers used to be countUnverified(factPack) directly. MARKER_RULE
+  // alone contributes 2 to every factPack unconditionally (it teaches the
+  // rule using the words it governs), so `packMarkers > 0` was true for
+  // EVERY report regardless of whether the period had a genuine gap —
+  // collapsing rule 5 to "the body must contain the marker word", which
+  // some of the SAME boilerplate explicitly instructs the writer NOT to do
+  // at that spot. countGenuineMarkers() strips MARKER_RULE_BOILERPLATE
+  // before counting, so a period with zero real UNVERIFIED/UNREADABLE facts
+  // now correctly measures zero.
+  const packMarkers = countGenuineMarkers(factPack);
   const bodyMarkers = countUnverified(body);
   if (packMarkers > 0 && bodyMarkers < 1) {
     reasons.push(
-      `the facts carried ${packMarkers} UNVERIFIED/UNREADABLE marker(s) and the report carries none — a marker was dropped. `
+      `the facts carried ${packMarkers} genuine UNVERIFIED/UNREADABLE marker(s) and the report carries none — a marker was dropped. `
       + 'The contract is the literal word, not the conveyed meaning (see countUnverified()); a sentence that means '
       + '"we could not establish this" without containing UNVERIFIED or UNREADABLE does not satisfy it.'
     );
@@ -1476,6 +1526,7 @@ export async function updateReportRow(env, id, patch) {
     ['status', 'status'], ['draftContent', 'draft_content'], ['finalContent', 'final_content'],
     ['reviewNotes', 'review_notes'], ['revisionCount', 'revision_count'],
     ['reviewerProvider', 'reviewer_provider'], ['drafterProvider', 'drafter_provider'],
+    ['factPack', 'fact_pack'],
   ]) {
     if (key in patch) {
       fields.push(`${column} = ?`);
