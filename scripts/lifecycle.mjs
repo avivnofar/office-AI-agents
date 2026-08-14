@@ -73,6 +73,13 @@
  *              Record one refusal, at the moment it happens. The character
  *              line is mandatory and cannot be supplied later.
  *
+ *   regen    (no --slug)
+ *              Added 2026-08-14. Mutates NO lifecycle state at all — just
+ *              rewrites IN-FLIGHT.md from every record found under every
+ *              known root, right now. Exists so the projection can be
+ *              resynced (or a fix to writeInFlight() proven) without a real
+ *              transition, ingest, or refusal as the trigger.
+ *
  * Every writing command also rewrites the board Stage line unless
  * `--no-board` is passed (which exists for a dry run, not for normal use).
  */
@@ -82,7 +89,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 import {
-  STAGES, IN_FLIGHT_STAGES, newRecord, canAdvance, applyTransition, nextAction,
+  STAGES, IN_FLIGHT_STAGES, LOCATIONS, DEFAULT_LOCATION, newRecord, canAdvance, applyTransition, nextAction,
   renderStageLine, reviewerCoverage, openGaps, unclassifiedGaps, renderInFlightFile,
   bindingGapsAwaitingVote, convergenceFinding, tallyVote, recordRefusal,
   renderRefusal, detectRefusals, resumeBrief, assertPhaseCompletable,
@@ -96,10 +103,27 @@ const REPO_ROOT = path.join(__dirname, '..');
 const SIBLINGS = path.join(REPO_ROOT, '..');
 const DEFAULTS = {
   tasksDir: path.join(SIBLINGS, 'warehouse-office-AI-agents', 'tasks'),
+  // ── ADDED 2026-08-14 (audit finding, this session's own root cause) ────
+  // verifier-count-ledger and repo-size-hygiene-check shipped OUT of the
+  // warehouse into back-office-AI-agents `tools/` this same day. A
+  // deliverable's directory can now live under either root, so every
+  // function below that used to take a single `tasksDir` now searches BOTH
+  // — see ROOTS_OF(ctx) and resolveRoot().
+  toolsDir: path.join(SIBLINGS, 'back-office-AI-agents', 'tools'),
   board: path.join(SIBLINGS, 'back-office-AI-agents', 'campus', 'shared', 'board', 'BOARD.md'),
   inbox: path.join(SIBLINGS, 'back-office-AI-agents', 'campus', 'shared', 'lifecycle-inbox'),
   inFlight: path.join(SIBLINGS, 'back-office-AI-agents', 'campus', 'shared', 'lifecycle', 'IN-FLIGHT.md'),
 };
+
+/** LOCATIONS is the SAME map renderStageLine()/parseStageValue() read — a
+ *  location added there needs one more entry in ROOT_DIR_KEYS (which ctx
+ *  field holds its resolved absolute path) to become a root this tool
+ *  searches too; scripts/verify-lifecycle.js asserts every LOCATIONS key
+ *  has one, so a forgotten entry is a failing check, not a silent gap. */
+const ROOT_DIR_KEYS = { warehouse: 'tasksDir', 'back-office-tools': 'toolsDir' };
+function rootsOf(ctx) {
+  return Object.keys(LOCATIONS).map((location) => ({ location, dir: ctx[ROOT_DIR_KEYS[location]] }));
+}
 
 /* ────────────────────────────── arg parsing ────────────────────────────── */
 
@@ -130,16 +154,39 @@ function readPhases(specPath) {
   return out;
 }
 
-function readState(tasksDir, slug) {
-  const p = statePathFor(tasksDir, slug);
-  if (!existsSync(p)) return { ok: false, reason: `no STATE.json at ${p} — this task has never been dispatched or built` };
-  try {
-    return { ok: true, path: p, state: JSON.parse(readFileSync(p, 'utf8')) };
-  } catch (e) {
-    // Same posture as run-controller.js: refuse rather than reset. A corrupt
-    // state file silently replaced with an empty one erases a review history.
-    return { ok: false, reason: `STATE.json in ${slug} is unreadable: ${e.message}. REFUSING — a reset here would erase the review history.` };
+/**
+ * Searches EVERY known root (rootsOf(ctx), driven by LOCATIONS) for
+ * `<slug>/STATE.json`, not just one hardcoded `tasksDir` — fixed 2026-08-14.
+ * Previously this took a single `tasksDir` and every caller passed
+ * `ctx.tasksDir`, so a deliverable whose directory had moved to
+ * back-office-AI-agents `tools/` (verifier-count-ledger,
+ * repo-size-hygiene-check) was invisible to every command, including
+ * `writeInFlight()`'s wholesale rewrite — which is exactly how its section
+ * of IN-FLIGHT.md got silently dropped and had to be manually re-spliced in
+ * (see that file's own 2026-08-14 finding note).
+ *
+ * The FIRST root a slug's STATE.json is found under is the resolved,
+ * structural answer to "where does this deliverable actually live" — more
+ * trustworthy than a `location` field the record might carry (or, for
+ * every record created before this fix, does NOT carry at all). Returned as
+ * `dir`/`location` so a caller can both open SPEC.md correctly and stamp
+ * the record's own `location` field from ground truth rather than guessing.
+ */
+function readState(ctx, slug) {
+  const tried = [];
+  for (const root of rootsOf(ctx)) {
+    const p = statePathFor(root.dir, slug);
+    tried.push(p);
+    if (!existsSync(p)) continue;
+    try {
+      return { ok: true, path: p, dir: root.dir, location: root.location, state: JSON.parse(readFileSync(p, 'utf8')) };
+    } catch (e) {
+      // Same posture as run-controller.js: refuse rather than reset. A corrupt
+      // state file silently replaced with an empty one erases a review history.
+      return { ok: false, reason: `STATE.json in ${slug} (${root.location}) is unreadable: ${e.message}. REFUSING — a reset here would erase the review history.` };
+    }
   }
+  return { ok: false, reason: `no STATE.json for "${slug}" under any known root — this task has never been dispatched or built. Tried: ${tried.join(', ')}` };
 }
 
 function writeState(statePath, state) {
@@ -179,12 +226,30 @@ function writeStageLine(boardText, taskId, record) {
   return { ok: true, action: 'inserted', line: wanted, text: lines.join('\n') };
 }
 
+/**
+ * Every slug across EVERY known root, deduped and sorted — fixed 2026-08-14,
+ * same root cause as readState(). A root directory that does not exist on
+ * this checkout (e.g. no `tools/` yet) contributes zero entries rather than
+ * refusing the whole command; `writeInFlight()` still names it explicitly
+ * so a missing root reads as "0 from here" and not as silent success.
+ */
+function allSlugs(ctx) {
+  const slugs = new Set();
+  for (const root of rootsOf(ctx)) {
+    if (!existsSync(root.dir)) continue;
+    for (const d of readdirSync(root.dir, { withFileTypes: true })) {
+      if (d.isDirectory()) slugs.add(d.name);
+    }
+  }
+  return [...slugs].sort();
+}
+
 /* ──────────────────────────────── commands ─────────────────────────────── */
 
 function cmdInit(argv, ctx) {
   const slug = arg(argv, 'slug');
   if (!slug) return refuse('--slug is required');
-  const st = readState(ctx.tasksDir, slug);
+  const st = readState(ctx, slug);
   if (!st.ok) return refuse(st.reason);
   if (st.state.lifecycle) return refuse(`${slug} already has a lifecycle record (stage ${st.state.lifecycle.stage}, round ${st.state.lifecycle.round}). Re-initialising would erase its review history.`);
 
@@ -193,6 +258,10 @@ function cmdInit(argv, ctx) {
     slug,
     boardTask: arg(argv, 'task'),
     type: arg(argv, 'type', 'warehouse-build'),
+    // The root readState() actually found this slug's STATE.json under is
+    // the structural ground truth for where it lives — not a --location
+    // flag the caller would have to remember and could get wrong.
+    location: st.location,
     touches,
     at: ctx.now,
   });
@@ -213,17 +282,17 @@ function cmdInit(argv, ctx) {
 
 function cmdStatus(argv, ctx) {
   const slugs = flag(argv, 'all')
-    ? readdirSync(ctx.tasksDir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort()
+    ? allSlugs(ctx)
     : [arg(argv, 'slug')].filter(Boolean);
   if (!slugs.length) return refuse('--slug <s> or --all');
 
   const rows = [];
   for (const slug of slugs) {
-    const st = readState(ctx.tasksDir, slug);
+    const st = readState(ctx, slug);
     if (!st.ok) { rows.push({ slug, error: st.reason }); continue; }
     const r = st.state.lifecycle;
     if (!r) {
-      const phases = readPhases(specPathFor(ctx.tasksDir, slug));
+      const phases = readPhases(specPathFor(st.dir, slug));
       const built = (st.state.completed || []).length;
       rows.push({
         slug,
@@ -264,12 +333,19 @@ function cmdAdvance(argv, ctx) {
   if (!slug || !to) return refuse('--slug <s> --to <STAGE>');
   if (!STAGES.includes(to)) return refuse(`--to must be one of ${STAGES.join(', ')}`);
 
-  const st = readState(ctx.tasksDir, slug);
+  const st = readState(ctx, slug);
   if (!st.ok) return refuse(st.reason);
   const r = st.state.lifecycle;
   if (!r) return refuse(`${slug} has no lifecycle record — run \`init\` first`);
+  // Backfills `location` from ground truth on every write, not just init() —
+  // fixed 2026-08-14. Every record created before this session's fix (both
+  // shipped tools included) carries no `location` field at all; without this,
+  // the BOARD's Stage: line (rendered from THIS `r`, not from writeInFlight()'s
+  // own re-stamped copy) would keep rendering the wrong path until the record
+  // happened to pass back through `init` again, which never naturally recurs.
+  if (r.location !== st.location) r.location = st.location;
 
-  const phases = readPhases(specPathFor(ctx.tasksDir, slug));
+  const phases = readPhases(specPathFor(st.dir, slug));
   const verdict = canAdvance(r, to, {
     phases,
     completed: st.state.completed || [],
@@ -309,10 +385,17 @@ function cmdAdvance(argv, ctx) {
 function cmdIngest(argv, ctx) {
   const slug = arg(argv, 'slug');
   if (!slug) return refuse('--slug is required');
-  const st = readState(ctx.tasksDir, slug);
+  const st = readState(ctx, slug);
   if (!st.ok) return refuse(st.reason);
   const r = st.state.lifecycle;
   if (!r) return refuse(`${slug} has no lifecycle record — run \`init\` first`);
+  // Backfills `location` from ground truth on every write, not just init() —
+  // fixed 2026-08-14. Every record created before this session's fix (both
+  // shipped tools included) carries no `location` field at all; without this,
+  // the BOARD's Stage: line (rendered from THIS `r`, not from writeInFlight()'s
+  // own re-stamped copy) would keep rendering the wrong path until the record
+  // happened to pass back through `init` again, which never naturally recurs.
+  if (r.location !== st.location) r.location = st.location;
 
   const dir = path.join(ctx.inbox, slug);
   if (!existsSync(dir)) return { command: 'ingest', slug, applied: 0, note: `no inbox at ${dir} — the office has proposed nothing for this deliverable` };
@@ -399,10 +482,17 @@ function cmdIngest(argv, ctx) {
 function cmdRefusal(argv, ctx) {
   const slug = arg(argv, 'slug');
   if (!slug) return refuse('--slug is required');
-  const st = readState(ctx.tasksDir, slug);
+  const st = readState(ctx, slug);
   if (!st.ok) return refuse(st.reason);
   const r = st.state.lifecycle;
   if (!r) return refuse(`${slug} has no lifecycle record — run \`init\` first`);
+  // Backfills `location` from ground truth on every write, not just init() —
+  // fixed 2026-08-14. Every record created before this session's fix (both
+  // shipped tools included) carries no `location` field at all; without this,
+  // the BOARD's Stage: line (rendered from THIS `r`, not from writeInFlight()'s
+  // own re-stamped copy) would keep rendering the wrong path until the record
+  // happened to pass back through `init` again, which never naturally recurs.
+  if (r.location !== st.location) r.location = st.location;
 
   const rec = recordRefusal({
     who: arg(argv, 'who'),
@@ -417,6 +507,44 @@ function cmdRefusal(argv, ctx) {
   st.state.lifecycle = r;
   if (!ctx.dry) writeState(st.path, st.state);
   return { command: 'refusal', slug, line: renderRefusal(rec.refusal), written: !ctx.dry };
+}
+
+/**
+ * No `--slug`, mutates no lifecycle state — resyncs BOTH projections (board
+ * Stage: lines and IN-FLIGHT.md) from every root, right now. See the
+ * header's "regen" entry.
+ *
+ * Rewrites every record's board Stage: line the same way project() does for
+ * one record after a real command — the missing half `regen` shipped without
+ * at first: IN-FLIGHT.md alone does not touch BOARD.md, and BOARD.md's own
+ * Stage: line for OB-018 is the documented stale case (`warehouse
+ * \`tasks/verifier-count-ledger/\`` — see that task's own 2026-08-14 Notes:
+ * line) this command exists to actually correct, not just describe.
+ */
+function cmdRegen(argv, ctx) {
+  const boardResults = [];
+  for (const root of rootsOf(ctx)) {
+    if (!existsSync(root.dir)) continue;
+    for (const d of readdirSync(root.dir, { withFileTypes: true })) {
+      if (!d.isDirectory()) continue;
+      const st = readState(ctx, d.name);
+      if (!st.ok || !st.state.lifecycle) continue;
+      const r = st.state.lifecycle;
+      const locationChanged = r.location !== st.location;
+      if (locationChanged) r.location = st.location;
+      // The record's own STATE.json is rewritten whenever `location` was
+      // backfilled, EVEN for a record with no board_task (repo-size-hygiene-
+      // check has none) — so a LATER run sees the same ground truth this run
+      // just derived, not the same absence again. Kept independent of the
+      // board-task branch below on purpose: a record without a board task
+      // still deserves its own state written correctly.
+      if (locationChanged && !ctx.dry) writeState(st.path, st.state);
+      if (!r.board_task) continue;
+      const res = maybeWriteBoard(ctx, r);
+      boardResults.push({ slug: d.name, board_task: r.board_task, ...res });
+    }
+  }
+  return { command: 'regen', board: boardResults, inFlight: writeInFlight(ctx) };
 }
 
 /* ─────────────────────────────── the board ─────────────────────────────── */
@@ -445,29 +573,56 @@ function maybeWriteBoard(ctx, record) {
 
 /**
  * Rewrites `back-office/campus/shared/lifecycle/IN-FLIGHT.md` WHOLESALE from
- * every warehouse record — not from the one record that just changed.
+ * every record found under EVERY known root — not from the one record that
+ * just changed, and not from one hardcoded `tasksDir` (fixed 2026-08-14).
  *
- * Wholesale is the point: a deliverable that reached CLIENT-READY has to
- * DISAPPEAR from this file, and an incremental writer would leave a tail of
- * finished work that every meeting keeps reading as in flight. It is also the
- * only reconciliation the projection has, for the same reason the board line's
- * rewrite is unconditional.
+ * Previously this walked ONE `--tasks-dir` only. verifier-count-ledger and
+ * repo-size-hygiene-check shipped OUT of the warehouse into back-office
+ * `tools/` the same day this was found, so the ONE run of this tool that
+ * regenerated the file after that move silently dropped their section —
+ * no code path here ever saw them, because their directory was never under
+ * `tasksDir` to begin with. See this file's own IN-FLIGHT.md finding note
+ * (2026-08-14) for the hand-splice that covered for it before this fix.
+ *
+ * Wholesale is still the point: a deliverable that reached CLIENT-READY has
+ * to DISAPPEAR from this file, and an incremental writer would leave a tail
+ * of finished work that every meeting keeps reading as in flight. Now
+ * "wholesale" correctly means every root, not every directory under one of
+ * them.
+ *
+ * Each record's `location` is stamped from the root it was ACTUALLY found
+ * under (readState()'s structural answer), overwriting whatever the stored
+ * record says — including every record written before this fix, which
+ * carries no `location` field at all and would otherwise render (via
+ * renderStageLine()'s default) as `warehouse`, wrong for the two tools.
  */
 function writeInFlight(ctx) {
   if (ctx.noBoard) return { skipped: 'projection disabled with --no-board' };
   const dir = path.dirname(ctx.inFlight);
   const records = [];
-  for (const d of readdirSync(ctx.tasksDir, { withFileTypes: true })) {
-    if (!d.isDirectory()) continue;
-    const st = readState(ctx.tasksDir, d.name);
-    if (st.ok && st.state.lifecycle) records.push(st.state.lifecycle);
+  const rootsScanned = [];
+  for (const root of rootsOf(ctx)) {
+    if (!existsSync(root.dir)) { rootsScanned.push({ ...root, found: false, note: 'directory does not exist on this checkout' }); continue; }
+    let count = 0;
+    for (const d of readdirSync(root.dir, { withFileTypes: true })) {
+      if (!d.isDirectory()) continue;
+      const st = readState(ctx, d.name);
+      if (st.ok && st.state.lifecycle) { records.push({ ...st.state.lifecycle, location: st.location }); count += 1; }
+    }
+    rootsScanned.push({ ...root, found: true, records: count });
   }
   const text = renderInFlightFile(records, { at: ctx.now });
   if (!ctx.dry) {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
     writeFileSync(ctx.inFlight, text);
   }
-  return { path: ctx.inFlight, in_flight: records.filter((r) => IN_FLIGHT_STAGES.includes(r.stage)).length, total_records: records.length, written: !ctx.dry };
+  return {
+    path: ctx.inFlight,
+    in_flight: records.filter((r) => IN_FLIGHT_STAGES.includes(r.stage)).length,
+    total_records: records.length,
+    roots_scanned: rootsScanned,
+    written: !ctx.dry,
+  };
 }
 
 /* ──────────────────────────────── driver ───────────────────────────────── */
@@ -478,6 +633,9 @@ function main(argv) {
   const cmd = argv[0];
   const ctx = {
     tasksDir: arg(argv, 'tasks-dir', DEFAULTS.tasksDir),
+    // --tools-dir, added 2026-08-14 alongside the multi-root fix — the
+    // second root a slug's STATE.json may now live under.
+    toolsDir: arg(argv, 'tools-dir', DEFAULTS.toolsDir),
     board: arg(argv, 'board', DEFAULTS.board),
     inbox: arg(argv, 'inbox', DEFAULTS.inbox),
     inFlight: arg(argv, 'in-flight', DEFAULTS.inFlight),
@@ -486,13 +644,21 @@ function main(argv) {
     noBoard: flag(argv, 'no-board'),
   };
 
-  const commands = { init: cmdInit, status: cmdStatus, advance: cmdAdvance, ingest: cmdIngest, refusal: cmdRefusal };
+  const commands = { init: cmdInit, status: cmdStatus, advance: cmdAdvance, ingest: cmdIngest, refusal: cmdRefusal, regen: cmdRegen };
   if (!commands[cmd]) {
-    console.error('usage: lifecycle.mjs <init|status|advance|ingest|refusal> [--slug s] [options]');
+    console.error('usage: lifecycle.mjs <init|status|advance|ingest|refusal|regen> [--slug s] [options]');
     return 2;
   }
-  if (!existsSync(ctx.tasksDir)) {
-    console.log(JSON.stringify(refuse(`tasks dir not found: ${ctx.tasksDir} — pass --tasks-dir`), null, 2));
+  // At least ONE root must exist to search at all — refusing here rather
+  // than per-command keeps every command's own error message about the
+  // SLUG, not the filesystem. A single missing root (e.g. no `tools/`
+  // checked out yet) is NOT refused here; rootsOf()'s callers already treat
+  // a missing individual root as "0 entries from it", reported rather than
+  // silent (see writeInFlight()'s roots_scanned).
+  const existingRoots = rootsOf(ctx).filter((r) => existsSync(r.dir));
+  if (!existingRoots.length) {
+    const tried = rootsOf(ctx).map((r) => `${r.location}: ${r.dir}`).join(', ');
+    console.log(JSON.stringify(refuse(`no known root exists on this checkout. Tried — ${tried}. Pass --tasks-dir / --tools-dir.`), null, 2));
     return 3;
   }
 

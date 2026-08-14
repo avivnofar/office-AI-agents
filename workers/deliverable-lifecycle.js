@@ -176,6 +176,23 @@ export const STAGE_HOLDER = Object.freeze({
   WITHDRAWN: 'nobody — withdrawn',
 });
 
+/**
+ * Where a deliverable's own directory actually lives — added 2026-08-14.
+ * `renderStageLine()` used to hardcode `warehouse \`tasks/${slug}/\`` with no
+ * parameter at all, which was correct for every deliverable until
+ * verifier-count-ledger and repo-size-hygiene-check shipped OUT of the
+ * warehouse into back-office-AI-agents `tools/` (see PROJECT-SPEC-TABLES.md's
+ * 2026-08-14 entry) — after which the board's Stage: line named a location
+ * those two tools no longer occupy. `newRecord()` defaults `location` to
+ * `'warehouse'`, so every EXISTING record (and every record from a caller
+ * that has not been updated) renders byte-identically to before this change.
+ */
+export const LOCATIONS = Object.freeze({
+  warehouse: { label: 'warehouse', dir: 'tasks' },
+  'back-office-tools': { label: 'back-office', dir: 'tools' },
+});
+export const DEFAULT_LOCATION = 'warehouse';
+
 /* ─────────────────────────────── The roles ─────────────────────────────── */
 
 /** The QA and the Architect are on every reviewer set. MEETING-PROTOCOL.md
@@ -1109,7 +1126,10 @@ export function renderStageLine(record = {}) {
   const stage = record.stage;
   const holder = STAGE_HOLDER[stage] || 'unknown';
   const parts = [stage, `round ${record.round ?? 0}`, `waiting on ${holder}`];
-  if (record.slug) parts.push(`warehouse \`tasks/${record.slug}/\``);
+  if (record.slug) {
+    const loc = LOCATIONS[record.location] || LOCATIONS[DEFAULT_LOCATION];
+    parts.push(`${loc.label} \`${loc.dir}/${record.slug}/\``);
+  }
   const conv = convergenceFinding(record);
   if (conv.concern) parts.push('NOT CONVERGING — see the meeting agenda');
   return `- **Stage:** ${parts.join(' · ')}`;
@@ -1127,12 +1147,23 @@ export function parseStageValue(value) {
   const stage = raw.split('·')[0].replace(/\*\*/g, '').trim();
   if (!STAGES.includes(stage)) return { ok: false, reason: `unreadable Stage "${stage}" — expected one of ${STAGES.join(', ')}` };
   const roundM = /round\s+(\d+)/i.exec(raw);
-  const slugM = /tasks\/([A-Za-z0-9._-]+)\//.exec(raw);
+  // Try every known location's own dir/ prefix, not just `tasks/` — a slug
+  // rendered under a location this parser does not know about would silently
+  // read back as `slug: null`, so LOCATIONS is the single source both
+  // renderStageLine() and this function read from; a new location added
+  // there is automatically parseable here too.
+  let slug = null;
+  let location = null;
+  for (const [key, loc] of Object.entries(LOCATIONS)) {
+    const m = new RegExp(`${loc.dir}/([A-Za-z0-9._-]+)/`).exec(raw);
+    if (m) { slug = m[1]; location = key; break; }
+  }
   return {
     ok: true,
     stage,
     round: roundM ? Number(roundM[1]) : 0,
-    slug: slugM ? slugM[1] : null,
+    slug,
+    location,
     notConverging: /NOT CONVERGING/.test(raw),
     holder: STAGE_HOLDER[stage],
   };
@@ -1179,11 +1210,13 @@ export function renderInFlightFile(records = [], { at = null } = {}) {
     '**Classification:** private · **Derived — do not hand-edit.**',
     '',
     '> Rewritten WHOLESALE by `office-AI-agents/scripts/lifecycle.mjs` on every run,',
-    '> from each warehouse task\'s own `STATE.json`. **The warehouse record is',
-    '> authoritative**; if this file and it disagree, this file is the stale one and',
-    '> the next run of that tool fixes it. It exists because the live Worker cannot',
-    '> read the warehouse — `WAREHOUSE_REPO_TOKEN` is deliberately unset — and a',
-    '> meeting handed a gap COUNT cannot act on it.',
+    '> from each deliverable\'s own `STATE.json` — searched across every known',
+    '> location (warehouse `tasks/`, back-office `tools/`; see LOCATIONS in',
+    '> `workers/deliverable-lifecycle.js`), not one hardcoded root. **The',
+    '> STATE.json is authoritative**; if this file and it disagree, this file is',
+    '> the stale one and the next run of that tool fixes it. It exists because the',
+    '> live Worker cannot read the warehouse — `WAREHOUSE_REPO_TOKEN` is',
+    '> deliberately unset — and a meeting handed a gap COUNT cannot act on it.',
     '',
     `*(Generated ${at || 'undated'} · ${live.length} in flight)*`,
     '',
@@ -1444,8 +1477,9 @@ export function renderGapAgenda(records = []) {
  * establishes that they are, and starting anywhere else would let a record be
  * born past its own first check.
  */
-export function newRecord({ slug, boardTask = null, type = 'warehouse-build', touches = [], roster = null, at = null } = {}) {
+export function newRecord({ slug, boardTask = null, type = 'warehouse-build', touches = [], roster = null, at = null, location = DEFAULT_LOCATION } = {}) {
   if (!String(slug || '').trim()) return { ok: false, reason: 'a lifecycle record must name the warehouse task slug it belongs to' };
+  if (!LOCATIONS[location]) return { ok: false, reason: `unknown location "${location}" — expected one of ${Object.keys(LOCATIONS).join(', ')}` };
   const set = composeReviewerSet({ type, touches }, { roster });
   return {
     ok: true,
@@ -1453,6 +1487,7 @@ export function newRecord({ slug, boardTask = null, type = 'warehouse-build', to
       slug: String(slug),
       board_task: boardTask,
       type,
+      location,
       stage: 'BUILDING',
       round: 0,
       opened: at,

@@ -156,6 +156,77 @@ try {
   check('every inbox file, applied or refused, still exists on disk', allPresent);
   const stillUnapplied = JSON.parse(readFileSync(path.join(inboxDir, slug, '04-dismiss-empty.json'), 'utf8'));
   check('a refused file was NOT marked applied — it is eligible to be corrected and re-ingested', stillUnapplied.applied !== true);
+
+  // ── §8 MULTI-ROOT (fixed 2026-08-14) ────────────────────────────────────
+  // verifier-count-ledger and repo-size-hygiene-check shipped OUT of the
+  // warehouse into back-office `tools/` this session. lifecycle.mjs used to
+  // take ONE `--tasks-dir` everywhere — a slug under a second root was
+  // invisible to init/status/writeInFlight alike, which is exactly how
+  // IN-FLIGHT.md's entry for those two tools got silently dropped and had
+  // to be hand-spliced back in. This runs the REAL CLI (not a description
+  // of the fix) against two SEPARATE scratch roots and proves one `regen`
+  // run sees both.
+  section('§8 multi-root — a slug under EITHER root is found, and both land in one regen');
+
+  const toolsDir = path.join(workDir, 'tools');
+  const boardPath = path.join(workDir, 'BOARD.md');
+  const inFlightPath = path.join(workDir, 'IN-FLIGHT.md');
+  const warehouseSlug = 'mr-warehouse-fixture';
+  const toolsSlug = 'mr-tools-fixture';
+
+  function runMultiRoot(args) {
+    const out = execFileSync('node', [
+      cliPath, ...args,
+      '--tasks-dir', tasksDir, '--tools-dir', toolsDir, '--inbox', inboxDir,
+      '--board', boardPath, '--in-flight', inFlightPath,
+    ], { encoding: 'utf8' });
+    return JSON.parse(out);
+  }
+
+  mkdirSync(path.join(toolsDir, toolsSlug), { recursive: true });
+  writeFileSync(path.join(toolsDir, toolsSlug, 'STATE.json'), JSON.stringify({ completed: ['x'] }));
+  writeFileSync(path.join(toolsDir, toolsSlug, 'SPEC.md'), '## Phases\n\n1. [x] Do the thing\n');
+  writeFileSync(boardPath, [
+    '### OB-MRW — warehouse fixture task', '', '- **State:** IN-PROGRESS', '',
+    '### OB-MRT — tools fixture task', '', '- **State:** IN-PROGRESS', '',
+  ].join('\n'));
+
+  const initTools = runMultiRoot(['init', '--slug', toolsSlug, '--task', 'OB-MRT', '--type', 'warehouse-build']);
+  check('init on a slug that only exists under --tools-dir succeeds (auto-discovered, no --location flag needed)',
+    initTools.stage === 'BUILDING', JSON.stringify(initTools));
+  const toolsState = JSON.parse(readFileSync(path.join(toolsDir, toolsSlug, 'STATE.json'), 'utf8'));
+  check('the record location is stamped "back-office-tools" from ground truth, not asserted by the caller',
+    toolsState.lifecycle.location === 'back-office-tools', JSON.stringify(toolsState.lifecycle));
+
+  mkdirSync(path.join(tasksDir, warehouseSlug), { recursive: true });
+  writeFileSync(path.join(tasksDir, warehouseSlug, 'STATE.json'), JSON.stringify({ completed: ['x'] }));
+  writeFileSync(path.join(tasksDir, warehouseSlug, 'SPEC.md'), '## Phases\n\n1. [x] Do the thing\n');
+  const initWarehouse = runMultiRoot(['init', '--slug', warehouseSlug, '--task', 'OB-MRW', '--type', 'warehouse-build']);
+  check('a second, DIFFERENT slug under --tasks-dir also auto-discovers correctly (neither root shadows the other)',
+    initWarehouse.stage === 'BUILDING', JSON.stringify(initWarehouse));
+
+  const advTools = runMultiRoot(['advance', '--slug', toolsSlug, '--to', 'IN-REVIEW']);
+  check('advance on the tools-root slug succeeds and rewrites its OWN board line',
+    advTools.board?.action === 'replaced', JSON.stringify(advTools));
+  const boardAfter = readFileSync(boardPath, 'utf8');
+  check('the board Stage: line for the tools-root task names "back-office", not "warehouse"',
+    /OB-MRT[\s\S]{0,200}back-office `tools\/mr-tools-fixture\/`/.test(boardAfter), boardAfter);
+
+  const allStatus = runMultiRoot(['status', '--all']);
+  const foundSlugs = allStatus.rows.map((r) => r.slug);
+  check('status --all finds the tools-root slug', foundSlugs.includes(toolsSlug), foundSlugs.join(','));
+  check('status --all ALSO still finds the warehouse-root slug (neither root shadows the other)',
+    foundSlugs.includes(warehouseSlug), foundSlugs.join(','));
+
+  const regenOut = runMultiRoot(['regen']);
+  check('[FAILS-OLD] regen -- spanning both roots in ONE run -- sees the tools-root record (the actual entry-drop bug)',
+    regenOut.inFlight.total_records >= 2, JSON.stringify(regenOut.inFlight));
+  const rootLocations = regenOut.inFlight.roots_scanned.map((r) => r.location).sort();
+  check('roots_scanned names BOTH known locations, not silently just one',
+    rootLocations.join(',') === 'back-office-tools,warehouse', JSON.stringify(regenOut.inFlight.roots_scanned));
+  const inFlightText = readFileSync(inFlightPath, 'utf8');
+  check('the regenerated IN-FLIGHT.md file itself contains BOTH slugs in ONE wholesale write',
+    inFlightText.includes(`## ${toolsSlug}`) && inFlightText.includes(`## ${warehouseSlug}`), inFlightText);
 } finally {
   rmSync(workDir, { recursive: true, force: true });
 }

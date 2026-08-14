@@ -389,6 +389,28 @@ check('an unreadable Stage is REFUSED, not defaulted to BUILDING',
   L.parseStageValue('REVIEWED · round 1').ok === false);
 check('an empty Stage is refused', L.parseStageValue('').ok === false);
 
+/* ── §9b location-aware rendering (fixed 2026-08-14) ────────────────────
+ * renderStageLine() used to hardcode `warehouse \`tasks/${slug}/\`` with no
+ * parameter. verifier-count-ledger and repo-size-hygiene-check shipped OUT
+ * of the warehouse into back-office-AI-agents `tools/` this same day, so a
+ * board Stage: line rendered for either of them named a location they no
+ * longer occupy. */
+check('[FAILS-OLD] a record with no `location` still renders the warehouse path -- default backward compatibility',
+  /warehouse `tasks\/office-site\/`/.test(L.renderStageLine({ ...builtClean, slug: 'office-site', stage: 'IN-REVIEW', round: 0 })));
+const toolsLine = L.renderStageLine({ ...builtClean, slug: 'verifier-count-ledger', stage: 'IN-REVIEW', round: 0, location: 'back-office-tools' });
+check('[new] a record with location "back-office-tools" renders the ACTUAL location, not the warehouse',
+  /back-office `tools\/verifier-count-ledger\/`/.test(toolsLine) && !/warehouse/.test(toolsLine));
+check('[new] an unknown location falls back to the default rather than throwing',
+  /warehouse `tasks\//.test(L.renderStageLine({ ...builtClean, slug: 'x', stage: 'IN-REVIEW', round: 0, location: 'nonexistent-location' })));
+const toolsBack = L.parseStageValue(toolsLine.replace('- **Stage:** ', ''));
+check('[new] the back-office-tools line round-trips: slug AND location both read back',
+  toolsBack.ok && toolsBack.slug === 'verifier-count-ledger' && toolsBack.location === 'back-office-tools', JSON.stringify(toolsBack));
+check('[new] newRecord() defaults location to "warehouse" -- every existing caller is unaffected',
+  L.newRecord({ slug: 'x', at: '2026-08-14' }).record.location === 'warehouse');
+check('[new] newRecord() accepts an explicit location and refuses an unknown one',
+  L.newRecord({ slug: 'x', at: '2026-08-14', location: 'back-office-tools' }).record.location === 'back-office-tools'
+  && L.newRecord({ slug: 'x', at: '2026-08-14', location: 'made-up' }).ok === false);
+
 // parseBoard must SEE it, and it must move no state count — the same rule
 // Dispatched: and Offered: already keep.
 const BOARD_FIXTURE = `# THE OFFICE BOARD
