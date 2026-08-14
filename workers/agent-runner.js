@@ -124,7 +124,7 @@ import {
   buildReviewPrompt as buildReportReviewPrompt, REVIEW_SYSTEM as REPORT_REVIEW_SYSTEM,
   parseReportReviewDecision, validateReportBody, renderReportFile, renderRejectedReportFile,
   reportPath, rejectedReportPath, periodLabelFor, daysUntil,
-  getPendingReportRow, getLatestReportRow, insertReportRow, updateReportRow,
+  getPendingReportRow, getLatestReportRow, getApprovedReportRow, insertReportRow, updateReportRow,
   DRAFTER_AGENT_ID, REVIEWER_AGENT_ID, REPORT_TYPES, estimateReviewFit, pickDraftLane,
   LATEST_INDEX_PATH, parseLatestIndex, renderLatestIndex, addToLatestIndex, wordCount,
 } from './report-pipeline.js';
@@ -1821,6 +1821,39 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
   }
   if (!REPORT_TYPES.includes(reportType)) {
     return { ran: false, reason: `unknown_report_type: ${reportType}` };
+  }
+
+  // ── Duplicate-publish guard (fixed 2026-08-14) ─────────────────────────
+  // getPendingReportRow() below only ever sees status='drafted' rows -- an
+  // approved row is invisible to it, so this pipeline could re-draft and
+  // re-review a period that already published, then overwrite whatever
+  // commitFileToRepo() finds at reportPath() -- including manual owner
+  // corrections appended after publish (reports/weekly/week-07-report.md,
+  // commit 4337350).
+  //
+  // getApprovedReportRow() -- NOT getLatestReportRow() -- is what actually
+  // protects a published period. Checked live against D1 before this went in:
+  // week-07 carries 3 approved rows from 2026-08-09 followed by 7 REJECTED
+  // retries through 2026-08-14 (the self-locking gate, audit א.2/Phase 2),
+  // so its MOST RECENT row is 'rejected' -- getLatestReportRow() alone would
+  // have missed the exact case this guard exists for. getApprovedReportRow()
+  // finds it regardless of what landed after it.
+  //
+  // Checked here, before the fact pack is built and before any model is
+  // called, so an already-approved period never reaches a drafter. NOT
+  // skippable by bypassGate -- that flag overrides the report_pipeline_enabled
+  // switch for a supervised manual fire, not this safety check; a manual
+  // re-trigger against a published period must refuse exactly like a cron tick.
+  const approvedForGuard = await getApprovedReportRow(env, reportType, periodLabel);
+  if (approvedForGuard) {
+    const latestForGuard = await getLatestReportRow(env, reportType, periodLabel);
+    const reason = `${reportType} ${periodLabel} was already approved (row ${approvedForGuard.id}, published ${approvedForGuard.updated_at || approvedForGuard.created_at})`
+      + (latestForGuard && latestForGuard.id !== approvedForGuard.id
+        ? ` -- most recent attempt since then was '${latestForGuard.status}' (row ${latestForGuard.id}, ${latestForGuard.updated_at || latestForGuard.created_at}), which does not undo the earlier publish`
+        : '')
+      + ' -- refusing to re-draft over a published report';
+    console.warn(`[report-pipeline] duplicate-publish guard refused: ${reason}`);
+    return { ran: false, reason: `already_approved: ${reason}`, existingRowId: approvedForGuard.id };
   }
 
   const routingOn = await routingEnabledForReports(env);

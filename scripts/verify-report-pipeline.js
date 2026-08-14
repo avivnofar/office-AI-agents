@@ -1280,6 +1280,91 @@ check('[new] an unreadable questions channel is UNREADABLE, not "nothing to ask"
     rp.buildFactPack({ reportType: 'weekly', periodLabel: 'week-08' })
   ));
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * §N  THE DUPLICATE-PUBLISH GUARD (fixed 2026-08-14) — getPendingReportRow()
+ * only ever sees status='drafted' rows, so an already-approved period was
+ * invisible to it and could be re-drafted and re-approved, overwriting a
+ * published report (including manual owner corrections appended after
+ * publish — reports/weekly/week-07-report.md, commit 4337350). Audit א.4.
+ *
+ * getLatestReportRow() was imported and never called — but wiring THAT
+ * function alone as the guard is insufficient, confirmed against live D1
+ * before this went in: week-07 carries 3 approved rows from 2026-08-09
+ * followed by 7 REJECTED retries through 2026-08-14 (the self-locking gate,
+ * audit א.2/Phase 2), so its MOST RECENT row is 'rejected'. A guard that
+ * only checks the latest row would be blind to exactly this case. The fix
+ * adds getApprovedReportRow() (status='approved' in the WHERE clause, not
+ * just the newest row) and guards on THAT.
+ * ═════════════════════════════════════════════════════════════════════════ */
+section('§N  Duplicate-publish guard — an approved period refuses to re-draft');
+
+const runReportPipelineSrc = (() => {
+  const start = runnerSrc.indexOf('async function runReportPipeline(');
+  const end = runnerSrc.indexOf('\nasync function routingEnabledForReports');
+  return runnerSrc.slice(start, end);
+})();
+
+check('[new] getApprovedReportRow is actually CALLED, not just imported',
+  /const approvedForGuard = await getApprovedReportRow\(env, reportType, periodLabel\);/.test(runReportPipelineSrc));
+check('[new] the guard refuses when an approved row exists',
+  /if \(approvedForGuard\) \{/.test(runReportPipelineSrc)
+  && /reason: `already_approved:/.test(runReportPipelineSrc));
+check('[new] the guard runs BEFORE the fact pack is built (buildReportFacts)',
+  runReportPipelineSrc.indexOf('const approvedForGuard = await getApprovedReportRow') <
+  runReportPipelineSrc.indexOf('buildReportFacts('));
+check('[new] the guard runs BEFORE every model call in the function (callReportModel)',
+  runReportPipelineSrc.indexOf('const approvedForGuard = await getApprovedReportRow') <
+  runReportPipelineSrc.indexOf('callReportModel('));
+check('[new] the guard is NOT gated behind bypassGate — a manual re-fire against an already-published period must refuse exactly like a cron tick',
+  !/if \(!bypassGate[^)]*\)[\s\S]{0,40}getApprovedReportRow/.test(runReportPipelineSrc)
+  && /const approvedForGuard = await getApprovedReportRow\(env, reportType, periodLabel\);\r?\n\s*if \(approvedForGuard\)/.test(runReportPipelineSrc));
+
+// ── [FAILS-OLD] transcribed row-selection logic ────────────────────────────
+// getPendingReportRow()'s real SQL is `WHERE status = 'drafted'`;
+// getLatestReportRow()'s is the same query with NO status filter, ORDER BY
+// created_at DESC LIMIT 1; getApprovedReportRow()'s adds `AND status =
+// 'approved'` back in, but keeps LIMIT 1 on recency WITHIN that filter, so
+// it is not simply "the latest row" filtered after the fact. All three are
+// transcribed here in pure JS (no D1 needed) against a fixture rows table
+// shaped exactly like live week-07: one old approval, then several newer
+// rejections on top of it. This is the actual bug being reproduced, not a
+// description of the fix.
+const fixtureRows = [
+  { id: 'row-1', report_type: 'weekly', period_label: 'week-07', status: 'approved', created_at: '2026-08-09T11:55:10Z' },
+  { id: 'row-2', report_type: 'weekly', period_label: 'week-07', status: 'rejected', created_at: '2026-08-11T16:50:21Z' },
+  { id: 'row-3', report_type: 'weekly', period_label: 'week-07', status: 'rejected', created_at: '2026-08-14T09:02:58Z' },
+];
+const oldPendingSelect = (rows, reportType, periodLabel) =>
+  rows.filter((r) => r.report_type === reportType && r.period_label === periodLabel && r.status === 'drafted')
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))[0] || null;
+const latestSelect = (rows, reportType, periodLabel) =>
+  rows.filter((r) => r.report_type === reportType && r.period_label === periodLabel)
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))[0] || null;
+const approvedSelect = (rows, reportType, periodLabel) =>
+  rows.filter((r) => r.report_type === reportType && r.period_label === periodLabel && r.status === 'approved')
+    .sort((a, b) => b.created_at.localeCompare(a.created_at))[0] || null;
+
+check('[FAILS-OLD] old pending-only selection is BLIND to the approved row — the actual bug: it would have proceeded to draft from scratch',
+  oldPendingSelect(fixtureRows, 'weekly', 'week-07') === null);
+check("[FAILS-OLD] a latest-row-only guard would ALSO have been blind here — week-07's newest row is 'rejected', not 'approved'",
+  latestSelect(fixtureRows, 'weekly', 'week-07')?.status === 'rejected');
+check('[new] getApprovedReportRow SEES the approval regardless of what landed after it — this is what actually protects week-07',
+  approvedSelect(fixtureRows, 'weekly', 'week-07')?.id === 'row-1');
+
+// A period with only a drafted (unreviewed) row, or only rejected rows, must
+// NOT be refused — the guard is specifically for "was ever approved", not
+// for "any row exists".
+const draftedOnlyRows = [
+  { id: 'row-4', report_type: 'weekly', period_label: 'week-08', status: 'drafted', created_at: '2026-08-14T09:00:00Z' },
+];
+check('[new] a period with only a drafted row is NOT refused (recovery must still work)',
+  approvedSelect(draftedOnlyRows, 'weekly', 'week-08') === null);
+const rejectedOnlyRows = [
+  { id: 'row-5', report_type: 'weekly', period_label: 'week-09', status: 'rejected', created_at: '2026-08-14T09:00:00Z' },
+];
+check('[new] a period with only rejected rows (never approved) is NOT refused',
+  approvedSelect(rejectedOnlyRows, 'weekly', 'week-09') === null);
+
 /* ══════════════════════════════════════════════════════════════════════════ */
 section('─────────────────────────────────────────────────────────────');
 console.log(`\n  ${pass} passed, ${fail} failed  (${pass + fail} checks)`);

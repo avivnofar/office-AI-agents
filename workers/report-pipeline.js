@@ -1431,6 +1431,24 @@ export async function getLatestReportRow(env, reportType, periodLabel) {
   ).bind(reportType, periodLabel).first();
 }
 
+/** Whether this period was EVER approved -- not just whether the MOST RECENT
+ *  row is approved. The duplicate-publish guard needs this distinction: a
+ *  period can be approved once and then have later, unrelated rows (e.g. a
+ *  stuck self-locking-gate retry loop, audit א.2) land as 'rejected' on top
+ *  of it, which would make the latest row 'rejected' while the period is
+ *  still published and must never be redrafted. Confirmed against live D1
+ *  2026-08-14: week-07 carries 3 approved rows from 08-09 followed by 7
+ *  rejected retries through 08-14 -- getLatestReportRow() alone would have
+ *  missed this exact case, which is why this function exists instead of
+ *  reusing it for the guard. */
+export async function getApprovedReportRow(env, reportType, periodLabel) {
+  if (!env?.DB) return null;
+  await env.DB.prepare(REPORT_PIPELINE_TABLE_SQL).run();
+  return env.DB.prepare(
+    `SELECT * FROM report_pipeline WHERE report_type = ? AND period_label = ? AND status = 'approved' ORDER BY created_at DESC LIMIT 1`
+  ).bind(reportType, periodLabel).first();
+}
+
 export async function insertReportRow(env, row) {
   if (!env?.DB) return null;
   const id = crypto.randomUUID();
