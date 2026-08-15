@@ -61,6 +61,7 @@ import { getClaudeBudgetStatus, recordClaudeSpend, routeTaskTypeCall, resolveTas
 import { listImageCapableModels } from './gemini-image-client.js';
 import { renderAssetProvenance, extensionForMime } from './provider-common.js';
 import { collectTodayGapReports, renderGapDigest } from './gap-reports.js';
+import { METRIC_DISCLOSURE } from './quality-metric.js';
 import { resolveIssueTarget } from './permission-guard.js';
 // buildOfficeContext + BUDGETS are imported for the office_context_status
 // read-back ONLY (2026-08-10): the meeting and per-agent shapes are the two that
@@ -114,7 +115,7 @@ import {
   insertGuidePipelineRow, updateGuidePipelineRow, getTodayDraftRow,
   buildReviewPrompt, parseReviewDecision, extractUnverifiedSections,
   renderGuideFile, renderRejectedDraftFile, guidePath, draftPath,
-  fetchVerificationQueueText, parseVerificationQueue, renderVerificationQueue,
+  fetchVerificationQueueChecked, parseVerificationQueue, renderVerificationQueue,
   pickVerificationQueueItems, buildVerifyPrompt, parseVerifyResult, replaceGuideSection,
   fetchRawRepoFile, ARCHITECT_REVIEW_SYSTEM, VERIFY_SYSTEM,
 } from './guide-engine.js';
@@ -593,16 +594,82 @@ async function fetchOwnerChannelIssues(env, repoName) {
   }
 }
 
-/** Reads reports/asset-pipeline/board.json from the repo (read-only, public). Returns { items: [] } on any failure. */
+/**
+ * Reads reports/asset-pipeline/board.json.
+ *
+ * ── REWRITTEN 2026-08-16 (audit #9 / KFM-15, and #14 / KFM-13) ────────────
+ *
+ * This function used to return `{ items: [] }` on any failure, from a
+ * `raw.githubusercontent.com` URL. Both halves were defects, and they
+ * compounded:
+ *
+ *   1. **"could not read" was indistinguishable from "the board is empty."**
+ *      Its two callers each do read-modify-WRITE-WHOLE-FILE. Neither writes
+ *      when the item list is empty today, so no live harm has occurred — but
+ *      that is a property of the current callers, not of this function, and
+ *      the next caller that writes unconditionally would replace the real
+ *      board with an empty one. `ok` now says which of the two happened.
+ *
+ *   2. **`raw.githubusercontent.com` is a CDN with its own cache** (minutes),
+ *      and it returns no blob sha. So a read could be minutes stale, and the
+ *      write that followed carried no way to notice. Concretely, in
+ *      `runWorkDayCycle()` `maybeOpenAssetTask()` writes the board and then
+ *      `checkProductVersionBumps()` re-reads it — through that cache — and
+ *      writes the whole file back, discarding the `asset_task_issue_filed`
+ *      flag the first one had just set. Two writers, one silently erased, no
+ *      error anywhere.
+ *
+ * The API read returns the content AND the sha in one call, so the sha now
+ * describes THE VERSION THIS CALLER READ and can be handed to
+ * commitFileToRepo() as `expectedSha`. The raw URL is kept only as a
+ * last-resort fallback, and a read that came from it is marked `sha: null` —
+ * which every writer below treats as "not safe to write the whole file."
+ *
+ * @returns {Promise<{items: array, sha: string|null, ok: boolean, reason: string|null, source: string}>}
+ */
 async function fetchAssetBoard(env) {
-  const url = `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/master/reports/asset-pipeline/board.json`;
-  try {
-    const res = await fetch(url);
-    if (!res.ok) return { items: [] };
-    return await res.json();
-  } catch {
-    return { items: [] };
+  const path = 'reports/asset-pipeline/board.json';
+
+  if (env.GITHUB_TOKEN) {
+    try {
+      const res = await fetch(`https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/contents/${path}`, {
+        headers: {
+          Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+          'User-Agent': 'data-center-agent-sim',
+          Accept: 'application/vnd.github+json',
+        },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const decoded = JSON.parse(decodeURIComponent(escape(atob(String(data.content || '').replace(/\n/g, '')))));
+        return { items: decoded.items || [], ...decoded, sha: data.sha ?? null, ok: true, reason: null, source: 'api' };
+      }
+    } catch (err) {
+      console.warn(`[asset-board] API read failed (${err?.message}) — falling back to the raw CDN, which cannot supply a sha.`);
+    }
   }
+
+  try {
+    const res = await fetch(`https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/master/${path}`);
+    if (!res.ok) return { items: [], sha: null, ok: false, reason: `raw_read_http_${res.status}`, source: 'raw' };
+    const body = await res.json();
+    // ok:true — the read succeeded — but sha:null, so no whole-file write may
+    // ride on it. Readable and writable are different permissions here.
+    return { ...body, items: body.items || [], sha: null, ok: true, reason: null, source: 'raw' };
+  } catch (err) {
+    return { items: [], sha: null, ok: false, reason: `raw_read_threw:${err?.message}`, source: 'raw' };
+  }
+}
+
+/**
+ * The one place that decides whether a read of the asset board may be written
+ * back whole. Both writers call it, so the rule cannot hold in one and drift
+ * in the other — the same reasoning as unifying the two pacers (audit #13).
+ */
+function assetBoardWritable(board) {
+  if (!board?.ok) return { writable: false, reason: `board_unreadable:${board?.reason || 'unknown'}` };
+  if (!board.sha) return { writable: false, reason: `board_read_without_sha:${board.source} — a whole-file write with no read-time sha cannot detect a concurrent write (KFM-15)` };
+  return { writable: true, reason: null };
 }
 
 /**
@@ -1354,17 +1421,30 @@ async function processGuideReviewBlock(env, dateStr, opts = {}) {
 
     const unverifiedSections = extractUnverifiedSections(decision.finalGuide);
     let queueUpdated = false;
+    let queueSkipped = null;
     if (unverifiedSections.length) {
-      const existingQueue = parseVerificationQueue(await fetchVerificationQueueText());
-      const newEntries = unverifiedSections
-        .filter((section) => !existingQueue.some((e) => e.guidePath === path && e.section === section))
-        .map((section) => ({ guidePath: path, section }));
-      if (newEntries.length) {
-        await commitFileToRepo(
-          env, REPO_NAME, 'guides/_verification-queue.md', renderVerificationQueue([...existingQueue, ...newEntries]),
-          `chore(agents): queue ${newEntries.length} UNVERIFIED section(s) — ${topic.slug} [skip ci]`
-        );
-        queueUpdated = true;
+      // AUDIT #14: this write REPLACES the whole queue file with
+      // existing + new. If the read failed, `existing` is empty and every
+      // previously queued UNVERIFIED section is erased by a network blip.
+      // Refuse instead. Losing today's entries is recoverable — the guide is
+      // committed and its UNVERIFIED markers are still in the text, so the
+      // next pass re-derives them. Losing the accumulated queue is not.
+      const queueRead = await fetchVerificationQueueChecked();
+      if (!queueRead.ok) {
+        queueSkipped = `queue_read_failed:${queueRead.reason} — refused to rewrite the whole queue from an unread copy (audit #14)`;
+        console.warn(`[guides] ${queueSkipped}`);
+      } else {
+        const existingQueue = parseVerificationQueue(queueRead.text);
+        const newEntries = unverifiedSections
+          .filter((section) => !existingQueue.some((e) => e.guidePath === path && e.section === section))
+          .map((section) => ({ guidePath: path, section }));
+        if (newEntries.length) {
+          await commitFileToRepo(
+            env, REPO_NAME, 'guides/_verification-queue.md', renderVerificationQueue([...existingQueue, ...newEntries]),
+            `chore(agents): queue ${newEntries.length} UNVERIFIED section(s) — ${topic.slug} [skip ci]`
+          );
+          queueUpdated = true;
+        }
       }
     }
 
@@ -1394,7 +1474,18 @@ async function processGuideVerifyBlock(env, opts = {}) {
     return { verified: 0, skipped: true, reason: 'guides_disabled' };
   }
 
-  const entries = parseVerificationQueue(await fetchVerificationQueueText());
+  // AUDIT #14: this block ends by rewriting the WHOLE queue from `remaining`.
+  // A failed read used to be indistinguishable from an empty queue — and while
+  // an empty queue exits early here, the distinction is what guarantees that;
+  // it is asserted rather than relied on. A read that did not happen exits with
+  // its own reason, so "the queue is empty" and "GitHub was unreachable" never
+  // appear in the logs as the same sentence.
+  const queueRead = await fetchVerificationQueueChecked();
+  if (!queueRead.ok) {
+    console.warn(`[guides] verification queue unreadable (${queueRead.reason}) — block skipped rather than rewriting it (audit #14)`);
+    return { verified: 0, reason: `queue_unreadable:${queueRead.reason}` };
+  }
+  const entries = parseVerificationQueue(queueRead.text);
   if (!entries.length) return { verified: 0, reason: 'queue_empty' };
   if (!env.ANTHROPIC_API_KEY) return { verified: 0, reason: 'anthropic_api_key_not_configured' };
 
@@ -1711,10 +1802,17 @@ async function buildReportFacts(env, { reportType, periodLabel, dateStr, agentRo
         return `${n} ${r.event_type}${avg}${over}`;
       });
       const notAsked = capRows.results.find((r) => r.event_type === 'case_not_asked');
+      const anyQuality = capRows.results.some((r) => r.avg_quality != null);
       captureSummary = `Improvement-loop capture: ${parts.join(', ')}.`
         + (notAsked
           ? ` NOTE: the ${notAsked.n} case_not_asked row(s) are asks that never reached a provider — the Gemini pacer denied the slot or a budget cap refused it. They are recorded so the refusal rate is visible, and they are NOT units of completed work. Do not add them to the case_answer count.`
-          : '');
+          : '')
+        // The fact pack feeds a CLIENT-FACING report. An average printed there
+        // without this sentence is a placeholder presented as a quality
+        // judgment — the same defect class as a count that drops rows
+        // silently. Printed only when an average is actually present, so the
+        // caveat never appears without the number it qualifies.
+        + (anyQuality ? ` QUALITY CAVEAT — carry this into any sentence that uses the averages above: ${METRIC_DISCLOSURE}` : '');
     }
   }
 
@@ -3058,16 +3156,28 @@ async function maybeOpenAssetTask(env, dayOfWeek, nextDay) {
   }
 
   const issue = await fileAssetTaskIssue(env, item, rotation.agents);
+  let boardWrite = null;
   if (issue.created) {
     item.asset_task_issue_filed = true;
     item.history = [...(item.history || []), { day: nextDay, stage: item.stage, note: 'asset-task issue filed (auto, tool_task_window)' }];
-    await commitFileToRepo(
-      env, REPO_NAME, 'reports/asset-pipeline/board.json', JSON.stringify(board, null, 2) + '\n',
-      `chore(agents): file asset-task issue for ${item.id} [skip ci]`
-    );
+
+    // Audit #9: the write carries the sha THIS FUNCTION READ, so a board that
+    // moved underneath it is refused rather than overwritten. The Issue is
+    // already filed at this point and is not rolled back — a filed Issue whose
+    // board flag did not stick is recoverable (the next run sees the flag
+    // unset and the `not_eligible` branch will not fire), whereas an erased
+    // board is not. Reported in the return value either way.
+    const gate = assetBoardWritable(board);
+    boardWrite = gate.writable
+      ? await commitFileToRepo(
+        env, REPO_NAME, 'reports/asset-pipeline/board.json', JSON.stringify(board, null, 2) + '\n',
+        `chore(agents): file asset-task issue for ${item.id} [skip ci]`,
+        { expectedSha: board.sha }
+      )
+      : { committed: false, reason: gate.reason };
   }
 
-  return { opened: issue.created, tool: rotation.tool, agents: rotation.agents, item: item.id, issue };
+  return { opened: issue.created, tool: rotation.tool, agents: rotation.agents, item: item.id, issue, boardWrite };
 }
 
 /**
@@ -3300,10 +3410,24 @@ async function checkProductVersionBumps(env, yearState, nextDay) {
   }
 
   if (bumps.length) {
-    await commitFileToRepo(
-      env, REPO_NAME, 'reports/asset-pipeline/board.json', JSON.stringify(board, null, 2) + '\n',
-      `chore(agents): version bump for ${bumps.map((b) => b.id).join(', ')} [skip ci]`
-    );
+    // Audit #9. This is the SECOND writer of this file, and in
+    // runWorkDayCycle() it runs after maybeOpenAssetTask() has already written
+    // it — the pair that could silently erase one another. `expectedSha` makes
+    // that collision a refused write with a conflict status instead of a lost
+    // one. If it is refused, the version bumps recorded in `yearState` still
+    // stand; the board's copy of them is what did not land, and it is named.
+    const gate = assetBoardWritable(board);
+    const write = gate.writable
+      ? await commitFileToRepo(
+        env, REPO_NAME, 'reports/asset-pipeline/board.json', JSON.stringify(board, null, 2) + '\n',
+        `chore(agents): version bump for ${bumps.map((b) => b.id).join(', ')} [skip ci]`,
+        { expectedSha: board.sha }
+      )
+      : { committed: false, reason: gate.reason };
+    if (!write.committed) {
+      console.warn(`[asset-board] version bumps NOT written to board.json: ${write.reason || `status ${write.status}`}`);
+      return bumps.map((b) => ({ ...b, boardWriteFailed: true, reason: write.reason || `status_${write.status}` }));
+    }
   }
 
   return bumps;
@@ -5168,6 +5292,52 @@ export default {
         return json({ ok: true, type: body.type, worker_version: workerVersion(env), result }, 200, origin);
       }
       if (request.method === 'GET' && url.pathname === '/api/simulation') {
+        /*
+         * ══════════════════════════════════════════════════════════════════
+         * CLOSED 2026-08-16 (OB-047). The WRITE half was closed 2026-08-10;
+         * this is the read half, and it was the last unauthenticated route
+         * into this Worker.
+         * ══════════════════════════════════════════════════════════════════
+         *
+         * WHAT IT LEAKED. `getSimulationState()` returns every kill switch the
+         * office has. OFFICE-POLICY Part C carried this as "eight switches
+         * reachable without a token"; measured against the live endpoint on
+         * 2026-08-16 it is **NINE** — `learning_loop_enabled` is the ninth,
+         * and it is the switch that gates writes to agents' active context
+         * (A2's red line) and the one the newly-wired QA instruments ride on.
+         * The count in the policy is stale and is reported for the owner to
+         * correct; this handler is not the place to argue with it.
+         *
+         * WHY THE PREVIOUS REASONING NO LONGER HOLDS. The 2026-08-10 note
+         * below kept GET open on the grounds that it is "a READ used by
+         * data-center's admin tab and by every deploy-verification step in
+         * DEPLOY.md and TOKEN-BUDGET.md". The first half is FALSE and was
+         * checked rather than assumed: `data-center/index.html` calls exactly
+         * one endpoint, `/api/chat`, which is its own API and not this Worker;
+         * `dashboard/dashboard.js` calls only `/api/agents/{status,reports,
+         * sessions,suggestions}`, all four already behind this same token.
+         * Nothing in any of the three repos reads `GET /api/simulation`.
+         *
+         * That is the load-bearing lesson: the justification for leaving a
+         * hole open was a claim about a consumer, the consumer was never
+         * re-checked, and the claim outlived it by an unknown number of weeks.
+         * A documented dependency is a claim about another repo and goes stale
+         * exactly like a documented switch state does (KFM-21).
+         *
+         * THE SECOND HALF IS TRUE and is handled rather than dismissed: the
+         * deploy-verification steps do use this route. They now need a token,
+         * and the authenticated equivalent already exists and predates this
+         * change — `POST /api/agents/trigger {"type":"simulation_state"}`,
+         * which returns the same object plus `worker_version`. DEPLOY.md and
+         * TOKEN-BUDGET.md are updated to point at it.
+         *
+         * Same idiom as the POST below and as the /api/agents/* gate, so this
+         * file still has ONE authentication shape rather than three.
+         */
+        const readToken = request.headers.get('X-Admin-Token') || '';
+        if (!env.ADMIN_TOKEN || readToken !== env.ADMIN_TOKEN) {
+          return json({ error: 'unauthorized' }, 401, origin);
+        }
         return json(await getSimulationState(env), 200, origin);
       }
       if (request.method === 'POST' && url.pathname === '/api/simulation') {

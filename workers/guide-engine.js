@@ -193,12 +193,54 @@ export async function getTodayGapTopicCandidates(env, dateStr) {
 
 /** Reads any file's raw content from this repo (read-only, same pattern as agent-runner.js fetchAssetBoard()). Returns '' on any failure. */
 export async function fetchRawRepoFile(path) {
+  return (await fetchRawRepoFileChecked(path)).text;
+}
+
+/**
+ * The same read, with the ONE fact `fetchRawRepoFile()` throws away: whether
+ * the read actually happened.
+ *
+ * ── AUDIT #14 / KFM-13, and this one had teeth (2026-08-16) ──────────────
+ *
+ * `fetchRawRepoFile()` returns `''` for a network error, a 404, a 500 and a
+ * genuinely empty file alike. For `guides/TOPICS.md` that is harmless — an
+ * empty topic list means "pick no topic today".
+ *
+ * For `guides/_verification-queue.md` it is a **silently lost write**, in two
+ * places, and neither would raise anything:
+ *
+ *   agent-runner.js `processGuideReviewBlock()` — writes
+ *   `[...existingQueue, ...newEntries]`. A failed read makes `existingQueue`
+ *   empty, so the queue is REPLACED by just today's entries and every
+ *   previously queued UNVERIFIED section disappears.
+ *
+ *   agent-runner.js `processGuideVerifyBlock()` — writes `remaining`. A failed
+ *   read makes the entry list empty, and if anything triggers the write the
+ *   whole queue is replaced with "no entries — every guide is currently
+ *   stable."
+ *
+ * That queue is the office's record of claims it published but could not
+ * verify. Erasing it does not merely lose data — it converts "we know these
+ * sections are unverified" into "every guide is stable", which is a false
+ * statement about published work, produced by a network blip.
+ *
+ * So the checked read is the one those two paths use, and they refuse to write
+ * a queue they could not read. `ok:false` and an empty queue are different
+ * facts and are now different values.
+ *
+ * @returns {Promise<{text: string, ok: boolean, reason: string|null}>}
+ */
+export async function fetchRawRepoFileChecked(path) {
   try {
     const res = await fetch(`${RAW_BASE}/${path}`);
-    if (!res.ok) return '';
-    return await res.text();
-  } catch {
-    return '';
+    // 404 is `ok: true` with empty text — the file genuinely is not there,
+    // which for a queue that has never been written is the correct reading and
+    // must not be conflated with "could not reach GitHub".
+    if (res.status === 404) return { text: '', ok: true, reason: 'not_found' };
+    if (!res.ok) return { text: '', ok: false, reason: `http_${res.status}` };
+    return { text: await res.text(), ok: true, reason: null };
+  } catch (err) {
+    return { text: '', ok: false, reason: `fetch_threw:${err?.message}` };
   }
 }
 
@@ -464,6 +506,15 @@ export function renderVerificationQueue(entries) {
 
 export async function fetchVerificationQueueText() {
   return fetchRawRepoFile('guides/_verification-queue.md');
+}
+
+/**
+ * The verification queue read that says whether it worked. Every caller that
+ * WRITES the queue back must use this one and refuse on `ok: false` — see
+ * fetchRawRepoFileChecked()'s header for what happens otherwise.
+ */
+export async function fetchVerificationQueueChecked() {
+  return fetchRawRepoFileChecked('guides/_verification-queue.md');
 }
 
 /**

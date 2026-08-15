@@ -1341,8 +1341,28 @@ check('[new] recordRepoWrite runs AFTER the PUT, never before it',
   rwSrc.indexOf('method: \'PUT\'') < rwSrc.lastIndexOf('await recordRepoWrite('));
 check('[new] recordRepoWrite cannot throw — it swallows and warns, like recordOfficeEvent',
   /export async function recordRepoWrite[\s\S]*?try \{[\s\S]*?\} catch \(err\) \{[\s\S]*?console\.warn/.test(rwSrc));
+/*
+ * REWRITTEN 2026-08-16. This check used to assert commitFileToRepo's return
+ * statement VERBATIM:
+ *     /return \{ committed: res\.ok, status: res\.status, path \};/
+ * Its intent is KFM-14 — a lost measurement must never cost the operation, so
+ * nothing about `recordRepoWrite()` may reach a caller who could branch on it.
+ * That intent is unchanged and still holds. What broke it was audit #9 adding
+ * a `conflict` field to the SAME return value for an unrelated reason.
+ *
+ * A check pinned to the exact text of a line goes red for edits that do not
+ * touch what it is about, which teaches a reader that red means nothing
+ * (KFM-04b, from the maintenance side). So it now asserts the property: the
+ * return value is built from the RESPONSE, and carries nothing derived from
+ * the recorder.
+ */
+const commitReturn = /return \{\s*committed: res\.ok,[\s\S]{0,400}?\n  \};/.exec(rwSrc)?.[0]
+  || /return \{ committed: res\.ok[^\n]*\};/.exec(rwSrc)?.[0] || '';
+check('[new] commitFileToRepo still returns a value built from the PUT response',
+  /committed: res\.ok/.test(commitReturn) && /status: res\.status/.test(commitReturn));
 check('[new] the record does NOT appear in commitFileToRepo\'s return value (nothing may branch on it)',
-  /return \{ committed: res\.ok, status: res\.status, path \};/.test(rwSrc));
+  commitReturn.length > 0
+  && !/record|repoWrites|recorded/i.test(commitReturn));
 check('[new] a DENIED write is not recorded as output (a denial is not an artifact)',
   rwSrc.indexOf('return { committed: false, reason: verdict.reason') < rwSrc.lastIndexOf('await recordRepoWrite('));
 check('[new] the table is created lazily, the same call task-router.js made for provider_usage',

@@ -37,6 +37,8 @@
  * from a comment.
  */
 
+import { METRIC_DISCLOSURE, scoresAreComparable, saturationOf, SCORER_ID } from './quality-metric.js';
+
 export const MIN_SAMPLE_FOR_FINDING = 5;
 
 /**
@@ -77,14 +79,21 @@ function groupAndScore(rows, key) {
   for (const r of rows) {
     const k = r[key];
     if (k === null || k === undefined) continue;
-    if (!groups.has(k)) groups.set(k, []);
-    groups.get(k).push(r.quality);
+    if (!groups.has(k)) groups.set(k, { qualities: [], projects: new Set() });
+    groups.get(k).qualities.push(r.quality);
+    groups.get(k).projects.add(r.project ?? null);
   }
-  return [...groups.entries()].map(([k, qualities]) => ({
+  return [...groups.entries()].map(([k, g]) => ({
     [key]: k,
-    n: qualities.length,
-    avgQuality: round3(avg(qualities)),
-    meetsMinSample: qualities.length >= MIN_SAMPLE_FOR_FINDING,
+    n: g.qualities.length,
+    avgQuality: round3(avg(g.qualities)),
+    meetsMinSample: g.qualities.length >= MIN_SAMPLE_FOR_FINDING,
+    // WHICH SCORER produced these numbers, carried on the group itself.
+    // `project` selects the divisor (quality-metric.js), so two groups whose
+    // project sets differ are not on the same scale and must not be ranked
+    // against each other. Added 2026-08-16.
+    projects: [...g.projects],
+    saturation: saturationOf(g.qualities),
   })).sort((a, b) => b.n - a.n);
 }
 
@@ -127,10 +136,41 @@ function buildFindings(rows) {
   } else {
     const sorted = [...qualifyingEmbodiments].sort((a, b) => b.avgQuality - a.avgQuality);
     const best = sorted[0]; const worst = sorted[sorted.length - 1];
-    if (best.avgQuality - worst.avgQuality > 0.1) {
+
+    /*
+     * ── THE CONFOUND GATE, added 2026-08-16 ──────────────────────────────
+     *
+     * Before this gate, the branch below fired whenever two averages differed
+     * by 0.1. On live D1 that produced, verbatim:
+     *
+     *   "cloudflare-fallback (n=19, avg 0.879) scores higher than claude
+     *    (n=10, avg 0.421) on reliably-attributed rows"
+     *
+     * — a degraded FALLBACK provider beating the office's primary. The
+     * sentence is arithmetically correct and it is not a fact about either
+     * provider. `quality` is a length proxy whose divisor is chosen by
+     * PROJECT (800 data-center / 600 notebook-x), and each provider serves
+     * exactly one project: Claude only answers data-center, Gemini and
+     * cloudflare-fallback only answer notebook-x. So every cross-provider
+     * comparison here is also a cross-divisor comparison, and the two effects
+     * cannot be separated by any sample size.
+     *
+     * The instrument therefore REFUSES the ranking rather than qualifying it.
+     * A caveat under a ranked list is still a ranked list — the reader takes
+     * the ranking and leaves the caveat (KFM-07: "a caveat is not a fix").
+     * The refusal itself is the finding, which is what A8 asks for: it names
+     * the remedy (score both projects on one scale, or evaluate for real).
+     */
+    const comparability = scoresAreComparable([...best.projects, ...worst.projects]);
+    if (!comparability.comparable) {
+      findings.push({
+        kind: 'comparison_refused_confounded',
+        text: `REFUSED to rank embodiments. ${best.embodiment_model} (n=${best.n}, avg ${best.avgQuality}) and ${worst.embodiment_model} (n=${worst.n}, avg ${worst.avgQuality}) were scored by DIFFERENT scorers — ${comparability.reason}. Because each provider serves exactly one project and the divisor is chosen by project, a difference between these averages is indistinguishable from the difference between their divisors. No provider conclusion can be drawn from this data, and the apparent gap is NOT evidence about either provider. Remedy: score every project on one scale, or replace the length proxy with a real evaluation (OB-080/OB-081). ${METRIC_DISCLOSURE}`,
+      });
+    } else if (best.avgQuality - worst.avgQuality > 0.1) {
       findings.push({
         kind: 'embodiment_quality_gap',
-        text: `${best.embodiment_model} (n=${best.n}, avg ${best.avgQuality}) scores higher than ${worst.embodiment_model} (n=${worst.n}, avg ${worst.avgQuality}) on reliably-attributed rows — a gap worth the Lead QA's attention, not yet a conclusion (A3's provider-blame threshold is separate and higher; see probation-review.js canBlameProvider()).`,
+        text: `${best.embodiment_model} (n=${best.n}, avg ${best.avgQuality}) scores higher than ${worst.embodiment_model} (n=${worst.n}, avg ${worst.avgQuality}) on reliably-attributed rows scored by the same scorer (\`${SCORER_ID}\`, divisor ${comparability.divisors[0]}) — a gap worth the Lead QA's attention, not yet a conclusion (A3's provider-blame threshold is separate and higher; see probation-review.js canBlameProvider()). ${METRIC_DISCLOSURE}`,
       });
     }
   }
@@ -176,7 +216,16 @@ export function renderComparisonFinding(result, { date } = {}) {
     ...result.findings.map((f) => `- **${f.kind}**: ${f.text}`),
     '',
     '### By embodiment (reliable rows only)',
-    ...result.byEmbodiment.map((e) => `- ${e.embodiment_model}: n=${e.n}, avg quality ${e.avgQuality}${e.meetsMinSample ? '' : ` (below the n=${MIN_SAMPLE_FOR_FINDING} floor — not a finding on its own)`}`),
+    ...result.byEmbodiment.map((e) => `- ${e.embodiment_model}: n=${e.n}, avg quality ${e.avgQuality}${e.meetsMinSample ? '' : ` (below the n=${MIN_SAMPLE_FOR_FINDING} floor — not a finding on its own)`}`
+      + ` — scored on project(s) ${e.projects.map((p) => p ?? 'unrecorded').join('/')}`
+      + (e.saturation?.note ? `; ${e.saturation.note}` : '')),
+    '',
+    '### What "quality" means in the numbers above',
+    '',
+    // Printed BELOW the numbers, not above: a reader who has just read an
+    // average is the reader who needs this sentence. Mandatory at every render
+    // site — see workers/quality-metric.js.
+    `> ${METRIC_DISCLOSURE}`,
   ];
   return lines.filter((l) => l !== '').join('\n');
 }

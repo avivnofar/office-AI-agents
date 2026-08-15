@@ -34,14 +34,14 @@
  * Status: DRAFT (Phase 1 foundation, Phase 2 meeting system).
  */
 
-import agentsConfig from '../config/agents-config.json';
+import agentsConfig from '../config/agents-config.json' with { type: 'json' };
 // The capability manifest supplies each role's `output_kinds` to the output
 // census. Read from the SAME file workers/capability-audit.js reads, deliberately:
 // "what this role is for" gets one definition, so the census and the audit cannot
 // disagree about it.
-import capabilityManifest from '../config/capability-manifest.json';
-import relationships from '../config/relationships.json';
-import officeProjects from '../config/office-projects.json';
+import capabilityManifest from '../config/capability-manifest.json' with { type: 'json' };
+import relationships from '../config/relationships.json' with { type: 'json' };
+import officeProjects from '../config/office-projects.json' with { type: 'json' };
 import { callGemini, callCloudflareFallback } from './gemini-client.js';
 import { callGroq } from './groq-client.js';
 import { commitFileToRepo, BACKOFFICE_REPO_NAME } from './repo-write.js';
@@ -228,7 +228,14 @@ async function saveAgentSnapshot(agentId, env, state) {
 
 /* ───────────────────────────── Attendees ──────────────────────────────── */
 
-function resolveAttendeeIds(meetingType, opts) {
+// EXPORTED 2026-08-16 for the same reason as task-router.js's
+// checkUnknownCapPacing: it was UNPROVEN on the gate-call audit, and it is the
+// function that decides who a meeting transcript may name. Every attribution
+// claim enforceAttendeeGate() checks is checked against THIS function's output,
+// so an error here is an error the gate cannot see — the declared list would
+// simply be wrong, and a fabricated speaker who happens to be on it passes.
+// scripts/verify-unproven-gates.js §5 exercises it directly.
+export function resolveAttendeeIds(meetingType, opts) {
   if (Array.isArray(opts.attendees) && opts.attendees.length) return opts.attendees;
 
   const fromRelationships = relationships.meeting_default_attendees?.[meetingType];

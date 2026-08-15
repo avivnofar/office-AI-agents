@@ -380,10 +380,58 @@ const liveGuard = simulationPostIsGuarded(arSrc0);
 check('the LIVE handler is guarded, and the token check precedes the state write',
   liveGuard.found === true && liveGuard.guarded === true, JSON.stringify(liveGuard));
 
-check('the closure did NOT widen the /api/agents/ prefix gate (GET /api/simulation stays a public read)',
+check('the closure did NOT widen the /api/agents/ prefix gate — each route carries its own explicit check',
   arSrc0.includes("url.pathname.startsWith('/api/agents/')") && !arSrc0.includes("url.pathname.startsWith('/api/')"));
 check('the 401 body is the SAME shape the /api/agents/* gate returns (one idiom, not two)',
   (arSrc0.match(/error: 'unauthorized' \}, 401, origin\)/g) || []).length >= 2);
+
+/* ── §3c THE READ HALF, CLOSED 2026-08-16 ────────────────────────────────
+ *
+ * The check above used to end "(GET /api/simulation stays a public read)" and
+ * asserted exactly that. It was correct on 2026-08-10 and it is the
+ * deliberate-decision half of Part C's pending item: the write path was closed
+ * and the read path was boarded as OB-047 rather than closed in the same
+ * breath.
+ *
+ * OB-047 is now closed too, so the assertion inverts. The justification for
+ * leaving it open was that data-center's admin tab read it; that was checked
+ * on 2026-08-16 and is false — data-center calls only `/api/chat`, and
+ * dashboard.js calls only `/api/agents/*`. Nothing read it.
+ *
+ * Same control shape as §3b: the detector is pointed at a transcription of the
+ * OLD open handler and required to refuse it, so a regex that matches anything
+ * cannot pass this section.
+ */
+section('§3c GET /api/simulation requires the admin token (OB-047, the read half)');
+
+function simulationGetIsGuarded(source) {
+  const start = source.indexOf("request.method === 'GET' && url.pathname === '/api/simulation'");
+  if (start === -1) return { found: false, guarded: false };
+  const body = source.slice(start, start + 3500);
+  const gateAt = body.search(/env\.ADMIN_TOKEN/);
+  const readAt = body.search(/getSimulationState\(env\)/);
+  if (readAt === -1) return { found: false, guarded: false };
+  return { found: true, guarded: gateAt !== -1 && gateAt < readAt };
+}
+
+const PRE_CHANGE_GET = `
+      if (request.method === 'GET' && url.pathname === '/api/simulation') {
+        return json(await getSimulationState(env), 200, origin);
+      }
+`;
+const preGet = simulationGetIsGuarded(PRE_CHANGE_GET);
+check('CONTROL — the pre-2026-08-16 GET handler is detected as UNGUARDED',
+  preGet.found === true && preGet.guarded === false, JSON.stringify(preGet));
+
+const liveGet = simulationGetIsGuarded(arSrc0);
+check('the LIVE GET handler is guarded, and the token check precedes the state read',
+  liveGet.found === true && liveGet.guarded === true, JSON.stringify(liveGet));
+
+// The authenticated read-back must exist, or closing this route would leave an
+// operator with no way to read a switch state at all — the exact mistake the
+// §3b block above records about `paused` having no route.
+check('an AUTHENTICATED read-back still exists, so closing the open read removes no capability',
+  arSrc0.includes("case 'simulation_state':"));
 
 /* ── EVERY SWITCH IS STILL REACHABLE THROUGH AN AUTHENTICATED PATH ───────
  *

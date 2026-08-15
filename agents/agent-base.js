@@ -17,6 +17,7 @@ import { queryNotebookX } from '../workers/notebookx-client.js';
 import { getClaudeBudgetStatus, recordClaudeSpend, getClaudeCallsToday, CLAUDE_MAX_CALLS_PER_DAY } from '../workers/model-router.js';
 import { checkGeminiPacingSlot } from '../workers/gemini-pacer.js';
 import { detectCapabilityGap } from '../workers/gap-reports.js';
+import { lengthProxyScore } from '../workers/quality-metric.js';
 import { recordOfficeEvent } from '../workers/improvement-loop.js';
 import { writeJournalEntry } from '../workers/context-editor.js';
 import { getOfficeContext } from '../workers/office-context.js';
@@ -463,13 +464,32 @@ export class AgentBase {
    * (agent-runner.js fileGapDigests()) to batch into
    * reports/gaps/<project>/<date>.md — never a GitHub Issue.
    */
-  async fileGapReport(project, caseId, hebrewContent) {
+  /**
+   * @param {'hard'|'soft'} [kind] - which tier of gap this was. STORED, as of
+   *   2026-08-16 (audit finding #22 / KFM-06). Before this, every row went in
+   *   as `severity: 'info'` and the digest headline could only say "N genuine
+   *   capability gaps" — merging `hard` (the tool returned nothing, or the
+   *   request failed outright) with `soft` (an answer came back and scored
+   *   below a threshold). Those are different facts and the code draws the
+   *   distinction three lines earlier in gap-reports.js `detectCapabilityGap()`;
+   *   only the render collapsed them.
+   *
+   *   `severity` is the right column for this rather than a new one: a gap
+   *   where the tool produced nothing IS more severe than one where it
+   *   produced something weak, so the values are meaningful in the column's own
+   *   terms. Nothing reads `severity` as logic — it renders as a badge in
+   *   `dashboard/dashboard.js:122` and nowhere else (checked repo-wide,
+   *   2026-08-16) — so widening its value set breaks no consumer. Rows written
+   *   before today carry 'info' and are NOT rewritten (A15); the digest counts
+   *   them as `unclassified` rather than guessing which tier they were.
+   */
+  async fileGapReport(project, caseId, hebrewContent, kind) {
     const id = crypto.randomUUID();
     if (this.env.DB) {
       await this.env.DB.prepare(
         `INSERT INTO reports (id, agent_id, type, title, content, severity, project)
-         VALUES (?, ?, 'gap_hebrew', ?, ?, 'info', ?)`
-      ).bind(id, this.id, caseId || this.name, hebrewContent, project).run();
+         VALUES (?, ?, 'gap_hebrew', ?, ?, ?, ?)`
+      ).bind(id, this.id, caseId || this.name, hebrewContent, kind === 'hard' || kind === 'soft' ? kind : 'info', project).run();
     }
     return id;
   }
@@ -731,7 +751,21 @@ export class AgentBase {
     const nbResult = kbSlug ? await queryNotebookX({ kbSlug, question: query }) : null;
     const notebookAnswerFound = !!nbResult;
     const responseText = nbResult?.text || '';
-    const quality = notebookAnswerFound ? Math.min(1, responseText.length / 600) : 0;
+    // THE SECOND FORMULA. Until 2026-08-16 this line read
+    // `Math.min(1, responseText.length / 600)` inline and never called
+    // evaluateResponseQuality() at all — so the office ran TWO scorers with
+    // TWO divisors (800 here, 600 there) and nothing recorded which produced
+    // which row. The same answer text scored 33% higher on this path.
+    //
+    // The 600 is PRESERVED, not harmonised: changing it would move every mood
+    // threshold, gap ceiling and published average for notebook-x in the same
+    // commit that made them honest, and A15 forbids a number moving without
+    // explanation. It is now declared data in quality-metric.js instead of a
+    // literal here, which is what makes the divergence readable rather than
+    // hidden. Harmonising is a separate, owner-visible decision — OB-080.
+    const quality = notebookAnswerFound
+      ? lengthProxyScore(responseText, { project: 'notebook-x', ok: true })
+      : 0;
 
     if (this.session) this.session.cases_handled += 1;
     const stateChange = await this._applyQualityMood(quality);
@@ -902,12 +936,25 @@ export class AgentBase {
    * Placeholder quality heuristic (0.0-1.0), UNCHANGED by the 2026-07-18
    * rebuild — explicitly reused rather than rebuilt, per that session's
    * Step 2 instruction ("reuse the EXISTING model-education quality-scoring
-   * logic"). Phase 2: replace with a Gemini-as-judge call comparing the
-   * response against the question.
+   * logic").
+   *
+   * **THIS DOES NOT MEASURE QUALITY. It measures answer length.** The name is
+   * kept because `config/capability-manifest.json` declares this symbol as the
+   * supplier of `response-quality-evaluation`, and renaming it would silently
+   * mark that capability unsupplied. The honesty lives in
+   * `workers/quality-metric.js` `METRIC_DISCLOSURE`, which every site that
+   * renders one of these numbers to a reader must print alongside it.
+   *
+   * 2026-08-16: the formula moved to `lengthProxyScore()` and the value it
+   * returns is byte-identical to what this function returned before. The move
+   * is not a fix — it is what made the divergence with `_askNotebookX()`'s
+   * inline 600-divisor copy visible at all. See that module's header.
+   *
+   * `_query` stays unread, and that unread parameter is the whole finding: a
+   * real evaluation is exactly the function that would use it.
    */
   async evaluateResponseQuality(_query, responseText, ok) {
-    if (!ok || !responseText) return 0;
-    return Math.min(1, responseText.length / 800);
+    return lengthProxyScore(responseText, { project: 'data-center', ok });
   }
 
   /**
@@ -955,7 +1002,7 @@ export class AgentBase {
       hebrewText = `[שגיאה בניסוח הדוח: ${err.message}] ${whatHappened} שאלה: ${query}`;
     }
 
-    return this.fileGapReport(project, caseId, hebrewText);
+    return this.fileGapReport(project, caseId, hebrewText, gap.kind);
   }
 
   async logInteraction({ type, query, response_summary, mood_before, mood_after, irritation_change, state_change, model_source, tool_used }) {

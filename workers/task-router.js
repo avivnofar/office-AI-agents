@@ -93,6 +93,9 @@ import { callGroq } from './groq-client.js';
 import { callGemini, callCloudflareFallback } from './gemini-client.js';
 import { callCloudflareImage, PROVIDER as CF_IMAGE_PROVIDER } from './cf-image-client.js';
 import { callGeminiImage, polishImage, PROVIDER as GEMINI_IMAGE_PROVIDER } from './gemini-image-client.js';
+// The ONE KV pacing primitive (audit #13). gemini-pacer.js imports nothing, so
+// this preserves the rule that task-router.js stays loadable by its verifier.
+import { checkKvPacingSlot } from './gemini-pacer.js';
 
 /** Must match agent-runner.js's SIM_STATE_KEY. verify-routing.js asserts it does. */
 export const SIM_STATE_KEY = 'simulation-state';
@@ -781,18 +784,25 @@ export function hasKnownCap(tokenEconomy, providerId) {
  *
  * Degrades OPEN without SIM_KV, matching the pacer and the rest of this repo.
  */
-async function checkUnknownCapPacing(env, providerId, minSpacingMs, now) {
-  if (!env?.SIM_KV) return { allowed: true, elapsedMs: null, degradedOpen: true };
-
-  const key = `routing-pace:${providerId}`;
-  const lastRaw = await env.SIM_KV.get(key).catch(() => null);
-  const last = lastRaw ? Number(lastRaw) : 0;
-  const elapsed = now - last;
-
-  if (elapsed < minSpacingMs) return { allowed: false, elapsedMs: elapsed, degradedOpen: false };
-
-  await env.SIM_KV.put(key, String(now)).catch(() => {});
-  return { allowed: true, elapsedMs: elapsed, degradedOpen: false };
+// EXPORTED 2026-08-16 so a verifier can exercise it DIRECTLY. It was on the
+// gate-call audit's UNPROVEN list — wired to a real call site, never once fed
+// the thing it is supposed to refuse. Exercising it only through
+// checkProviderAllowance() would prove the behaviour and still leave the audit
+// reporting UNPROVEN, because that tool counts call sites by name; an indirect
+// test is invisible to it and to the next reader. See
+// scripts/verify-unproven-gates.js §2.
+export async function checkUnknownCapPacing(env, providerId, minSpacingMs, now) {
+  // ONE IMPLEMENTATION, 2026-08-16 (audit #13). This function used to carry
+  // its own copy of the get→compare→put dance that gemini-pacer.js also
+  // carried — same algorithm, two keys, and the honest account of what it does
+  // NOT guarantee written on only one of them. Delegating means the "this is
+  // not atomic, and here is the failure mode" block cannot be accurate in one
+  // file and stale in the other.
+  //
+  // gemini-pacer.js imports nothing, so this does not break the rule that
+  // task-router.js stays loadable by its verifier.
+  const r = await checkKvPacingSlot(env, `routing-pace:${providerId}`, minSpacingMs, now);
+  return { allowed: r.allowed, elapsedMs: r.waitedMs, degradedOpen: r.degradedOpen };
 }
 
 /**

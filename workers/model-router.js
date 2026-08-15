@@ -24,8 +24,8 @@
  * collide or drain each other regardless of read/write order.
  */
 
-import tokenEconomy from '../config/token-economy.json';
-import modelRouting from '../config/model-routing.json';
+import tokenEconomy from '../config/token-economy.json' with { type: 'json' };
+import modelRouting from '../config/model-routing.json' with { type: 'json' };
 import {
   routeTask,
   resolveLane,

@@ -219,7 +219,45 @@ if (!fs.existsSync(SETTINGS)) {
   /* ═════ §2 THE CONTROL — the OLD list must fail on the two gaps ═════════ */
   section('§2 CONTROL — the old inline list, and the gaps it left');
 
-  // Transcribed from run_architect_midnight.bat's --disallowedTools line.
+  /*
+   * ── OB-079 RECONCILED, 2026-08-16. READ THIS BEFORE CHANGING THE LIST. ──
+   *
+   * `OLD_RULES` is a FROZEN HISTORICAL SNAPSHOT of the six patterns the
+   * wrapper carried before 2026-08-14. It is deliberately NOT a live
+   * transcription any more, and it must never be "re-synced" to the wrapper:
+   * its entire job is to be the pre-fix list, so §2 can demonstrate that the
+   * matcher below is capable of returning "not denied". A control that tracks
+   * the thing it controls for is not a control.
+   *
+   * WHAT HAPPENED, established from evidence rather than inferred:
+   *   back-office commit `1666dec`, 2026-08-14 13:57:56 +0300, "OB-053: close
+   *   both deny-list gaps". The wrapper's --disallowedTools went from these 6
+   *   patterns to 33, widened to match .claude/settings.json.
+   *
+   * DIRECTION — and this is the question that mattered: **the wrapper became
+   * STRICTLY MORE PROTECTIVE, not less.** Every one of the six old patterns is
+   * still covered:
+   *   rm / git push --force / git clean / git stash drop / git merge — present verbatim;
+   *   `git reset --hard:*` — REPLACED BY THE BROADER `git reset:*`, which
+   *   matches a superset (that widening is precisely gap 2 being closed).
+   * §2b below asserts that superset relation mechanically rather than leaving
+   * it as a claim in this comment.
+   *
+   * AND IT WAS RECORDED. The previous session inferred "someone partially
+   * fixed the wrapper without recording it." That inference was wrong. The
+   * change is recorded in three places: the commit message, a REM block inside
+   * the .bat itself, and — unusually — the commit message PREDICTS this exact
+   * verifier failure and explains why it was left ("office-AI-agents is
+   * read-only this session; flagged for whoever updates that transcription
+   * next, not fixed here"). The signal worked exactly as designed; what was
+   * missing was a check pointing at the invariant that still matters.
+   *
+   * SO THE CHECK CHANGED TARGET. "Does the wrapper still match a hand-typed
+   * copy of its own past?" goes stale by construction and fired once, here.
+   * "Does the wrapper's live list still match settings.json?" is the invariant
+   * OB-053 was closing and the one that catches the NEXT drift — because the
+   * failure mode is two lists diverging, not either list changing.
+   */
   const OLD_RULES = [
     'Bash(rm:*)',
     'Bash(git push --force:*)',
@@ -231,13 +269,54 @@ if (!fs.existsSync(SETTINGS)) {
 
   if (fs.existsSync(WRAPPER)) {
     const bat = fs.readFileSync(WRAPPER, 'utf8');
-    check('the transcription still matches the wrapper (else this control is stale)',
-      OLD_RULES.every((r) => bat.includes(r)),
-      OLD_RULES.filter((r) => !bat.includes(r)).join(' ; '));
+
+    // Every "Bash(...)" pattern on the wrapper's --disallowedTools line(s).
+    const wrapperRules = [...bat.matchAll(/"(Bash\([^"]*\))"/g)].map((m) => m[1]);
+    const settingsDeny = settings.permissions.deny || [];
+
+    check('the wrapper declares a deny list this script can actually read', wrapperRules.length > 0);
+
+    // THE LIVE INVARIANT. Two lists that drift is the failure OB-053 closed,
+    // and the failure this project keeps having in other forms (KFM-24).
+    const missingFromWrapper = settingsDeny.filter((r) => !wrapperRules.includes(r));
+    const missingFromSettings = wrapperRules.filter((r) => !settingsDeny.includes(r));
+    check('the wrapper\'s live deny list still covers every rule in .claude/settings.json',
+      missingFromWrapper.length === 0, `absent from wrapper: ${missingFromWrapper.join(' ; ')}`);
+    check('...and the wrapper carries no rule settings.json does not (so the two are ONE list, not two)',
+      missingFromSettings.length === 0, `absent from settings.json: ${missingFromSettings.join(' ; ')}`);
+
     check('the wrapper still pairs the deny-list with --dangerously-skip-permissions',
       /--dangerously-skip-permissions/.test(bat) && /--disallowedTools/.test(bat));
+
+    /* ═════ §2b THE DIRECTION OF THE 2026-08-14 CHANGE, asserted ═════════ */
+    section('§2b the 2026-08-14 wrapper change was in the SAFE direction');
+
+    // For every command the OLD list denied, the CURRENT wrapper must still
+    // deny it. This is what "strictly more protective" means, and checking it
+    // by running the matcher is the difference between knowing and assuming.
+    const OLD_LIST_DENIED = [
+      'rm -rf node_modules',
+      'git push --force origin main',
+      'git reset --hard HEAD~1',
+      'git clean -fdx',
+      'git stash drop',
+      'git merge feature',
+    ];
+    let allStillDenied = true;
+    for (const cmd of OLD_LIST_DENIED) {
+      const wasDenied = isDenied(OLD_RULES, cmd);
+      const nowDenied = isDenied(wrapperRules, cmd);
+      if (wasDenied && !nowDenied) allStillDenied = false;
+      check(`still denied after the widening: \`${cmd}\``, !wasDenied || nowDenied);
+    }
+    check('NO REGRESSION: nothing the pre-2026-08-14 list denied is permitted by the current wrapper',
+      allStillDenied);
+    check('and the widening closed gap 1 in the wrapper itself: `git push -f` is now denied there',
+      isDenied(wrapperRules, 'git push -f origin main'));
+    check('and closed gap 2 in the wrapper itself: a bare `git reset` is now denied there',
+      isDenied(wrapperRules, 'git reset HEAD~1'));
   } else {
-    skip('the wrapper transcription check', `no ${WRAPPER}`);
+    skip('the wrapper live-list checks', `no ${WRAPPER}`);
   }
 
   check('CONTROL — the OLD list does NOT stop `git push -f` (gap 1, and the matcher can fail)',

@@ -40,6 +40,8 @@
  *   - Anything with quality >= 0.5 is not even a candidate — that's an
  *     ordinary imperfect-but-fine answer, not a capability-gap signal.
  */
+import { METRIC_DISCLOSURE } from './quality-metric.js';
+
 const SOFT_CANDIDATE_CEILING = 0.5;
 
 export function detectCapabilityGap({ project, ok, quality, notebookAnswerFound }) {
@@ -66,7 +68,10 @@ export async function collectTodayGapReports(env) {
   if (!env.DB) return [];
 
   const { results } = await env.DB.prepare(
-    `SELECT r.id, r.agent_id, r.title, r.content, r.project, r.created_at, a.name AS agent_name
+    // `severity` carries the gap KIND ('hard' | 'soft'), written since
+    // 2026-08-16 — see agent-base.js fileGapReport(). Selected so the digest
+    // can count the two tiers apart instead of merging them (finding #22).
+    `SELECT r.id, r.agent_id, r.title, r.content, r.project, r.severity, r.created_at, a.name AS agent_name
      FROM reports r JOIN agents a ON a.id = r.agent_id
      WHERE r.type = 'gap_hebrew' AND DATE(r.created_at) = DATE('now')
      ORDER BY r.project, r.created_at ASC`
@@ -89,11 +94,48 @@ export async function collectTodayGapReports(env) {
  * file), entry body in Hebrew as composed by the flagging agent.
  */
 export function renderGapDigest(project, dateStr, entries) {
+  /*
+   * ── FINDING #22 / KFM-06, fixed 2026-08-16 ──────────────────────────────
+   *
+   * This headline used to read "N genuine capability gaps flagged today",
+   * where N merged two populations THIS FILE ITSELF distinguishes 40 lines
+   * above: `hard` (the notebook returned nothing, or the request to Claude
+   * failed — the tool demonstrably did not work) and `soft` (an answer came
+   * back and scored below this persona's threshold). Merging them produces a
+   * number that is true and useless: a reader cannot tell one outage from
+   * three mediocre answers, and the two demand completely different responses.
+   *
+   * The soft tier is additionally downstream of a LENGTH PROXY — a `soft` gap
+   * means "the answer was short", not "the answer was wrong. So the merged
+   * count was partly a measure of verbosity, presented as a count of tool
+   * failures. That is why the disclosure below is printed on the digest and
+   * not only on reports that show a numeric score.
+   *
+   * Rows written before today carry `severity: 'info'` and are counted as
+   * `unclassified` — not silently folded into either tier (KFM-13: "could not
+   * check" is not "checked and found absent"), and not rewritten (A15).
+   */
+  const hard = entries.filter((e) => e.severity === 'hard').length;
+  const soft = entries.filter((e) => e.severity === 'soft').length;
+  const unclassified = entries.length - hard - soft;
+
+  const breakdown = [
+    `${hard} HARD (the tool produced nothing — no notebook coverage, or the request failed outright)`,
+    `${soft} SOFT (an answer came back but scored below the flagging agent's own threshold)`,
+    unclassified ? `${unclassified} unclassified (filed before 2026-08-16, when the tier stopped being discarded at write time — not reclassified retroactively)` : null,
+  ].filter(Boolean).join('; ');
+
   const header = `# Capability gaps — ${project} — ${dateStr}\n\n` +
-    `${entries.length} genuine capability gap${entries.length === 1 ? '' : 's'} flagged today. ` +
+    `${entries.length} capability gap${entries.length === 1 ? '' : 's'} flagged today: ${breakdown}.\n\n` +
+    `> **HARD and SOFT are different findings and are deliberately not summed into one headline.** ` +
+    `A HARD gap is evidence the tool failed. A SOFT gap is evidence an answer scored low — and the score is a ` +
+    `length proxy, so a SOFT gap means the answer was SHORT, not that it was wrong. ${METRIC_DISCLOSURE}\n\n` +
     `Internal office notes — not GitHub Issues, not customer-facing.\n\n`;
 
-  const body = entries.map((e) => `## ${e.agent_name} — case \`${e.title}\`\n\n${e.content}\n`).join('\n---\n\n');
+  const body = entries.map((e) => {
+    const tier = e.severity === 'hard' || e.severity === 'soft' ? e.severity.toUpperCase() : 'UNCLASSIFIED';
+    return `## ${e.agent_name} — case \`${e.title}\` — ${tier}\n\n${e.content}\n`;
+  }).join('\n---\n\n');
 
   return header + body;
 }

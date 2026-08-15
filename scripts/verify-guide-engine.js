@@ -335,6 +335,86 @@ const permissionGuardSrc = readFileSync(new URL('../workers/permission-guard.js'
 check('.md is NOT in the code-file extension guard (guides commit like any other report)',
   !permissionGuardSrc.match(/CODE_FILE_EXTENSIONS[\s\S]*?\]/)[0].includes("'.md'"));
 
+/* ── AUDIT #14 / KFM-13 — a failed read must not erase the queue ────────
+ *
+ * `guides/_verification-queue.md` is the office's record of claims it
+ * PUBLISHED but could not verify, and both writers replace the whole file.
+ * Until 2026-08-16 the read returned '' for a network error, a 500 and an
+ * empty file alike — so a blip rewrote the queue as "every guide is currently
+ * stable", which is a false statement about published work.
+ *
+ * The three cases must be three values. `fetch` is stubbed per case, then
+ * restored — nothing here touches the network.
+ */
+console.log('\n--- Audit #14: the verification-queue read distinguishes failure from empty ---');
+
+const guideEngine = await import('../workers/guide-engine.js');
+const realFetch = globalThis.fetch;
+
+async function withFetch(impl, fn) {
+  globalThis.fetch = impl;
+  try { return await fn(); } finally { globalThis.fetch = realFetch; }
+}
+
+const okRead = await withFetch(
+  async () => ({ ok: true, status: 200, text: async () => '- guides/linux/x.md — Sources' }),
+  () => guideEngine.fetchVerificationQueueChecked());
+check('#14 a successful read is ok:true and carries the text',
+  okRead.ok === true && okRead.text.includes('guides/linux/x.md'));
+check('#14 ...and still parses to the entry it always did',
+  guideEngine.parseVerificationQueue(okRead.text).length === 1);
+
+const notFound = await withFetch(
+  async () => ({ ok: false, status: 404, text: async () => '' }),
+  () => guideEngine.fetchVerificationQueueChecked());
+check('#14 a 404 is ok:TRUE — the queue genuinely does not exist yet, which is not a failure',
+  notFound.ok === true && notFound.reason === 'not_found');
+
+const serverError = await withFetch(
+  async () => ({ ok: false, status: 500, text: async () => '' }),
+  () => guideEngine.fetchVerificationQueueChecked());
+check('#14 REFUSES: a 500 is ok:false, NOT an empty queue', serverError.ok === false);
+check('#14 ...and names the status rather than a bare false', serverError.reason === 'http_500');
+
+const threw = await withFetch(
+  async () => { throw new Error('socket hang up'); },
+  () => guideEngine.fetchVerificationQueueChecked());
+check('#14 REFUSES: a thrown fetch is ok:false', threw.ok === false && /socket hang up/.test(threw.reason));
+
+check('#14 the tolerant wrapper still exists and still returns a bare string for callers that want one',
+  typeof (await withFetch(async () => ({ ok: true, status: 200, text: async () => 'x' }),
+    () => guideEngine.fetchRawRepoFile('guides/TOPICS.md'))) === 'string');
+
+// The call sites: both queue writers must consult the CHECKED read and refuse.
+const runnerSource = readFileSync(new URL('../workers/agent-runner.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+check('#14 the guide REVIEW block reads the queue with the checked reader',
+  /const queueRead = await fetchVerificationQueueChecked\(\);[\s\S]{0,400}?if \(!queueRead\.ok\)/.test(runnerSource));
+check('#14 the guide VERIFY block reads the queue with the checked reader and returns early',
+  /queue_unreadable:/.test(runnerSource));
+check('#14 neither block still uses the unchecked reader for a path that writes the queue back',
+  !/fetchVerificationQueueText\(\)/.test(runnerSource));
+
+/* ── AUDIT #9 / KFM-15 — a read-modify-write carries its READ-time sha ── */
+console.log('\n--- Audit #9: whole-file updates carry the sha they read ---');
+
+const repoWriteSrc = readFileSync(new URL('../workers/repo-write.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+check('#9 commitFileToRepo accepts an expectedSha', /let sha = opts\.expectedSha;/.test(repoWriteSrc));
+check('#9 ...and SKIPS the write-time fetch when one is supplied (else it is not a concurrency check)',
+  /let sha = opts\.expectedSha;\s*\n\s*if \(!sha\) \{/.test(repoWriteSrc));
+check('#9 a conflict status is NAMED, not left as a bare number',
+  /conflict: true, reason: 'sha_conflict_or_missing'/.test(repoWriteSrc));
+
+check('#9 the asset board read returns a sha and an ok flag rather than a bare item list',
+  /ok: true, reason: null, source: 'api'/.test(runnerSource));
+check('#9 a raw-CDN fallback read is marked sha:null — readable is not writable',
+  /sha: null, ok: true, reason: null, source: 'raw'/.test(runnerSource));
+check('#9 ONE function decides whether the board may be written back whole',
+  /function assetBoardWritable\(board\)/.test(runnerSource));
+check('#9 BOTH board writers consult it (two copies of this rule is the defect underneath)',
+  (runnerSource.match(/assetBoardWritable\(board\)/g) || []).length >= 2);
+check('#9 both board writes pass the sha they read',
+  (runnerSource.match(/\{ expectedSha: board\.sha \}/g) || []).length >= 2);
+
 /* ── Summary ─────────────────────────────────────────────────────────── */
 console.log(`\n=== ${pass} passed, ${fail} failed ===`);
 if (fail > 0) {

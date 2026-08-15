@@ -287,12 +287,44 @@ export async function commitFileToRepo(env, repoName, path, content, message, op
   };
   const url = `https://api.github.com/repos/${REPO_OWNER}/${repoName}/contents/${path}`;
 
-  // Updating an existing file requires its current blob sha.
-  let sha;
-  const existing = await fetch(url, { headers }).catch(() => null);
-  if (existing?.ok) {
-    const data = await existing.json().catch(() => null);
-    sha = data?.sha;
+  /*
+   * ── THE SHA, AND WHICH MOMENT IT DESCRIBES (audit #9 / KFM-15) ──────────
+   *
+   * Updating an existing file requires its current blob sha. Fetching it HERE
+   * — at write time — makes every write succeed, which sounds like robustness
+   * and is the opposite. GitHub's `sha` field is an optimistic-concurrency
+   * token: it means "I am changing the version I read." Re-reading it
+   * immediately before the PUT answers "I am changing whatever is there now,"
+   * which is not a check at all. Two writers who each read the file, each
+   * modify their own copy, and each re-fetch the sha will BOTH succeed, and
+   * the second silently discards the first. No error is raised anywhere.
+   *
+   * `opts.expectedSha` is the fix, and it is opt-in per caller rather than
+   * mandatory, deliberately: most callers here write a NEW dated file
+   * (reports, digests, guides) where there is nothing to conflict with, and
+   * forcing them to supply a sha would add a read they do not need. The
+   * callers that matter are the ones doing read-modify-write on a SHARED
+   * mutable file — `reports/asset-pipeline/board.json` has two of them — and
+   * those now pass the sha they actually read.
+   *
+   * When supplied, the write-time fetch is SKIPPED entirely, so GitHub
+   * compares against the caller's read and answers 409 (or 422) if anything
+   * moved in between. A refused write with a conflict status is a good
+   * outcome: it is the lost update, surfaced instead of absorbed.
+   */
+  let sha = opts.expectedSha;
+  if (!sha) {
+    const existing = await fetch(url, { headers }).catch(() => null);
+    if (existing?.ok) {
+      const data = await existing.json().catch(() => null);
+      sha = data?.sha;
+    }
+    // NOTE (KFM-13): a FAILED existence check and a genuinely ABSENT file are
+    // indistinguishable here — both leave `sha` undefined. The consequence is
+    // not a silent overwrite: GitHub refuses an update with no sha (422), so
+    // the write fails and `committed: false` is returned and recorded. It is a
+    // lost write that is REPORTED, not one that is hidden. Callers doing
+    // read-modify-write should pass `expectedSha` and avoid this path.
   }
 
   const res = await fetch(url, {
@@ -322,5 +354,15 @@ export async function commitFileToRepo(env, repoName, path, content, message, op
     redirected: !!verdict.redirected,
   });
 
-  return { committed: res.ok, status: res.status, path };
+  // A conflict is NAMED rather than left as a bare status, so a caller that
+  // passed `expectedSha` can tell "somebody else wrote this file since I read
+  // it" apart from "the write failed". They call for different responses: the
+  // first means re-read and re-apply, the second means retry or report.
+  const conflict = res.status === 409 || res.status === 422;
+  return {
+    committed: res.ok,
+    status: res.status,
+    path,
+    ...(conflict ? { conflict: true, reason: 'sha_conflict_or_missing' } : {}),
+  };
 }
