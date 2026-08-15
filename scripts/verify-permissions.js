@@ -280,7 +280,11 @@ for (const repo of mappedRepos) {
 
 console.log('\n-- Publishing-split call-site check (0.4 stage 1: meeting reports) --');
 {
-  const meetingEngineSrc = fs.readFileSync(path.join(REPO_ROOT, 'workers', 'meeting-engine.js'), 'utf8');
+  // Normalised for the same reason as stages 3/4 below. This one PASSES today
+  // only because meeting-engine.js happens to sit in the working tree with LF;
+  // one `git checkout` under core.autocrlf=true and it fails identically. A
+  // latent instance of the same defect is still the defect.
+  const meetingEngineSrc = fs.readFileSync(path.join(REPO_ROOT, 'workers', 'meeting-engine.js'), 'utf8').replace(/\r\n/g, '\n');
   const fnMatch = meetingEngineSrc.match(/async function commitMeetingReport\([\s\S]*?\n}\n/);
   const fnBody = fnMatch ? fnMatch[0] : '';
   const callSiteChecks = [
@@ -339,7 +343,13 @@ console.log('\n-- Publishing-split call-site check (0.4 stage 2: daily summaries
 
 console.log('\n-- Publishing-split call-site check (0.4 stage 3: weekly raw trio) --');
 {
-  const runnerSrc = fs.readFileSync(path.join(REPO_ROOT, 'workers', 'agent-runner.js'), 'utf8');
+  // NORMALISED, 2026-08-15. This read the file raw and matched `\n}\n`, which
+  // is a LINE-ENDING dependency, not a permissions rule: `core.autocrlf=true`
+  // (the owner's own setting) checks agent-runner.js out with CRLF, so this
+  // block failed on the machine a person actually runs it on while passing in
+  // CI on Linux. A verifier that is red for an environmental reason is worse
+  // than no verifier — it teaches the reader that red means nothing.
+  const runnerSrc = fs.readFileSync(path.join(REPO_ROOT, 'workers', 'agent-runner.js'), 'utf8').replace(/\r\n/g, '\n');
   const fnMatch = runnerSrc.match(/async function generateWeeklySummary\([\s\S]*?\n}\n/);
   const fnBody = fnMatch ? fnMatch[0] : '';
   const weeklyWriteRe = /commitFileToRepo\(env, (\w+), `\$\{base\}\/(week-\$\{pad\(weekNumber, 2\)\}-[\w.-]+)`/g;
@@ -369,7 +379,8 @@ console.log('\n-- Publishing-split call-site check (0.4 stage 3: weekly raw trio
 
 console.log('\n-- Publishing-split call-site check (0.4 stage 4: side plots) --');
 {
-  const runnerSrc = fs.readFileSync(path.join(REPO_ROOT, 'workers', 'agent-runner.js'), 'utf8');
+  // Normalised for the same reason as stage 3 above — CRLF checkout.
+  const runnerSrc = fs.readFileSync(path.join(REPO_ROOT, 'workers', 'agent-runner.js'), 'utf8').replace(/\r\n/g, '\n');
   const fnMatch = runnerSrc.match(/async function advanceSidePlots\([\s\S]*?\n}\n/);
   const fnBody = fnMatch ? fnMatch[0] : '';
   const sideCfg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'config', 'side-plots.json'), 'utf8'));
