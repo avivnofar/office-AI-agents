@@ -93,7 +93,9 @@ import {
   renderStageLine, reviewerCoverage, openGaps, unclassifiedGaps, renderInFlightFile,
   bindingGapsAwaitingVote, convergenceFinding, tallyVote, recordRefusal,
   renderRefusal, detectRefusals, resumeBrief, assertPhaseCompletable,
+  checkRecordAttribution, checkSignoffAttribution,
 } from '../workers/deliverable-lifecycle.js';
+import { checkAttribution } from '../workers/meeting-attendance.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.join(__dirname, '..');
@@ -113,7 +115,23 @@ const DEFAULTS = {
   board: path.join(SIBLINGS, 'back-office-AI-agents', 'campus', 'shared', 'board', 'BOARD.md'),
   inbox: path.join(SIBLINGS, 'back-office-AI-agents', 'campus', 'shared', 'lifecycle-inbox'),
   inFlight: path.join(SIBLINGS, 'back-office-AI-agents', 'campus', 'shared', 'lifecycle', 'IN-FLIGHT.md'),
+  // This repo's own roster. Not a sibling — agents-config.json lives beside
+  // the module the gate is in, so this default resolves on any checkout of
+  // office-AI-agents alone.
+  agentsConfig: path.join(REPO_ROOT, 'config', 'agents-config.json'),
 };
+
+/** The roster as `[{id, name}]`. Returns `[]` on ANY failure — read, parse or
+ *  shape — and `main()` refuses on an empty result rather than proceeding with
+ *  a gate that cannot check existence. */
+function readRoster(p) {
+  try {
+    const j = JSON.parse(readFileSync(p, 'utf8'));
+    return (Array.isArray(j?.agents) ? j.agents : [])
+      .filter((a) => Number.isInteger(a?.id))
+      .map((a) => ({ id: a.id, name: a.name }));
+  } catch { return []; }
+}
 
 /** LOCATIONS is the SAME map renderStageLine()/parseStageValue() read — a
  *  location added there needs one more entry in ROOT_DIR_KEYS (which ctx
@@ -345,6 +363,17 @@ function cmdAdvance(argv, ctx) {
   // happened to pass back through `init` again, which never naturally recurs.
   if (r.location !== st.location) r.location = st.location;
 
+  // THE LIFECYCLE SIGN-OFF (OB-075, 2026-08-15). `--by` records who moved the
+  // stage and was read by NOTHING until now — two live records carry
+  // "10 (Architect, this session)", which is an assertion about an agent, and
+  // two carry "supervised lifecycle session", which is not. Only the first
+  // kind is checkable and only the first kind is checked; refusing the second
+  // would push honest prose out of the field in favour of a plausible id.
+  const signoff = checkSignoffAttribution(r, arg(argv, 'by'), { roster: ctx.roster });
+  if (!signoff.ok) {
+    return { command: 'advance', slug, from: r.stage, to, refused: true, code: 'attribution_refused', reason: signoff.reason };
+  }
+
   const phases = readPhases(specPathFor(st.dir, slug));
   const verdict = canAdvance(r, to, {
     phases,
@@ -352,6 +381,7 @@ function cmdAdvance(argv, ctx) {
     meetingId: arg(argv, 'meeting'),
     reason: arg(argv, 'reason'),
     roundIncremented: true,
+    roster: ctx.roster,
   });
 
   // A refusal is the useful output here, not a failure. It names which rule
@@ -415,12 +445,22 @@ function cmdIngest(argv, ctx) {
       case 'review': {
         if (!Number.isInteger(item.agent_id)) { refused.push({ file: f, why: 'no integer agent_id — REFUSED, never guessed' }); break; }
         if (!['review', 'comment', 'abstain'].includes(item.review_kind)) { refused.push({ file: f, why: `review_kind must be review|comment|abstain, got "${item.review_kind}"` }); break; }
+        const att = checkRecordAttribution(r, { role: 'review', named: [item.agent_id], roster: ctx.roster });
+        if (!att.ok) { refused.push({ file: f, why: `ATTRIBUTION REFUSED — ${att.reason}` }); break; }
         r.reviews.push({ agent_id: item.agent_id, round: item.round ?? r.round, kind: item.review_kind, verdict: item.verdict || null, text: item.text || null, at: item.at || null, path: item.path || null });
         applied.push({ file: f, kind: 'review', agent: item.agent_id });
         break;
       }
       case 'gap': {
         if (!item.id) { refused.push({ file: f, why: 'a gap must carry an id' }); break; }
+        // `raised_by` is OPTIONAL and gated only when present. A gap may come
+        // from the owner, a tool run or an audit, none of which is an agent —
+        // an unattributed gap is anonymous, not falsely attributed, and those
+        // are different defects with different remedies.
+        if (item.raised_by != null) {
+          const attG = checkRecordAttribution(r, { role: 'review', named: [item.raised_by], roster: ctx.roster });
+          if (!attG.ok) { refused.push({ file: f, why: `ATTRIBUTION REFUSED — ${attG.reason}` }); break; }
+        }
         r.gaps.push({ id: item.id, title: item.title || item.text || null, class: item.class || null, raised_by: item.raised_by ?? null, status: 'open', at: item.at || null });
         applied.push({ file: f, kind: 'gap', id: item.id });
         break;
@@ -435,25 +475,57 @@ function cmdIngest(argv, ctx) {
         break;
       }
       case 'vote': {
-        const t = tallyVote(item, {});
+        // MANDATORY here, optional in tallyVote() — see that function's fifth
+        // refusal. A vote proposal that does not say who was in the room cannot
+        // be checked against who was in the room, and passing it because the
+        // evidence is missing is how "not checked" becomes "checked and fine".
+        // Zero votes exist on any record, so this requirement breaks nothing.
+        if (!Array.isArray(item.attendees) || !item.attendees.length) {
+          refused.push({ file: f, why: 'a vote must carry `attendees` — the ids actually in the room. §4.3 casts a vote AT a meeting, and an admin who was not there did not vote. REFUSED, never tallied on roster membership alone' });
+          break;
+        }
+        const t = tallyVote(item, { attendees: item.attendees });
         if (!t.ok) { refused.push({ file: f, why: t.reason }); break; }
+        const attV = checkAttribution(item.attendees, item.attendees, ctx.roster);
+        if (attV.unknown.length) { refused.push({ file: f, why: `ATTRIBUTION REFUSED — the attendee list names agent(s) ${attV.unknown.join(', ')} who are not on the roster` }); break; }
         r.votes.push({ ...item, tally: t.tally, outcome: t.outcome, resolution: t.resolution });
         applied.push({ file: f, kind: 'vote', outcome: t.outcome });
         break;
       }
       case 'recommendation': {
         if (!String(item.text || '').trim()) { refused.push({ file: f, why: 'a recommendation with no text is an approval request wearing its name' }); break; }
-        r.recommendation = { text: item.text, by: item.by ?? null, at: item.at || null };
+        // `by` becomes REQUIRED (OB-075). It was `item.by ?? null` and nothing
+        // downstream read it, so an unsigned recommendation could carry a
+        // deliverable to the CEO with nobody's name on it. No record holds a
+        // recommendation today, so requiring it costs nothing and closes it
+        // while latent.
+        if (!Number.isInteger(item.by)) { refused.push({ file: f, why: 'a recommendation must name the agent making it (`by`, an integer id) — the CEO answers a recommendation, and one nobody signed cannot be reviewed later' }); break; }
+        const attR = checkRecordAttribution(r, { role: 'recommendation', named: [item.by], roster: ctx.roster });
+        if (!attR.ok) { refused.push({ file: f, why: `ATTRIBUTION REFUSED — ${attR.reason}` }); break; }
+        r.recommendation = { text: item.text, by: item.by, at: item.at || null };
         applied.push({ file: f, kind: 'recommendation' });
         break;
       }
       case 'approval': {
         if (!['approve', 'return'].includes(item.decision)) { refused.push({ file: f, why: 'decision must be approve|return' }); break; }
+        // THE HIGHEST-CONSEQUENCE CHECK IN THIS FILE. An approval is the one
+        // artifact here that can send work to a client, and `item.by` was
+        // copied in unchecked — the CLIENT-READY guard's comparison happened
+        // later, at the transition, on a value this loop had already trusted.
+        if (!Number.isInteger(item.by)) { refused.push({ file: f, why: 'an approval must name the approving agent (`by`, an integer id) — REFUSED, never guessed' }); break; }
+        const attA = checkRecordAttribution(r, { role: 'approval', named: [item.by], roster: ctx.roster });
+        if (!attA.ok) { refused.push({ file: f, why: `ATTRIBUTION REFUSED — ${attA.reason}` }); break; }
         r.approval = { by: item.by, decision: item.decision, reason: item.reason || null, at: item.at || null };
         applied.push({ file: f, kind: 'approval', decision: item.decision });
         break;
       }
       case 'refusal': {
+        // B5's own words: "<who> declined <what>". `who` is prose, so this
+        // refuses only a claim it can actually read — see
+        // checkSignoffAttribution(); "the supervised session" names no agent
+        // and passes, "Agent 4" on a deliverable Agent 4 never touched does not.
+        const attF = checkSignoffAttribution(r, item.who, { roster: ctx.roster, role: 'review' });
+        if (!attF.ok) { refused.push({ file: f, why: `ATTRIBUTION REFUSED — ${attF.reason}` }); break; }
         const rec = recordRefusal({ who: item.who, declined: item.declined, characterLine: item.character_line, source: item.source, at: item.at });
         if (!rec.ok) { refused.push({ file: f, why: rec.reason }); break; }
         r.refusals.push({ ...rec.refusal, moment: item.moment || null });
@@ -493,6 +565,10 @@ function cmdRefusal(argv, ctx) {
   // own re-stamped copy) would keep rendering the wrong path until the record
   // happened to pass back through `init` again, which never naturally recurs.
   if (r.location !== st.location) r.location = st.location;
+
+  // Same gate as the inbox's `refusal` kind — one mechanism, both doors.
+  const attF = checkSignoffAttribution(r, arg(argv, 'who'), { roster: ctx.roster, role: 'review' });
+  if (!attF.ok) return refuse(`ATTRIBUTION REFUSED — ${attF.reason}`);
 
   const rec = recordRefusal({
     who: arg(argv, 'who'),
@@ -642,7 +718,19 @@ function main(argv) {
     now: arg(argv, 'now', new Date().toISOString()),
     dry: flag(argv, 'dry-run'),
     noBoard: flag(argv, 'no-board'),
+    // THE ROSTER, read here and passed down (OB-075, 2026-08-15).
+    // deliverable-lifecycle.js may not import JSON — see its header — so the
+    // caller that already reads files does it. An unreadable roster is a
+    // REFUSAL, never an empty array: an empty roster silently turns the
+    // "does this agent exist at all" half of the attribution gate off, and a
+    // gate that disables itself when its input is missing is the fail-open
+    // shape this project found on 2026-08-06.
+    roster: readRoster(arg(argv, 'agents-config', DEFAULTS.agentsConfig)),
   };
+  if (!ctx.roster.length) {
+    console.log(JSON.stringify(refuse(`could not read the agent roster from ${arg(argv, 'agents-config', DEFAULTS.agentsConfig)} — the attribution gate cannot run without it, and running without it would pass every claim. Pass --agents-config <path>.`), null, 2));
+    return 4;
+  }
 
   const commands = { init: cmdInit, status: cmdStatus, advance: cmdAdvance, ingest: cmdIngest, refusal: cmdRefusal, regen: cmdRegen };
   if (!commands[cmd]) {

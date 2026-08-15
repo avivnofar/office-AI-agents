@@ -135,7 +135,16 @@
  * needs an attribute esbuild accepts and plain `node` rejects, so a verifier
  * could not import this module and would hand-mirror it instead. The roster
  * and the agent names are PASSED IN by callers who already import config.
+ *
+ * The one import below is `./meeting-attendance.js`, which imports nothing
+ * itself — so plain `node` still loads this file and its verifier still calls
+ * these functions rather than regexing them. Added 2026-08-15 for OB-075: the
+ * attribution gate is ONE mechanism, and a second copy of it living here is
+ * precisely the drift this file's own "two mechanisms agreeing by accident is
+ * not a guard" rule warns about.
  */
+
+import { checkAttribution, attributedAgentIds } from './meeting-attendance.js';
 
 /* ────────────────────────────── The stages ─────────────────────────────── */
 
@@ -366,6 +375,125 @@ export function reviewerCoverage(record = {}) {
   };
 }
 
+/* ─────────────────────── The attribution gate (OB-075) ─────────────────── */
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ * WHO A RECORD IS ALLOWED TO SAY DID SOMETHING
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * Added 2026-08-15. Meeting transcripts were gated on 2026-08-15 morning
+ * (`workers/meeting-attendance.js`, audit finding #1). **Every other artifact
+ * in this file that records who did something was not**, and the highest-
+ * consequence one is the CEO approval that turns a deliverable CLIENT-READY —
+ * written by the same class of mechanism that invented eleven speakers in a
+ * three-person meeting, and the only artifact here that can send work to a
+ * client.
+ *
+ * What was actually unprotected before this, checked rather than assumed:
+ *
+ *   review        `scripts/lifecycle.mjs:416` checked `Number.isInteger(agent_id)`
+ *                 and nothing else. Any integer could file a review, including
+ *                 an agent on no reviewer list and an id that is not an agent.
+ *   vote          `tallyVote()` checked ADMIN ROSTER MEMBERSHIP only. Being an
+ *                 admin is not being in the room; a vote is cast at a meeting.
+ *   approval      `scripts/lifecycle.mjs:452` copied `item.by` in unchecked.
+ *                 `canAdvance()`'s CLIENT-READY guard did compare it to
+ *                 CEO_AGENT_ID — a real check, and the reason a fabricated
+ *                 approval had to CLAIM to be the CEO. Claiming is free.
+ *   sign-off      `applyTransition()`'s `by` was never read by anything.
+ *
+ * ── THE ONE THING THESE GATES DO NOT DO ──────────────────────────────────
+ *
+ * They check a claim against the artifact's OWN declared participant list.
+ * They do NOT prove the named agent was invoked — no per-agent invocation
+ * ledger exists that a warehouse-side tool can read (the improvement loop's
+ * D1 rows are inside the Worker, which cannot reach the warehouse; that is
+ * the same credential split this file's header describes). So a record can
+ * still say Agent 6 reviewed when Agent 6's model call never happened.
+ *
+ * That limit is stated, not papered over. It is the difference between
+ * "this claim is consistent with the process" and "this claim is true", and
+ * a gate that implied the second would be KFM-09 — prose asserting an
+ * enforcement that does not exist — written by the very session that closed
+ * four instances of it. Boarded as OB-076.
+ */
+
+/** Everyone this deliverable's own reviewer set says may respond to it. */
+export function declaredReviewers(record = {}) {
+  const set = record.reviewer_set || {};
+  return [...new Set([...(set.required || []), ...(set.mayComment || [])])]
+    .map(Number).filter(Number.isInteger).sort((a, b) => a - b);
+}
+
+/**
+ * One attribution claim against this record. The single entry point every
+ * caller uses, so a new artifact kind cannot quietly get a weaker check.
+ *
+ * `role` picks the declared list, and the lists differ ON PURPOSE:
+ *
+ *   review | gap   the reviewer set — required and mayComment both, because an
+ *                  abstention and a brief comment are responses (A4).
+ *   recommendation the reviewer set PLUS the composer (Agent 12), who runs the
+ *                  round and is the natural author of what it recommends.
+ *   approval       the approver alone. Not "an admin". Not "a root-clearance
+ *                  agent". A4: only the CEO's approval reaches client-ready,
+ *                  and no other admin may stand in for him.
+ *   signoff        anyone the record already names as a participant, plus the
+ *                  approver — a stage line may legitimately be moved by the
+ *                  composer, a reviewer, or the CEO.
+ *
+ * @returns {{ok:boolean, reason:string|null, unknown:number[], nonParticipants:number[]}}
+ */
+export function checkRecordAttribution(record = {}, { role, named = [], roster = [] } = {}) {
+  const reviewers = declaredReviewers(record);
+  const approver = Number(record.reviewer_set?.approver ?? CEO_AGENT_ID);
+  const composer = Number(record.reviewer_set?.composedBy ?? COMPOSER_AGENT_ID);
+
+  let declared;
+  if (role === 'approval') declared = [approver];
+  else if (role === 'recommendation') declared = [...reviewers, composer];
+  else if (role === 'signoff') declared = [...reviewers, composer, approver];
+  else declared = reviewers;
+  // The composer is usually already in the reviewer set, so the raw
+  // concatenations above repeat him. That duplicate reaches a human in the
+  // refusal text, and a refusal that looks sloppy gets trusted less than one
+  // that reads cleanly — the message IS the product here.
+  declared = [...new Set(declared.map(Number))].filter(Number.isInteger).sort((a, b) => a - b);
+
+  const a = checkAttribution(named, declared, roster);
+  if (a.ok) return { ok: true, reason: null, unknown: [], nonParticipants: [] };
+
+  const parts = [];
+  if (a.unknown.length) {
+    parts.push(
+      `agent(s) ${a.unknown.join(', ')} do not exist on the roster — an artifact naming an agent nothing runs as is fabricated participation, not a stale list`,
+    );
+  }
+  if (a.nonParticipants.length) {
+    parts.push(
+      role === 'approval'
+        ? `approval is recorded by agent ${a.nonParticipants.join(', ')}, and this record's approver is Agent ${approver}. NOTHING REACHES THE CLIENT WITHOUT THE CEO — an approval naming anyone else is refused, never re-attributed to him`
+        : `agent(s) ${a.nonParticipants.join(', ')} are not on this deliverable's declared participant list for a ${role} (${declared.join(', ') || 'nobody'}) — a record naming a non-participant is refused, not silently corrected`,
+    );
+  }
+  return { ok: false, reason: parts.join('; '), unknown: a.unknown, nonParticipants: a.nonParticipants };
+}
+
+/**
+ * A free-text sign-off (`applyTransition`'s `by`, a refusal's `who`).
+ *
+ * Prose that names NO agent is passed: the live records carry
+ * `"supervised lifecycle session"`, which claims nothing about any agent and
+ * is the honest form. Prose that DOES name one — `"10 (Architect, this
+ * session)"` — is a claim, and is checked like any other.
+ */
+export function checkSignoffAttribution(record = {}, by, { roster = [], role = 'signoff' } = {}) {
+  const named = attributedAgentIds(by, roster);
+  if (!named.length) return { ok: true, reason: null, named: [], unattributed: true, unknown: [], nonParticipants: [] };
+  return { ...checkRecordAttribution(record, { role, named, roster }), named, unattributed: false };
+}
+
 /* ──────────────────────────────── Gaps ─────────────────────────────────── */
 
 /**
@@ -436,6 +564,22 @@ export function bindingGapsAwaitingVote(record = {}) {
  *  - A VETO overrides the count and is reported as its own outcome. It never
  *    silently changes `carried` to `rejected`, because "the room voted for it
  *    and the CEO stopped it" is the fact worth keeping.
+ *
+ * ── A FIFTH REFUSAL, ADDED 2026-08-15 (OB-075) ───────────────────────────
+ *
+ * A voter who WAS NOT IN THE ROOM is refused. Being an admin was the only test
+ * until now, and it is the wrong one: A12 puts the vote in a meeting, and the
+ * artifact that recorded eleven speakers in a three-person standup is the same
+ * class of mechanism that composes a tally. An admin who did not attend did not
+ * vote, however plausible the row looks.
+ *
+ * `opts.attendees` is OPTIONAL here and MANDATORY at the ingest call site
+ * (`scripts/lifecycle.mjs` refuses a vote proposal that carries no attendee
+ * list). The split is deliberate: this function has ~30 verifier call sites
+ * testing the tally arithmetic, and forcing an attendee list through all of
+ * them would have bought nothing — while the one path a real vote actually
+ * travels is closed. `rosterOnly: true` on the result says which check ran, so
+ * a caller can never read "passed" as "attendance was verified" (KFM-13).
  */
 export const VOTE_CHOICES = Object.freeze(['for', 'against', 'abstain']);
 export const TIE_RESOLUTIONS = Object.freeze(['investigate', 'defer', 'drop']);
@@ -443,6 +587,13 @@ export const TIE_RESOLUTIONS = Object.freeze(['investigate', 'defer', 'drop']);
 export function tallyVote(vote = {}, opts = {}) {
   const roster = (opts.roster && opts.roster.length ? opts.roster : ADMIN_IDS);
   const cast = Array.isArray(vote.votes) ? vote.votes : [];
+  // The attendee list may come with the vote itself or from the caller; the
+  // caller wins, because it read the meeting record and the vote is prose.
+  const attendeeList = (opts.attendees && opts.attendees.length)
+    ? opts.attendees
+    : (Array.isArray(vote.attendees) ? vote.attendees : []);
+  const attendees = new Set(attendeeList.map(Number).filter(Number.isInteger));
+  const rosterOnly = attendees.size === 0;
 
   if (!String(vote.question || '').trim()) {
     return { ok: false, reason: 'vote has no question — §4.3 records the question as stated, and a vote whose question was never written down cannot bind anything' };
@@ -457,6 +608,10 @@ export function tallyVote(vote = {}, opts = {}) {
     const id = Number(v.agent_id);
     const choice = String(v.choice || '').trim().toLowerCase();
     if (!roster.includes(id)) { invalid.push({ agent_id: v.agent_id, why: 'not an admin — admins only vote (bible, §4.3)' }); continue; }
+    if (!rosterOnly && !attendees.has(id)) {
+      invalid.push({ agent_id: id, why: `was not at the meeting this vote was cast in (attendees: ${[...attendees].sort((a, b) => a - b).join(', ')}) — an admin who was not in the room did not vote` });
+      continue;
+    }
     if (!VOTE_CHOICES.includes(choice)) { invalid.push({ agent_id: id, why: `unreadable choice "${v.choice}"` }); continue; }
     // The CEO's double vote. Applied here rather than by the caller so a
     // report and a gate can never weight it differently.
@@ -489,10 +644,10 @@ export function tallyVote(vote = {}, opts = {}) {
         tally: { for: forCount, against: againstCount, abstained },
       };
     }
-    return { ok: true, outcome: 'tie', resolution: res, tally: { for: forCount, against: againstCount, abstained }, vetoed: false };
+    return { ok: true, outcome: 'tie', resolution: res, tally: { for: forCount, against: againstCount, abstained }, vetoed: false, rosterOnly };
   }
 
-  return { ok: true, outcome, resolution: null, tally: { for: forCount, against: againstCount, abstained }, vetoed };
+  return { ok: true, outcome, resolution: null, tally: { for: forCount, against: againstCount, abstained }, vetoed, rosterOnly };
 }
 
 /** Renders one vote in MEETING-PROTOCOL.md §4.3's exact recorded format, so a
@@ -603,6 +758,22 @@ const TRANSITION_GUARDS = {
     const a = r.approval;
     if (!a) return 'no approval recorded — NOTHING REACHES THE CLIENT WITHOUT THE CEO';
     if (Number(a.by) !== CEO_AGENT_ID) return `approval is recorded by Agent ${a.by}, not by the CEO (Agent ${CEO_AGENT_ID}). The CEO approves the final version; no other admin may stand in for him`;
+    // OB-075, 2026-08-15. The line above is a ROLE check and it is not the same
+    // check as the one below: it compares against the module constant, this
+    // compares against THIS RECORD's own declared approver, and it also refuses
+    // an id that is on no roster. `scripts/lifecycle.mjs` already refuses a
+    // fabricated approval at ingest — this is the second lock on the one exit
+    // that can reach a client, because the only way past the first is a hand
+    // edit of STATE.json, and that is exactly the case worth surviving.
+    const attr = checkRecordAttribution(r, { role: 'approval', named: [a.by], roster: ctx.roster || [] });
+    if (!attr.ok) return attr.reason;
+    // Every reviewer this round must also be someone the record admits exists.
+    const rev = checkRecordAttribution(r, {
+      role: 'review',
+      named: (r.reviews || []).filter((x) => (x.round ?? 0) === (r.round ?? 0)).map((x) => x.agent_id),
+      roster: ctx.roster || [],
+    });
+    if (!rev.ok) return `the approval rests on review records that name a non-participant: ${rev.reason}`;
     if (a.decision !== 'approve') return `the CEO's recorded decision is "${a.decision}", not "approve"`;
     if (!r.recommendation || !String(r.recommendation.text || '').trim()) return 'the CEO approved with no recommendation on record — §4.3 has him answering a recommendation, and an approval with nothing behind it cannot be reviewed later';
     if (openGaps(r).length) return `${openGaps(r).length} gap(s) reopened after the recommendation and are still open`;

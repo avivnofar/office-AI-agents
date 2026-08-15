@@ -17,6 +17,9 @@
  *   §10 refusals — the character line is mandatory and cannot be back-filled
  *   §11 source-level assertions: no JSON import, no provider-layer import,
  *       no warehouse token anywhere in this feature
+ *   §12 THE ATTRIBUTION GATE (OB-075, 2026-08-15) — a record naming someone
+ *       who was not a participant is refused, on all four artifact kinds
+ *       [FAILS-OLD]
  *
  * NO NETWORK. globalThis.fetch is replaced with a tripwire that throws.
  *
@@ -508,8 +511,21 @@ section('§11 source — no JSON import, no provider layer, no warehouse token')
 
 check('deliverable-lifecycle.js imports NO json (a verifier must be able to import it)',
   !/from\s+['"][^'"]+\.json['"]/.test(lifecycleSrc));
-check('…and imports nothing at all — it is pure',
-  !/^import\s/m.test(lifecycleSrc));
+// CHANGED 2026-08-15 (OB-075). This read "imports nothing at all — it is
+// pure" until the attribution gate landed. The property that check was
+// protecting is "plain `node` can import this module, so its verifier CALLS
+// these functions instead of regexing them" — and that property is intact:
+// the one permitted import is `./meeting-attendance.js`, which itself imports
+// nothing. Weakening the check to "no imports except that one" is stated here
+// rather than deleted, because a silently relaxed assertion is how a rule
+// becomes decoration. Anything else appearing in this list is a real failure.
+const ALLOWED_LIFECYCLE_IMPORTS = ['./meeting-attendance.js'];
+const lifecycleImports = [...lifecycleSrc.matchAll(/^\s*import[\s\S]*?from\s+['"]([^'"]+)['"]/gm)].map((m) => m[1]);
+check('…and imports nothing beyond the attribution gate, which is itself import-free',
+  lifecycleImports.every((s) => ALLOWED_LIFECYCLE_IMPORTS.includes(s)),
+  lifecycleImports.join(', '));
+check('…and that gate really does import nothing, so `node` can still load the chain',
+  !/^import\s/m.test(readFileSync(new URL('../workers/meeting-attendance.js', import.meta.url), 'utf8')));
 // The rule is about IMPORTS, not mentions: the module names task-router.js in
 // prose precisely to explain why it does not import it, and a check that
 // banned the word would push that explanation out of the file.
@@ -667,6 +683,134 @@ check('…while holding NO lifecycle logic of its own — it points at the tool 
   /lifecycle\.mjs status/.test(rcSrc) && !/AWAITING-APPROVAL|reviewerCoverage|tallyVote/.test(rcSrc));
 check('the midnight run claims work through the SAME hold token the office uses, so the two cannot double-hold',
   /Dispatched/.test(readFileSync(path.join(root, '..', 'back-office-AI-agents', 'campus', 'agents', '10-the-architect', 'automation', 'dispatch.js'), 'utf8')));
+
+/* ═══════════ §12 the attribution gate — OB-075, 2026-08-15 ═════════════ */
+section('§12 attribution — a record naming a non-participant is REFUSED');
+
+// The pre-OB-075 checks, transcribed. These are what actually stood between a
+// composed record and the client, and every [FAILS-OLD] below passes them.
+const OLD = {
+  review: (item) => Number.isInteger(item.agent_id),               // lifecycle.mjs:416
+  approval: (item) => ['approve', 'return'].includes(item.decision), // lifecycle.mjs:451
+  // Roster membership only. `attendees` is stripped because the field did not
+  // exist before this change — leaving it in would let the NEW fallback answer
+  // for the old code and quietly turn this row green against itself.
+  vote: (v) => { const { attendees, ...old } = v; return L.tallyVote(old, {}).ok; },
+};
+
+const ROSTER = agentsConfig.agents.map((a) => ({ id: a.id, name: a.name }));
+const rec = L.newRecord({ slug: 'attribution-fixture', type: 'warehouse-build', touches: ['front'] }).record;
+const REVIEWERS = L.declaredReviewers(rec);
+
+check('the fixture record composes a real reviewer set to check against',
+  REVIEWERS.length > 0 && rec.reviewer_set.approver === L.CEO_AGENT_ID, REVIEWERS.join(','));
+
+// ── the four artifact kinds ──────────────────────────────────────────────
+const nonAdmin = 3; // The Standard Agent — a worker, on no reviewer set
+check('[FAILS-OLD] the old review check ACCEPTS a review from a non-reviewer',
+  OLD.review({ agent_id: nonAdmin }));
+check('[new] the gate REFUSES a review from an agent on no reviewer list',
+  !L.checkRecordAttribution(rec, { role: 'review', named: [nonAdmin], roster: ROSTER }).ok);
+check('…and the refusal names the agent and the list it is missing from',
+  /not on this deliverable's declared participant list/.test(
+    L.checkRecordAttribution(rec, { role: 'review', named: [nonAdmin], roster: ROSTER }).reason));
+
+check('[new] a review from an agent id that DOES NOT EXIST is refused as unknown, not merely as a non-participant',
+  L.checkRecordAttribution(rec, { role: 'review', named: [99], roster: ROSTER }).unknown.join(',') === '99');
+check('…and the two populations stay apart — an existing non-participant is NOT reported as unknown',
+  L.checkRecordAttribution(rec, { role: 'review', named: [nonAdmin], roster: ROSTER }).unknown.length === 0);
+
+check('[new] A4 holds structurally: the CEO cannot file a REVIEW on the thing he approves',
+  !L.checkRecordAttribution(rec, { role: 'review', named: [L.CEO_AGENT_ID], roster: ROSTER }).ok);
+check('a genuine reviewer passes untouched',
+  L.checkRecordAttribution(rec, { role: 'review', named: [REVIEWERS[0]], roster: ROSTER }).ok);
+
+// APPROVAL — the highest-consequence one.
+check('[FAILS-OLD] the old approval check ACCEPTS an approval recorded by the Architect',
+  OLD.approval({ by: 10, decision: 'approve' }));
+check('[new] the gate REFUSES an approval by anyone but this record\'s own approver',
+  !L.checkRecordAttribution(rec, { role: 'approval', named: [10], roster: ROSTER }).ok);
+check('…and says so in the owner\'s words rather than a code',
+  /NOTHING REACHES THE CLIENT WITHOUT THE CEO/.test(
+    L.checkRecordAttribution(rec, { role: 'approval', named: [10], roster: ROSTER }).reason));
+check('the CEO\'s own approval passes',
+  L.checkRecordAttribution(rec, { role: 'approval', named: [L.CEO_AGENT_ID], roster: ROSTER }).ok);
+
+// VOTES — attendance, not admin membership.
+const absentVote = {
+  question: 'Ship the front?',
+  attendees: [6, 7, 12],
+  votes: [{ agent_id: 6, choice: 'for' }, { agent_id: 8, choice: 'for' }],
+};
+check('[FAILS-OLD] the old tally ACCEPTS a vote from an admin who was not in the room',
+  OLD.vote(absentVote));
+check('[new] the tally REFUSES it once the attendee list is supplied',
+  !L.tallyVote(absentVote, { attendees: absentVote.attendees }).ok);
+check('…and the refusal says which room, so the reader can check the meeting record',
+  /was not at the meeting this vote was cast in/.test(L.tallyVote(absentVote, { attendees: absentVote.attendees }).reason));
+check('a vote cast entirely by attendees still tallies',
+  L.tallyVote({ ...absentVote, votes: [{ agent_id: 6, choice: 'for' }, { agent_id: 7, choice: 'for' }] },
+    { attendees: absentVote.attendees }).outcome === 'carried');
+check('KFM-13: a tally with NO attendee list reports rosterOnly rather than passing off "not checked" as "checked"',
+  L.tallyVote({ question: 'q', votes: [{ agent_id: 6, choice: 'for' }] }, {}).rosterOnly === true);
+check('…and one WITH an attendee list says the attendance check ran',
+  L.tallyVote({ ...absentVote, votes: [{ agent_id: 6, choice: 'for' }] }, { attendees: [6, 7, 12] }).rosterOnly === false);
+
+// SIGN-OFFS — prose, and the discriminator that keeps honest prose legal.
+check('[new] a sign-off naming NO agent passes — "supervised lifecycle session" claims nothing',
+  L.checkSignoffAttribution(rec, 'supervised lifecycle session', { roster: ROSTER }).unattributed === true);
+check('…and is not counted as a refusal',
+  L.checkSignoffAttribution(rec, 'supervised lifecycle session', { roster: ROSTER }).ok);
+check('[new] a sign-off naming a participant is read as a claim and passes — the real records\' "10 (Architect, this session)" form',
+  L.checkSignoffAttribution(rec, '10 (Architect, this session)', { roster: ROSTER }).named.join(',') === '10');
+check('[new] a sign-off naming a NON-participant is refused',
+  !L.checkSignoffAttribution(rec, `Agent ${nonAdmin} — The Standard Agent`, { roster: ROSTER }).ok);
+
+// THE EXIT, end to end: a hand-edited record cannot walk past canAdvance().
+const forged = {
+  ...rec,
+  stage: 'AWAITING-APPROVAL',
+  recommendation: { text: 'ship it', by: 12 },
+  approval: { by: 10, decision: 'approve' },
+  reviews: (rec.reviewer_set.required || []).map((id) => ({ agent_id: id, round: 0, kind: 'review' }))
+    .concat((rec.reviewer_set.mayComment || []).map((id) => ({ agent_id: id, round: 0, kind: 'abstain' }))),
+};
+check('[new] a FORGED approval hand-written into STATE.json is still refused at the exit',
+  !L.canAdvance(forged, 'CLIENT-READY', { roster: ROSTER }).ok);
+const forgedReview = {
+  ...forged,
+  approval: { by: L.CEO_AGENT_ID, decision: 'approve' },
+  reviews: [...forged.reviews, { agent_id: 99, round: 0, kind: 'review' }],
+};
+check('[new] …and a real CEO approval resting on a review by a non-existent agent is refused too',
+  !L.canAdvance(forgedReview, 'CLIENT-READY', { roster: ROSTER }).ok);
+check('…naming the review, not the approval, so the reader fixes the right thing',
+  /rests on review records/.test(L.canAdvance(forgedReview, 'CLIENT-READY', { roster: ROSTER }).reason || ''));
+check('a clean record with a genuine CEO approval still reaches CLIENT-READY',
+  L.canAdvance({ ...forged, approval: { by: L.CEO_AGENT_ID, decision: 'approve' } }, 'CLIENT-READY', { roster: ROSTER }).ok,
+  L.canAdvance({ ...forged, approval: { by: L.CEO_AGENT_ID, decision: 'approve' } }, 'CLIENT-READY', { roster: ROSTER }).reason || '');
+
+// KFM-13 again, on the gate's own input.
+check('an EMPTY roster disables only the existence half and says so, rather than silently passing everything',
+  L.checkRecordAttribution(rec, { role: 'review', named: [99], roster: [] }).unknown.length === 0
+  && !L.checkRecordAttribution(rec, { role: 'review', named: [99], roster: [] }).ok);
+
+// The one writer must actually call it — a gate wired nowhere is KFM-08.
+const lifecycleTool = read('scripts/lifecycle.mjs');
+for (const [what, re] of [
+  ['review', /case 'review':[\s\S]{0,400}?checkRecordAttribution/],
+  ['gap', /case 'gap':[\s\S]{0,600}?checkRecordAttribution/],
+  ['vote', /case 'vote':[\s\S]{0,900}?tallyVote\(item, \{ attendees/],
+  ['recommendation', /case 'recommendation':[\s\S]{0,1200}?checkRecordAttribution/],
+  ['approval', /case 'approval':[\s\S]{0,800}?checkRecordAttribution/],
+  ['refusal', /case 'refusal':[\s\S]{0,500}?checkSignoffAttribution/],
+]) {
+  check(`KFM-08: lifecycle.mjs's \`${what}\` path actually CALLS the gate`, re.test(lifecycleTool));
+}
+check('KFM-08: the stage sign-off path calls it too',
+  /function cmdAdvance[\s\S]{0,1600}?checkSignoffAttribution/.test(lifecycleTool));
+check('the one writer refuses outright when it cannot read the roster, rather than running a gate that passes everything',
+  /if \(!ctx\.roster\.length\)/.test(lifecycleTool));
 
 console.log(`\n${pass}/${pass + fail} checks passed.`);
 if (fail) { console.log(`${fail} FAILED`); process.exit(1); }

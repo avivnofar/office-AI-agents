@@ -53,6 +53,18 @@ function run(args) {
   return JSON.parse(out);
 }
 
+/** Same call, for a command that is EXPECTED to refuse (exit 3). Asserts the
+ *  non-zero exit rather than tolerating it: a refusal that exited 0 would be a
+ *  refusal nothing downstream could detect. */
+function runExpectingRefusal(args) {
+  try {
+    const out = execFileSync('node', [cliPath, ...args, '--tasks-dir', tasksDir, '--inbox', inboxDir, '--no-board'], { encoding: 'utf8' });
+    return { ...JSON.parse(out), exitedNonZero: false };
+  } catch (e) {
+    return { ...JSON.parse(e.stdout), exitedNonZero: e.status !== 0 };
+  }
+}
+
 function readFixtureState() {
   return JSON.parse(readFileSync(path.join(tasksDir, slug, 'STATE.json'), 'utf8'));
 }
@@ -227,6 +239,82 @@ try {
   const inFlightText = readFileSync(inFlightPath, 'utf8');
   check('the regenerated IN-FLIGHT.md file itself contains BOTH slugs in ONE wholesale write',
     inFlightText.includes(`## ${toolsSlug}`) && inFlightText.includes(`## ${warehouseSlug}`), inFlightText);
+
+  /* ══════════════ §9 THE ATTRIBUTION GATE, OVER THE REAL CLI ═════════════ */
+  // scripts/verify-lifecycle.js §12 proves the FUNCTIONS refuse. This proves
+  // the TOOL refuses — the distinction that separates KFM-08's four dead gates
+  // from a live one, and the reason that audit exists.
+  section('§9 attribution — the one writer refuses a record naming a non-participant');
+
+  const whyOf = (out, file) => (out.refused.find((r) => r.file === file) || {}).why || '';
+
+  writeInboxFile('20-review-nonparticipant.json', { kind: 'review', agent_id: 3, review_kind: 'review', verdict: 'approve', at: '2026-08-15' });
+  const a1 = run(['ingest', '--slug', slug]);
+  check('[FAILS-OLD] a review from Agent 3 — a worker on no reviewer set — is REFUSED by the tool',
+    /ATTRIBUTION REFUSED/.test(whyOf(a1, '20-review-nonparticipant.json')), JSON.stringify(a1.refused));
+  check('…and no review was written to the record',
+    !readFixtureState().lifecycle.reviews.some((r) => r.agent_id === 3));
+
+  writeInboxFile('21-review-ghost.json', { kind: 'review', agent_id: 99, review_kind: 'review', at: '2026-08-15' });
+  const a2 = run(['ingest', '--slug', slug]);
+  check('a review from an agent id that is on NO roster is refused as non-existent, in those words',
+    /do not exist on the roster/.test(whyOf(a2, '21-review-ghost.json')), JSON.stringify(a2.refused));
+
+  writeInboxFile('22-approval-forged.json', { kind: 'approval', by: 10, decision: 'approve', reason: 'looks good', at: '2026-08-15' });
+  const a3 = run(['ingest', '--slug', slug]);
+  check('[FAILS-OLD] an APPROVAL recorded by the Architect instead of the CEO is refused',
+    /NOTHING REACHES THE CLIENT WITHOUT THE CEO/.test(whyOf(a3, '22-approval-forged.json')), JSON.stringify(a3.refused));
+  check('…and the record carries no approval at all — a refused approval is not a partial one',
+    readFixtureState().lifecycle.approval === null);
+
+  writeInboxFile('23-vote-noattendees.json', {
+    kind: 'vote', question: 'Ship it?', date: '2026-08-15',
+    votes: [{ agent_id: 6, choice: 'for' }, { agent_id: 11, choice: 'for' }],
+  });
+  const a4 = run(['ingest', '--slug', slug]);
+  check('[FAILS-OLD] a vote carrying NO attendee list is refused rather than tallied on admin membership',
+    /must carry `attendees`/.test(whyOf(a4, '23-vote-noattendees.json')), JSON.stringify(a4.refused));
+
+  writeInboxFile('24-vote-absentee.json', {
+    kind: 'vote', question: 'Ship it?', date: '2026-08-15', attendees: [6, 7, 11],
+    votes: [{ agent_id: 6, choice: 'for' }, { agent_id: 8, choice: 'for' }],
+  });
+  const a5 = run(['ingest', '--slug', slug]);
+  check('[FAILS-OLD] an admin who was not in the room has their vote refused',
+    /was not at the meeting/.test(whyOf(a5, '24-vote-absentee.json')), JSON.stringify(a5.refused));
+  check('…and no vote landed on the record', readFixtureState().lifecycle.votes.length === 0);
+
+  writeInboxFile('25-vote-clean.json', {
+    kind: 'vote', question: 'Ship it?', date: '2026-08-15', attendees: [6, 7, 11], gap_ids: [],
+    votes: [{ agent_id: 6, choice: 'for' }, { agent_id: 7, choice: 'for' }, { agent_id: 11, choice: 'for' }],
+  });
+  const a6 = run(['ingest', '--slug', slug]);
+  check('a vote cast entirely by people who were in the room is APPLIED — the gate is not a wall',
+    a6.applied.some((x) => x.kind === 'vote' && x.outcome === 'carried'), JSON.stringify(a6));
+
+  writeInboxFile('26-rec-unsigned.json', { kind: 'recommendation', text: 'ship it', at: '2026-08-15' });
+  const a7 = run(['ingest', '--slug', slug]);
+  check('an UNSIGNED recommendation is refused — the CEO answers a recommendation somebody made',
+    /must name the agent making it/.test(whyOf(a7, '26-rec-unsigned.json')), JSON.stringify(a7.refused));
+
+  writeInboxFile('27-review-clean.json', { kind: 'review', agent_id: 6, review_kind: 'review', verdict: 'approve', at: '2026-08-15' });
+  const a8 = run(['ingest', '--slug', slug]);
+  check('a review from a genuine reviewer is still applied unchanged',
+    a8.applied.some((x) => x.kind === 'review' && x.agent === 6), JSON.stringify(a8));
+
+  check('every refused attribution file was LEFT IN PLACE for correction, never deleted',
+    ['20-review-nonparticipant.json', '21-review-ghost.json', '22-approval-forged.json', '23-vote-noattendees.json', '24-vote-absentee.json', '26-rec-unsigned.json']
+      .every((f) => existsSync(path.join(inboxDir, slug, f))));
+
+  // `advance` REFUSES with exit 3, which is the tool working — run() throws on
+  // a non-zero exit, so this one call reads the refusal off the thrown result.
+  // Deliberately not a softer run(): the exit code is part of what is proven.
+  const advBad = runExpectingRefusal(['advance', '--slug', slug, '--to', 'IN-REVIEW', '--by', 'Agent 3 — The Standard Agent']);
+  check('a stage SIGN-OFF naming a non-participant is refused by the tool, with a non-zero exit',
+    advBad.refused === true && advBad.code === 'attribution_refused' && advBad.exitedNonZero === true, JSON.stringify(advBad));
+  const advOk = run(['advance', '--slug', slug, '--to', 'WITHDRAWN', '--reason', 'fixture teardown', '--by', 'supervised lifecycle session']);
+  check('…while the honest unattributed sign-off the live records actually use still passes',
+    advOk.refused !== true && advOk.to === 'WITHDRAWN', JSON.stringify(advOk));
 } finally {
   rmSync(workDir, { recursive: true, force: true });
 }

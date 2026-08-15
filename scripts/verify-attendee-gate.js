@@ -9,7 +9,7 @@
  * No network, no D1, no KV. Run: node scripts/verify-attendee-gate.js
  */
 import { readFileSync } from 'node:fs';
-import { transcriptSpeakerIds, enforceAttendeeGate } from '../workers/meeting-attendance.js';
+import { transcriptSpeakerIds, enforceAttendeeGate, checkAttribution, attributedAgentIds } from '../workers/meeting-attendance.js';
 
 // The REAL roster, read as data. meeting-attendance.js imports nothing so it
 // can be executed by this verifier rather than regexed; the roster is the
@@ -116,6 +116,49 @@ for (const [label, t, d] of [
   catch { ok = false; }
   check(`${label} is handled without throwing`, ok);
 }
+
+/* ── §6  The primitive the four OB-075 gates share ──────────────────────── */
+section('§6  checkAttribution() — the one mechanism, and its two populations');
+
+check('a named agent on the declared list passes',
+  checkAttribution([6], [6, 7], ROSTER).ok);
+check('a named agent NOT on the declared list is a nonParticipant, not an unknown',
+  checkAttribution([9], [6, 7], ROSTER).nonParticipants.join(',') === '9'
+  && checkAttribution([9], [6, 7], ROSTER).unknown.length === 0);
+check('an id that is on no roster is an UNKNOWN — a different fact with a different remedy',
+  checkAttribution([99], [6, 7], ROSTER).unknown.join(',') === '99'
+  && checkAttribution([99], [6, 7], ROSTER).nonParticipants.length === 0);
+check('an unknown id is never double-counted as a nonParticipant',
+  checkAttribution([99, 9], [6], ROSTER).unknown.length + checkAttribution([99, 9], [6], ROSTER).nonParticipants.length === 2);
+check('KFM-13: an empty roster reports rosterChecked:false rather than a clean existence check',
+  checkAttribution([99], [6], []).rosterChecked === false && checkAttribution([99], [6], []).unknown.length === 0);
+check('…and still refuses on the participation half, so an absent roster never opens the gate',
+  !checkAttribution([99], [6], []).ok);
+check('duplicate names collapse — one agent named twice is one finding',
+  checkAttribution([9, 9, 9], [6], ROSTER).nonParticipants.join(',') === '9');
+check('degenerate input returns a clean pass rather than throwing',
+  checkAttribution(null, null, null).ok === true);
+
+section('§7  attributedAgentIds() — prose that names an agent, and prose that does not');
+check('"supervised lifecycle session" claims no agent — the honest form must stay legal',
+  attributedAgentIds('supervised lifecycle session', ROSTER).length === 0);
+check('the live record form "10 (Architect, this session)" is read as a claim about Agent 10',
+  attributedAgentIds('10 (Architect, this session)', ROSTER).join(',') === '10');
+check('"Agent 6 — The QA" is read once, not twice, despite id and name both matching',
+  attributedAgentIds('Agent 6 — The QA', ROSTER).join(',') === '6');
+check('a bare persona name resolves through the roster',
+  attributedAgentIds('handled by The Designer', ROSTER).join(',') === '9');
+check('empty and null claim nothing',
+  attributedAgentIds('', ROSTER).length === 0 && attributedAgentIds(null, ROSTER).length === 0);
+
+section('§8  ONE mechanism — the meeting gate is not a second copy of it');
+const gateSrc = readFileSync(new URL('../workers/meeting-attendance.js', import.meta.url), 'utf8');
+check('enforceAttendeeGate() delegates to checkAttribution() rather than re-deriving the set',
+  /export function enforceAttendeeGate[\s\S]{0,700}?checkAttribution\(/.test(gateSrc));
+check('…and no longer carries its own `filter((id) => !attendees.has(id))` copy of the rule',
+  !/attendees\.has\(id\)/.test(gateSrc));
+check('the module still imports nothing, so every gate above is EXECUTED by this file, not regexed',
+  !/^import\s/m.test(gateSrc));
 
 console.log(`\n  ${pass} passed, ${fail} failed  (${pass + fail} checks)`);
 console.log(`  network calls attempted: ${NETWORK.length}`);
