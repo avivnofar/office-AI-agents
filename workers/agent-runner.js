@@ -680,6 +680,146 @@ async function fileAssetTaskIssue(env, item, ownerAgentIds) {
  * rule holds, and the receipt lives in the office's own directory precisely so
  * that reading the client's mail never requires writing in his folder.
  */
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ * THE WEEKLY QA INSTRUMENTS — audit 2026-08-15 finding #8, wired 2026-08-15.
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * Two "signature" cross-agent QA instruments were fully built, marked
+ * capability-SUPPLIED in `config/capability-manifest.json`, and reachable ONLY
+ * by a human typing a trigger:
+ *
+ *   cross-embodiment comparison   `/api/agents/trigger`
+ *                                 {"type":"learning_loop_embodiment_comparison"}
+ *   review-the-reviewers          {"type":"learning_loop_review_the_reviewers"}
+ *
+ * No scheduled block referenced either, so as far as the audit could tell
+ * NEITHER HAS EVER RUN IN PRODUCTION. The office's whole quality argument
+ * rests on cross-agent review, and the two instruments that perform it had no
+ * autonomous caller. That is KFM-10, on the machinery that matters most.
+ *
+ * ── WHY THIS BLOCK HAS NO KILL SWITCH OF ITS OWN ─────────────────────────
+ *
+ * Deliberate, and it is the whole lesson of the finding. Every recent feature
+ * shipped with a switch defaulting OFF, and this project's own memory records
+ * the Guides pipeline sitting gated-off awaiting an enable. A switch whose
+ * purpose is to be left off is how a built capability becomes an unrun one —
+ * which is the defect being closed here, not a pattern to repeat.
+ *
+ * So it rides on `improvement_loop_enabled` (live ON), and that is an honest
+ * dependency rather than a borrowed one: the comparison reads exactly the rows
+ * `workers/improvement-loop.js` writes, and with the loop off there is nothing
+ * to compare. Same reasoning `deliverable-lifecycle.js` used for riding on
+ * `office_context_enabled`.
+ *
+ * Cost is not a reason for a switch here: one D1 SELECT, one markdown commit,
+ * and ZERO model calls.
+ *
+ * ── WHAT "REVIEW THE REVIEWERS" CAN AND CANNOT DO UNATTENDED ─────────────
+ *
+ * `reviewTheReviewers()` VALIDATES a record; it does not make one. A3 gives no
+ * trigger for flagging a reviewer, and inventing one would be this session
+ * writing office policy. So the autonomous half is the half that is structural:
+ *
+ *   - WHOSE TURN — a fixed rotation over the three reviewers by ISO week, so
+ *     each is reviewed in turn rather than only when someone complains. A3
+ *     reads as a standing practice, and a rotation is the only reading that
+ *     runs without a trigger nobody has defined.
+ *   - WHO REVIEWS — structurally determined: the other two. Never chosen.
+ *   - WHO DECIDES — the CEO. Never chosen.
+ *
+ * The VERDICT is left open, because the CEO has not given one. The block opens
+ * the round and records that it is open; it never fills in an outcome. A record
+ * that manufactured the CEO's decision would be the very fabrication OB-075
+ * spent this morning gating.
+ */
+async function processQaInstrumentsBlock(env, opts = {}) {
+  if (!opts.bypassGate && !(await improvementLoopEnabled(env))) {
+    console.log('[qa-instruments] improvement_loop_enabled is not true — block is a no-op');
+    return { skipped: true, reason: 'improvement_loop_disabled' };
+  }
+
+  const today = todayDateStr();
+  const out = { today, comparison: null, reviewRound: null, committed: null, errors: [] };
+
+  /* ── 1. the Lead QA's cross-embodiment comparison, against live D1 ── */
+  let rendered = 'Cross-embodiment comparison did not run.';
+  try {
+    const comparison = await runCrossEmbodimentComparison(env);
+    if (comparison.ok) comparison.generatedAt = new Date().toISOString();
+    out.comparison = comparison;
+    rendered = renderComparisonFinding(comparison, { date: today });
+  } catch (err) {
+    out.errors.push(`embodiment_comparison: ${err?.message}`);
+    rendered = `Cross-embodiment comparison THREW: ${err?.message}. Recorded rather than omitted — a missing section and a failed one are different facts (KFM-13).`;
+  }
+
+  /* ── 2. review-the-reviewers, opened on rotation ── */
+  const THREE = [6, 7, 8];
+  // ISO-week rotation. `weekNumber` comes from the caller's year state so the
+  // rotation is derived from the office's own clock, not from a fresh Date()
+  // this function would have to trust.
+  const week = Number.isInteger(opts.weekNumber) ? opts.weekNumber : 0;
+  const flaggedReviewer = THREE[week % THREE.length];
+  const reviewingPair = THREE.filter((id) => id !== flaggedReviewer);
+  const validation = reviewTheReviewers({
+    flaggedReviewer,
+    reviewingPair,
+    decidedBy: 11,
+    architectOpinion: null,
+  });
+  out.reviewRound = {
+    week,
+    flaggedReviewer,
+    reviewingPair,
+    valid: validation.valid,
+    reason: validation.reason || null,
+    // OPEN, never decided here. See this function's header.
+    outcome: 'OPEN — awaiting the CEO, who has not decided; this block opens the round and does not close it',
+  };
+
+  /* ── 3. one file, in back-office ── */
+  // FULL ISO DATE in the filename, not `week-NN` — audit finding #2 / KFM-17:
+  // a week index with no year silently overwrites last year's published file
+  // at rollover, and this is a NEW generated path, so it starts correct rather
+  // than joining the ~319-day-out problem.
+  const path = `campus/shared/qa-instruments/${today}-qa-instruments.md`;
+  const body = [
+    `# Weekly QA instruments — ${today}`,
+    '',
+    '_Produced autonomously by the Friday `qa_instruments` block. Before 2026-08-15 both',
+    'instruments below existed and were reachable only by a manual admin trigger; as far as',
+    'the 2026-08-15 audit could tell, neither had ever run in production (finding #8)._',
+    '',
+    rendered,
+    '',
+    `## Review-the-reviewers — round opened, week ${week}`,
+    '',
+    `- **Under review:** Agent ${flaggedReviewer}`,
+    `- **Reviewed by:** Agent ${reviewingPair.join(', Agent ')} — the other two, structurally, never chosen`,
+    '- **Decided by:** the CEO (Agent 11)',
+    '- **Architect:** present for technical opinion only — opinion, not verdict (A3)',
+    `- **Structural validation:** ${validation.valid ? 'PASSED' : `REFUSED — ${validation.reason}`}`,
+    '- **Outcome:** OPEN. The CEO has not decided. This block opens the round on the',
+    '  rotation and records that it is open; it does not invent a verdict.',
+    '',
+    '> A3: any change to one of the three reviewers is reported to the owner in the',
+    '> weekly report — for visibility, not approval.',
+    '',
+    out.errors.length ? `## Errors\n\n${out.errors.map((e) => `- ${e}`).join('\n')}` : '',
+  ].filter((l) => l !== '').join('\n');
+
+  try {
+    await commitFileToRepo(env, BACKOFFICE_REPO_NAME, path, body,
+      `chore(office): weekly QA instruments ${today} [skip ci]`);
+    out.committed = path;
+  } catch (err) {
+    out.errors.push(`commit: ${err?.message}`);
+  }
+  out.rendered = body;
+  return out;
+}
+
 async function processOwnerChannelBlock(env, opts = {}) {
   const sim = await getSimulationState(env);
   if (!opts.bypassGate && !(await ownerChannelEnabled(env))) {
@@ -3542,7 +3682,7 @@ export async function runScheduledBlock(env, israelTime, dayOfWeek) {
       results: {
         toolTask: null, aiExperience: null, standup: null, spareTime: [], weeklySummary: null, versionBumps: [], choreRotation: null,
         guideDraft: null, guideReview: null, guideVerify: null, architectLiaison: null,
-        ownerChannel: null,
+        ownerChannel: null, qaInstruments: null,
       },
     };
   }
@@ -3614,6 +3754,13 @@ export async function runScheduledBlock(env, israelTime, dayOfWeek) {
         cycle.results.guideReview = await processGuideReviewBlock(env, todayDateStr());
       } else if (block.type === 'guide_verify') {
         cycle.results.guideVerify = await processGuideVerifyBlock(env);
+      } else if (block.type === 'qa_instruments') {
+        // Audit finding #8 — the two cross-agent QA instruments had NO
+        // autonomous caller until 2026-08-15. Self-gating inside the handler,
+        // riding improvement_loop_enabled; see processQaInstrumentsBlock().
+        cycle.results.qaInstruments = await processQaInstrumentsBlock(env, {
+          weekNumber: (await getYearState(env)).current_week || 0,
+        });
       } else if (block.type === 'owner_channel') {
         // Self-gating inside the handler, like the guide_* blocks and unlike
         // architect_liaison's call-site gate. Deliberate: this block's FIRST act
@@ -4518,6 +4665,18 @@ export default {
             // Pure threshold check, A3's "blaming the provider" rule. Body:
             // { failingAgentIds, failingDates, embodimentComparisonDone }.
             result = canBlameProvider(body);
+            break;
+          case 'qa_instruments_block':
+            // Runs the Friday qa_instruments block directly, gate bypassed —
+            // the same supervised shape `guide_block` uses, and for the same
+            // reason: {"type":"block","israelTime":"09:30"} would also fire
+            // Friday's 09:30 case batch. Body: { weekNumber?, bypassGate? }.
+            // ADDED 2026-08-15 alongside the scheduled block; the trigger is
+            // the SUPERVISED path, not the only path — that was finding #8.
+            result = await processQaInstrumentsBlock(env, {
+              bypassGate: body.bypassGate !== false,
+              weekNumber: Number.isInteger(body.weekNumber) ? body.weekNumber : ((await getYearState(env)).current_week || 0),
+            });
             break;
           case 'learning_loop_embodiment_comparison':
             // Runs the Lead QA's cross-embodiment comparison against LIVE D1

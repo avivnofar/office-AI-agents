@@ -511,6 +511,78 @@ console.log('\n-- 13. this catches the actual pre-2026-08-10 gap, not a strawman
   checkTrue('_askNotebookX() now returns an explicit source', /source:\s*'gemini'/.test(agentBase));
 }
 
+/* ══════════ THE AUTONOMOUS CALLER — audit finding #8, 2026-08-15 ═════════
+ *
+ * Both instruments below were fully built, marked capability-SUPPLIED, and
+ * reachable ONLY by a manual admin trigger. No scheduled block referenced
+ * either, so as far as the 2026-08-15 audit could tell NEITHER HAD EVER RUN.
+ *
+ * These are SOURCE-LEVEL checks on purpose: agent-runner.js imports JSON and
+ * pulls in the whole Worker, so a verifier under plain `node` cannot call
+ * processQaInstrumentsBlock(). What can be proven here is exactly the thing
+ * that was missing — that a scheduled path names it at all. KFM-08's own
+ * rule: grep for the call site, never trust the definition.
+ * ═════════════════════════════════════════════════════════════════════════ */
+console.log('\n-- the autonomous caller (audit #8): qa_instruments --');
+{
+  const runnerSrc = readRepo('workers/agent-runner.js');
+  const schedule = JSON.parse(readRepo('config/daily-schedule.json'));
+  const fridayBlocks = schedule.friday_schedule.blocks;
+  const qaBlocks = Object.values(schedule)
+    .filter((v) => v && Array.isArray(v.blocks))
+    .flatMap((v) => v.blocks)
+    .filter((b) => b.type === 'qa_instruments');
+
+  const wiringChecks = [
+    ['[FAILS-OLD] a SCHEDULED block of type qa_instruments exists', qaBlocks.length >= 1],
+    ['…exactly one, so a weekly instrument does not run twice a week', qaBlocks.length === 1],
+    ['…on Friday', fridayBlocks.some((b) => b.type === 'qa_instruments')],
+    ['…at a tick nothing else occupies (the 2026-08-15 subrequest lesson)',
+      fridayBlocks.filter((b) => b.time === '09:30').length === 1],
+    ['…and NOT as the day\'s last block, which triggers finalizeScheduledDay()',
+      fridayBlocks[fridayBlocks.length - 1].type !== 'qa_instruments'],
+    ['[FAILS-OLD] runScheduledBlock() dispatches it', /block\.type === 'qa_instruments'/.test(runnerSrc)],
+    ['…to processQaInstrumentsBlock()', /processQaInstrumentsBlock\(env,/.test(runnerSrc)],
+    ['the handler calls the cross-embodiment comparison',
+      /async function processQaInstrumentsBlock[\s\S]{0,4000}?runCrossEmbodimentComparison\(env\)/.test(runnerSrc)],
+    ['the handler calls review-the-reviewers',
+      /async function processQaInstrumentsBlock[\s\S]{0,6000}?reviewTheReviewers\(\{/.test(runnerSrc)],
+    ['the handler commits its finding somewhere a human can read it',
+      /async function processQaInstrumentsBlock[\s\S]{0,9000}?commitFileToRepo\(env, BACKOFFICE_REPO_NAME/.test(runnerSrc)],
+    // KFM-17 — a NEW generated path joining the ~319-day rollover problem
+    // would be this session creating audit finding #2 rather than avoiding it.
+    ['the generated filename carries a FULL DATE, not a bare week index (KFM-17)',
+      /qa-instruments\/\$\{today\}-qa-instruments\.md/.test(runnerSrc)],
+    // The switch decision, asserted so a later session cannot quietly add one.
+    ['it rides improvement_loop_enabled and carries NO switch of its own',
+      /async function processQaInstrumentsBlock[\s\S]{0,1500}?improvementLoopEnabled\(env\)/.test(runnerSrc)
+      && !/qa_instruments_enabled/.test(runnerSrc)],
+    ['the supervised trigger still exists — the trigger is A path, not THE path',
+      /case 'qa_instruments_block':/.test(runnerSrc)],
+    ['the block never invents a verdict — the round is opened OPEN',
+      /outcome: 'OPEN/.test(runnerSrc)],
+  ];
+  for (const [label, ok] of wiringChecks) checkTrue(label, ok);
+
+  // The rotation itself, proven by CALLING the real function: every reviewer
+  // comes up, and the reviewing pair is always exactly the other two.
+  const THREE = [6, 7, 8];
+  const seen = new Set();
+  let rotationOk = true;
+  for (let week = 0; week < 9; week += 1) {
+    const flagged = THREE[week % THREE.length];
+    seen.add(flagged);
+    const v = reviewTheReviewers({
+      flaggedReviewer: flagged,
+      reviewingPair: THREE.filter((id) => id !== flagged),
+      decidedBy: CEO_ID,
+    });
+    if (!v.valid) rotationOk = false;
+  }
+  checkTrue('the ISO-week rotation reaches ALL THREE reviewers and every round validates',
+    rotationOk && seen.size === 3);
+}
+
 console.log(`\n=== ${passed} passed, ${failed} failed ===`);
 if (failed > 0) {
   console.log('SOME SCENARIOS FAILED — see [FAIL] lines above.');

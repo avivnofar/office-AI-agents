@@ -61,6 +61,7 @@
       { "time": "08:00", "type": "architect_liaison", "label": "Architect liaison: file last night's headless run as a D1 report (gated, SEE architect_liaison_program — SHIPPED OFF 2026-08-07)", "ref": "architect_liaison_program" },
       { "time": "08:00", "type": "case_batch", "label": "Friday opening batch", "case_share": 0.40 },
       { "time": "09:00", "type": "case_batch", "label": "Friday mid batch", "case_share": 0.30 },
+      { "time": "09:30", "type": "qa_instruments", "label": "Weekly QA instruments: the Lead QA's cross-embodiment comparison + the review-the-reviewers rotation. ADDED 2026-08-15 (audit finding #8): both were fully built, marked capability-SUPPLIED, and reachable ONLY by a manual admin trigger, so as far as that audit could tell NEITHER HAD EVER RUN in production. 09:30 is a FREE Friday tick with nothing else on it — chosen for the same reason closing_qa_review was moved to 15:30 on 2026-08-15, and it is before the 12:00 weekly close so the finding exists when the weekly package is built. Rides improvement_loop_enabled; carries NO switch of its own, deliberately — see processQaInstrumentsBlock()'s header. One D1 SELECT, one markdown commit, ZERO model calls.", "ref": "qa_instruments_program" },
       { "time": "10:00", "type": "case_batch", "label": "Friday late-morning batch", "case_share": 0.30 },
       { "time": "10:30", "type": "report", "label": "Daily AI-experience reports + model-education case studies", "ref": "model_education_program" },
       { "time": "10:30", "type": "guide_draft", "label": "Guides pipeline: Gemini draft (ordered after the Friday 'report' block)", "ref": "guides_program" },
@@ -119,6 +120,18 @@
     }
   },
 
+  "qa_instruments_program": {
+    "description": "Friday 09:30. Runs the office's two cross-agent QA instruments and files one markdown finding into back-office. Added 2026-08-15 to close audit finding #8 / KFM-10: cross-embodiment comparison and review-the-reviewers were both built, both marked capability-SUPPLIED, and both reachable only via /api/agents/trigger — no scheduled block referenced either, so neither had ever run on its own. The office's entire quality argument rests on cross-agent review, and the two instruments that perform it had no autonomous caller.",
+    "gate": "improvement_loop_enabled. NO SWITCH OF ITS OWN, deliberately: the defect being closed here is a built capability with no autonomous caller, and shipping it behind a fresh OFF switch would reproduce that defect on the very feature meant to fix it. Riding improvement_loop_enabled is an honest dependency, not a borrowed one — the comparison reads exactly the rows workers/improvement-loop.js writes, and with the loop off there is nothing to compare.",
+    "outputs": [
+      {
+        "file": "campus/shared/qa-instruments/{{YYYY-MM-DD}}-qa-instruments.md",
+        "filename_note": "FULL ISO DATE, not week-NN. Audit finding #2 / KFM-17: a week or day index with no year silently overwrites the previous cycle's published file at rollover (~319 days out for the existing offenders). This path is new, so it starts correct rather than joining the problem.",
+        "permission_level": "private — back office."
+      }
+    ],
+    "what_it_does_not_do": "review-the-reviewers is VALIDATION, not a verdict. A3 gives no trigger for flagging a reviewer, so the block picks WHOSE TURN by a fixed ISO-week rotation over agents 6/7/8, derives the reviewing pair structurally (the other two) and the decider structurally (the CEO), and leaves the OUTCOME OPEN. It never fills in a decision the CEO has not made — that would be the fabricated attribution OB-075 gated the same day."
+  },
   "weekly_summary_program": {
     "description": "Friday 12:00. Generates the week's executive package and bumps product versions for any asset_pipeline items that reached 'implemented' this week. This is the RAW trio (string-template, no review) — distinct from the REVIEWED `reports/weekly/week-NN-report.md` produced by workers/report-pipeline.js, which stays public. Moved to back-office 2026-08-11 (plan 0.4 stage 3 of 5) — the `agents/reports/weekly/` paths below were already stale pre-migration (pre-2026-06-19 repo-split prefix); corrected to the actual runtime location in the same edit that moved it.",
     "outputs": [
