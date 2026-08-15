@@ -46,6 +46,7 @@ import { callGemini, callCloudflareFallback } from './gemini-client.js';
 import { callGroq } from './groq-client.js';
 import { commitFileToRepo, BACKOFFICE_REPO_NAME } from './repo-write.js';
 import { getOfficeContext, getOfficeSnapshot } from './office-context.js';
+import { enforceAttendeeGate } from './meeting-attendance.js';
 import {
   addOfficeDays, normalizeActionItems, renderBoardTask,
   computeWorkflowMetrics, renderWorkflowMetrics,
@@ -971,9 +972,31 @@ function renderMeetingReport(meetingType, attendeeSnapshots, transcript, decisio
     .map((o) => `- Agent ${o.agent_id}: ${JSON.stringify(o.overrides)} — ${o.reason}`)
     .join('\n') || '_None._';
 
+  // The artifact carries its own warning. A meeting whose transcript invented
+  // speakers must not be readable as a clean record — the 2026-08-11 standups
+  // sat in the same directory as the true ones with nothing to tell them
+  // apart, which is what let a hallucinated line become board task OB-067.
+  const fab = decisions.fabricated_participation;
+  const fabricationBanner = fab?.agent_ids?.length
+    ? `> ⚠️ **FABRICATED PARTICIPATION — this transcript is not a reliable record of who spoke.**
+> The **Attendees** list below is authoritative. The transcript body contains
+> speaking lines attributed to agent(s) **${fab.agent_ids.join(', ')}**, who did not
+> attend. ${fab.refused_action_items?.length
+      ? `${fab.refused_action_items.length} action item(s) assigned to them were **refused** and are recorded below rather than acted on.`
+      : 'No action items were assigned to them.'}
+> Composed by \`${fab.composed_by || 'unknown provider'}\`. Detected automatically at composition time.
+
+`
+    : '';
+  const refusedList = fab?.refused_action_items?.length
+    ? `\n## Refused Action Items (fabricated participation)\n\n${fab.refused_action_items
+      .map((it) => `- Agent ${it?.agent_id}: ${it?.task || it?.description || JSON.stringify(it)} — **refused**, this agent did not attend`)
+      .join('\n')}\n`
+    : '';
+
   return `# ${meta.label} — ${date}
 
-${opts?.trigger ? `**Trigger:** ${opts.trigger}\n` : ''}
+${fabricationBanner}${opts?.trigger ? `**Trigger:** ${opts.trigger}\n` : ''}
 ## Attendees
 
 ${attendeeList}
@@ -981,6 +1004,7 @@ ${attendeeList}
 ## Transcript
 
 ${transcript}
+${refusedList}
 
 ## Summary
 
@@ -1209,6 +1233,28 @@ export async function runMeeting(meetingType, env, opts = {}) {
   const responseText = modelResult.text;
 
   const { transcript, decisions } = parseMeetingResponse(responseText);
+
+  // The attendee gate (audit 2026-08-15, finding #1). Placed here on purpose:
+  // this is the only point where the resolved attendee set and the composed
+  // transcript both exist, and it is upstream of EVERY consumer — mood
+  // effects, refusals, journals, the D1 row and the rendered report. A check
+  // any later would let one of them act on fabricated participation first.
+  const gate = enforceAttendeeGate(transcript, decisions, attendeeIds, agentsConfig.agents);
+  if (gate.fabricated.length) {
+    console.warn(
+      `[meeting-engine] FABRICATED PARTICIPATION (${meetingType}): agent(s) ${gate.fabricated.join(', ')} `
+      + `have speaking lines but are not attendees (${attendeeIds.join(', ')}). `
+      + `${gate.removed.length} action item(s) refused.`,
+    );
+    // Refused items are dropped from what the office ACTS on, and carried on
+    // the record so the refusal is visible rather than a silent shrink.
+    decisions.action_items = gate.kept;
+    decisions.fabricated_participation = {
+      agent_ids: gate.fabricated,
+      refused_action_items: gate.removed,
+      composed_by: modelResult?.source || null,
+    };
+  }
 
   await applyMeetingEffects(meetingType, attendeeSnapshots, decisions, env);
 
