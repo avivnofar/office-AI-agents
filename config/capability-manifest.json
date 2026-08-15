@@ -13,247 +13,542 @@
     "what_this_is_not": "NOT a skills library. campus/brain-export/skills/ holds techniques another project could import; this is an inventory of what THIS office can do with THIS wiring. Conflating them is how a skills library fills up with documentation of local plumbing.",
     "bible_quotes_are_verbatim": "Every `bible_claim` is quoted from back-office-AI-agents/AGENTS-CHARACTER-CORE-v2.md, not paraphrased. A paraphrase of a role is where an invented capability gets in: it reads as the bible's claim one session later, and then the audit is measuring the manifest against itself."
   },
-
   "capabilities": {
     "mood-state-machine": {
       "what": "The shared mood / irritation / panic state machine and its durable per-agent state.",
-      "supplied_by": { "kind": "module", "ref": "agents/agent-base.js", "symbol": "AgentBase" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "agents/agent-base.js",
+        "symbol": "AgentBase"
+      },
       "also": "workers/state-manager.js AgentStateDO (durable per-agent overrides)",
       "exercised_by": "scripts/verify-qa-engine.js",
       "cost": "none — local state, no provider",
-      "agents": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13]
+      "agents": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11,
+        12,
+        13
+      ]
     },
     "ask-data-center": {
       "what": "Ask Claude a real IT/cybersecurity question through data-center's /api/chat and score the answer.",
-      "supplied_by": { "kind": "module", "ref": "agents/agent-base.js", "symbol": "AgentBase#askAssignedProject" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "agents/agent-base.js",
+        "symbol": "AgentBase#askAssignedProject"
+      },
       "exercised_by": "scripts/verify-qa-engine.js",
       "cost": "Anthropic, shared_claude_budget $4.50/mo soft-stop. The ONLY paid provider in the office, and capped.",
-      "agents": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11],
+      "agents": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11
+      ],
       "_not_12_or_13": "Agents 12 and 13 carry `in_case_rotation: false` in config/agents-config.json — they never ask Q&A questions. That is deliberate (their work is the office, not the tools) and it is why the census DOES see them as producing nothing, while it never saw the Designer."
     },
     "ask-notebook-x": {
       "what": "Ask a Notebook-X notebook a question, paced against a quota two unobservable consumers share.",
-      "supplied_by": { "kind": "module", "ref": "workers/notebookx-client.js", "symbol": "queryNotebookX" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/notebookx-client.js",
+        "symbol": "queryNotebookX"
+      },
       "also": "workers/gemini-pacer.js (20s minimum spacing)",
       "exercised_by": "scripts/verify-qa-engine.js",
       "cost": "Gemini free tier, paced by wall clock",
-      "agents": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11]
+      "agents": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11
+      ]
     },
     "answer-quality-scoring": {
-      "what": "Score an answer 0-1. A LENGTH PROXY, not a quality judgment: min(1, characters / divisor). No model reads the question or the answer.",
+      "what": "Score an answer 0-1. A LENGTH PROXY, not a quality judgment: min(1, characters / 800). No model reads the question or the answer.",
       "supplied_by": {
         "kind": "module",
         "ref": "agents/agent-base.js",
         "symbol": "AgentBase#evaluateResponseQuality",
-        "caveat": "READ THIS BEFORE TRUSTING ANY QUALITY NUMBER IN THIS OFFICE. UPDATED 2026-08-16. The verdict stays SUPPLIED because the code path resolves and is exercised — but what it supplies is a measure of ANSWER LENGTH, and twelve consumers treat it as a quality judgment: the mood engine, the follow-up band, capability-gap detection, each persona's escalation_threshold, the Hebrew gap note, the journal line, reports.quality, the client-facing fact pack's AVG(quality), the meeting agenda, the improvement-loop stats trigger, and the Lead QA's cross-embodiment comparison. THREE FACTS ESTABLISHED BY MEASUREMENT 2026-08-16: (1) there were TWO formulas — _askNotebookX() never called this function and carried an inline /600 against this one's /800, so the same answer scored 33% higher on notebook-x, and nothing recorded which formula produced which row; (2) the metric is SATURATED — 101 of 120 scored notebook-x rows sit exactly at the 1.0 ceiling, where it carries no information at all; (3) it had already produced a FALSE PUBLISHED FINDING (a degraded fallback outranking the primary), which was a comparison of two divisors because each provider serves exactly one project. FIXED WITHOUT CHANGING ANY SCORE: workers/quality-metric.js is now the single scorer, both divisors preserved byte-identically, history NOT rescored (A15), METRIC_DISCLOSURE printed at every render site, and scoresAreComparable() makes the comparison instrument REFUSE to rank confounded providers. STILL A LENGTH PROXY — OB-080 (harmonise the divisors) and OB-081 (a real sampled evaluation) carry the rest. The cost objection to a real evaluation was checked and is false: the judgment lane is free-tier, so a judge call costs $0; the binding constraint is the 20-second unknown-cap pacing."
+        "caveat": "READ THIS BEFORE TRUSTING ANY QUALITY NUMBER IN THIS OFFICE. UPDATED 2026-08-16 (second session). The verdict stays SUPPLIED because the code path resolves and is exercised — but what it supplies is a measure of ANSWER LENGTH, and twelve consumers treat it as a quality judgment: the mood engine, the follow-up band, capability-gap detection, each persona's escalation_threshold, the Hebrew gap note, the journal line, reports.quality, the client-facing fact pack's AVG(quality), the meeting agenda, the improvement-loop stats trigger, and the Lead QA's cross-embodiment comparison. OB-080 IS NOW CLOSED: there was a SECOND formula (an inline /600 in _askNotebookX() against this one's /800, so the same answer scored 33% higher on notebook-x) and the two are UNIFIED AT 800 from 2026-08-16T00:00:00Z. 800 survived because it was the declared formula while /600 was an undeclared inline copy, and because it is the information-preserving direction: a row that saturates at 800 also saturated at 600, so the useless-1.0 set can only shrink. HISTORY IS NOT RESCORED (A15) — instead reports.scorer_id was added and buildOfficeEventRow() now REFUSES a row carrying a quality with no scorer id, because the reason two divisors survived four weeks is that the rows did not say. STILL SATURATED: 101 of 120 scored notebook-x rows sat at the 1.0 ceiling under /600, where the metric carries no information. STILL A LENGTH PROXY, and it is not the office's only scorer any more — see answer-quality-judging (OB-081), which sends one answer in eight to a real evaluator. TWO SUPERVISED CALLS ON THE LIVE JUDGMENT LANE, SAME QUESTION: a correct 397-char answer scored 0.50 here and 0.88 there; a padded, vague 991-char answer scored 1.00 here and 0.07 there. The two metrics are INVERTED on that pair. That is a two-point demonstration, not the calibration — the calibration needs n>=20 and is not accumulating until judge_sampler_enabled is turned on."
       },
       "exercised_by": "scripts/verify-quality-metric.js",
       "cost": "none — local computation",
-      "agents": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11]
+      "agents": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11
+      ]
     },
     "gap-flagging": {
       "what": "Classify a weak or absent answer as a capability gap against the agent's own escalation threshold, and write the finding up in Hebrew in that agent's voice.",
-      "supplied_by": { "kind": "module", "ref": "workers/gap-reports.js", "symbol": "detectCapabilityGap" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/gap-reports.js",
+        "symbol": "detectCapabilityGap"
+      },
       "exercised_by": "scripts/verify-qa-engine.js",
       "cost": "Gemini free tier for the Hebrew note",
-      "agents": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11]
+      "agents": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11
+      ]
     },
     "hebrew-composition": {
       "what": "Compose internal Hebrew — gap notes, summaries — in the flagging agent's own voice.",
-      "supplied_by": { "kind": "lane", "ref": "config/model-routing.json", "symbol": "lanes.hebrew_composition" },
+      "supplied_by": {
+        "kind": "lane",
+        "ref": "config/model-routing.json",
+        "symbol": "lanes.hebrew_composition"
+      },
       "exercised_by": "scripts/verify-routing.js",
       "cost": "Gemini free tier primary, Mistral free tier backup",
-      "agents": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13]
+      "agents": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11,
+        12,
+        13
+      ]
     },
     "routine-drafting": {
       "what": "Routine volume: drafts, coworker chatter, spare-time interactions.",
-      "supplied_by": { "kind": "lane", "ref": "config/model-routing.json", "symbol": "lanes.routine_volume" },
+      "supplied_by": {
+        "kind": "lane",
+        "ref": "config/model-routing.json",
+        "symbol": "lanes.routine_volume"
+      },
       "exercised_by": "scripts/verify-routing.js",
       "cost": "Groq free tier (14,400/day), Cloudflare Workers AI backup",
-      "agents": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13]
+      "agents": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11,
+        12,
+        13
+      ]
     },
     "judgment-review": {
       "what": "Score and review someone else's work — the reviewing capability the QA ranks depend on.",
-      "supplied_by": { "kind": "lane", "ref": "config/model-routing.json", "symbol": "lanes.judgment" },
+      "supplied_by": {
+        "kind": "lane",
+        "ref": "config/model-routing.json",
+        "symbol": "lanes.judgment"
+      },
       "exercised_by": "scripts/verify-routing.js",
       "cost": "Cerebras free tier primary (131,000-token input), Mistral backup. Both lanes share both providers — an accepted concentration risk.",
-      "agents": [6, 7, 8]
+      "agents": [
+        6,
+        7,
+        8
+      ]
     },
     "long-document-processing": {
       "what": "Process more text than a single judgment call should carry — daily report batches, cross-report input.",
-      "supplied_by": { "kind": "lane", "ref": "config/model-routing.json", "symbol": "lanes.long_document" },
+      "supplied_by": {
+        "kind": "lane",
+        "ref": "config/model-routing.json",
+        "symbol": "lanes.long_document"
+      },
       "exercised_by": "scripts/verify-routing.js",
       "cost": "Cerebras free tier, Mistral backup",
-      "agents": [6, 8, 12]
+      "agents": [
+        6,
+        8,
+        12
+      ]
     },
     "report-drafting": {
       "what": "Draft the office's periodic reports.",
-      "supplied_by": { "kind": "lane", "ref": "config/model-routing.json", "symbol": "lanes.report_drafting" },
+      "supplied_by": {
+        "kind": "lane",
+        "ref": "config/model-routing.json",
+        "symbol": "lanes.report_drafting"
+      },
       "also": "workers/report-pipeline.js planReportProviders()",
       "exercised_by": "scripts/verify-report-pipeline.js",
       "cost": "Gemini free tier (owner decision AD-028), Mistral backup",
-      "agents": [12]
+      "agents": [
+        12
+      ]
     },
     "report-structural-gate": {
       "what": "Refuse a report draft that fails a structural check — including the repository-axis consistency check that week-07's 'Nothing moved' sentence would fail.",
-      "supplied_by": { "kind": "module", "ref": "workers/report-pipeline.js", "symbol": "validateReportBody" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/report-pipeline.js",
+        "symbol": "validateReportBody"
+      },
       "exercised_by": "scripts/verify-report-pipeline.js",
       "cost": "none — local computation",
-      "agents": [6, 8]
+      "agents": [
+        6,
+        8
+      ]
     },
     "hebrew-executive-summary": {
       "what": "OFFICE-POLICY A9: a short Hebrew headline on the daily report (names a concrete item needing attention or says explicitly there is none) and a Hebrew executive-summary layer prepended above the English weekly report body — not a translation, a judgement of what the owner needs to know.",
-      "supplied_by": { "kind": "module", "ref": "workers/hebrew-summary.js", "symbol": "buildWeeklySummaryPrompt" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/hebrew-summary.js",
+        "symbol": "buildWeeklySummaryPrompt"
+      },
       "also": "workers/agent-runner.js composeDailyHeadline() (daily half) and runReportPipeline()'s weekly-only Hebrew step (both call the DIRECT queryGeminiDirect() path, never the routed hebrew_composition lane)",
       "exercised_by": "scripts/verify-hebrew-summary.js",
       "cost": "Gemini free tier, direct call only",
-      "agents": [12],
+      "agents": [
+        12
+      ],
       "_added": "2026-08-11 (Audit-and-Fix session, Phase 4). SCOPE CAVEAT, stated where the audit can see it: the daily half is NOT literally 'entirely' Hebrew — a short Hebrew block is prepended above the still-English operational log (case stats, standup transcript, schedule/branch sections), which stays English because it is a template with no model call, deliberately kept that way so it renders for free even on a Saturday A13 forbids spending tokens on. Full 'entirely' conversion is a larger rewrite this session did not take on; see the module's own header."
     },
     "meeting-participation": {
       "what": "Hold a meeting to the standing agenda, with the office's real state in the prompt.",
-      "supplied_by": { "kind": "module", "ref": "workers/meeting-engine.js", "symbol": "runMeeting" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/meeting-engine.js",
+        "symbol": "runMeeting"
+      },
       "exercised_by": "scripts/verify-office-bureaucracy.js",
       "cost": "Gemini free tier for synthesis; the conversation lane's controlled-random pool for events",
-      "agents": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13]
+      "agents": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11,
+        12,
+        13
+      ]
     },
     "meeting-decision-to-board": {
       "what": "Turn a meeting's action items into REAL board tasks — allocated an OB-NNN id and appended to BOARD.md itself, not merely shaped into a proposal — refusing an item the meeting did not actually decide.",
-      "supplied_by": { "kind": "module", "ref": "workers/meeting-decisions.js", "symbol": "normalizeActionItems" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/meeting-decisions.js",
+        "symbol": "normalizeActionItems"
+      },
       "also": "campus/agents/12-the-workflow/automation/promote-inbox.js (back-office-AI-agents) — the actual promotion step: allocates the next OB-NNN, appends the task to BOARD.md in its own format, and records the outcome in board/inbox/PROMOTED-LOG.md so a promoted, a refused and a never-processed proposal are distinguishable",
       "exercised_by": "scripts/verify-office-bureaucracy.js",
       "cost": "none — local computation",
-      "agents": [12],
+      "agents": [
+        12
+      ],
       "_updated": "2026-08-11 (Make the Pipe Conduct session). Until this date `normalizeActionItems()` only produced a shaped PROPOSAL in board/inbox/ — nothing ever turned it into a real board task. `campus/shared/board/inbox/README.md` had described the promotion step ('the Workflow accepts or rejects each item and allocates a real OB-NNN id') since 2026-08-07 with nothing performing it. Proven live: the three Phase-6 report-improvement proposals sitting in the inbox since the prior session are now OB-064/OB-065/OB-066 on the real board."
     },
     "productivity-picture": {
       "what": "The Workflow's four measures: unstarted work, agents not working, work past its metric line, free capacity. Deliberately never averaged into one number.",
-      "supplied_by": { "kind": "module", "ref": "workers/meeting-decisions.js", "symbol": "computeWorkflowMetrics" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/meeting-decisions.js",
+        "symbol": "computeWorkflowMetrics"
+      },
       "exercised_by": "scripts/verify-office-bureaucracy.js",
       "cost": "none — local computation",
-      "agents": [12]
+      "agents": [
+        12
+      ]
     },
     "output-census": {
       "what": "For every agent on the roster: has it produced anything in N days, and OF WHAT KIND. Distinguishes NEVER from SILENT, and flags an agent that is producing but has produced none of the kinds its own role is for.",
-      "supplied_by": { "kind": "module", "ref": "workers/meeting-decisions.js", "symbol": "computeOutputCensus" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/meeting-decisions.js",
+        "symbol": "computeOutputCensus"
+      },
       "exercised_by": "scripts/verify-office-bureaucracy.js",
       "cost": "none — one D1 query",
-      "agents": [12],
+      "agents": [
+        12
+      ],
       "_added": "2026-08-10. Completes the `idle` measure in computeWorkflowMetrics(), which read ACTIVITY rather than OUTPUT — so an agent whose Q&A asks kept its activity row warm never read as idle however little it produced."
     },
     "capability-audit": {
       "what": "For every agent: does a code path supply the means its role requires? The role-level form of the Cyber Expert's standing question. Now RECURRING (weekly, .github/workflows/weekly-capability-audit.yml) and its findings reach the board as tasks, not only a findings document.",
-      "supplied_by": { "kind": "module", "ref": "workers/capability-audit.js", "symbol": "auditCapabilities" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/capability-audit.js",
+        "symbol": "auditCapabilities"
+      },
       "also": "scripts/capability-audit.mjs (the runner that builds the supply index from the repo); auditFindingsToBoardItems() (same module) shapes findings for the board; workers/agent-runner.js's capability_audit_findings admin trigger writes them via the existing meeting action-items board-inbox path",
       "exercised_by": "scripts/verify-capability-audit.js",
       "cost": "none — reads files, calls no provider",
-      "agents": [13],
+      "agents": [
+        13
+      ],
       "_added": "2026-08-10",
       "_updated": "2026-08-11 (Phase 5): weekly cron + board-task write added. Was: a one-off manual run whose findings went to stdout/a markdown file only."
     },
     "board-read": {
       "what": "Read the delegation board, the client requirements and the owner's open questions into every prompt, refusing a malformed task rather than counting it.",
-      "supplied_by": { "kind": "module", "ref": "workers/office-context.js", "symbol": "parseBoard" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/office-context.js",
+        "symbol": "parseBoard"
+      },
       "exercised_by": "scripts/verify-office-bureaucracy.js",
       "cost": "none — GitHub reads, 30-minute cache",
-      "agents": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13]
+      "agents": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11,
+        12,
+        13
+      ]
     },
     "deliverable-lifecycle": {
       "what": "What happens to a deliverable after it is built: eight stages, one forward exit, and that exit is the CEO. No cap on review rounds.",
-      "supplied_by": { "kind": "module", "ref": "workers/deliverable-lifecycle.js", "symbol": "legalMovesFrom" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/deliverable-lifecycle.js",
+        "symbol": "legalMovesFrom"
+      },
       "also": "scripts/lifecycle.mjs (the only tool that writes a lifecycle record)",
       "exercised_by": "scripts/verify-lifecycle.js",
       "cost": "none — local computation; the reviews themselves cost the judgment lane",
-      "agents": [6, 9, 10, 11, 13]
+      "agents": [
+        6,
+        9,
+        10,
+        11,
+        13
+      ]
     },
     "owner-channel-read": {
       "what": "Read the owner's messages, refuse a malformed one, and keep a read record that separates unread from read-and-ignored by content SHA. An optional `to:` field addresses one agent; the rest see it collapse to a count instead of full text in their own per-call prompt (meetings/reports stay unscoped).",
-      "supplied_by": { "kind": "module", "ref": "workers/owner-channel.js", "symbol": "parseOwnerMessage" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/owner-channel.js",
+        "symbol": "parseOwnerMessage"
+      },
       "also": "messageAddressesAgent() (same file) — the addressee matcher",
       "exercised_by": "scripts/verify-owner-channel.js",
       "cost": "none — GitHub reads",
-      "agents": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13],
+      "agents": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11,
+        12,
+        13
+      ],
       "_updated": "2026-08-11 (Phase 3): addressee scoping added. Was: every message reached every agent in full, always."
     },
     "owner-channel-write": {
       "what": "A page the owner can type into whose message reaches channel/from-owner/ in the contract's format, authenticated, with the read state visible back to him.",
-      "supplied_by": { "kind": "module", "ref": "workers/owner-page.js", "symbol": "renderOwnerPage" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/owner-page.js",
+        "symbol": "renderOwnerPage"
+      },
       "also": "workers/agent-runner.js POST /api/owner/message — validates through the UNMODIFIED parseOwnerMessage() before writing",
       "exercised_by": "scripts/verify-owner-page.js",
       "cost": "none — one GitHub write per message",
-      "agents": [12],
+      "agents": [
+        12
+      ],
       "_added": "2026-08-10. REQ-003's delivery half. The office builds the PRESENTATION layer only; the folder contract itself is the owner's, because an office that builds its own instruction channel builds the pipe that feeds it."
     },
     "owner-notification": {
       "what": "Reach the owner: one GitHub Issue a day plus a Sunday heartbeat sent even when there is nothing to report, which is the only thing that makes silence informative. An unanswered notification Issue itself now climbs the same FRESH/STANDING/OVERDUE/ESCALATED ladder questions and submissions already use, and re-surfaces in the next notification once it clears OVERDUE.",
-      "supplied_by": { "kind": "module", "ref": "workers/owner-notify.js", "symbol": "notifyOwner" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/owner-notify.js",
+        "symbol": "notifyOwner"
+      },
       "also": "workers/owner-channel.js classifyOwnerIssueReadback() — reads back every owner-channel Issue's reply state (a comment, or the owner closing it himself) via the GitHub API",
       "exercised_by": "scripts/verify-owner-channel.js",
       "cost": "none — GitHub API",
-      "agents": [5, 12],
+      "agents": [
+        5,
+        12
+      ],
       "_updated": "2026-08-11 (Phase 1.2): the escalation ladder now covers Issues, not only questions/submissions. Was: an Issue with no reply was never checked back on at all."
     },
     "submissions-ledger": {
       "what": "Submit finished work with a recommendation (A8), with an age ladder so an unanswered entry rises instead of going quiet.",
-      "supplied_by": { "kind": "module", "ref": "workers/owner-channel.js", "symbol": "parseSubmissions" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/owner-channel.js",
+        "symbol": "parseSubmissions"
+      },
       "exercised_by": "scripts/verify-owner-channel.js",
       "cost": "none",
-      "agents": [5, 6, 8, 9, 12, 13]
+      "agents": [
+        5,
+        6,
+        8,
+        9,
+        12,
+        13
+      ]
     },
     "guide-authoring": {
       "what": "Write a high-quality English technical guide, reviewed by the Architect with extra skepticism on whatever the writer marked high-confidence.",
-      "supplied_by": { "kind": "module", "ref": "workers/guide-engine.js", "symbol": "selectGuideTopic" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/guide-engine.js",
+        "symbol": "selectGuideTopic"
+      },
       "also": "workers/claude-client.js (the Architect's direct Anthropic review)",
       "exercised_by": "scripts/verify-guide-engine.js",
       "cost": "Gemini free tier to draft; Anthropic guides_claude_budget $4.50/mo to review",
-      "agents": [6, 7, 8, 10]
+      "agents": [
+        6,
+        7,
+        8,
+        10
+      ]
     },
     "security-scan-outbound": {
       "what": "Refuse a publication whose content trips the pre-publication scan. Automatic, never a judgment call, and there is no override flag.",
-      "supplied_by": { "kind": "module", "ref": "workers/security-scan.js", "symbol": "scanOutbound" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/security-scan.js",
+        "symbol": "scanOutbound"
+      },
       "exercised_by": "scripts/verify-security-scan.js",
       "cost": "none — local computation",
-      "agents": [13]
+      "agents": [
+        13
+      ]
     },
     "governed-repo-write": {
       "what": "The one place a repo write happens. Unmapped repo is a denial, the token follows the repo, and the write is recorded on the REPOSITORY axis.",
-      "supplied_by": { "kind": "module", "ref": "workers/repo-write.js", "symbol": "commitFileToRepo" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/repo-write.js",
+        "symbol": "commitFileToRepo"
+      },
       "also": "workers/permission-guard.js resolveRepoWrite() — the single write-decision entry point",
       "exercised_by": "scripts/verify-permissions.js",
       "cost": "none — GitHub API",
-      "agents": [10]
+      "agents": [
+        10
+      ]
     },
     "unattended-architect-session": {
       "what": "File an unattended Architect session into D1 so the office can see the night happened.",
-      "supplied_by": { "kind": "module", "ref": "workers/architect-liaison.js", "symbol": "processArchitectLiaisonBlock" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/architect-liaison.js",
+        "symbol": "processArchitectLiaisonBlock"
+      },
       "exercised_by": "scripts/verify-architect-liaison-inert.js",
       "cost": "Anthropic, the Architect's own budget",
-      "agents": [10]
+      "agents": [
+        10
+      ]
     },
     "image-generation-draft": {
       "what": "Generate a visual asset. The Designer's default.",
-      "supplied_by": { "kind": "lane", "ref": "config/model-routing.json", "symbol": "lanes.image.roles.draft" },
+      "supplied_by": {
+        "kind": "lane",
+        "ref": "config/model-routing.json",
+        "symbol": "lanes.image.roles.draft"
+      },
       "also": "workers/cf-image-client.js callCloudflareImage()",
       "exercised_by": "scripts/verify-routing.js",
       "cost": "Cloudflare Workers AI free tier — 10,000 Neurons/day, SHARED with the classification lane and the routine-volume backup. The balance cannot be read from inside the Worker, so this provider is paced by wall clock.",
-      "agents": [9],
+      "agents": [
+        9
+      ],
       "_added": "2026-08-10. Before this date the verdict on this row was UNSUPPLIED and had been for two months."
     },
     "image-polish": {
       "what": "Take a draft's own bytes back in and revise them. Final touches, not a re-generation.",
-      "supplied_by": { "kind": "lane", "ref": "config/model-routing.json", "symbol": "lanes.image.roles.polish" },
+      "supplied_by": {
+        "kind": "lane",
+        "ref": "config/model-routing.json",
+        "symbol": "lanes.image.roles.polish"
+      },
       "also": "workers/gemini-image-client.js polishImage() — refuses a call with no input image rather than degrading to a fresh draft",
       "exercised_by": "scripts/verify-routing.js",
       "cost": "Gemini free tier, SHARED with hebrew_composition, report_drafting, report synthesis and the Notebook-X asks. A third unobservable consumer on an already-paced key.",
-      "agents": [9],
+      "agents": [
+        9
+      ],
       "_added": "2026-08-10"
     },
     "asset-provenance": {
       "what": "Every asset carries a note naming the model, the date and the prompt. A bible requirement, not a convention.",
-      "supplied_by": { "kind": "module", "ref": "workers/provider-common.js", "symbol": "renderAssetProvenance" },
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/provider-common.js",
+        "symbol": "renderAssetProvenance"
+      },
       "exercised_by": "scripts/verify-providers.js",
       "cost": "none — local computation",
-      "agents": [9],
+      "agents": [
+        9
+      ],
       "_added": "2026-08-10"
     },
     "front-publishing-gate": {
@@ -265,7 +560,9 @@
       },
       "exercised_by": null,
       "cost": "n/a",
-      "agents": [9]
+      "agents": [
+        9
+      ]
     },
     "front-localization": {
       "what": "Internal Hebrew material RE-VOICED (not translated) into English narrative on its way to the English-only Front — a localization step, not a polish step.",
@@ -277,7 +574,9 @@
       },
       "exercised_by": "scripts/verify-localization-engine.js",
       "cost": "Gemini free tier primary, Mistral backup — same shared pool as `hebrew_composition` (see `config/model-routing.json`'s `front_localization` lane)",
-      "agents": [9]
+      "agents": [
+        9
+      ]
     },
     "semantic-search": {
       "what": "Search the local brain — the per-agent adaptations — and compare reports across agents by meaning rather than by string.",
@@ -289,7 +588,11 @@
       },
       "exercised_by": "scripts/verify-providers.js",
       "cost": "Cohere TRIAL key — 1,000 calls per MONTH, not a free production tier. Converting to a production key is an owner decision under the overtime rule.",
-      "agents": [6, 7, 8]
+      "agents": [
+        6,
+        7,
+        8
+      ]
     },
     "cross-embodiment-comparison": {
       "what": "The Lead QA's signature instrument: compare report quality across agents AND across embodiment models — 'this persona is more consistent under that provider'.",
@@ -301,7 +604,9 @@
       },
       "exercised_by": "scripts/verify-learning-loop.js",
       "cost": "none — one D1 read",
-      "agents": [8]
+      "agents": [
+        8
+      ]
     },
     "gate-call-audit": {
       "what": "Agent 13's own line in the bible, and his favourite question: 'this gate — is it actually called anywhere?' One row per gate, CALLED / NOT-CALLED / UNPROVEN, each with a file:line or the evidence of its absence.",
@@ -312,7 +617,9 @@
       },
       "exercised_by": null,
       "cost": "n/a",
-      "agents": [13]
+      "agents": [
+        13
+      ]
     },
     "dependency-vulnerability-audit": {
       "what": "One of the Cyber Expert's four declared lanes of review.",
@@ -323,7 +630,9 @@
       },
       "exercised_by": null,
       "cost": "n/a",
-      "agents": [13]
+      "agents": [
+        13
+      ]
     },
     "paper-attack-multi-provider": {
       "what": "Run the same attack scenario through several providers deliberately, because different models see different things.",
@@ -334,7 +643,9 @@
       },
       "exercised_by": null,
       "cost": "n/a",
-      "agents": [13]
+      "agents": [
+        13
+      ]
     },
     "active-context-amendment": {
       "what": "The Team Lead's product: an approved amendment written PERMANENTLY into that agent's active-context.md, the same night the closing review reaches its conclusion.",
@@ -346,7 +657,10 @@
       },
       "exercised_by": "scripts/verify-learning-loop.js",
       "cost": "none — GitHub Contents API via BACKOFFICE_REPO_TOKEN",
-      "agents": [7, 6]
+      "agents": [
+        7,
+        6
+      ]
     },
     "agent-journal": {
       "what": "Each agent's own free writing, append-only — named in the bible for several personas and present as a file for all thirteen.",
@@ -358,7 +672,20 @@
       },
       "exercised_by": "scripts/verify-learning-loop.js",
       "cost": "none — GitHub Contents API via BACKOFFICE_REPO_TOKEN",
-      "agents": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13]
+      "agents": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11,
+        12,
+        13
+      ]
     },
     "adaptations-write": {
       "what": "The agent itself, or a reviewer, sharpening a local adaptations/<topic>.md — append only, never deletion (A2).",
@@ -370,7 +697,20 @@
       },
       "exercised_by": "scripts/verify-learning-loop.js",
       "cost": "none — GitHub Contents API via BACKOFFICE_REPO_TOKEN",
-      "agents": [1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13]
+      "agents": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11,
+        12,
+        13
+      ]
     },
     "active-context-probation": {
       "what": "A3's whole mechanism: a change to active context enters provisionally (measured over 20 actions, ≤3 concurrent per agent on distinct aspects, the agent never told), then a short meeting of three decides kept/dropped/extended — with a missed meeting falling as a PROCESS failure, and reviewing-the-reviewers escalating to the CEO with the Architect's opinion.",
@@ -382,7 +722,13 @@
       },
       "exercised_by": "scripts/verify-learning-loop.js",
       "cost": "none — D1 + one GitHub write per proposed change",
-      "agents": [6, 7, 8, 10, 11]
+      "agents": [
+        6,
+        7,
+        8,
+        10,
+        11
+      ]
     },
     "code-write-warehouse": {
       "what": "Write code — the single deliberate repo-scoped exception to the global no-code-write rule.",
@@ -394,119 +740,258 @@
       },
       "exercised_by": "scripts/verify-permissions.js",
       "cost": "none",
-      "agents": [10]
+      "agents": [
+        10
+      ]
+    },
+    "answer-quality-judging": {
+      "what": "Evaluate an answer AGAINST THE QUESTION with a real model, on a 1-in-8 sample, so the length proxy above can be calibrated. This is the function the length proxy is not: it reads the question.",
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/judge-sampler.js",
+        "symbol": "buildJudgePrompt",
+        "caveat": "SHIPS OFF (judge_sampler_enabled), so as of 2026-08-16 it has produced ZERO office rows and the correlation it exists to measure DOES NOT YET EXIST. Read that before treating this capability as answering anything. The mechanism is proven — two supervised live calls on the judgment lane (Cerebras, free tier) returned parseable scores of 0.88 and 0.07 for a good and a padded answer to the same question — but a proven mechanism with no data is not a measurement. THE POINT IS CALIBRATION, NOT A BETTER SCORE: the question is whether the cheap score correlates with a real one at all, and correlate() REFUSES to report a number below n=20 or when the cheap scores have no spread. The likeliest outcome is cheap_score_has_no_variance, because a metric sitting at 1.0 for 84% of answers has nothing to correlate with — and that would itself be the finding. Sampling is 1 in 8 by a deterministic hash of the case id (reproducible, so the sample can be audited); SENDING is capped by the judgment lane's 20-second unknown-cap pacing floor, not by a counter, and cases pacing turns away are recorded as paced_out rather than vanishing. KNOWN BIAS, stated: selection is position-independent, sending is not — within a block the earliest selected case takes the only slot."
+      },
+      "exercised_by": "scripts/verify-judge-sampler.js",
+      "cost": "none — judgment lane, Cerebras free tier. The cost objection to a real evaluation was checked and is false; the binding constraint is pacing.",
+      "agents": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11
+      ]
+    },
+    "growth-trend-watch": {
+      "what": "Measure every store that only grows — the verify suite, the report archive, per-agent journals, BOARD.md, TOKEN-BUDGET.md, the insert-only D1 tables — and report the change since the last measurement.",
+      "supplied_by": {
+        "kind": "module",
+        "ref": "scripts/growth-watch.mjs",
+        "symbol": "buildReport",
+        "caveat": "IT CAPS NOTHING AND RETIRES NOTHING, deliberately. KNOWN-FAILURE-MODES KFM-20 asks for a cap, a retirement path, OR AT MINIMUM A TREND SOMEONE READS; a cap is a policy decision that belongs to the owner and the trend is the part that was missing across seven consecutive sweeps (audit #12). It has an autonomous caller from day one — .github/workflows/weekly-capability-audit.yml — because a detection primitive with no consumer is the exact defect it was built in response to, and this project already owns one (back-office tools/repo-size-hygiene-check, whose own README records \"R7 — nothing calls this\"). That tool is NOT this one: it measures bytes on disk against a 2GB/4GB threshold, and none of #18/#19/#20 is a disk-space problem. COVERAGE IS PARTIAL IN CI AND SAYS SO: the weekly job holds no credential for either private repo, so back-office metrics come back not_measured WITH A REASON, never as zero, and each metric trends against the last run that measured THAT metric rather than the previous run. The CI run reports but does not extend the ledger (no commit step) — OB-085."
+      },
+      "exercised_by": "scripts/verify-growth-watch.js",
+      "cost": "none — filesystem reads plus one read-only Worker trigger (growth_counts)",
+      "agents": [
+        13
+      ]
     }
   },
-
   "_output_kind_producers_meta": "WHICH CAPABILITY COULD PRODUCE EACH KIND OF OUTPUT A ROLE IS FOR. This is the join that makes the audit's load-bearing half possible: `agents.<id>.output_kinds` says what the role produces, and this says which capability would have to work for that to happen. It lives here as DATA rather than as a string match inside workers/capability-audit.js, because 'a visual_asset comes from the image lane' is a judgement about this office and not something a module should infer from a substring. A kind with an EMPTY producer list is reported as `unmapped` — a gap in this file rather than necessarily in the office — and deliberately not as a gap in the office, because the two have different fixes.",
   "output_kind_producers": {
-    "case_answer": ["ask-data-center", "ask-notebook-x"],
-    "gap_hebrew": ["gap-flagging"],
-    "suggestion": ["routine-drafting"],
-    "status": ["routine-drafting"],
-    "incident": ["routine-drafting"],
-    "submission": ["submissions-ledger"],
-    "qa_review": ["judgment-review"],
-    "weekly": ["report-drafting", "report-structural-gate"],
-    "lifecycle_review": ["deliverable-lifecycle"],
-    "team_lead_review": ["judgment-review"],
-    "active_context_amendment": ["active-context-amendment"],
-    "lead_qa_weekly": ["report-drafting"],
-    "cross_embodiment_finding": ["cross-embodiment-comparison"],
-    "visual_asset": ["image-generation-draft", "image-polish"],
-    "front_publication": ["front-publishing-gate"],
-    "design_flag": ["routine-drafting"],
-    "guide_review": ["guide-authoring"],
-    "warehouse_build": ["code-write-warehouse"],
-    "architect_session": ["unattended-architect-session"],
-    "meeting": ["meeting-participation"],
-    "ceo_approval": ["deliverable-lifecycle"],
-    "dispatch": ["productivity-picture", "meeting-decision-to-board"],
-    "board_task": ["meeting-decision-to-board"],
-    "finding": ["capability-audit", "security-scan-outbound"],
-    "security_review": ["security-scan-outbound"]
+    "case_answer": [
+      "ask-data-center",
+      "ask-notebook-x"
+    ],
+    "gap_hebrew": [
+      "gap-flagging"
+    ],
+    "suggestion": [
+      "routine-drafting"
+    ],
+    "status": [
+      "routine-drafting"
+    ],
+    "incident": [
+      "routine-drafting"
+    ],
+    "submission": [
+      "submissions-ledger"
+    ],
+    "qa_review": [
+      "judgment-review"
+    ],
+    "weekly": [
+      "report-drafting",
+      "report-structural-gate"
+    ],
+    "lifecycle_review": [
+      "deliverable-lifecycle"
+    ],
+    "team_lead_review": [
+      "judgment-review"
+    ],
+    "active_context_amendment": [
+      "active-context-amendment"
+    ],
+    "lead_qa_weekly": [
+      "report-drafting"
+    ],
+    "cross_embodiment_finding": [
+      "cross-embodiment-comparison"
+    ],
+    "visual_asset": [
+      "image-generation-draft",
+      "image-polish"
+    ],
+    "front_publication": [
+      "front-publishing-gate"
+    ],
+    "design_flag": [
+      "routine-drafting"
+    ],
+    "guide_review": [
+      "guide-authoring"
+    ],
+    "warehouse_build": [
+      "code-write-warehouse"
+    ],
+    "architect_session": [
+      "unattended-architect-session"
+    ],
+    "meeting": [
+      "meeting-participation"
+    ],
+    "ceo_approval": [
+      "deliverable-lifecycle"
+    ],
+    "dispatch": [
+      "productivity-picture",
+      "meeting-decision-to-board"
+    ],
+    "board_task": [
+      "meeting-decision-to-board"
+    ],
+    "finding": [
+      "capability-audit",
+      "security-scan-outbound"
+    ],
+    "security_review": [
+      "security-scan-outbound"
+    ]
   },
-
   "agents": {
     "1": {
       "name": "The Perfectionist",
       "role": "QA Lead",
       "bible_claim": "She despises trivial queries and hoards complexity, seeking out syntax anomalies and cross-platform paradoxes. She treats her journal and her carefully curated bookmarks as sacred texts.",
-      "output_kinds": ["case_answer", "gap_hebrew", "suggestion"]
+      "output_kinds": [
+        "case_answer",
+        "gap_hebrew",
+        "suggestion"
+      ]
     },
     "2": {
       "name": "The Productive",
       "role": "Senior IT Operator",
       "bible_claim": "Raw throughput. Overtime whenever possible. He chases nothing: one failure and he drops the session, finds the answer elsewhere, and returns to demonstrate how easy it was.",
-      "output_kinds": ["case_answer", "gap_hebrew"]
+      "output_kinds": [
+        "case_answer",
+        "gap_hebrew"
+      ]
     },
     "3": {
       "name": "The Standard Agent",
       "role": "IT Generalist — the control",
       "bible_claim": "After every session where the interface behaved, he files a balanced status report — interface, resource access, answer quality, friendliness, overall satisfaction, each rated.",
-      "output_kinds": ["case_answer", "status"]
+      "output_kinds": [
+        "case_answer",
+        "status"
+      ]
     },
     "4": {
       "name": "The Trainee",
       "role": "Junior IT Support — the documentation checker",
       "bible_claim": "He is entirely dependent on the structural integrity of the active-context.md files the QA and Team Lead curate for him.",
-      "output_kinds": ["case_answer", "gap_hebrew"],
+      "output_kinds": [
+        "case_answer",
+        "gap_hebrew"
+      ],
       "_note": "His dependency names a file the office cannot write — see `active-context-amendment`."
     },
     "5": {
       "name": "The IT Chief",
       "role": "Senior IT Admin — the Technical Marker, escalation of last resort",
       "bible_claim": "He works logs and metadata, reconstructing what actually happened rather than accepting a summary.",
-      "output_kinds": ["case_answer", "incident", "submission"]
+      "output_kinds": [
+        "case_answer",
+        "incident",
+        "submission"
+      ]
     },
     "6": {
       "name": "The QA",
       "role": "Quality Assurance",
       "bible_claim": "He extracts logs about the agents and builds a weekly audit from them: one audit per agent per week, cases sampled at random from that agent's previous week, conducted jointly with the Team Lead and the audited agent.",
-      "output_kinds": ["qa_review", "weekly", "lifecycle_review"]
+      "output_kinds": [
+        "qa_review",
+        "weekly",
+        "lifecycle_review"
+      ]
     },
     "7": {
       "name": "The Team Lead",
       "role": "Agent Coach — the persona axis of the daily loop",
       "bible_claim": "Every day she reads every agent's reports for character consistency, behavioral drift, and context gaps, including cross-embodiment differences. An approved amendment is written permanently into that agent's active-context.md.",
-      "output_kinds": ["team_lead_review", "active_context_amendment"]
+      "output_kinds": [
+        "team_lead_review",
+        "active_context_amendment"
+      ]
     },
     "8": {
       "name": "The Lead QA",
       "role": "Chief Quality Officer",
       "bible_claim": "Weekly cross-comparison is his signature instrument: he compares report quality across agents and across embodiment models, surfacing findings like 'this persona is more consistent under that provider'.",
-      "output_kinds": ["lead_qa_weekly", "cross_embodiment_finding"]
+      "output_kinds": [
+        "lead_qa_weekly",
+        "cross_embodiment_finding"
+      ]
     },
     "9": {
       "name": "The Designer",
       "role": "UI/UX Specialist — the project's designer and the Front's gatekeeper",
       "bible_claim": "She generates visual assets through the office's image-capable providers, always leaving a provenance note (model, date). The Front runs on her gate: content accumulates in campus/shared/front-drafts/, and she curates and publishes in batches after QA sign-off.",
-      "output_kinds": ["visual_asset", "front_publication", "design_flag"]
+      "output_kinds": [
+        "visual_asset",
+        "front_publication",
+        "design_flag"
+      ]
     },
     "10": {
       "name": "The Architect",
       "role": "Project Mastermind — the Builder, the sole hand on the keys",
       "bible_claim": "The only entity that pushes code to any live project, and each push is individually owner-authorized at the time.",
-      "output_kinds": ["guide_review", "warehouse_build", "architect_session"],
+      "output_kinds": [
+        "guide_review",
+        "warehouse_build",
+        "architect_session"
+      ],
       "_dormant": "Excluded from the daily Q&A rotation by getActiveQaAgents() and never routed or shuffled. Dormancy is a deliberate state, NOT an absent capability — the audit must not report him as a gap for it."
     },
     "11": {
       "name": "The CEO",
       "role": "Founder & Chief Executive — the Barometer",
       "bible_claim": "He leads every meeting with veto rights; important decisions pass by majority where his vote counts double.",
-      "output_kinds": ["case_answer", "meeting", "ceo_approval"]
+      "output_kinds": [
+        "case_answer",
+        "meeting",
+        "ceo_approval"
+      ]
     },
     "12": {
       "name": "The Workflow",
       "role": "Operations Manager — the office's pulse",
       "bible_claim": "He intercepts every request from the Owner, decomposes it against the roster's topic affinities and current load, assigns, draws a metric line, and stands over the work. He runs the daily dispatch board — what came in, who has what, what is stuck and why.",
-      "output_kinds": ["dispatch", "weekly", "board_task"]
+      "output_kinds": [
+        "dispatch",
+        "weekly",
+        "board_task"
+      ]
     },
     "13": {
       "name": "The Cyber Expert",
       "role": "Security Specialist — the Adversarial Conscience",
       "bible_claim": "Four lanes of review, all against the office's own assets: configuration review (his favorite question is 'this gate, is it actually called anywhere?'); dependency and vulnerability audit; permission-flow analysis; and paper attack scenarios, where the same scenario is deliberately run through multiple providers.",
-      "output_kinds": ["finding", "security_review", "lifecycle_review"]
+      "output_kinds": [
+        "finding",
+        "security_review",
+        "lifecycle_review"
+      ]
     }
   }
 }

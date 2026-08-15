@@ -62,6 +62,14 @@ import { listImageCapableModels } from './gemini-image-client.js';
 import { renderAssetProvenance, extensionForMime } from './provider-common.js';
 import { collectTodayGapReports, renderGapDigest } from './gap-reports.js';
 import { METRIC_DISCLOSURE } from './quality-metric.js';
+// OB-081 — the sampled real judge. The Worker owns the toggle, the calibration
+// read-back and the supervised single call; the sampling itself happens on the
+// Q&A path in agents/agent-base.js, which is the only place holding the full
+// answer text (see that file's `_maybeJudgeSample()`).
+import {
+  runCalibration, renderCalibrationReport, buildJudgePrompt, parseJudgeVerdict,
+  JUDGE_LANE, JUDGE_MAX_TOKENS,
+} from './judge-sampler.js';
 import { resolveIssueTarget } from './permission-guard.js';
 // buildOfficeContext + BUDGETS are imported for the office_context_status
 // read-back ONLY (2026-08-10): the meeting and per-agent shapes are the two that
@@ -118,6 +126,7 @@ import {
   fetchVerificationQueueChecked, parseVerificationQueue, renderVerificationQueue,
   pickVerificationQueueItems, buildVerifyPrompt, parseVerifyResult, replaceGuideSection,
   fetchRawRepoFile, ARCHITECT_REVIEW_SYSTEM, VERIFY_SYSTEM,
+  guidesEnabled,
 } from './guide-engine.js';
 import {
   reportPipelineEnabled, planReportProviders, assertDistinctReviewer,
@@ -398,7 +407,7 @@ async function getSimulationState(env) {
  */
 async function updateSimulationState(env, patch) {
   const current = await getSimulationState(env);
-  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled', 'improvement_loop_enabled', 'architect_liaison_enabled', 'office_context_enabled', 'action_items_to_board_enabled', 'report_pipeline_enabled', 'owner_channel_enabled', 'learning_loop_enabled'];
+  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled', 'improvement_loop_enabled', 'architect_liaison_enabled', 'office_context_enabled', 'action_items_to_board_enabled', 'report_pipeline_enabled', 'owner_channel_enabled', 'learning_loop_enabled', 'judge_sampler_enabled'];
   const next = { ...current };
   const rejected = [];
   for (const key of Object.keys(patch)) {
@@ -1246,22 +1255,13 @@ function todayDateStr() {
   return new Date().toISOString().slice(0, 10);
 }
 
-/**
- * Kill switch for the Guides pipeline (added 2026-08-02, before first
- * activation). The daily-schedule guide blocks ship inside the deployed
- * bundle, so without this gate the first deploy of the feature would start
- * drafting/reviewing guides on the very next cron tick — before the owner
- * has read a single guide. The flag lives in SIM_KV's simulation-state
- * (`guides_enabled`), so flipping it needs no redeploy:
- *   ON/OFF: POST /api/agents/trigger {"type":"guides_toggle","enabled":true|false}
- * Flag absent or false → all three guide blocks are logged no-ops on the
- * scheduled path. The supervised-test path ({"type":"guide_block"}) passes
- * { bypassGate: true } and is unaffected.
+/*
+ * `guidesEnabled()` MOVED to workers/guide-engine.js on 2026-08-16 (OB-078)
+ * and is imported at the top of this file. It was UNPROVEN for one reason —
+ * it lived here, and nothing can load this module outside a Worker — so the
+ * fix was to move the gate, not to write a test that could never run. See
+ * that function's header for why the behaviour is identical.
  */
-async function guidesEnabled(env) {
-  const sim = await getSimulationState(env);
-  return sim.guides_enabled === true;
-}
 
 /**
  * 'guide_draft' block: picks today's topic (workers/guide-engine.js
@@ -4812,6 +4812,79 @@ export default {
               if (body.render) result = { ...result, rendered: renderComparisonFinding(result) };
             }
             break;
+          case 'growth_counts': {
+            // Row counts for the insert-only D1 tables, for
+            // `scripts/growth-watch.mjs` (audit #19 / KFM-20). Read-only,
+            // no model call, no write.
+            //
+            // It is a TRIGGER rather than a query in the script because the
+            // script runs where D1 is not reachable — a GitHub Actions job and
+            // the owner's laptop both have the repo and neither has a D1
+            // binding. The Worker is the only thing that can count these rows.
+            //
+            // A table that cannot be counted comes back NULL, not 0: "the
+            // office wrote nothing" and "the count failed" are different facts,
+            // and a growth ledger that recorded a failed count as zero would
+            // show every insert-only table collapsing to empty (KFM-13).
+            const counts = {};
+            for (const table of ['reports', 'interactions', 'cases', 'suggestions']) {
+              try {
+                const row = await env.DB.prepare(`SELECT COUNT(*) AS n FROM ${table}`).first();
+                counts[table] = typeof row?.n === 'number' ? row.n : null;
+              } catch (e) {
+                counts[table] = null;
+                counts[`${table}_error`] = String(e?.message || e).slice(0, 160);
+              }
+            }
+            result = { ok: true, counts, note: 'A null count means the table could not be read, never that it is empty.' };
+            break;
+          }
+          case 'judge_sampler_toggle':
+            // OB-081's kill switch (workers/judge-sampler.js
+            // judgeSamplerEnabled()). Body: { enabled: true|false }. While off
+            // — the shipped default — no answer is ever sent to the judgment
+            // lane and no quality_judgements row is written; the cheap score is
+            // computed exactly as before either way.
+            result = await updateSimulationState(env, { judge_sampler_enabled: !!body.enabled });
+            break;
+          case 'judge_calibration': {
+            // **The output of OB-081.** Reads every quality_judgements row and
+            // reports whether the cheap length proxy correlates with a real
+            // evaluation at all. Read-only — no model call, no write.
+            // Body: {} (optional { render: true } for the Markdown finding).
+            const calib = await runCalibration(env);
+            result = body.render && calib.ok
+              ? { ...calib, rendered: renderCalibrationReport(calib, { date: new Date().toISOString().slice(0, 10) }) }
+              : calib;
+            break;
+          }
+          case 'judge_test': {
+            // ONE supervised judgment-lane call with the routing gate bypassed,
+            // the same shape `routing_test` and `guide_block` use. Body:
+            // { question, answer }. Writes NOTHING — this is for reading the
+            // judge's actual output before trusting a correlation built on it.
+            if (!body.question || !body.answer) {
+              result = { ok: false, reason: 'judge_test needs { question, answer }' };
+              break;
+            }
+            const built = buildJudgePrompt({ question: body.question, answer: body.answer });
+            const routed = await routeTaskTypeCall(env, JUDGE_LANE, {
+              bypassGate: true,
+              prompt: built.prompt,
+              systemPrompt: built.systemPrompt,
+              maxTokens: JUDGE_MAX_TOKENS,
+              agentId: 8,
+            });
+            result = {
+              ok: !!routed?.ok,
+              truncatedInput: built.truncated,
+              provider: routed?.provider || null,
+              attempts: routed?.attempts || [],
+              raw: routed?.result?.text ?? null,
+              parsed: parseJudgeVerdict(String(routed?.result?.text ?? '')),
+            };
+            break;
+          }
           case 'office_context_toggle':
             // Office-context kill switch (workers/office-context.js
             // officeContextEnabled()): flips SIM_KV simulation-state

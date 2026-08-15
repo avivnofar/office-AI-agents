@@ -146,7 +146,11 @@ function fakeDb() {
               const [agentId, status] = args;
               return { results: tables.probation.filter((r) => r.agent_id === agentId && r.status === status) };
             }
-            if (/^SELECT agent_id, project, embodiment_model, quality\s+FROM reports/.test(sql)) {
+            // `created_at, scorer_id` joined the SELECT on 2026-08-16 (OB-080):
+            // the comparison cannot tell which formula produced a row without
+            // them. Matched loosely on the leading columns so an added column
+            // does not break the fake for a reason unrelated to what it fakes.
+            if (/^SELECT agent_id, project, embodiment_model, quality/.test(sql)) {
               return { results: db._embodimentRows || [] };
             }
             throw new Error(`fakeDb: unhandled all(): ${sql}`);
@@ -462,10 +466,16 @@ console.log('\n-- 12. embodiment-comparison.js reads real rows, never fabricates
 {
   const env = fakeEnv({ flag: true, withFetch: false });
   globalThis.fetch = throwingFetch('embodiment comparison (must be DB-only, no network)');
+  // `created_at`/`scorer_id` ADDED to these fixtures 2026-08-16: a row with no
+  // timestamp is not a shape live D1 can produce (the column has a DEFAULT), and
+  // a fixture that cannot be attributed exercises the could-not-check path
+  // instead of the one this section is about.
+  const AT = '2026-08-20 05:00:00';   // after quality-metric.js UNIFIED_FROM
+  const SC = 'length-proxy-v2@800';
   env.DB._embodimentRows = [
-    { agent_id: 1, project: 'notebook-x', embodiment_model: null, quality: 0.9 },
-    { agent_id: 1, project: 'notebook-x', embodiment_model: 'groq', quality: 1.0 },
-    { agent_id: 2, project: 'notebook-x', embodiment_model: 'cloudflare-fallback', quality: 0.8 },
+    { agent_id: 1, project: 'notebook-x', embodiment_model: null, quality: 0.9, created_at: AT, scorer_id: SC },
+    { agent_id: 1, project: 'notebook-x', embodiment_model: 'groq', quality: 1.0, created_at: AT, scorer_id: SC },
+    { agent_id: 2, project: 'notebook-x', embodiment_model: 'cloudflare-fallback', quality: 0.8, created_at: AT, scorer_id: SC },
   ];
   const thin = await runCrossEmbodimentComparison(env);
   check('unreliable (null-embodiment) rows are counted, not silently dropped', thin.unreliableRowCount, 1);
@@ -474,11 +484,13 @@ console.log('\n-- 12. embodiment-comparison.js reads real rows, never fabricates
   checkFalse('...and specifically NOT an embodiment_quality_gap finding', thin.findings.some((f) => f.kind === 'embodiment_quality_gap'));
 
   const rich = [];
-  for (let i = 0; i < 8; i++) rich.push({ agent_id: 1, project: 'notebook-x', embodiment_model: 'groq', quality: 0.95 });
-  for (let i = 0; i < 8; i++) rich.push({ agent_id: 2, project: 'notebook-x', embodiment_model: 'cloudflare-fallback', quality: 0.60 });
+  for (let i = 0; i < 8; i++) rich.push({ agent_id: 1, project: 'notebook-x', embodiment_model: 'groq', quality: 0.95, created_at: AT, scorer_id: SC });
+  for (let i = 0; i < 8; i++) rich.push({ agent_id: 2, project: 'notebook-x', embodiment_model: 'cloudflare-fallback', quality: 0.60, created_at: AT, scorer_id: SC });
   env.DB._embodimentRows = rich;
   const gapFound = await runCrossEmbodimentComparison(env);
   checkTrue(`with ${MIN_SAMPLE_FOR_FINDING}+ rows on both sides and a real gap, a finding IS produced`, gapFound.findings.some((f) => f.kind === 'embodiment_quality_gap'));
+  checkFalse('...and one scorer across all the rows means nothing is refused as confounded',
+    gapFound.findings.some((f) => f.kind === 'comparison_refused_confounded'));
   const rendered = renderComparisonFinding(gapFound, { date: '2026-08-10' });
   checkTrue('renderComparisonFinding() produces readable Markdown', rendered.includes('## Cross-embodiment comparison'));
 }

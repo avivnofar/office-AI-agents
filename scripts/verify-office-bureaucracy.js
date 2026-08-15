@@ -461,6 +461,13 @@ const ALLOW_LIST_TO_TRIGGER = {
   // Added 2026-08-10 with the learning loop's write path (workers/context-
   // editor.js, probation.js) — same session, later in the day.
   learning_loop_enabled: 'learning_loop_toggle',
+  // Added 2026-08-16 with the sampled real judge (OB-081,
+  // workers/judge-sampler.js). This map caught it the same way it caught the
+  // owner channel — the session had added the trigger case and forgotten
+  // `updateSimulationState()`'s allow-list, which is the exact failure
+  // agent-runner.js documents in prose above that array: adding a toggle case
+  // is not enough, and the omission is invisible (HTTP 200, state unchanged).
+  judge_sampler_enabled: 'judge_sampler_toggle',
 };
 const allowListMatch = /const allowedKeys = \[([^\]]+)\]/.exec(arSrc0);
 const allowListKeys = allowListMatch

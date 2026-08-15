@@ -14,6 +14,7 @@ import {
   computeSlug, parseTopicsMd, buildDraftPrompt, isSplitRecommendation, parseReviewDecision,
   extractUnverifiedSections, renderGuideFile, renderRejectedDraftFile, guidePath, draftPath,
   parseVerificationQueue, renderVerificationQueue, replaceGuideSection, ARCHITECT_REVIEW_SYSTEM,
+  guidesEnabled,
 } from '../workers/guide-engine.js';
 
 const require = createRequire(import.meta.url);
@@ -277,8 +278,21 @@ check('agent-runner.js never escalates a rejected guide to a GitHub Issue',
 
 /* ── Kill-switch gate (guides_enabled, added 2026-08-02) ────────────────── */
 console.log('\n--- Kill-switch gate (guides_enabled) ---');
-check('guidesEnabled() reads simulation-state and defaults CLOSED (=== true, so absent flag means off)',
-  /async function guidesEnabled\(env\)[\s\S]{0,200}guides_enabled === true/.test(agentRunnerSrc));
+/*
+ * MOVED to guide-engine.js on 2026-08-16 (OB-078), which is why this check
+ * changed shape. It used to grep agent-runner.js's source for the function
+ * body — the only thing possible while the gate lived in a module nothing can
+ * load. Now that it is importable, the gate is CALLED instead, which asserts
+ * the property rather than the spelling (KFM-04c) and is what moved it from
+ * UNPROVEN to CALLED in the gate-call audit. The adversarial set lives in
+ * scripts/verify-unproven-gates.js §9; these two keep the guide pipeline's own
+ * verifier honest about its own switch.
+ */
+check('guidesEnabled() defaults CLOSED — an absent flag means off',
+  (await guidesEnabled({ SIM_KV: { get: async () => ({}) } })) === false);
+check('...and opens only for boolean true, never a truthy string',
+  (await guidesEnabled({ SIM_KV: { get: async () => ({ guides_enabled: true }) } })) === true
+  && (await guidesEnabled({ SIM_KV: { get: async () => ({ guides_enabled: 'true' }) } })) === false);
 for (const fn of ['processGuideDraftBlock', 'processGuideReviewBlock', 'processGuideVerifyBlock']) {
   check(`${fn} checks the gate at the top (bypassGate opt honoured, guides_disabled no-op otherwise)`,
     new RegExp(`(async function|const) ${fn}[\\s\\S]{0,400}bypassGate[\\s\\S]{0,120}guidesEnabled\\(env\\)[\\s\\S]{0,250}guides_disabled`).test(agentRunnerSrc));

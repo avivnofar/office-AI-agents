@@ -138,12 +138,12 @@ function isRestDay(now = new Date()) {
  * on this machine (`gh auth status`) rather than this script managing its own
  * token — one fewer secret that can silently expire.
  */
-async function checkReports(dateStr) {
+async function checkReports(dateStr, { exec = execFileSync } = {}) {
   const result = { date: dateStr, method: null, daily: null, ok: false, detail: null };
 
   const apiPath = `repos/${OWNER}/${BACKOFFICE_REPO}/commits?path=${DAILY_SUMMARY_PATH}&since=${dateStr}T00:00:00Z&per_page=20`;
   try {
-    const raw = execFileSync('gh', ['api', apiPath], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const raw = exec('gh', ['api', apiPath], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     const commits = JSON.parse(raw);
     result.method = 'github-api';
     result.daily = Array.isArray(commits) ? commits.length : 0;
@@ -192,10 +192,10 @@ async function checkReports(dateStr) {
  * `git` is invoked with execFileSync and an argument array — never a shell
  * string — so a branch name containing shell metacharacters is data, not code.
  */
-function checkBranches() {
+function checkBranches({ exec = execFileSync, repos = REPOS, existsSync = fs.existsSync } = {}) {
   const out = [];
-  for (const repo of REPOS) {
-    if (!fs.existsSync(path.join(repo.dir, '.git'))) {
+  for (const repo of repos) {
+    if (!existsSync(path.join(repo.dir, '.git'))) {
       out.push({ repo: repo.name, error: `no checkout at ${repo.dir} — cannot report its branches, and an unreported repo is not a clean one` });
       continue;
     }
@@ -215,11 +215,11 @@ function checkBranches() {
        */
       let defaultBranch = null;
       try {
-        defaultBranch = execFileSync('git', ['-C', repo.dir, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
+        defaultBranch = exec('git', ['-C', repo.dir, 'symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
           { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().replace(/^origin\//, '');
       } catch { /* reported below, never guessed */ }
 
-      const raw = execFileSync('git', [
+      const raw = exec('git', [
         '-C', repo.dir, 'for-each-ref',
         '--format=%(refname:short)\t%(committerdate:unix)\t%(authorname)',
         'refs/remotes/origin',
@@ -269,6 +269,30 @@ function branchVerdict(rows) {
 }
 
 /* ──────────────────────────────── Main ────────────────────────────────── */
+
+/*
+ * ── WHY THIS IS A FUNCTION AND NOT TOP-LEVEL CODE (2026-08-16, OB-078) ─────
+ *
+ * Everything below used to run at module scope. That made this file
+ * IMPORT-EXECUTES: a Node verifier that so much as `import`ed it would shell
+ * out to git, call GitHub, print a report and set an exit code. So the three
+ * gates in it — `isRestDay`, `checkReports`, `checkBranches` — could not be
+ * exercised by any test, and the gate-call audit recorded all three as
+ * UNPROVEN.
+ *
+ * **That is the finding worth carrying, not the fix.** They were not UNPROVEN
+ * because nobody bothered to write tests. They were unprovable because of a
+ * property of the module, and no amount of discipline about writing tests
+ * changes a module that cannot be loaded. Same shape as the two files whose
+ * bare JSON imports were fixed on 2026-08-16: an architecture problem wearing
+ * the costume of a habit problem.
+ *
+ * The behaviour when RUN is unchanged, deliberately — this is the office's A16
+ * external check and the midnight run acts on its exit code. The guard below
+ * compares `process.argv[1]` against this module's own path, so running it is
+ * exactly what it was and importing it is now free.
+ */
+export async function main() {
 
 const dateStr = dateArg || israelDateStr();
 const restDay = !dateArg && isRestDay();
@@ -369,3 +393,25 @@ console.log(`\nexit ${code}  (0 reported / 1 DID NOT REPORT / 2 could not check)
 finish(code);
 
 }
+
+}
+
+/**
+ * The gates, exported so they can be exercised. Nothing about them changed;
+ * they were simply unreachable from outside a run.
+ */
+export { isRestDay, israelDateStr, israelNow, checkReports, checkBranches, branchVerdict };
+
+/*
+ * RUN ONLY WHEN RUN. `import.meta.url` against `process.argv[1]` — resolved
+ * through `realpath` because Windows hands back a drive-letter case and a path
+ * separator that do not always match `fileURLToPath()`, and a guard that
+ * silently never fires would turn this watchdog into a file that does nothing.
+ */
+const invokedDirectly = (() => {
+  try {
+    const entry = process.argv[1] ? fs.realpathSync(process.argv[1]) : '';
+    return entry && entry === fs.realpathSync(fileURLToPath(import.meta.url));
+  } catch { return false; }
+})();
+if (invokedDirectly) await main();

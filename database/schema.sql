@@ -109,6 +109,32 @@ CREATE TABLE IF NOT EXISTS interactions (
 -- score here", never zero. Until 2026-08-06 this value was computed on every
 -- answer and DISCARDED — it appeared in no INSERT anywhere in the repo, so the
 -- improvement loop had been specified against data nobody was collecting.
+--
+-- `scorer_id` (added 2026-08-16, OB-080) NAMES THE FUNCTION THAT PRODUCED
+-- `quality`, and is NOT optional on a scored row — buildOfficeEventRow()
+-- REFUSES one without it. The reason is measured: from 2026-07-18 to
+-- 2026-08-16 the office ran TWO scorers side by side (divisor 800 for
+-- data-center, 600 for notebook-x, the second an undeclared inline copy), the
+-- same answer scored 33% higher on one project than the other, and the
+-- divergence survived four weeks because THE ROWS DID NOT SAY. It ended in a
+-- published finding that a degraded fallback provider outscored the office's
+-- primary — arithmetic about two denominators, presented as evidence about two
+-- providers. A number stored without the name of what computed it is not a
+-- measurement; it is a number.
+--
+-- Format is `name@divisor` (e.g. `length-proxy-v2@800`) so two rows can be
+-- compared by string equality without a lookup table that could drift from the
+-- ids actually in use. Legacy ids are `length-proxy-v1@800` / `@600` and are
+-- never WRITTEN — they exist only as what workers/quality-metric.js
+-- `scorerForRow()` infers for the 134 rows that predate this column.
+--
+-- **The 134 pre-existing scored rows are NULL here and stay NULL.** History is
+-- not rescored and not backfilled (OFFICE-POLICY A15): a backfilled id would be
+-- a guess wearing the same shape as a record. They are attributed instead from
+-- `created_at` against quality-metric.js UNIFIED_FROM, which is EXACT for them
+-- because every one predates the boundary, and `scorerForRow()` reports
+-- `source: 'inferred'` rather than 'recorded' so a reader can tell the two
+-- apart.
 CREATE TABLE IF NOT EXISTS reports (
   id TEXT PRIMARY KEY,
   agent_id INTEGER NOT NULL,
@@ -123,6 +149,7 @@ CREATE TABLE IF NOT EXISTS reports (
   embodiment_model TEXT,
   track TEXT,
   quality REAL,
+  scorer_id TEXT,
   FOREIGN KEY (agent_id) REFERENCES agents(id)
 );
 
@@ -380,6 +407,20 @@ CREATE TABLE IF NOT EXISTS pull_log (
 --     --command "ALTER TABLE reports ADD COLUMN track TEXT"
 --   npx wrangler d1 execute data-center-db --remote \
 --     --command "ALTER TABLE reports ADD COLUMN quality REAL"
+--
+-- AND, 2026-08-16 (OB-080) — RUN AND VERIFIED THE SAME DAY, before the deploy
+-- that writes it. See the `scorer_id` note beside the table definition above.
+--   npx wrangler d1 execute data-center-db --remote \
+--     --command "ALTER TABLE reports ADD COLUMN scorer_id TEXT"
+-- Post-migration read-back on live D1, 2026-08-16: 134 rows have a non-null
+-- `quality`, and all 134 have `scorer_id IS NULL` — the exact population
+-- `scorerForRow()`'s date-and-project inference exists to read.
+--
+-- THIS ONE MUST BE RUN BEFORE THE DEPLOY, unlike the four above, and the
+-- reason is that `improvement_loop_enabled` is ALREADY ON in production. The
+-- "either order is safe" argument below rests entirely on the flag being off;
+-- with it on, deploying the INSERT first would silently lose every capture row
+-- until the ALTER landed.
 --
 -- ORDER RELATIVE TO DEPLOY, AND WHAT BREAKS IF IT IS WRONG:
 --

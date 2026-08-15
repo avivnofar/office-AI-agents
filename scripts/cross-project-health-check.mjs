@@ -54,11 +54,20 @@ function renderTemplate(template, now) {
     .replaceAll('{{today}}', now.toISOString().slice(0, 10));
 }
 
-/** Resolves a gatingWorkflow's enabled/disabled state. Returns null (no gate) if check has none. */
-function resolveGate(gatingWorkflow) {
+/**
+ * Resolves a gatingWorkflow's enabled/disabled state. Returns null (no gate) if
+ * check has none.
+ *
+ * `ghFn` is injectable (2026-08-16, OB-078) purely so this can be exercised
+ * without running the real `gh` binary against the real GitHub. It defaults to
+ * the real one, so no production path changed — the only caller that passes
+ * anything is the verifier. This is the smaller half of the testability fix;
+ * the larger half was making the module importable at all.
+ */
+function resolveGate(gatingWorkflow, ghFn = gh) {
   if (!gatingWorkflow) return null;
   try {
-    const out = gh(['api', `repos/${gatingWorkflow.repo}/actions/workflows`, '-q', '.workflows[] | "\\(.name)|\\(.state)"']);
+    const out = ghFn(['api', `repos/${gatingWorkflow.repo}/actions/workflows`, '-q', '.workflows[] | "\\(.name)|\\(.state)"']);
     const line = out.split('\n').find((l) => l.startsWith(`${gatingWorkflow.name}|`));
     if (!line) return { enabled: null, reason: `workflow "${gatingWorkflow.name}" not found in ${gatingWorkflow.repo}` };
     const state = line.split('|')[1];
@@ -171,6 +180,19 @@ function runCheck(check, now) {
   }
 }
 
+/*
+ * ── WHY THIS IS A FUNCTION AND NOT TOP-LEVEL CODE (2026-08-16, OB-078) ─────
+ *
+ * Same change, same reason, as scripts/report-watchdog.mjs: this file used to
+ * run its whole sweep at module scope and export nothing, so importing it shelled
+ * out to `gh` and printed a report. `resolveGate()` — the gate that decides
+ * whether a check is even evaluated, and therefore the one whose failure mode is
+ * "everything silently SKIPPED" — could not be exercised by a test at all, and
+ * the gate-call audit recorded it UNPROVEN.
+ *
+ * Behaviour when RUN is unchanged.
+ */
+export function main() {
 const now = new Date();
 console.log(`Cross-project health check — dry run, ${now.toISOString()}\n(read-only: no files written, no issues filed, no workflows triggered)\n`);
 
@@ -184,3 +206,19 @@ for (const check of manifest.checks) {
 
 console.log(`Excluded from this manifest: ${Object.keys(manifest.not_included).join(', ')}`);
 console.log(anyFail ? '\nAt least one real FAIL (not SKIPPED/UNKNOWN) — would file a digest issue if wired live.' : '\nNo FAILs.');
+}
+
+/**
+ * The gates and their helpers, exported so they can be exercised. `gh` is
+ * exported too: it is how a test injects a fake shell instead of running the
+ * real `gh` binary — see scripts/verify-unproven-gates.js.
+ */
+export { resolveGate, runCheck, renderTemplate, isoWeekNumber, ageHours, manifest };
+
+const invokedDirectly = (() => {
+  try {
+    const entry = process.argv[1] ? fs.realpathSync(process.argv[1]) : '';
+    return entry && entry === fs.realpathSync(fileURLToPath(import.meta.url));
+  } catch { return false; }
+})();
+if (invokedDirectly) main();

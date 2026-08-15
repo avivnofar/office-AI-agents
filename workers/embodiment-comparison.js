@@ -37,9 +37,39 @@
  * from a comment.
  */
 
-import { METRIC_DISCLOSURE, scoresAreComparable, saturationOf, SCORER_ID } from './quality-metric.js';
+import {
+  METRIC_DISCLOSURE, metricDisclosureFor, DIVISOR_UNIFICATION_NOTE, UNIFIED_FROM_ISO,
+  scoresAreComparable, saturationOf, scorerForRow,
+} from './quality-metric.js';
 
 export const MIN_SAMPLE_FOR_FINDING = 5;
+
+/**
+ * ── SCORER STRATIFICATION, added 2026-08-16 (OB-080) ────────────────────────
+ *
+ * The first version of this instrument pooled every row and ranked providers.
+ * On live D1 that produced "cloudflare-fallback (0.879) scores higher than
+ * claude (0.421)" — a fact about two divisors, because provider maps one-to-one
+ * onto project and the divisor was chosen by project. The fix that session was
+ * a REFUSAL: rank nothing when the scorers differ.
+ *
+ * A refusal is correct and it is not an answer. What makes an answer possible
+ * is stratifying: **compare only within one scorer, and report each stratum
+ * separately.** The divisors are unified from `UNIFIED_FROM` so future rows all
+ * share one stratum — but history is not rescored, so the strata are permanent
+ * and this instrument has to be able to read across the boundary without
+ * pretending it is not there.
+ *
+ * The pooled cross-stratum ranking is still refused. What is new is that a
+ * within-stratum ranking is now attempted and reported, which is how the
+ * instrument produces a provider comparison at all.
+ */
+function stratifyRows(rows) {
+  return rows.map((r) => {
+    const s = scorerForRow({ project: r.project, scoredAt: r.created_at, scorerId: r.scorer_id });
+    return { ...r, _scorerId: s.scorerId, _divisor: s.divisor, _scorerSource: s.source, _era: s.era };
+  });
+}
 
 /**
  * @param {object} env - needs env.DB (D1)
@@ -48,14 +78,22 @@ export const MIN_SAMPLE_FOR_FINDING = 5;
 export async function runCrossEmbodimentComparison(env) {
   if (!env?.DB) return { ok: false, reason: 'no_db_binding' };
 
+  // `created_at` and `scorer_id` ADDED 2026-08-16: without them this query
+  // cannot tell which formula produced a row, which is precisely what made the
+  // false finding unfalsifiable. `scorer_id` is authoritative where present;
+  // `created_at` is how the 134 rows that predate the column are attributed.
   const rows = await env.DB.prepare(
-    `SELECT agent_id, project, embodiment_model, quality
+    `SELECT agent_id, project, embodiment_model, quality, created_at, scorer_id
      FROM reports WHERE type = 'office_event' AND event_type = 'case_answer'`
   ).all();
-  const all = rows.results || [];
+  const all = stratifyRows(rows.results || []);
 
   const reliable = all.filter((r) => r.embodiment_model !== null && r.embodiment_model !== '');
   const unreliable = all.filter((r) => r.embodiment_model === null || r.embodiment_model === '');
+
+  const strata = [...new Set(all.map((r) => r._scorerId))];
+  const inferred = all.filter((r) => r._scorerSource === 'inferred').length;
+  const unattributed = all.filter((r) => r._scorerSource === 'unknown').length;
 
   return {
     ok: true,
@@ -66,10 +104,24 @@ export async function runCrossEmbodimentComparison(env) {
     unreliableNote: unreliable.length
       ? `${unreliable.length} of ${all.length} case_answer rows carry no reliable embodiment_model (pre-2026-08-10 capture bug, see this module's header) and are EXCLUDED from every comparison below, not averaged in.`
       : null,
+    // How the scorer behind each row was established. `inferred` is not a
+    // defect — it is the only honest reading of a row written before the
+    // scorer_id column existed — but it is weaker evidence than `recorded` and
+    // is counted rather than blended in (KFM-13).
+    scorerStrata: strata,
+    scorerAttribution: {
+      recorded: all.length - inferred - unattributed,
+      inferred,
+      unattributed,
+      note: inferred
+        ? `${inferred} of ${all.length} rows predate the scorer_id column and their scorer is INFERRED from created_at against ${UNIFIED_FROM_ISO} (exact for them: every one was written before that boundary). ${unattributed} could not be attributed at all.`
+        : null,
+    },
     byAgent: groupAndScore(reliable, 'agent_id'),
     byEmbodiment: groupAndScore(reliable, 'embodiment_model'),
     byAgentAndEmbodiment: groupPair(reliable, 'agent_id', 'embodiment_model'),
     byProjectAndEmbodiment: groupPair(reliable, 'project', 'embodiment_model'),
+    byScorerAndEmbodiment: groupPair(reliable, '_scorerId', 'embodiment_model'),
     findings: buildFindings(reliable),
   };
 }
@@ -79,20 +131,23 @@ function groupAndScore(rows, key) {
   for (const r of rows) {
     const k = r[key];
     if (k === null || k === undefined) continue;
-    if (!groups.has(k)) groups.set(k, { qualities: [], projects: new Set() });
+    if (!groups.has(k)) groups.set(k, { qualities: [], projects: new Set(), scorers: new Map() });
     groups.get(k).qualities.push(r.quality);
     groups.get(k).projects.add(r.project ?? null);
+    groups.get(k).scorers.set(r._scorerId, r._divisor ?? null);
   }
   return [...groups.entries()].map(([k, g]) => ({
     [key]: k,
     n: g.qualities.length,
     avgQuality: round3(avg(g.qualities)),
     meetsMinSample: g.qualities.length >= MIN_SAMPLE_FOR_FINDING,
-    // WHICH SCORER produced these numbers, carried on the group itself.
-    // `project` selects the divisor (quality-metric.js), so two groups whose
-    // project sets differ are not on the same scale and must not be ranked
-    // against each other. Added 2026-08-16.
     projects: [...g.projects],
+    // WHICH SCORER(S) produced these numbers, carried on the group itself and
+    // read straight off the rows rather than re-derived from `project`. A group
+    // spanning more than one entry here is internally incomparable — its own
+    // average pools two scales — which is a thing only this field can show.
+    // Added 2026-08-16.
+    scorers: [...g.scorers.entries()].map(([scorerId, divisor]) => ({ scorerId, divisor })),
     saturation: saturationOf(g.qualities),
   })).sort((a, b) => b.n - a.n);
 }
@@ -134,44 +189,87 @@ function buildFindings(rows) {
       text: `Only ${qualifyingEmbodiments.length} embodiment(s) have ${MIN_SAMPLE_FOR_FINDING}+ reliably-attributed rows (${byEmbodiment.map((e) => `${e.embodiment_model}: n=${e.n}`).join(', ') || 'none'}). A cross-embodiment quality comparison needs at least two providers each meeting the sample floor to say anything — the data does not support one yet.`,
     });
   } else {
-    const sorted = [...qualifyingEmbodiments].sort((a, b) => b.avgQuality - a.avgQuality);
-    const best = sorted[0]; const worst = sorted[sorted.length - 1];
-
     /*
-     * ── THE CONFOUND GATE, added 2026-08-16 ──────────────────────────────
+     * ── THE POOLED RANKING IS STILL REFUSED, AND THE REASON HAS CHANGED ───
      *
-     * Before this gate, the branch below fired whenever two averages differed
-     * by 0.1. On live D1 that produced, verbatim:
+     * Before the confound gate, the branch below fired whenever two averages
+     * differed by 0.1. On live D1 that produced, verbatim:
      *
      *   "cloudflare-fallback (n=19, avg 0.879) scores higher than claude
      *    (n=10, avg 0.421) on reliably-attributed rows"
      *
      * — a degraded FALLBACK provider beating the office's primary. The
      * sentence is arithmetically correct and it is not a fact about either
-     * provider. `quality` is a length proxy whose divisor is chosen by
+     * provider: `quality` was a length proxy whose divisor was chosen by
      * PROJECT (800 data-center / 600 notebook-x), and each provider serves
-     * exactly one project: Claude only answers data-center, Gemini and
-     * cloudflare-fallback only answer notebook-x. So every cross-provider
-     * comparison here is also a cross-divisor comparison, and the two effects
-     * cannot be separated by any sample size.
+     * exactly one project.
      *
-     * The instrument therefore REFUSES the ranking rather than qualifying it.
-     * A caveat under a ranked list is still a ranked list — the reader takes
-     * the ranking and leaves the caveat (KFM-07: "a caveat is not a fix").
-     * The refusal itself is the finding, which is what A8 asks for: it names
-     * the remedy (score both projects on one scale, or evaluate for real).
+     * 2026-08-16 (OB-080) unified the divisors, so the office no longer
+     * CREATES that confound. It does not erase it: history is not rescored
+     * (A15), so pre-unification rows keep two scales forever and a pooled
+     * average over them still measures the formula as well as the provider.
+     * The refusal therefore survives, and it now names a HISTORICAL boundary
+     * with an expiry — "rows from before 2026-08-16" — rather than a standing
+     * property of the office, which is a different and much better sentence.
+     *
+     * A caveat under a ranked list is still a ranked list (KFM-07), so it
+     * refuses rather than qualifies. What is new is the stratified comparison
+     * below, which is the instrument finally answering the question instead of
+     * only declining it.
      */
-    const comparability = scoresAreComparable([...best.projects, ...worst.projects]);
-    if (!comparability.comparable) {
+    const pooled = scoresAreComparable(qualifyingEmbodiments.flatMap((e) => e.scorers));
+    if (!pooled.comparable) {
+      const sorted = [...qualifyingEmbodiments].sort((a, b) => b.avgQuality - a.avgQuality);
+      const best = sorted[0]; const worst = sorted[sorted.length - 1];
       findings.push({
         kind: 'comparison_refused_confounded',
-        text: `REFUSED to rank embodiments. ${best.embodiment_model} (n=${best.n}, avg ${best.avgQuality}) and ${worst.embodiment_model} (n=${worst.n}, avg ${worst.avgQuality}) were scored by DIFFERENT scorers — ${comparability.reason}. Because each provider serves exactly one project and the divisor is chosen by project, a difference between these averages is indistinguishable from the difference between their divisors. No provider conclusion can be drawn from this data, and the apparent gap is NOT evidence about either provider. Remedy: score every project on one scale, or replace the length proxy with a real evaluation (OB-080/OB-081). ${METRIC_DISCLOSURE}`,
+        text: `REFUSED to rank embodiments in one pooled table. ${best.embodiment_model} (n=${best.n}, avg ${best.avgQuality}) and ${worst.embodiment_model} (n=${worst.n}, avg ${worst.avgQuality}) rest on rows scored by DIFFERENT scorers — ${pooled.reason}. A difference between these averages is indistinguishable from the difference between their divisors, so no provider conclusion can be drawn from the pooled numbers and the apparent gap is NOT evidence about either provider. This is now a fact about ROWS WRITTEN BEFORE ${UNIFIED_FROM_ISO}, not about how the office scores today: the divisors were unified on that date (OB-080) and every row after it shares one scale. The comparison the office CAN make is the per-scorer one below. ${DIVISOR_UNIFICATION_NOTE}`,
       });
-    } else if (best.avgQuality - worst.avgQuality > 0.1) {
-      findings.push({
-        kind: 'embodiment_quality_gap',
-        text: `${best.embodiment_model} (n=${best.n}, avg ${best.avgQuality}) scores higher than ${worst.embodiment_model} (n=${worst.n}, avg ${worst.avgQuality}) on reliably-attributed rows scored by the same scorer (\`${SCORER_ID}\`, divisor ${comparability.divisors[0]}) — a gap worth the Lead QA's attention, not yet a conclusion (A3's provider-blame threshold is separate and higher; see probation-review.js canBlameProvider()). ${METRIC_DISCLOSURE}`,
-      });
+    }
+
+    /*
+     * ── THE COMPARISON THAT IS ACTUALLY VALID ────────────────────────────
+     * Within one scorer, a ranking is legitimate — same formula, same
+     * denominator, no confound left to separate. This runs whether or not the
+     * pooled ranking was refused, because a refusal that offers nothing in its
+     * place is why the Lead QA's signature instrument had produced exactly one
+     * conclusion in its life and that conclusion was false.
+     */
+    for (const stratum of strataOf(rows)) {
+      // A stratum whose divisor could not be established cannot support a
+      // comparison OR a refusal-with-a-reason: saying "no gap on one scale"
+      // about rows whose scale is unknown would be the original defect wearing
+      // the new vocabulary. Reported as a could-not-check (KFM-13).
+      if (typeof stratum.divisor !== 'number') {
+        findings.push({
+          kind: 'stratum_scorer_unknown',
+          text: `${stratum.n} row(s) carry no scorer_id and no usable created_at, so the formula that produced their scores cannot be established. They are NOT compared and NOT pooled — an unattributable score is a could-not-check, not a score that happens to match.`,
+        });
+        continue;
+      }
+      const inStratum = groupAndScore(rows.filter((r) => r._scorerId === stratum.scorerId), 'embodiment_model');
+      const qualifying = inStratum.filter((e) => e.meetsMinSample);
+      if (qualifying.length < 2) {
+        findings.push({
+          kind: 'stratum_sample_too_thin',
+          text: `Scorer \`${stratum.scorerId}\` (divisor ${stratum.divisor ?? 'unknown'}): only ${qualifying.length} embodiment(s) reach n=${MIN_SAMPLE_FOR_FINDING} (${inStratum.map((e) => `${e.embodiment_model}: n=${e.n}`).join(', ') || 'none'}). Comparable rows exist but not enough of them to rank anything on this scale.`,
+        });
+        continue;
+      }
+      const sorted = [...qualifying].sort((a, b) => b.avgQuality - a.avgQuality);
+      const best = sorted[0]; const worst = sorted[sorted.length - 1];
+      const gap = round3(best.avgQuality - worst.avgQuality);
+      if (gap > 0.1) {
+        findings.push({
+          kind: 'embodiment_quality_gap',
+          text: `Scorer \`${stratum.scorerId}\` (divisor ${stratum.divisor}): ${best.embodiment_model} (n=${best.n}, avg ${best.avgQuality}) scores higher than ${worst.embodiment_model} (n=${worst.n}, avg ${worst.avgQuality}) — gap ${gap}, on rows scored by ONE formula, so this one is not a divisor artifact. A gap worth the Lead QA's attention, not yet a conclusion (A3's provider-blame threshold is separate and higher; see probation-review.js canBlameProvider()). ${metricDisclosureFor(stratum.divisor, stratum.scorerId)}`,
+        });
+      } else {
+        findings.push({
+          kind: 'embodiment_no_gap_on_one_scale',
+          text: `Scorer \`${stratum.scorerId}\` (divisor ${stratum.divisor}): ${qualifying.map((e) => `${e.embodiment_model} (n=${e.n}, avg ${e.avgQuality})`).join(' vs ')} — gap ${gap}, below the 0.1 floor. **This is a comparison, not a refusal**: these rows share one formula, so the absence of a gap is a real (if weak) result about the providers rather than an artifact. ${metricDisclosureFor(stratum.divisor, stratum.scorerId)}`,
+        });
+      }
     }
   }
 
@@ -189,6 +287,19 @@ function buildFindings(rows) {
   }
 
   return findings;
+}
+
+/**
+ * The distinct scorers present in a row set, largest first, so the stratified
+ * comparison reports the biggest comparable population before the tail.
+ */
+function strataOf(rows) {
+  const m = new Map();
+  for (const r of rows) {
+    if (!m.has(r._scorerId)) m.set(r._scorerId, { scorerId: r._scorerId, divisor: r._divisor ?? null, n: 0 });
+    m.get(r._scorerId).n += 1;
+  }
+  return [...m.values()].sort((a, b) => b.n - a.n);
 }
 
 function avg(nums) {
@@ -212,12 +323,19 @@ export function renderComparisonFinding(result, { date } = {}) {
     `${result.totalCaseAnswerRows} case_answer rows total. ${result.reliableRowCount} carry a reliably-attributed embodiment_model; ${result.unreliableRowCount} do not and are excluded from every number below.`,
     result.unreliableNote ? `\n> ${result.unreliableNote}` : '',
     '',
+    '### Scorers behind these numbers',
+    '',
+    `Rows are grouped by the formula that scored them: ${(result.scorerStrata || []).join(', ') || 'none recorded'}.`,
+    result.scorerAttribution?.note ? `\n> ${result.scorerAttribution.note}` : '',
+    '',
     '### Findings',
     ...result.findings.map((f) => `- **${f.kind}**: ${f.text}`),
     '',
     '### By embodiment (reliable rows only)',
     ...result.byEmbodiment.map((e) => `- ${e.embodiment_model}: n=${e.n}, avg quality ${e.avgQuality}${e.meetsMinSample ? '' : ` (below the n=${MIN_SAMPLE_FOR_FINDING} floor — not a finding on its own)`}`
       + ` — scored on project(s) ${e.projects.map((p) => p ?? 'unrecorded').join('/')}`
+      + ` by scorer(s) ${e.scorers.map((s) => `${s.scorerId}`).join(' + ')}`
+      + (e.scorers.length > 1 ? ' **— this average itself pools more than one scale and is not interpretable on its own**' : '')
       + (e.saturation?.note ? `; ${e.saturation.note}` : '')),
     '',
     '### What "quality" means in the numbers above',

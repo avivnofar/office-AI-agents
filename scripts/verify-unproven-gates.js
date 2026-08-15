@@ -55,6 +55,19 @@ import { checkUnknownCapPacing, checkProviderAllowance } from '../workers/task-r
 import { learningLoopEnabled } from '../workers/context-editor.js';
 import { getClaudeBudgetStatus, resolveTaskLane, resolveImageRoles } from '../workers/model-router.js';
 import { actionItemsToBoardEnabled, resolveAttendeeIds } from '../workers/meeting-engine.js';
+// The five added 2026-08-16. The first four became importable only because the
+// modules holding them were made loadable — see §7/§8/§9 and this file's header.
+import { isRestDay, checkReports, checkBranches, branchVerdict } from './report-watchdog.mjs';
+import { resolveGate } from './cross-project-health-check.mjs';
+import { guidesEnabled } from '../workers/guide-engine.js';
+import { checkKvPacingSlot } from '../workers/gemini-pacer.js';
+
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import nodePath from 'node:path';
+
+const __vdir = nodePath.dirname(fileURLToPath(import.meta.url));
+const readSrc = (rel) => readFileSync(nodePath.join(__vdir, '..', rel), 'utf8').replace(/\r\n/g, '\n');
 
 globalThis.fetch = () => { throw new Error('TRIPWIRE: verify-unproven-gates.js must make no network call'); };
 
@@ -291,31 +304,208 @@ check('...and no image role names anthropic either',
   !JSON.stringify(imageRoles).match(/anthropic/i));
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * §7  report-watchdog.mjs — THE A16 EXTERNAL CHECK, now loadable
+ * ═══════════════════════════════════════════════════════════════════════════
+ * These three were UNPROVEN because the module RAN on import and exported
+ * nothing — an architecture property, not a missing habit. 2026-08-16 wrapped
+ * its main block in `main()` behind a run-directly guard and exported the
+ * gates; `checkReports`/`checkBranches` also take an injectable `exec` so the
+ * refusal paths can be reached without a network or a git repo.
+ */
+section('§7 report-watchdog — isRestDay / checkReports / checkBranches');
+
+check('LOADABLE AT ALL, which is the whole fix: importing it ran nothing',
+  typeof isRestDay === 'function' && typeof checkReports === 'function' && typeof checkBranches === 'function');
+
+// isRestDay — the one place the watchdog is ALLOWED to expect silence. Getting
+// it wrong in either direction is a false alarm every week, or a missed one.
+check('REFUSES to alarm on Saturday (Israel), per A13', isRestDay(new Date('2026-08-15T09:00:00Z')) === true);
+check('FALSIFIABLE: Friday is not a rest day', isRestDay(new Date('2026-08-14T09:00:00Z')) === false);
+check('FALSIFIABLE: Sunday is not a rest day', isRestDay(new Date('2026-08-16T09:00:00Z')) === false);
+// The +3 offset is the point: late Friday UTC is already Saturday in Israel,
+// and a watchdog using the host's zone would alarm on the office's rest day.
+check('the Israel offset is applied, not the host zone: 21:30 UTC Friday IS Saturday in Israel',
+  isRestDay(new Date('2026-08-14T21:30:00Z')) === true);
+
+// checkReports — THE MOST IMPORTANT ASSERTION IN THIS FILE for KFM-13. "The
+// office did not report" and "I could not find out" are different facts, and
+// this watchdog's exit code drives the midnight run. Collapsing them would
+// raise a false DID-NOT-REPORT alarm on every offline or unauthenticated night.
+const reportsFound = await checkReports('2026-08-16', {
+  exec: () => JSON.stringify([{ commit: { message: 'daily summary\nbody' } }]),
+});
+check('FALSIFIABLE: a commit found today reports ok', reportsFound.ok === true && reportsFound.daily === 1);
+const reportsNone = await checkReports('2026-08-16', { exec: () => '[]' });
+check('REFUSES: zero commits reports ok=false — the office did not report',
+  reportsNone.ok === false && /did not report today/.test(reportsNone.detail));
+const reportsBroken = await checkReports('2026-08-16', {
+  exec: () => { const e = new Error('gh: not authenticated'); throw e; },
+});
+check('KFM-13: a FAILED check reports ok=NULL, never false — "could not check" is not "did not report"',
+  reportsBroken.ok === null);
+check('...and says in words that the check was not performed', /WAS NOT PERFORMED/.test(reportsBroken.detail));
+check('...and is marked offline rather than claiming the github-api method',
+  reportsBroken.method === 'offline');
+
+// checkBranches + branchVerdict — policy A7's evidence.
+const fakeRefs = (lines) => (cmd, args) => {
+  if (args.includes('symbolic-ref')) return 'origin/main\n';
+  return lines.join('\n');
+};
+const refNowSec = Math.floor(Date.now() / 1000);
+const twoActive = checkBranches({
+  repos: [{ name: 'demo', dir: '/nope' }],
+  existsSync: () => true,
+  exec: fakeRefs([
+    `origin/main\t${refNowSec}\taviv`,
+    `origin/feature-a\t${refNowSec - 86400 * 3}\taviv`,
+    `origin/feature-b\t${refNowSec - 86400 * 9}\taviv`,
+  ]),
+});
+check('the default branch is EXCLUDED from the active count, not counted as a stray',
+  twoActive[0].active === 2 && !twoActive[0].branches.some((b) => b.branch === 'main'));
+check('REFUSES: two active branches is an A7 violation', branchVerdict(twoActive).violation === true);
+check('...and the violation names the repo', /demo/.test(branchVerdict(twoActive).violations[0]));
+check('...and blocks a new branch there', branchVerdict(twoActive).blockedFromNew.includes('demo'));
+
+const oneActive = checkBranches({
+  repos: [{ name: 'demo', dir: '/nope' }],
+  existsSync: () => true,
+  exec: fakeRefs([`origin/main\t${refNowSec}\taviv`, `origin/feature-a\t${refNowSec - 86400}\taviv`]),
+});
+check('FALSIFIABLE: ONE active branch is not a violation', branchVerdict(oneActive).violation === false);
+check('...but it still blocks opening a second, which is what A7 actually says',
+  branchVerdict(oneActive).blockedFromNew.includes('demo'));
+
+const noCheckout = checkBranches({ repos: [{ name: 'demo', dir: '/nope' }], existsSync: () => false, exec: () => '' });
+check('KFM-13 again: a missing checkout is reported as unreadable, not as zero branches',
+  !!noCheckout[0].error && noCheckout[0].active === undefined);
+check('...and an unreadable repo is NOT counted as clean',
+  branchVerdict(noCheckout).unreadable.length === 1 && branchVerdict(noCheckout).violation === false);
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * §8  cross-project-health-check.mjs resolveGate — the SKIP decision
+ * ═══════════════════════════════════════════════════════════════════════════
+ * The gate that decides whether a health check is evaluated at all. Its bad
+ * failure mode is silence: everything SKIPPED and the sweep still reporting
+ * "no FAILs". Same import-executes problem, same fix.
+ */
+section('§8 resolveGate — a disabled workflow SKIPS, an unreadable one is UNKNOWN');
+
+check('no gatingWorkflow means no gate, and null is not an error', resolveGate(null) === null);
+
+const gateActive = resolveGate({ repo: 'o/r', name: 'W' }, () => 'W|active\nOther|disabled');
+check('FALSIFIABLE: an active workflow does not gate anything out', gateActive.enabled === true);
+const gateDisabled = resolveGate({ repo: 'o/r', name: 'W' }, () => 'W|disabled_manually');
+check('REFUSES: a disabled workflow reports enabled=false so its check is skipped', gateDisabled.enabled === false);
+check('...and carries the state so the skip line can say WHY', gateDisabled.state === 'disabled_manually');
+
+const gateMissing = resolveGate({ repo: 'o/r', name: 'W' }, () => 'Something|active');
+check('KFM-13: a workflow that is NOT FOUND is enabled=null, not false — could-not-check, never "off"',
+  gateMissing.enabled === null && /not found/.test(gateMissing.reason));
+const gateBroken = resolveGate({ repo: 'o/r', name: 'W' }, () => { throw new Error('gh: HTTP 401\nmore'); });
+check('...and an API failure is enabled=null too, with the reason kept',
+  gateBroken.enabled === null && /could not query/.test(gateBroken.reason));
+check('...and only the first line of the error is carried, so a stack trace cannot become the report',
+  !/more/.test(gateBroken.reason));
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * §9  guidesEnabled — moved out of the Worker entry point to be testable
+ * ═══════════════════════════════════════════════════════════════════════════
+ * This one gates a pipeline that COMMITS FILES to the public repo. It was
+ * UNPROVEN because it lived in agent-runner.js, which no Node verifier can
+ * load. Moved to guide-engine.js 2026-08-16 with the behaviour unchanged.
+ */
+section('§9 guidesEnabled — the switch on a pipeline that writes to the public repo');
+
+const kvWith = (obj) => ({ SIM_KV: { get: async () => obj } });
+check('REFUSES when the flag is ABSENT — the shipped default', (await guidesEnabled(kvWith({}))) === false);
+check('REFUSES when explicitly false', (await guidesEnabled(kvWith({ guides_enabled: false }))) === false);
+check('REFUSES a truthy non-boolean: "true" as a string is not true',
+  (await guidesEnabled(kvWith({ guides_enabled: 'true' }))) === false);
+check('REFUSES 1 as well', (await guidesEnabled(kvWith({ guides_enabled: 1 }))) === false);
+check('REFUSES with no SIM_KV binding at all', (await guidesEnabled({})) === false);
+check('REFUSES when SIM_KV throws — an unreadable switch is an off switch',
+  (await guidesEnabled({ SIM_KV: { get: async () => { throw new Error('kv down'); } } })) === false);
+check('FALSIFIABLE: it does turn on for boolean true', (await guidesEnabled(kvWith({ guides_enabled: true }))) === true);
+check('the guide blocks still consult it on the scheduled path',
+  /!\(await guidesEnabled\(env\)\)/.test(readSrc('workers/agent-runner.js')));
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * §10  checkKvPacingSlot — the ONE pacing implementation
+ * ═══════════════════════════════════════════════════════════════════════════
+ * Created 2026-08-16 when the two copies of the get→compare→put pacing dance
+ * were collapsed into one. It was UNPROVEN because it is NEW, not because it
+ * lives anywhere awkward — §2 exercises `checkUnknownCapPacing`, which
+ * delegates to it, but the audit counts call sites by NAME and an indirect
+ * test is invisible to it.
+ */
+section('§10 checkKvPacingSlot — refuses inside the window, allows outside it');
+
+const T0 = 1_000_000_000_000;
+const kvPaced = fakeKv({ k: String(T0) });
+const slotTooSoon = await checkKvPacingSlot({ SIM_KV: kvPaced }, 'k', 20_000, T0 + 5_000);
+check('REFUSES: a call 5s after the last one, against a 20s floor', slotTooSoon.allowed === false);
+check('...and reports the elapsed time rather than a bare false', slotTooSoon.waitedMs === 5_000);
+check('...and flags that it was a real check, not a degrade-open', slotTooSoon.degradedOpen === false);
+check('...and does NOT overwrite the stored timestamp on a refusal', kvPaced.store.get('k') === String(T0));
+
+const kvOk = fakeKv({ k: String(T0) });
+const slotAllowed = await checkKvPacingSlot({ SIM_KV: kvOk }, 'k', 20_000, T0 + 25_000);
+check('FALSIFIABLE: a call 25s later IS allowed', slotAllowed.allowed === true);
+check('...and the slot is recorded, so the next call is paced against this one',
+  kvOk.store.get('k') === String(T0 + 25_000));
+
+check('a first-ever call with no stored timestamp is allowed rather than refused forever',
+  (await checkKvPacingSlot({ SIM_KV: fakeKv({}) }, 'k', 20_000, T0)).allowed === true);
+// The degrade-open posture is pinned here rather than left to be discovered: it
+// is safe for the office and unsafe for the quota, and it is DECLARED on the
+// return value rather than looking like a normal allow.
+const noKv = await checkKvPacingSlot({}, 'k', 20_000, T0);
+check('no SIM_KV binding degrades to allowed rather than blocking the office', noKv.allowed === true);
+check('...and SAYS it degraded, so an allow with no store behind it is distinguishable', noKv.degradedOpen === true);
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * summary
  * ═══════════════════════════════════════════════════════════════════════════ */
 console.log(`\n${'═'.repeat(72)}`);
 console.log(`  ${passed} passed, ${failed} failed`);
 console.log('');
-console.log('  PROVEN HERE (7 of the audit\'s 13 UNPROVEN gates), each shown to REFUSE:');
-console.log('    getClaudeBudgetStatus · checkUnknownCapPacing · learningLoopEnabled');
-console.log('    actionItemsToBoardEnabled · resolveAttendeeIds · resolveTaskLane');
-console.log('    resolveImageRoles');
+console.log('  PROVEN HERE (12 gates), each shown to REFUSE and each with a');
+console.log('  falsifying case proving it does not refuse everything:');
+console.log('    2026-08-16, first pass — getClaudeBudgetStatus · checkUnknownCapPacing');
+console.log('      learningLoopEnabled · actionItemsToBoardEnabled · resolveAttendeeIds');
+console.log('      resolveTaskLane · resolveImageRoles');
+console.log('    2026-08-16, second pass (§7-§10) — isRestDay · checkReports');
+console.log('      checkBranches · resolveGate · guidesEnabled · checkKvPacingSlot');
 console.log('');
-console.log('  NOT PROVEN HERE, and what each would need — listed because an');
-console.log('  omitted gate reads as a covered one:');
-console.log('    guidesEnabled, checkProductVersionBumps  (workers/agent-runner.js)');
-console.log('      -> the Worker entry point cannot be imported by a Node verifier.');
-console.log('         Needs both lifted into an importable module, the way');
-console.log('         guide-engine.js/report-pipeline.js already separate logic');
-console.log('         from the entry point. Real work, not a missing test.');
-console.log('    checkReports, checkBranches, isRestDay  (scripts/report-watchdog.mjs)');
-console.log('    resolveGate                             (scripts/cross-project-health-check.mjs)');
-console.log('      -> both scripts RUN their whole check at import time and export');
-console.log('         nothing, so importing one executes it. Needs the usual');
-console.log('         module + thin entry-point split. These four are A16 external');
-console.log('         checks: they guard no write and touch no credential, which is');
-console.log('         why they are last rather than skipped.');
-console.log(`\n  Audit verdict after this file: 38 CALLED · 6 UNPROVEN · 0 NOT-CALLED · 3 RETIRED`);
+console.log('  HOW THE SECOND FIVE STOPPED BEING UNPROVABLE — the finding, not the fix:');
+console.log('    None of them lacked a test because anybody neglected to write one.');
+console.log('    Each lived in a module a Node verifier could not load, and no amount');
+console.log('    of discipline about writing tests fixes a module that cannot be');
+console.log('    loaded. Three different obstacles, three different small fixes:');
+console.log('      report-watchdog.mjs / cross-project-health-check.mjs RAN their');
+console.log('        whole check at import time and exported nothing -> main() behind');
+console.log('        a run-directly guard, gates exported, behaviour when RUN unchanged.');
+console.log('      guidesEnabled lived in agent-runner.js, which pulls Workers-only');
+console.log('        bindings -> moved to guide-engine.js, which its own verifier');
+console.log('        already loads. Same read, same `=== true`.');
+console.log('      checkKvPacingSlot was simply NEW (created the same day the two');
+console.log('        copies of the pacing dance were merged) and its only coverage was');
+console.log('        indirect, through checkUnknownCapPacing. The audit counts call');
+console.log('        sites by NAME, so an indirect test is invisible to it.');
+console.log('');
+console.log('  STILL NOT PROVEN, listed because an omitted gate reads as a covered one:');
+console.log('    checkProductVersionBumps  (workers/agent-runner.js:3401)');
+console.log('      -> the Worker entry point cannot be imported by a Node verifier, and');
+console.log('         unlike guidesEnabled this is not a three-line flag read: it reads');
+console.log('         the asset board, compares product versions and WRITES the board');
+console.log('         back whole, through commitFileToRepo with an expectedSha. Lifting');
+console.log('         it is a real extraction with a live read-modify-write inside it');
+console.log('         (KFM-15 territory), and doing it in the same session that deploys');
+console.log('         two other changes to this file is how a careful change becomes a');
+console.log('         careless one. BOARDED as OB-083 with this scope attached.');
+console.log(`\n  Audit verdict after this file, RE-RUN and read back: 46 CALLED · 1 UNPROVEN · 0 NOT-CALLED · 3 RETIRED`);
 console.log(`  (re-run back-office tools/gate-call-audit/gate-call-audit.js to confirm)`);
 
 if (failed) { console.log('\nUNPROVEN-gate verification FAILED.'); process.exit(1); }

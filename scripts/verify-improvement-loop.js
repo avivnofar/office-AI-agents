@@ -30,6 +30,10 @@ import {
   SIM_STATE_KEY,
   NOT_ASKED_EVENT,
 } from '../workers/improvement-loop.js';
+// A scored row must name its scorer from 2026-08-16 (OB-080) — see section 3b.
+// Every fixture here that carries a quality therefore carries one, and the
+// refusal itself is asserted rather than worked around.
+import { SCORER_ID } from '../workers/quality-metric.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import nodePath from 'node:path';
@@ -119,9 +123,28 @@ check('non-integer agentId refused', buildOfficeEventRow({ agentId: '6', eventTy
 check('quality > 1 refused', buildOfficeEventRow({ agentId: 6, eventType: 'qa_review', track: 'office', quality: 1.4 }).valid, false);
 check('quality < 0 refused', buildOfficeEventRow({ agentId: 6, eventType: 'qa_review', track: 'office', quality: -0.1 }).valid, false);
 check('quality NaN refused', buildOfficeEventRow({ agentId: 6, eventType: 'qa_review', track: 'office', quality: NaN }).valid, false);
-checkTrue('quality 0 is VALID — a zero score is a real score', buildOfficeEventRow({ agentId: 6, eventType: 'qa_review', track: 'office', quality: 0 }).valid);
+checkTrue('quality 0 is VALID — a zero score is a real score', buildOfficeEventRow({ agentId: 6, eventType: 'qa_review', track: 'office', quality: 0, scorerId: SCORER_ID }).valid);
 check('quality null is valid and stays null (means "no score", not zero)',
   buildOfficeEventRow({ agentId: 6, eventType: 'meeting', track: 'office' }).row.quality, null);
+
+/* ── 3b. A SCORE MUST NAME ITS SCORER (OB-080, 2026-08-16) ──────────────── */
+console.log('\n-- 3b. A stored score must name the function that produced it --');
+const scoredNoId = buildOfficeEventRow({ agentId: 6, eventType: 'case_answer', track: 'client', quality: 0.9 });
+check('a scored row with NO scorerId is REFUSED, not stamped with a default', scoredNoId.valid, false);
+checkTrue('the refusal explains the measured reason rather than saying "invalid"',
+  /four weeks undetected/.test(scoredNoId.reason));
+const scoredWithId = buildOfficeEventRow({ agentId: 6, eventType: 'case_answer', track: 'client', quality: 0.9, scorerId: SCORER_ID });
+checkTrue('a scored row WITH a scorerId is accepted', scoredWithId.valid);
+check('...and the id reaches the row', scoredWithId.row.scorer_id, SCORER_ID);
+// FALSIFIABILITY: the gate must not refuse everything, or every meeting,
+// refusal and liaison row — none of which carry a score — would stop being
+// recorded, and the loop would go quiet for the reason least likely to be
+// noticed.
+const unscoredRow = buildOfficeEventRow({ agentId: 6, eventType: 'meeting', track: 'office' });
+checkTrue('FALSIFIABILITY: an UNSCORED row is still accepted with no scorerId', unscoredRow.valid);
+check('...and carries scorer_id null rather than an invented one', unscoredRow.row.scorer_id, null);
+check('a scorerId on an unscored row is NOT written — no scorer without a score',
+  buildOfficeEventRow({ agentId: 6, eventType: 'meeting', track: 'office', scorerId: SCORER_ID }).row.scorer_id, null);
 
 /* ── 4. type vs event_type, track, embodiment ───────────────────────────── */
 console.log('\n-- 4. The type/event_type rule and the two axes --');
@@ -155,7 +178,7 @@ console.log('\n-- 5. [FAILS-OLD] quality persistence — transcribed pre-change 
   const newEnv = fakeEnv({ flag: true });
   await recordOfficeEvent(newEnv, {
     agentId: 3, eventType: 'case_answer', track: 'client',
-    embodimentModel: 'cerebras', quality: 0.42, project: 'data-center',
+    embodimentModel: 'cerebras', quality: 0.42, scorerId: SCORER_ID, project: 'data-center',
   });
   check('NEW path persists exactly one row', newEnv.writes.length, 1);
   const [w] = newEnv.writes;
@@ -176,7 +199,7 @@ console.log('\n-- 6. Capture is write-only — it cannot change what it observes
   const snapshot = JSON.stringify(result);
   await recordOfficeEvent(env, {
     agentId: 2, eventType: 'case_answer', track: 'client',
-    embodimentModel: result.source, quality: result.quality,
+    embodimentModel: result.source, quality: result.quality, scorerId: SCORER_ID,
   });
   check('the observed result object is byte-identical afterwards', JSON.stringify(result), snapshot);
 
@@ -186,7 +209,7 @@ console.log('\n-- 6. Capture is write-only — it cannot change what it observes
   for (const q of [0, 0.29, 0.3, 0.5, 0.64, 0.65, 1]) {
     const before = band(q);
     const envQ = fakeEnv({ flag: true });
-    await recordOfficeEvent(envQ, { agentId: 2, eventType: 'case_answer', track: 'client', quality: q });
+    await recordOfficeEvent(envQ, { agentId: 2, eventType: 'case_answer', track: 'client', quality: q, scorerId: SCORER_ID });
     check(`follow-up band unchanged at quality=${q}`, band(q), before);
   }
 }
@@ -194,7 +217,7 @@ console.log('\n-- 6. Capture is write-only — it cannot change what it observes
   // A capture failure must never propagate. This is the live-Track-A promise.
   const env = { SIM_KV: { get: async () => ({ [IMPROVEMENT_LOOP_FLAG]: true }) },
                 DB: { prepare() { throw new Error('D1 exploded'); } } };
-  const r = await recordOfficeEvent(env, { agentId: 1, eventType: 'case_answer', track: 'client', quality: 0.5 });
+  const r = await recordOfficeEvent(env, { agentId: 1, eventType: 'case_answer', track: 'client', quality: 0.5, scorerId: SCORER_ID });
   check('a throwing D1 is swallowed, never propagated', r, { recorded: false, reason: 'capture_error' });
 }
 {
@@ -207,8 +230,8 @@ console.log('\n-- 6. Capture is write-only — it cannot change what it observes
 console.log('\n-- 7. Per-track consumption is separable (the plan requires this) --');
 {
   const env = fakeEnv({ flag: true });
-  await recordOfficeEvent(env, { agentId: 1, eventType: 'case_answer', track: 'client', quality: 0.8, embodimentModel: 'gemini' });
-  await recordOfficeEvent(env, { agentId: 6, eventType: 'qa_review', track: 'office', quality: 0.6, embodimentModel: 'cerebras' });
+  await recordOfficeEvent(env, { agentId: 1, eventType: 'case_answer', track: 'client', quality: 0.8, scorerId: SCORER_ID, embodimentModel: 'gemini' });
+  await recordOfficeEvent(env, { agentId: 6, eventType: 'qa_review', track: 'office', quality: 0.6, scorerId: SCORER_ID, embodimentModel: 'cerebras' });
   await recordOfficeEvent(env, { agentId: 8, eventType: 'lead_qa_weekly', track: 'office', embodimentModel: 'mistral' });
   const tracks = env.writes.map((w) => w.args[9]);
   check('3 rows, tracks distinguishable', tracks, ['client', 'office', 'office']);
@@ -222,7 +245,7 @@ console.log('\n-- 8. INSERT column list matches database/schema.sql --');
   const cols = OFFICE_EVENT_INSERT_SQL.match(/\(([^)]*)\)/)[1].split(',').map((s) => s.trim());
   const placeholders = (OFFICE_EVENT_INSERT_SQL.match(/\?/g) || []).length;
   check('one placeholder per column', placeholders, cols.length);
-  for (const c of ['event_type', 'embodiment_model', 'track', 'quality']) {
+  for (const c of ['event_type', 'embodiment_model', 'track', 'quality', 'scorer_id']) {
     checkTrue(`INSERT names the new column "${c}"`, cols.includes(c));
   }
   checkTrue('INSERT does not touch created_at (the DB default is the timestamp)', !cols.includes('created_at'));
@@ -252,7 +275,12 @@ console.log('\n-- 9. case_not_asked: an ask that never happened is a different e
   checkTrue('...and the refusal says why a score cannot exist for it',
     scored.valid === false && /never reached a provider/.test(scored.reason));
   checkTrue('a case_answer row carrying the same score is still fine (the rule is scoped)',
-    buildOfficeEventRow({ agentId: 3, eventType: 'case_answer', track: 'client', quality: 0.8 }).valid === true);
+    buildOfficeEventRow({ agentId: 3, eventType: 'case_answer', track: 'client', quality: 0.8, scorerId: SCORER_ID }).valid === true);
+  // Order matters: the NOT_ASKED rule must fire BEFORE the scorer rule, so an
+  // unscorable event type is refused for the reason that is actually true
+  // about it rather than for a missing label it could never have.
+  checkTrue('a scored case_not_asked row is refused for the RIGHT reason even with no scorerId',
+    /never reached a provider/.test(buildOfficeEventRow({ agentId: 3, eventType: NOT_ASKED_EVENT, track: 'client', quality: 0.8 }).reason));
 }
 
 /* ── 10. The call site routes skipped results to the new event type ────── */

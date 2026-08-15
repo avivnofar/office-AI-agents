@@ -49,6 +49,43 @@ const RAW_BASE = `https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/m
 /** Derived from Notebook-X's notebook list + data-center's topic areas + Windows — see CLAUDE.md "Folder structure". */
 export const DOMAIN_FOLDERS = ['networking', 'firewall', 'windows', 'ai', 'linux', 'cloud', 'cybersecurity'];
 
+/** SIM_KV key holding the office's live switch state. */
+export const SIM_STATE_KEY = 'simulation-state';
+
+/**
+ * Kill switch for the Guides pipeline (added 2026-08-02, before first
+ * activation). The daily-schedule guide blocks ship inside the deployed bundle,
+ * so without this gate the first deploy of the feature would start
+ * drafting/reviewing guides on the very next cron tick — before the owner has
+ * read a single guide. Flipping it needs no redeploy:
+ *   POST /api/agents/trigger {"type":"guides_toggle","enabled":true|false}
+ * Flag absent or false → all three guide blocks are logged no-ops on the
+ * scheduled path. The supervised path ({"type":"guide_block"}) passes
+ * { bypassGate: true } and is unaffected.
+ *
+ * ── MOVED HERE FROM agent-runner.js ON 2026-08-16 (OB-078) ────────────────
+ *
+ * It lived in `agent-runner.js`, which a Node verifier cannot load — it pulls
+ * Workers-only bindings — so this gate could not be exercised by any test and
+ * the gate-call audit recorded it UNPROVEN for that reason and no other. It now
+ * sits in the module that owns the pipeline it gates, beside the functions its
+ * own verifier already exercises.
+ *
+ * **Behaviour is unchanged and that was checked rather than assumed.** The old
+ * body read `getSimulationState(env)`, which merges
+ * `config/simulation-config.json`'s `SIMULATION` block over the KV value —
+ * and that block contains no `guides_enabled` key (verified 2026-08-16), so
+ * the merge contributed nothing here. Reading SIM_KV directly is the same
+ * answer by the same route every other switch in this office already takes
+ * (`improvementLoopEnabled`, `routingEnabled`, `judgeSamplerEnabled`), and
+ * `=== true` still means a stray `"false"` string cannot enable it.
+ */
+export async function guidesEnabled(env) {
+  if (!env?.SIM_KV) return false;
+  const stored = await env.SIM_KV.get(SIM_STATE_KEY, 'json').catch(() => null);
+  return stored?.guides_enabled === true;
+}
+
 /**
  * ABSOLUTE ZERO blocklist (CLAUDE.md "Topic selection" step 2) — 1COM,
  * MirtaPBX, Netvill, or commercial cloud-telephony keywords. Checked against

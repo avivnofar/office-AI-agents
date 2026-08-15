@@ -17,8 +17,13 @@ import { queryNotebookX } from '../workers/notebookx-client.js';
 import { getClaudeBudgetStatus, recordClaudeSpend, getClaudeCallsToday, CLAUDE_MAX_CALLS_PER_DAY } from '../workers/model-router.js';
 import { checkGeminiPacingSlot } from '../workers/gemini-pacer.js';
 import { detectCapabilityGap } from '../workers/gap-reports.js';
-import { lengthProxyScore } from '../workers/quality-metric.js';
+import { lengthProxyScore, scoreWithScorer, SCORER_ID } from '../workers/quality-metric.js';
 import { recordOfficeEvent } from '../workers/improvement-loop.js';
+import {
+  judgeSamplerEnabled, isSelectedForJudging, buildJudgePrompt, parseJudgeVerdict,
+  recordJudgement, JUDGE_LANE, JUDGE_MAX_TOKENS,
+} from '../workers/judge-sampler.js';
+import { routeTaskTypeCall } from '../workers/model-router.js';
 import { writeJournalEntry } from '../workers/context-editor.js';
 import { getOfficeContext } from '../workers/office-context.js';
 // The office's own projects, as data. office-context.js deliberately imports
@@ -635,6 +640,12 @@ export class AgentBase {
       // comparison (1.5) would then average a real provider against silence.
       embodimentModel: notAsked ? null : (result?.source || this.lastModelSource || null),
       quality: typeof result?.quality === 'number' && !notAsked ? result.quality : null,
+      // ADDED 2026-08-16 (OB-080). The number and the name of what produced it
+      // are written together, and buildOfficeEventRow() REFUSES a scored row
+      // without this — a stored score whose formula is unrecorded is exactly
+      // how two divisors survived four weeks and produced a false published
+      // finding. Null on a `case_not_asked` row, which carries no score.
+      scorerId: notAsked ? null : (result?.scorerId || null),
       project: opts.project || null,
       title: `${notAsked ? 'case_not_asked' : 'case_answer'} — ${opts.caseId || this.name}`,
       content: JSON.stringify({
@@ -677,7 +688,96 @@ export class AgentBase {
       `- Problems/unclear: ${problemLine}`
     );
 
+    // ── OB-081: THE SAMPLED REAL JUDGE (2026-08-16) ────────────────────────
+    // Same position and the same posture as recordOfficeEvent() above: it runs
+    // after every decision has been made, it reads `result` and never mutates
+    // it, nothing branches on what it returns, and it cannot throw. Gated OFF
+    // by default (`judge_sampler_enabled`).
+    //
+    // WHY IT IS HERE and not in a scheduled block reading D1 afterwards: this
+    // is the only place that holds the FULL answer text. `interactions.
+    // response_summary` is `responseText.slice(0, 500)`, so a later job would
+    // judge a truncated answer while the cheap score was computed on the whole
+    // one — and the calibration would then measure the truncation. That is the
+    // kind of quiet mismatch this whole session exists to stop shipping.
+    await this._maybeJudgeSample({ query, result, notAsked, opts });
+
     return result;
+  }
+
+  /**
+   * Sends one in eight answers to the judgment lane for a real evaluation of
+   * the answer against the question, and records the outcome either way.
+   *
+   * NEVER THROWS. See workers/judge-sampler.js for the sampling rate, why the
+   * pacer rather than a counter is the per-block cap, and what the measurement
+   * is actually for (calibration of the cheap score, not a better score).
+   */
+  async _maybeJudgeSample({ query, result, notAsked, opts }) {
+    try {
+      if (notAsked) return;                       // nothing was answered
+      if (!(await judgeSamplerEnabled(this.env))) return;
+
+      const caseId = opts.caseId || `${this.id}:${query}`;
+      const pick = isSelectedForJudging(caseId);
+      if (!pick.selected) return;                 // not in the sample, silently
+
+      const answer = result?.response || '';
+      const common = {
+        caseId,
+        agentId: this.id,
+        project: opts.project || null,
+        cheapQuality: typeof result?.quality === 'number' ? result.quality : null,
+        cheapScorerId: result?.scorerId || null,
+        sampleBucket: pick.bucket,
+      };
+
+      const { prompt, systemPrompt, truncated } = buildJudgePrompt({ question: query, answer });
+      if (truncated) {
+        // Refused rather than judged on a slice. A judge that saw part of the
+        // answer produces a score about a different answer, and it would sit in
+        // the correlation indistinguishable from a real one.
+        await recordJudgement(this.env, { ...common, outcome: 'truncated_input' });
+        return;
+      }
+
+      const routed = await routeTaskTypeCall(this.env, JUDGE_LANE, {
+        prompt,
+        systemPrompt,
+        maxTokens: JUDGE_MAX_TOKENS,
+        agentId: this.id,
+      });
+
+      if (!routed?.ok) {
+        // Pacing and quota refusals are the EXPECTED outcome for most selected
+        // cases — that is the design, not a failure — and they are stored so
+        // the realized sample can be told from the intended one.
+        const paced = (routed?.attempts || []).some((a) => /pacing|quota|allowance|denied/i.test(`${a.outcome} ${a.reason}`));
+        await recordJudgement(this.env, {
+          ...common,
+          outcome: paced ? 'paced_out' : 'lane_error',
+          judgeReason: routed?.reason || (routed?.attempts || []).map((a) => `${a.provider}:${a.reason}`).join('; ') || null,
+        });
+        return;
+      }
+
+      const verdict = parseJudgeVerdict(String(routed.result?.text ?? ''));
+      if (!verdict.ok) {
+        await recordJudgement(this.env, { ...common, outcome: 'unparseable', judgeProvider: routed.provider || null, judgeReason: verdict.why });
+        return;
+      }
+
+      await recordJudgement(this.env, {
+        ...common,
+        outcome: 'judged',
+        judgeScore: verdict.score,
+        judgeProvider: routed.provider || null,
+        judgeReason: verdict.reason,
+      });
+    } catch (e) {
+      // KFM-14, absolutely: a lost measurement must never cost the answer.
+      console.warn(`[agent-${this.id}] judge sample failed, continuing: ${e?.message || e}`);
+    }
   }
 
   /** Back-compat name during the transition — same behavior as askAssignedProject(). */
@@ -757,15 +857,22 @@ export class AgentBase {
     // TWO divisors (800 here, 600 there) and nothing recorded which produced
     // which row. The same answer text scored 33% higher on this path.
     //
-    // The 600 is PRESERVED, not harmonised: changing it would move every mood
-    // threshold, gap ceiling and published average for notebook-x in the same
-    // commit that made them honest, and A15 forbids a number moving without
-    // explanation. It is now declared data in quality-metric.js instead of a
-    // literal here, which is what makes the divergence readable rather than
-    // hidden. Harmonising is a separate, owner-visible decision — OB-080.
-    const quality = notebookAnswerFound
-      ? lengthProxyScore(responseText, { project: 'notebook-x', ok: true })
-      : 0;
+    // ── OB-080 CLOSED, 2026-08-16 (second session) ────────────────────────
+    // The 600 is GONE. There is one divisor, 800, for every project, from
+    // quality-metric.js UNIFIED_FROM onward — see that module's header for why
+    // 800 survived and not 600. This path's scores therefore step DOWN by 25%
+    // from this date: a notebook-x answer that scored 1.0 at /600 scores 0.75
+    // at /800 unless it is genuinely 800+ characters. That is a deliberate,
+    // disclosed step, not a drift — more notebook-x answers will now fall
+    // below each persona's escalation_threshold and be flagged SOFT, which is
+    // the safe direction for a QA office.
+    //
+    // History is NOT rescored (A15): rows written before UNIFIED_FROM keep
+    // their /600 numbers and scorerForRow() is how a reader tells them apart.
+    const scored = notebookAnswerFound
+      ? scoreWithScorer(responseText, { ok: true })
+      : { quality: 0, scorerId: SCORER_ID };
+    const quality = scored.quality;
 
     if (this.session) this.session.cases_handled += 1;
     const stateChange = await this._applyQualityMood(quality);
@@ -790,7 +897,10 @@ export class AgentBase {
     // notebook covers the topic, Gemini still answered — `notebookAnswerFound`
     // is about COVERAGE, not about which provider was asked); there is no
     // fallback path here to record a substitution for.
-    return { ok: notebookAnswerFound, quality, response: responseText, tool_used: 'notebook-x', source: 'gemini' };
+    // `scorerId` ADDED 2026-08-16: the number and the identity of what produced
+    // it travel together, because the whole reason two divisors survived four
+    // weeks is that the stored rows did not say which one scored them.
+    return { ok: notebookAnswerFound, quality, scorerId: scored.scorerId, response: responseText, tool_used: 'notebook-x', source: 'gemini' };
   }
 
   /**
@@ -929,7 +1039,8 @@ export class AgentBase {
     // Go-forward fix only, per A15: existing rows are not rewritten, and any
     // pre-2026-08-10 embodiment_model value is not reliable evidence of what
     // actually answered.
-    return { ok, quality, response: responseText, source: 'claude' };
+    // `scorerId` ADDED 2026-08-16 — see _askNotebookX()'s matching note.
+    return { ok, quality, scorerId: SCORER_ID, response: responseText, source: 'claude' };
   }
 
   /**
@@ -950,11 +1061,17 @@ export class AgentBase {
    * is not a fix — it is what made the divergence with `_askNotebookX()`'s
    * inline 600-divisor copy visible at all. See that module's header.
    *
+   * 2026-08-16 (second session, OB-080): the divisors are unified at 800. This
+   * function's OUTPUT IS UNCHANGED — data-center was always /800 — which is
+   * part of why 800 was the value kept. The `project` argument is gone because
+   * project no longer selects a scale.
+   *
    * `_query` stays unread, and that unread parameter is the whole finding: a
-   * real evaluation is exactly the function that would use it.
+   * real evaluation is exactly the function that would use it. OB-081 builds
+   * one alongside it — see `workers/judge-sampler.js`.
    */
   async evaluateResponseQuality(_query, responseText, ok) {
-    return lengthProxyScore(responseText, { project: 'data-center', ok });
+    return lengthProxyScore(responseText, { ok });
   }
 
   /**

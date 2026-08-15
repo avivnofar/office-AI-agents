@@ -95,9 +95,49 @@ jobs:
             -d @/tmp/findings.json \
             -o /tmp/result.json
 
+      # ── GROWTH WATCH (2026-08-16, audit #12/#18/#19/#20/#24) ──────────────
+      #
+      # KFM-20 asks of every store that only grows: a cap, a retirement path,
+      # or AT MINIMUM a trend someone reads. Finding #12 is that the need was
+      # identified across seven consecutive sweeps and nothing was built. This
+      # is the caller, added in the same session as the tool — because a
+      # detection primitive with no consumer is the defect the whole audit is
+      # about (KFM-10/KFM-26), and this repo already has one of those in
+      # back-office `tools/repo-size-hygiene-check/` ("R7 — nothing calls this").
+      #
+      # It rides this job rather than getting a schedule of its own: same
+      # weekly cadence, same audience, same moment. It never fails the run —
+      # there is no threshold yet, and a gate with an invented number behind it
+      # is worse than no gate.
+      #
+      # COVERAGE HERE IS PARTIAL AND THAT IS RECORDED, NOT PAPERED OVER: this
+      # job holds no credential for either private repo, so the back-office
+      # journal and board metrics come back `not measured` with that as the
+      # stated reason. `trendFor()` compares each metric against the last run
+      # that could read IT, so a laptop run and a CI run interleave without
+      # either one reporting a private store as having shrunk to zero.
+      # `--no-append` HERE, DELIBERATELY, AND IT IS A REAL LIMITATION:
+      # this job does not commit, so the CI run REPORTS a trend into the run
+      # summary and does not extend the ledger. The ledger therefore grows from
+      # local runs only, and a week with no local run leaves a gap that
+      # `trendFor()` handles correctly (it compares against the last run that
+      # measured that metric) but does not fill. Giving this job write
+      # permission and a commit step is the fix and is BOARDED (OB-085) rather
+      # than added in the same session that deploys three other subsystems.
+      - name: Growth watch — measure the unbounded stores and report the trend
+        if: steps.config.outputs.ready == 'true'
+        env:
+          AGENTS_API_BASE: ${{ vars.AGENTS_API_BASE }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: node scripts/growth-watch.mjs --no-append > /tmp/growth.md || true
+
       - name: Summary
         if: steps.config.outputs.ready == 'true'
         run: |
+          echo "### Growth watch" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/growth.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "_growth watch produced no output_" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### Weekly Capability Audit — result" >> "$GITHUB_STEP_SUMMARY"
           echo '```json' >> "$GITHUB_STEP_SUMMARY"
           cat /tmp/result.json >> "$GITHUB_STEP_SUMMARY"

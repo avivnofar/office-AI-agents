@@ -282,6 +282,7 @@ export function buildOfficeEventRow({
   track,
   embodimentModel = null,
   quality = null,
+  scorerId = null,
   title = null,
   content = null,
   project = null,
@@ -308,6 +309,22 @@ export function buildOfficeEventRow({
     if (eventType === NOT_ASKED_EVENT) {
       return { valid: false, reason: `${NOT_ASKED_EVENT} rows must carry quality null — the ask never reached a provider, so a score cannot exist. Got ${JSON.stringify(quality)}` };
     }
+    // ── A SCORE MUST NAME ITS SCORER (OB-080, 2026-08-16) ──────────────────
+    // REFUSED, not defaulted, and the reason is measured rather than
+    // theoretical. Two divisors (800 for data-center, 600 for notebook-x) ran
+    // side by side for four weeks and produced a published finding that a
+    // degraded fallback outscored the office's primary provider. It survived
+    // that long for exactly one reason: **the rows did not record which
+    // formula scored them**, so no reader and no query could tell. Stamping a
+    // default here would rebuild that hole — a wrong scorer id is worse than a
+    // refused row, because it looks checked.
+    //
+    // The 134 rows written before this date legitimately have no scorer_id and
+    // are read by `scorerForRow()`'s date-and-project inference; that path is
+    // exact for them and is NOT a licence to write new rows without one.
+    if (typeof scorerId !== 'string' || !scorerId) {
+      return { valid: false, reason: `a row carrying quality ${quality} must also carry scorerId naming the function that produced it (workers/quality-metric.js SCORER_ID) — refused rather than defaulted, because an unlabelled score is how two divisors went four weeks undetected` };
+    }
   }
 
   return {
@@ -319,6 +336,9 @@ export function buildOfficeEventRow({
       track,
       embodiment_model: embodimentModel || null,
       quality: quality ?? null,
+      // Null whenever quality is null — an unscored row has no scorer, and
+      // writing one would claim a measurement that does not exist.
+      scorer_id: (quality === null || quality === undefined) ? null : scorerId,
       title: title || `${eventType} — agent ${agentId}`,
       content: content || '',
       severity,
@@ -329,8 +349,8 @@ export function buildOfficeEventRow({
 
 /** Kept identical to the ALTER-TABLE'd shape. See database/schema.sql. */
 export const OFFICE_EVENT_INSERT_SQL = `INSERT INTO reports
-  (id, agent_id, type, title, content, severity, project, event_type, embodiment_model, track, quality)
- VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+  (id, agent_id, type, title, content, severity, project, event_type, embodiment_model, track, quality, scorer_id)
+ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
 /**
  * Records one office event. NEVER THROWS and never returns anything a caller
@@ -360,7 +380,7 @@ export async function recordOfficeEvent(env, fields) {
     const r = built.row;
     const id = crypto.randomUUID();
     await env.DB.prepare(OFFICE_EVENT_INSERT_SQL)
-      .bind(id, r.agent_id, r.type, r.title, r.content, r.severity, r.project, r.event_type, r.embodiment_model, r.track, r.quality)
+      .bind(id, r.agent_id, r.type, r.title, r.content, r.severity, r.project, r.event_type, r.embodiment_model, r.track, r.quality, r.scorer_id)
       .run();
 
     // ── PROBATION ACTION COUNT (A3, 2026-08-10) ─────────────────────────────
