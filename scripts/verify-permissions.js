@@ -25,6 +25,13 @@ import {
   resolveWriteTarget as resolveWriteTargetReal,
   resolveIssueTarget as resolveIssueTargetReal,
   resolveRepoWrite as resolveRepoWriteReal,
+  // Added 2026-08-15 for the A1 red-line section at the foot of this file —
+  // the three gates OB-001's audit reported UNPROVEN. Imported and CALLED,
+  // not regexed: permission-guard.js has no JSON import precisely so that
+  // this is possible.
+  canPushToProject,
+  checkCodeWriteAllowed,
+  isCodeFilePath,
 } from '../workers/permission-guard.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -417,6 +424,68 @@ console.log('\n-- Publishing-split call-site check (0.4 stage 5: promotions) --'
     ['every call site uses campus/shared/promotions/', matches.every((m) => m[2].startsWith('campus/shared/promotions/'))],
   ];
   for (const [label, ok] of callSiteChecks) {
+    pass = pass && ok;
+    console.log(`[${ok ? 'PASS' : 'FAIL'}] ${label}`);
+  }
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+ * A1'S RED LINE, EXERCISED — from OB-001's UNPROVEN list, 2026-08-15.
+ *
+ * The gate-call audit's larger and quieter result was not its four NOT-CALLED
+ * gates but its SIXTEEN UNPROVEN ones — gates with live call sites and no
+ * verifier exercising them — and it named this file's specific hole: it
+ * exercises the RESOLVERS (resolveWriteTarget, resolveIssueTarget,
+ * resolveRepoWrite) and never touched `canPushToProject`,
+ * `checkCodeWriteAllowed` or `isCodeFilePath`, which are the write-decision
+ * surface OFFICE-POLICY A1 calls the red line.
+ *
+ * "This is not a claim that they are broken. It is a claim that nothing would
+ * tell us if they broke." These tell us.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+console.log('\n-- A1 red line: the three gates the OB-001 audit reported UNPROVEN --');
+{
+  const redLineChecks = [
+    // canPushToProject — the fail-closed default IS the contract.
+    ['canPushToProject: a project with push:true passes', canPushToProject(permissions, 'office-agents') === true],
+    ['canPushToProject: a project with push:false is refused', canPushToProject(permissions, 'data-center') === false],
+    ['canPushToProject: an UNKNOWN key fails CLOSED, never open', canPushToProject(permissions, 'no-such-project') === false],
+    ['canPushToProject: an empty permissions object does not fail open', canPushToProject({}, 'office-agents') === false],
+    ['canPushToProject: push:"true" (a STRING) does not pass — strict identity, not truthiness',
+      canPushToProject({ x: { push: 'true' } }, 'x') === false],
+
+    // isCodeFilePath — the extension list that decides what "code" means.
+    ['isCodeFilePath: a .js file is code', isCodeFilePath('workers/agent-runner.js') === true],
+    ['isCodeFilePath: a .md file is NOT code (every report write depends on this)', isCodeFilePath('reports/daily/day-01.md') === false],
+    ['isCodeFilePath: matching is case-insensitive', isCodeFilePath('Thing.JS') === true],
+    ['isCodeFilePath: an extensionless path is not code', isCodeFilePath('LICENSE') === false],
+    ['isCodeFilePath: only the LAST extension counts', isCodeFilePath('notes.js.md') === false],
+    ['isCodeFilePath: .sql and .sh are code — they are on the list for a reason',
+      isCodeFilePath('database/schema.sql') === true && isCodeFilePath('run.sh') === true],
+
+    // checkCodeWriteAllowed — the blanket rule, its one pass, and the
+    // per-project exception wired 2026-08-06.
+    ['checkCodeWriteAllowed: a markdown write passes untouched',
+      checkCodeWriteAllowed(permissions, { filePath: 'reports/x.md' }).allowed === true],
+    ['checkCodeWriteAllowed: a code write is BLOCKED by the blanket rule',
+      checkCodeWriteAllowed(permissions, { filePath: 'workers/x.js' }).allowed === false],
+    ['checkCodeWriteAllowed: …and the refusal carries a reason a human can act on',
+      /not an explicit code-writing instruction/.test(checkCodeWriteAllowed(permissions, { filePath: 'workers/x.js' }).reason || '')],
+    ['checkCodeWriteAllowed: explicitCodeTask is the ONLY blanket pass',
+      checkCodeWriteAllowed(permissions, { filePath: 'workers/x.js', explicitCodeTask: true }).allowed === true],
+    ['checkCodeWriteAllowed: no projectKey lands on the blanket denial',
+      checkCodeWriteAllowed(permissions, { filePath: 'workers/x.js', projectKey: undefined }).allowed === false],
+    ['checkCodeWriteAllowed: the warehouse code_write:true exception is REAL, not documentation',
+      checkCodeWriteAllowed(permissions, { filePath: 'tasks/t/x.js', projectKey: 'warehouse' }).allowed === true],
+    ['checkCodeWriteAllowed: back-office code_write is not true — a code write there is refused',
+      checkCodeWriteAllowed(permissions, { filePath: 'tools/t/x.js', projectKey: 'back-office' }).allowed === false],
+    ['checkCodeWriteAllowed: the PUBLIC repo refuses a Worker-code write — A1, structurally',
+      checkCodeWriteAllowed(permissions, { filePath: 'workers/agent-runner.js', projectKey: 'office-agents' }).allowed === false],
+    ['checkCodeWriteAllowed: an unknown project cannot grant itself code_write',
+      checkCodeWriteAllowed(permissions, { filePath: 'x.js', projectKey: 'no-such-project' }).allowed === false],
+  ];
+  for (const [label, ok] of redLineChecks) {
     pass = pass && ok;
     console.log(`[${ok ? 'PASS' : 'FAIL'}] ${label}`);
   }
