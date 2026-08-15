@@ -292,7 +292,7 @@
         "kind": "module",
         "ref": "workers/embodiment-comparison.js",
         "symbol": "runCrossEmbodimentComparison",
-        "caveat": "BUILT 2026-08-10 (learning-loop session). Run against the live table the same day: 58 case_answer rows, only 23 reliably embodiment-attributed (see the 2026-08-10 agent-base.js fix below), and even those are too thin to support a real cross-provider finding yet (1 embodiment over the n=5 floor). The reader itself is SUPPLIED; the FINDING it can currently produce is 'insufficient sample' — reported honestly rather than manufactured, per this module's own header."
+        "caveat": "BUILT 2026-08-10 (learning-loop session). UPDATED 2026-08-15 — the previous caveat recorded 58 case_answer rows / 23 reliably attributed / 'insufficient sample', which had been true and was not any more; a caveat that outlives its measurement understates a capability the same way a stale 'NO TOOL' overstates a gap. Re-run 2026-08-15 against live D1: 134 rows, 99 reliably embodiment-attributed, and it produced a REAL finding for the first time rather than 'insufficient sample'. ALSO 2026-08-15: it finally has an autonomous caller. Until then it was reachable only through /api/agents/trigger and, as far as audit finding #8 could tell, had never run in production — built, SUPPLIED, and never once executed on its own. Now the Friday 09:30 qa_instruments block (config/daily-schedule.json qa_instruments_program, workers/agent-runner.js processQaInstrumentsBlock) runs it weekly. READ THE FINDING WITH ITS OWN CAVEAT: the quality score behind every number is evaluateResponseQuality()'s documented length-based placeholder heuristic, and on the first real run the DEGRADED cloudflare-fallback scored above the primary — which is at least as likely to be a fact about the metric as about the providers."
       },
       "exercised_by": "scripts/verify-learning-loop.js",
       "cost": "none — one D1 read",
@@ -303,7 +303,7 @@
       "supplied_by": {
         "kind": "none",
         "ref": null,
-        "why": "NO TOOL. Board OB-001, READY since 2026-08-06 and never dispatched. Every one of the six instances of this defect in this project was found by a human or a session noticing, never by a mechanism. workers/capability-audit.js added 2026-08-10 answers the ROLE-level version of the same question; the GATE-level version is still manual."
+        "why": "BUILT 2026-08-15 (board OB-001, READY since 2026-08-06 and undispatched for 40 days). CORRECTED 2026-08-15 — this row said 'NO TOOL', which stopped being true the moment the tool was built, and a manifest that keeps reporting a capability as absent after it exists is the mirror image of one reporting a capability it does not have. The verdict below stays UNSUPPLIED and that is HONEST, not stale: the tool lives in back-office-AI-agents tools/gate-call-audit/ (private), this manifest resolves refs against THIS repo's own files, and there is no ref that would resolve here. Same limitation docs/KNOWN-FAILURE-MODES.md discloses for its own weekly walker, which has no credential for either private repo. Reported as 'the public-repo audit cannot see it' rather than papered over with a path that would not resolve. First run 2026-08-15: 24 CALLED, 16 UNPROVEN, 4 NOT-CALLED — four of its own first verdicts were wrong and hand-checking caught them; after the same day's fixes, 31/13/0 plus 3 RETIRED. Verified by tools/gate-call-audit/verify-gate-call-audit.js, 23 checks."
       },
       "exercised_by": null,
       "cost": "n/a",

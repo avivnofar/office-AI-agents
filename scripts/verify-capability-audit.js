@@ -349,6 +349,47 @@ console.log('\n--- 8. Findings -> board tasks, not a report nobody acts on ---')
   }
 }
 
+/* ── 8b. THE GATE'S METRIC — audit finding #4 / KFM-04, 2026-08-15 ───────
+ *
+ * The gate used to be `audit.counts.agentsWhoCannotWork > 0`, derived from
+ * `canWork`, which ONE supplied capability of any kind flips true. The
+ * sharper `roleVerdict` was computed on the line above it and never
+ * consulted. These lock the rewiring in place — including the
+ * acknowledgement rule, which is the part a later session is most likely to
+ * loosen without noticing.
+ */
+console.log('\n--- The gate measures roleVerdict, not canWork ---');
+{
+  const gateSrc = readFileSync(new URL('./capability-audit.mjs', import.meta.url), 'utf8');
+
+  // Anchored to column 0 on purpose: the old line is QUOTED verbatim inside
+  // the new GATE comment block (so a reader can see what changed), and an
+  // unanchored match would find the quotation and report the fix as absent.
+  check('[FAILS-OLD] the gate no longer exits on agentsWhoCannotWork ALONE',
+    !/^process\.exit\(audit\.counts\.agentsWhoCannotWork > 0 \? 1 : 0\)/m.test(gateSrc));
+  check('the gate reads roleVerdict', /roleVerdict === 'CANNOT_PRODUCE_ITS_OWN_OUTPUT'/.test(gateSrc));
+  check('…and fails on a role the audit COULD NOT CHECK rather than passing it quietly (KFM-13)',
+    /roleVerdict === 'NO_OUTPUT_KINDS_DECLARED'/.test(gateSrc));
+  check('…and keeps the old zero-capability check, which catches a different shape',
+    /audit\.counts\.agentsWhoCannotWork/.test(gateSrc));
+  check('the severities are kept apart, not merged into one count (KFM-06)',
+    /cannotProduce/.test(gateSrc) && /undeclared/.test(gateSrc) && /unacknowledged/.test(gateSrc));
+  check('a gap can only be acknowledged by NAMING A BOARD TASK — a checked claim, not a suppression list',
+    /BOARD_REF\.test/.test(gateSrc));
+  check('dormant agents are excluded from the gate, deliberately',
+    /roleClaims\.filter\(\(r\) => !r\.dormant\)/.test(gateSrc));
+
+  // The workflow half: a gate nothing can fail on is still a green light
+  // wired to nothing (KFM-05).
+  const wf = readFileSync(new URL('../.github/workflows/weekly-capability-audit.yml', import.meta.url), 'utf8');
+  check('[FAILS-OLD] the weekly workflow has a step that can FAIL the run',
+    /exit 1/.test(wf) && /steps\.audit\.outputs\.gate_exit != '0'/.test(wf));
+  check('…placed AFTER the findings are posted, so a red gate never costs the board its findings',
+    wf.indexOf('Post findings to the board inbox') < wf.indexOf('Fail the run if the capability gate'));
+  check('the audit step captures its exit code rather than discarding it',
+    /gate_exit=\$\?/.test(wf));
+}
+
 /* ── 9. Network tripwire ────────────────────────────────────────────────── */
 console.log('\n--- Network tripwire ---');
 check('this verifier made ZERO network calls end to end', NETWORK.length === 0, NETWORK.join(','));

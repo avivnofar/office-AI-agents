@@ -181,8 +181,83 @@ if (outIdx !== -1 && args[outIdx + 1]) {
   console.error(`\n[capability-audit] findings written to ${args[outIdx + 1]}`);
 }
 
-// Exit code carries the headline so a caller can gate on it. NON-ZERO when an
-// agent that is not dormant cannot work at all — the Designer's old state, which
-// is the one condition this tool exists to make impossible to miss. A merely
-// UNSUPPLIED capability is not an error: several are deliberate and recorded.
-process.exit(audit.counts.agentsWhoCannotWork > 0 ? 1 : 0);
+/* ═══════════════════════════════════════════════════════════════════════════
+ * THE GATE — rewired 2026-08-15 (audit finding #4 / KFM-04).
+ *
+ * It used to be exactly this line:
+ *
+ *     process.exit(audit.counts.agentsWhoCannotWork > 0 ? 1 : 0);
+ *
+ * `agentsWhoCannotWork` derives from `canWork`
+ * (workers/capability-audit.js:218), which is
+ * `mine.some((c) => c.verdict === 'SUPPLIED')` — ONE supplied capability of
+ * ANY kind flips it true. So an agent that can send a chat message but cannot
+ * produce a single one of its role's declared outputs counted as working, and
+ * the weekly job stayed green.
+ *
+ * That is not a hypothetical. It was true of Agent 9 at the moment this was
+ * written: canWork=yes, roleVerdict=PARTLY_SUPPLIED, and she cannot produce
+ * `front_publication` — the Designer, "absolute gatekeeper of the Front",
+ * with no gate to operate. The sharper metric, `roleVerdict`, was computed on
+ * the line above and never consulted. Classic KFM-26: the right thing built,
+ * and the number that gates CI not using it.
+ *
+ * ── THE THREE SEVERITIES, KEPT APART (KFM-06) ────────────────────────────
+ *
+ * A single merged "problems" count would be true and useless. They fail
+ * differently because their remedies differ:
+ *
+ *   CANNOT_PRODUCE_ITS_OWN_OUTPUT  the role is decorative. Always fails.
+ *   NO_OUTPUT_KINDS_DECLARED       the audit COULD NOT CHECK this role. That
+ *                                  is not the same as checking it and finding
+ *                                  it fine (KFM-13), so it fails rather than
+ *                                  passing quietly.
+ *   PARTLY_SUPPLIED                some outputs blocked. Fails UNLESS every
+ *                                  blocking capability's manifest entry names
+ *                                  a board task — see below.
+ *
+ * ── WHY "BOARDED" IS THE ONLY WAY TO ACKNOWLEDGE A GAP ───────────────────
+ *
+ * Failing forever on a known, boarded, BLOCKED item would make this job
+ * permanently red, and a permanently red gate is ignored — which is KFM-04
+ * again from the other side. But an acknowledgement mechanism is a place to
+ * hide things, so acknowledgement is a CLAIM THIS SCRIPT CHECKS: the only way
+ * to acknowledge a blocked output is for the blocking capability's own
+ * manifest entry to name an `OB-NNN`. Today `front-publishing-gate` says
+ * "Board OB-014", so the Designer is reported loudly and does not fail the
+ * run; a NEW unproducible output that nobody boarded fails immediately.
+ * Same discipline the gate-call audit's RETIRED verdict got the same day:
+ * you may declare something known, and the declaration is verified.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+const BOARD_REF = /\bOB-\d{3}\b/;
+const reasonById = new Map(audit.capabilities.map((c) => [c.id, `${c.reason || ''} ${c.means?.why || ''}`]));
+
+const live = roleClaims.filter((r) => !r.dormant);
+const cannotProduce = live.filter((r) => r.roleVerdict === 'CANNOT_PRODUCE_ITS_OWN_OUTPUT');
+const undeclared = live.filter((r) => r.roleVerdict === 'NO_OUTPUT_KINDS_DECLARED');
+
+const partial = live.filter((r) => r.roleVerdict === 'PARTLY_SUPPLIED');
+const blockersOf = (r) => [...new Set(r.kinds.filter((k) => !k.producible && !k.unmapped).flatMap((k) => k.blockedBy))];
+const acknowledged = partial.filter((r) => {
+  const b = blockersOf(r);
+  return b.length > 0 && b.every((cid) => BOARD_REF.test(reasonById.get(cid) || ''));
+});
+const unacknowledged = partial.filter((r) => !acknowledged.includes(r));
+
+const say = (s) => console.error(s);
+say('\n[capability-audit] GATE — measured on roleVerdict (can the role produce its own declared output?),');
+say('                   not on canWork (does it have any supplied capability at all).');
+
+for (const r of cannotProduce) say(`  FAIL  Agent ${r.id} (${r.name}) CANNOT PRODUCE ITS OWN OUTPUT — declared kinds: ${r.kinds.map((k) => k.kind).join(', ')}`);
+for (const r of undeclared) say(`  FAIL  Agent ${r.id} (${r.name}) declares NO output kinds — this role could not be checked at all, which is not the same as checking it and finding it fine`);
+for (const r of unacknowledged) say(`  FAIL  Agent ${r.id} (${r.name}) cannot produce ${r.unproducibleKinds.join(', ')} — blocked by ${blockersOf(r).join(', ')}, and no blocking capability names a board task. Board it or fix it.`);
+for (const r of acknowledged) say(`  KNOWN Agent ${r.id} (${r.name}) cannot produce ${r.unproducibleKinds.join(', ')} — blocked by ${blockersOf(r).join(', ')}, boarded. Reported, not failed.`);
+if (audit.counts.agentsWhoCannotWork > 0) say(`  FAIL  ${audit.counts.agentsWhoCannotWork} non-dormant agent(s) have ZERO supplied capabilities (the old check, kept — it catches a role with no declared output kinds AND nothing supplied)`);
+
+const failures = cannotProduce.length + undeclared.length + unacknowledged.length + audit.counts.agentsWhoCannotWork;
+say(failures
+  ? `\n[capability-audit] ${failures} blocking finding(s). Exiting 1.`
+  : `\n[capability-audit] no blocking findings (${acknowledged.length} known-and-boarded gap(s) reported above). Exiting 0.`);
+
+process.exit(failures > 0 ? 1 : 0);

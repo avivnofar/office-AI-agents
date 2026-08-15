@@ -58,15 +58,29 @@ jobs:
       # No filesystem access needed beyond this checkout — the audit reads
       # config/capability-manifest.json and workers/*.js source directly.
       #
-      # `|| true` on both: capability-audit.mjs's own exit code is
-      # NON-ZERO when an agent cannot work at all (its own documented
-      # signal for a caller that wants to gate on it) — the opposite of a
-      # reason to skip posting, since that is exactly the moment findings
-      # matter most. stdout is already fully written to the file before the
-      # process exits either way.
+      # `|| true` on both: capability-audit.mjs's own exit code is NON-ZERO
+      # when the gate finds a blocking problem — the opposite of a reason to
+      # skip posting, since that is exactly the moment findings matter most.
+      # stdout is already fully written to the file before the process exits
+      # either way. That reasoning was right and stays.
+      #
+      # ── WHAT WAS WRONG, AND WHAT CHANGED (2026-08-15, KFM-05 / finding #4)
+      #
+      # `|| true` on every step meant NOTHING IN THIS JOB COULD EVER GO RED.
+      # A green light wired to nothing. Swallowing the code so the post
+      # happens and never looking at it again are two different decisions,
+      # and only the first one was intended.
+      #
+      # So the code is now CAPTURED here and RE-RAISED in the final step,
+      # AFTER the findings have been posted. Ordering is the whole fix: the
+      # post still happens on a failing audit, and the run still goes red.
       - name: Run the audit and shape findings
+        id: audit
         if: steps.config.outputs.ready == 'true'
-        run: node scripts/capability-audit.mjs --findings > /tmp/findings.json || true
+        run: |
+          set +e
+          node scripts/capability-audit.mjs --findings > /tmp/findings.json
+          echo "gate_exit=$?" >> "$GITHUB_OUTPUT"
 
       - name: Also render the human-readable findings document (for the run log)
         if: steps.config.outputs.ready == 'true'
@@ -94,3 +108,26 @@ jobs:
           cat /tmp/findings.md >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "</details>" >> "$GITHUB_STEP_SUMMARY"
+
+      # THE STEP THAT CAN FAIL THE RUN. Added 2026-08-15 (KFM-05 / audit #4).
+      #
+      # Deliberately LAST: the findings are already posted to the board and
+      # the summary is already written, so failing here costs no information
+      # — it only makes the failure visible. Before this step existed, every
+      # step ended in `|| true` and the job was structurally incapable of
+      # going red, which is a gate wired to nothing.
+      #
+      # It fails on capability-audit.mjs's exit code, and that code is now
+      # computed from `roleVerdict` — "can this role produce its own declared
+      # output" — rather than from `canWork`, which one supplied capability
+      # of any kind flipped true. See that script's own GATE block.
+      #
+      # A gap that is genuinely known does NOT fail the run: the script
+      # passes a PARTLY_SUPPLIED role whose blocking capability names a board
+      # task in the manifest. So this going red means something new and
+      # unboarded, not a standing item.
+      - name: Fail the run if the capability gate found a blocking problem
+        if: steps.config.outputs.ready == 'true' && steps.audit.outputs.gate_exit != '0'
+        run: |
+          echo "::error::The capability gate exited ${{ steps.audit.outputs.gate_exit }} — a non-dormant agent cannot produce a declared output kind, and it is not boarded. See the findings document in the summary above; the findings have already been posted to the board inbox."
+          exit 1
