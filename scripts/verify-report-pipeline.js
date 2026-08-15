@@ -1110,6 +1110,43 @@ check('[new] daysUntil() returns null for an unreadable due date, never a guess'
   rp.daysUntil(null) === null && rp.daysUntil('not a date') === null);
 check('[new] daysUntil() computes a real remaining count',
   rp.daysUntil('2026-09-07', Date.parse('2026-08-08T00:00:00Z')) === 30);
+
+/* ── §9b  The commitment date past its deadline — audit #5 / KFM-18 ──────
+ *
+ * The fact pack interpolated daysUntil() raw, so from 2026-09-10 a
+ * CLIENT-FACING report would have read "Days remaining to the commitment
+ * date: -3." The date had not arrived, so nothing was failing — which is
+ * exactly why it needed a check that can set the clock forward.
+ */
+const DUE = '2026-09-07';
+const at = (d) => Date.parse(`${d}T12:00:00Z`);
+
+check('[FAILS-OLD] the OLD line reads "Days remaining ... -3" on 2026-09-10',
+  `Days remaining to the commitment date: ${rp.daysUntil(DUE, at('2026-09-10'))}.`
+  === 'Days remaining to the commitment date: -3.');
+check('[new] the same day now reads OVERDUE, and names how late',
+  /^OVERDUE: the commitment date passed 3 day\(s\) ago\./.test(rp.daysRemainingLine(DUE, at('2026-09-10'))));
+check('[new] …and tells the writer not to soften it',
+  /do not soften it/.test(rp.daysRemainingLine(DUE, at('2026-09-10'))));
+check('[new] the due date itself is "TODAY", not the "0 days remaining" that reads as a rounding artifact',
+  /commitment date is TODAY/.test(rp.daysRemainingLine(DUE, at('2026-09-07'))));
+check('[new] the ordinary future case is unchanged',
+  rp.daysRemainingLine(DUE, at('2026-09-06')) === 'Days remaining to the commitment date: 1.');
+check('[new] an unreadable due date still yields NOTHING, so the caller keeps its own UNVERIFIED line',
+  rp.daysRemainingLine('not a date') === null && rp.daysRemainingLine(null) === null);
+check('[new] daysUntil() itself stays SIGNED — clamping at the source would destroy the fact',
+  rp.daysUntil(DUE, at('2026-09-10')) === -3);
+
+// End to end through the real fact pack, at a clock that has not arrived.
+const overduePack = rp.buildFactPack(
+  { requirements: { due: DUE, requirements: [{ id: 'REQ-001', status: 'open', title: 'x' }] } },
+  { nowMs: at('2026-09-10') },
+);
+check('[FAILS-OLD] the FACT PACK no longer carries a negative day count to the client',
+  !/Days remaining to the commitment date: -/.test(overduePack));
+check('[new] …it carries OVERDUE instead', /OVERDUE: the commitment date passed 3 day\(s\) ago/.test(overduePack));
+check('[new] the due date is still stated, so OVERDUE never replaces the date itself',
+  overduePack.includes(DUE));
 check('[new] the byline names both personas AND both providers (the embodiment record)',
   (() => {
     const f = rp.renderReportFile({

@@ -48,21 +48,107 @@ import {
 
 const CHORE = tokenEconomy.chore_automation;
 
-// Current Sonnet 5 intro pricing. Per config/token-economy.json
-// chore_automation.claude_pricing_note: this changes to $3/M input /
-// $15/M output after 2026-08-31 — verify the real published price when
-// that date arrives rather than trusting this estimate blindly.
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ * CLAUDE PRICING — A FETCHED FACT WITH A DATE ON IT, NOT A GUESS (KFM-19)
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * Audit 2026-08-15, finding #15: `after` was a hardcoded post-change price
+ * that nobody had checked, and `config/token-economy.json` said in its own
+ * text to "double check the real published price at that time". The date was
+ * 16 days out when the audit was written.
+ *
+ * ── VERIFIED 2026-08-15 AGAINST THE LIVE PUBLISHED PRICE ─────────────────
+ *
+ * Checked against Anthropic's own models overview
+ * (platform.claude.com/docs/en/about-claude/models/overview), not from
+ * memory. Both figures held:
+ *
+ *   `before` — Sonnet 5 is published TODAY at $2 / input MTok, $10 / output
+ *              MTok. That is the introductory rate, and it is what this
+ *              office is actually billed right now.
+ *   `after`  — $3 / $15 is the documented standard rate the introductory
+ *              price discounts from, and 2026-08-31 is the documented end of
+ *              the introductory period.
+ *
+ * So the numbers were right. **That was never the defect.** The defect is
+ * that nothing distinguished a checked number from an invented one, and
+ * nothing would say a word when the switch happened.
+ *
+ * ── WHY THE EXPIRY IS NOW LOUD ───────────────────────────────────────────
+ *
+ * KFM-19 asks "is this a fetched fact or a guess with a date on it?" — and
+ * this project has had THREE model IDs retired out from under it, every one
+ * discovered by something breaking rather than by anything noticing. A price
+ * is the same class of external fact, and a wrong one is quieter than a
+ * retired model ID: spend keeps being recorded, the budget keeps being
+ * enforced, and every figure is simply wrong by 50%.
+ *
+ * So the transition is announced three ways rather than happening silently:
+ *
+ *   1. `PRICING_VERIFIED_ON` records WHEN a human last checked. A date, not
+ *      a boolean — "verified" with no date is the claim that goes stale.
+ *   2. `currentClaudePricing()` returns `verified: false` past the change
+ *      date and warns once per Worker instance, naming the figure in use.
+ *   3. `scripts/verify-routing.js` FAILS once the change date is reached
+ *      while `PRICING_VERIFIED_ON` still predates it. That is deliberate: a
+ *      verifier that goes red on a calendar date is a time bomb, and a time
+ *      bomb is exactly right here — it fires BEFORE the price moves, which
+ *      is the only moment at which re-checking is cheap.
+ *
+ * **To clear it:** re-read the published price, update the figures if they
+ * moved, and set `PRICING_VERIFIED_ON` to the date you checked.
+ */
 const PRICING_CHANGE_DATE = '2026-08-31';
+/** The date a person last checked these figures against the published price. */
+const PRICING_VERIFIED_ON = '2026-08-15';
 const CLAUDE_PRICING = {
   before: { inputPerMillion: 2, outputPerMillion: 10 },
   after: { inputPerMillion: 3, outputPerMillion: 15 },
 };
 
+let pricingWarned = false;
+
 function currentClaudePricing(asOf = new Date()) {
-  return asOf.toISOString().slice(0, 10) > PRICING_CHANGE_DATE ? CLAUDE_PRICING.after : CLAUDE_PRICING.before;
+  const today = asOf.toISOString().slice(0, 10);
+  const past = today > PRICING_CHANGE_DATE;
+  if (!past) return { ...CLAUDE_PRICING.before, verified: true, verifiedOn: PRICING_VERIFIED_ON };
+
+  const verified = PRICING_VERIFIED_ON > PRICING_CHANGE_DATE;
+  if (!verified && !pricingWarned) {
+    pricingWarned = true;
+    console.warn(
+      `[model-router] CLAUDE PRICING IS PAST ITS CHANGE DATE (${PRICING_CHANGE_DATE}) AND UNVERIFIED. `
+      + `Using $${CLAUDE_PRICING.after.inputPerMillion}/M input, $${CLAUDE_PRICING.after.outputPerMillion}/M output, `
+      + `last checked ${PRICING_VERIFIED_ON}. Every budget figure below rests on this. `
+      + 'Re-read the published price and update PRICING_VERIFIED_ON.',
+    );
+  }
+  return { ...CLAUDE_PRICING.after, verified, verifiedOn: PRICING_VERIFIED_ON };
 }
 
-/** Estimated USD cost for a Claude call at current (date-aware) pricing. */
+/**
+ * Is the price this router is charging against a checked fact right now?
+ *
+ * Exported so a status endpoint or a report can say so out loud rather than
+ * a reader having to know that a console warning exists. Makes no model call.
+ */
+export function claudePricingStatus(asOf = new Date()) {
+  const p = currentClaudePricing(asOf);
+  return {
+    inputPerMillion: p.inputPerMillion,
+    outputPerMillion: p.outputPerMillion,
+    verified: p.verified,
+    verifiedOn: PRICING_VERIFIED_ON,
+    changeDate: PRICING_CHANGE_DATE,
+    note: p.verified
+      ? `verified against the published price on ${PRICING_VERIFIED_ON}`
+      : `UNVERIFIED — past the ${PRICING_CHANGE_DATE} change date and last checked ${PRICING_VERIFIED_ON}. Every cost figure derived from this is a guess.`,
+  };
+}
+
+/** Estimated USD cost for a Claude call at current (date-aware) pricing.
+ *  Return shape unchanged — a number — so no caller had to change. */
 export function estimateClaudeCostUsd(inputTokens, outputTokens, asOf = new Date()) {
   const pricing = currentClaudePricing(asOf);
   return (inputTokens / 1_000_000) * pricing.inputPerMillion + (outputTokens / 1_000_000) * pricing.outputPerMillion;

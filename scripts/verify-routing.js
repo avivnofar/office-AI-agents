@@ -981,6 +981,63 @@ check('soft_stop_fraction is a fraction below 1 (headroom, not a hard ceiling)',
 console.log('\n--- Network tripwire ---');
 check('this verifier made ZERO network calls end to end', NETWORK_TRIPWIRE.length === 0, NETWORK_TRIPWIRE.join(', '));
 
+/* ═══════ Claude pricing is a dated fact — audit #15 / KFM-19, 2026-08-15 ═══
+ *
+ * ⚠ THIS SECTION IS DESIGNED TO GO RED ON A CALENDAR DATE, AND THAT IS THE
+ * POINT. `workers/model-router.js` carries a post-2026-08-31 Claude price.
+ * On 2026-08-15 both figures were verified against Anthropic's published
+ * models overview and both held — but a number that was right once and is
+ * never re-checked is the shape KFM-19 exists for, and this project has had
+ * three model IDs retired out from under it without noticing.
+ *
+ * The last check below fails once the change date arrives while nobody has
+ * re-verified. It fires BEFORE the price moves, which is the only moment at
+ * which re-checking is cheap. Clearing it means re-reading the published
+ * price and updating PRICING_VERIFIED_ON — not deleting this check.
+ * ═════════════════════════════════════════════════════════════════════════ */
+{
+  const routerSrc = readFileSync(new URL('../workers/model-router.js', import.meta.url), 'utf8');
+  const changeDate = /PRICING_CHANGE_DATE = '(\d{4}-\d{2}-\d{2})'/.exec(routerSrc)?.[1];
+  const verifiedOn = /PRICING_VERIFIED_ON = '(\d{4}-\d{2}-\d{2})'/.exec(routerSrc)?.[1];
+  const today = new Date().toISOString().slice(0, 10);
+
+  check('the pricing change date is still declared', Boolean(changeDate), String(changeDate));
+  check('[FAILS-OLD] the price records WHEN it was last verified, not just what it is',
+    Boolean(verifiedOn), String(verifiedOn));
+
+  // The figures verified on 2026-08-15 against the published price.
+  check('the pre-change price is still the verified $2/$10 introductory rate',
+    /before: \{ inputPerMillion: 2, outputPerMillion: 10 \}/.test(routerSrc));
+  check('the post-change price is still the documented $3/$15 standard rate',
+    /after: \{ inputPerMillion: 3, outputPerMillion: 15 \}/.test(routerSrc));
+
+  // ── SOURCE ASSERTIONS, AND WHY THEY ARE NOT EXECUTED ──────────────────
+  // `model-router.js` imports config JSON, so plain `node` cannot load it and
+  // this verifier cannot CALL claudePricingStatus() the way it calls
+  // task-router's functions above. That is the same limitation that puts
+  // model-router's gates on the gate-call audit's UNPROVEN list, and it is
+  // reported there rather than papered over here. These check that the
+  // mechanism EXISTS and has the right shape — not that it runs.
+  check('claudePricingStatus() exists so a reader never has to know a console warning is the only signal',
+    /export function claudePricingStatus/.test(routerSrc));
+  check('[FAILS-OLD] past the change date the price reports itself UNVERIFIED rather than silently switching',
+    /verified = PRICING_VERIFIED_ON > PRICING_CHANGE_DATE/.test(routerSrc));
+  check('…and warns, naming the figure every budget number then rests on',
+    /CLAUDE PRICING IS PAST ITS CHANGE DATE/.test(routerSrc));
+  check('…once per instance, so a per-call warning cannot drown the log it needs to be seen in',
+    /pricingWarned = true/.test(routerSrc));
+  check('the status note says plainly that derived figures are guesses',
+    /UNVERIFIED — past the/.test(routerSrc));
+
+  // THE TIME BOMB.
+  check(
+    `RE-VERIFY THE CLAUDE PRICE: change date ${changeDate}, last verified ${verifiedOn}. `
+    + 'Re-read the published price, update the figures if they moved, and set PRICING_VERIFIED_ON.',
+    today < changeDate || (verifiedOn && verifiedOn > changeDate),
+    `today=${today}`,
+  );
+}
+
 // Restore the real invoke functions so nothing leaks between runs.
 for (const [id, invoke] of Object.entries(REAL_INVOKE)) PROVIDER_REGISTRY[id].invoke = invoke;
 

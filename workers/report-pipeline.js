@@ -601,7 +601,10 @@ export const MARKER_RULE =
   + 'spelled exactly. Conveying the same meaning in other words does NOT satisfy this rule: an automated check looks '
   + 'for the word itself, and a report that carries the meaning without the word is refused and never published.';
 
-export function buildFactPack(f = {}) {
+/** `opts.nowMs` exists so the commitment-date wording is testable at a fixed
+ *  clock — audit #5's whole point is what this renders on a date that has not
+ *  arrived yet, and a check that cannot set the date cannot prove it. */
+export function buildFactPack(f = {}, { nowMs = Date.now() } = {}) {
   const lines = [];
   const push = (s) => lines.push(s);
 
@@ -621,7 +624,16 @@ export function buildFactPack(f = {}) {
           + 'Section 1 must report this as a defect AND must contain the literal word UNVERIFIED when it does. '
           + 'Do not write that there is no deadline.'
     );
-    if (f.daysRemaining != null) push(`Days remaining to the commitment date: ${f.daysRemaining}.`);
+    // Was `Days remaining to the commitment date: ${f.daysRemaining}.` — which
+    // prints "-3" from 2026-09-10 (audit #5 / KFM-18). `daysRemainingLine()`
+    // owns the wording for all three cases; `f.daysRemaining` stays the
+    // signed number so nothing downstream loses the fact.
+    if (f.requirements?.due) {
+      const line = daysRemainingLine(f.requirements.due, nowMs);
+      if (line) push(line);
+    } else if (f.daysRemaining != null) {
+      push(`Days remaining to the commitment date: ${f.daysRemaining}.`);
+    }
     for (const r of f.requirements.requirements) {
       push(`- ${r.id} [${r.status}]${r.urgent ? ' [URGENT — owner-assigned]' : ''}${r.crossCutting ? ' [cross-cutting]' : ''}: ${r.title}`);
     }
@@ -1583,10 +1595,50 @@ export function periodLabelFor(reportType, n) {
 
 /** Whole days from `fromIso` to the commitment date, or null when the due
  *  date could not be read. Null is returned rather than a guess — the report
- *  must be able to tell "no deadline" from "deadline unreadable". */
+ *  must be able to tell "no deadline" from "deadline unreadable".
+ *
+ *  SIGNED ON PURPOSE. A negative value is the real answer and callers need it
+ *  to say OVERDUE; see `daysRemainingLine()`, which is what a report renders.
+ *  Clamping here would have destroyed the fact at its source. */
 export function daysUntil(dueDateStr, nowMs = Date.now()) {
   if (!dueDateStr) return null;
   const due = Date.parse(`${String(dueDateStr).trim()}T00:00:00Z`);
   if (Number.isNaN(due)) return null;
   return Math.ceil((due - nowMs) / (24 * 60 * 60 * 1000));
+}
+
+/**
+ * The sentence a CLIENT-FACING report prints about the commitment date.
+ *
+ * ── AUDIT 2026-08-15, FINDING #5 / KFM-18 ────────────────────────────────
+ *
+ * The fact pack used to interpolate `daysUntil()` raw:
+ *
+ *     Days remaining to the commitment date: -3.
+ *
+ * From 2026-09-10, in a report that goes to the client. Nothing was wrong
+ * with the arithmetic — a bare `Math.ceil` with no floor and no OVERDUE
+ * branch is simply the wrong SENTENCE for a passed deadline. "Days
+ * remaining: -3" reads as a rendering bug and buries the one fact that
+ * actually needed saying, which is that the office is three days late.
+ *
+ * Three cases, three different sentences, because they are three different
+ * facts and a client reading the wrong one draws the wrong conclusion:
+ *
+ *   future   "N day(s) remaining"      — the ordinary case.
+ *   today    "due TODAY"               — not "0 days remaining", which reads
+ *                                        as a rounding artifact on the last
+ *                                        day it is still possible to deliver.
+ *   past     "OVERDUE by N day(s)"     — named, not negated.
+ *
+ * Returns null for an unreadable date so the caller keeps printing its own
+ * UNVERIFIED line rather than this function inventing a softer one.
+ */
+export function daysRemainingLine(dueDateStr, nowMs = Date.now()) {
+  const d = daysUntil(dueDateStr, nowMs);
+  if (d == null) return null;
+  if (d > 0) return `Days remaining to the commitment date: ${d}.`;
+  if (d === 0) return 'The commitment date is TODAY. Say so in section 1 — this is the last day delivery is still on time.';
+  return `OVERDUE: the commitment date passed ${Math.abs(d)} day(s) ago. `
+    + 'Section 1 must state this plainly as a missed commitment — do not report it as time remaining, and do not soften it.';
 }
