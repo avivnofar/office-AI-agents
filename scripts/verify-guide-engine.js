@@ -225,7 +225,16 @@ check('Friday: guide_draft at 10:30 (after the Friday report block)',
   hasBlock(dailySchedule.friday_schedule, '10:30', 'guide_draft') &&
   dailySchedule.friday_schedule.blocks.findIndex((b) => b.time === '10:30' && b.type === 'report') <
   dailySchedule.friday_schedule.blocks.findIndex((b) => b.time === '10:30' && b.type === 'guide_draft'));
-check('Friday: guide_review at 12:00', hasBlock(dailySchedule.friday_schedule, '12:00', 'guide_review'));
+// 12:00 -> 12:30 on 2026-08-15 (OB-073). What this check is really protecting
+// is that guide_review stays the day's LAST block, not that it sits at any
+// particular clock time — so assert the ordering property, which survives the
+// next move, alongside the time itself.
+check('Friday: guide_review at 12:30 (moved off the crowded 12:00 tick, OB-073)',
+  hasBlock(dailySchedule.friday_schedule, '12:30', 'guide_review'));
+check('Friday: guide_review is still the LAST block of the day',
+  dailySchedule.friday_schedule.blocks
+    .filter((b) => b.type === 'guide_review')
+    .every((b) => dailySchedule.friday_schedule.blocks.every((o) => o.time <= b.time)));
 
 /*
  * ── guide_verify MOVED OFF SATURDAY, 2026-08-10 ──────────────────────────
