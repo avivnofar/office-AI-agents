@@ -696,6 +696,35 @@ const TRANSITION_GUARDS = {
     if (!phases.length) return 'no "## Phases" list was supplied — a build cannot be declared complete against a spec nobody read';
     const openShift = r.shift && r.shift.status === 'SUSPENDED';
     if (openShift) return `the last shift on phase "${r.shift.phase}" is SUSPENDED and was never closed — a suspended shift means work stopped mid-phase, and a phase list that looks complete over an open shift is exactly the partial-that-looks-finished failure this project has hit three times`;
+    // ── assertPhaseCompletable()'s CALL SITE, wired 2026-08-15 (OB-001) ────
+    //
+    // It was NOT-CALLED: named in `scripts/lifecycle.mjs`'s import list,
+    // invoked nowhere in it, and exercised only by `verify-lifecycle.js` — a
+    // test proving a guard that guarded nothing on any live path.
+    //
+    // Its docstring says the rule lives "at the phase-completion path". THERE
+    // IS NO SUCH PATH IN CODE: `openShift()`/`closeShift()` have no production
+    // caller either, and every live record carries `shift: null` beside a fully
+    // populated `completed` list, because `completed` is hand-written today.
+    // So it is wired HERE instead — the moment `completed` stops being a note
+    // and starts being believed, by this guard, the board and the weekly report.
+    //
+    // WHAT THIS DOES AND DOES NOT CATCH, stated because the difference matters:
+    // the record holds ONE `shift`, not a history, so this validates the last
+    // phase worked and cannot speak for the ones before it. It catches the
+    // hand-edited COMPLETED shift carrying incomplete artifacts — which
+    // `closeShift()` refuses at write time and a direct STATE.json edit does
+    // not. The missing shift history is boarded as OB-077.
+    // The phase id comes from `build_completed`, NOT from `r.shift.phase`.
+    // Passing the shift its own phase back would make the gate's
+    // `shift.phase !== phaseId` arm unreachable — the gate would run and one
+    // of its three refusals could never fire. Asking "does the shift support
+    // the LAST phase this build claims finished?" is what it was written for.
+    const claimed = (r.build_completed || []);
+    if (r.shift && r.shift.status === 'COMPLETED' && claimed.length) {
+      const completable = assertPhaseCompletable(r, claimed[claimed.length - 1]);
+      if (!completable.ok) return `the shift this build closed on cannot support the phase it claims finished: ${completable.reason}`;
+    }
     if (!r.reviewer_set || !(r.reviewer_set.required || []).length) return 'no reviewer set has been composed — the Workflow (Agent 12) composes it per deliverable (MEETING-PROTOCOL.md §4.4)';
     return null;
   },

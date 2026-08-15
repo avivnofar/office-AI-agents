@@ -32,11 +32,18 @@ export function getRotatedProject(date = new Date()) {
 
 /**
  * Reads TODO.md from THIS repo (office-AI-agents) via a public raw fetch —
- * a self-repo read, not an external "pull" in the General-rule sense (that
- * cap is checkAndRecordPull()'s 1/day-repo-wide limit on checking out an
- * EXTERNAL project's repo, unrelated to the push-permission check
- * commitFileToRepo()/fileGitHubIssue() run via REPO_TO_PROJECT_KEY), so
- * this read isn't subject to the 1-pull/day cap. Returns the raw text
+ * a self-repo read, not an external "pull" in the General-rule sense, and
+ * unrelated to the push-permission check commitFileToRepo()/fileGitHubIssue()
+ * run via REPO_TO_PROJECT_KEY.
+ *
+ * CORRECTED 2026-08-15 (OB-001's gate-call audit). This sentence used to name
+ * `checkAndRecordPull()`'s "1/day-repo-wide limit" as a live cap this read was
+ * exempt from. **That cap has never been enforced anywhere** — the function
+ * has zero call sites and is now RETIRED with its reasoning at
+ * `workers/permission-guard.js`. The exemption claimed here was true and the
+ * thing it claimed exemption FROM was not, which is the more misleading half:
+ * a reader checking why this path is safe would have found a named guard and
+ * stopped looking. Returns the raw text
  * under `## <sectionHeading>` up to the next `## ` heading, or null if the
  * section is missing/empty/unreachable.
  */

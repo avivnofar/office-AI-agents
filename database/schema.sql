@@ -329,7 +329,15 @@ CREATE TABLE IF NOT EXISTS provider_usage (
 
 -- General agent-conduct rule: max 1 pull (external repo checkout/fetch) per
 -- day, repo-wide, regardless of config/project-permissions.json push state.
--- See workers/permission-guard.js checkAndRecordPull().
+--
+-- ⚠ THIS TABLE HAS NEVER HELD A ROW, AND THE RULE ABOVE IS NOT ENFORCED HERE.
+-- Corrected 2026-08-15 by OB-001's gate-call audit: the only writer,
+-- workers/permission-guard.js checkAndRecordPull(), has zero call sites and is
+-- now RETIRED — that function's own header carries the full reasoning (short
+-- version: the Worker has no git and never checks a repo out; the midnight run
+-- does, on another machine, with no D1). The table is KEPT rather than dropped
+-- per A15 — dropping it is the one irreversible step in an otherwise reversible
+-- retirement — but a reader must not take its presence as evidence of a cap.
 CREATE TABLE IF NOT EXISTS pull_log (
   date TEXT PRIMARY KEY,
   count INTEGER DEFAULT 0,

@@ -32,7 +32,10 @@ import {
   routingEnabled,
   assignEmbodiment,
   renderEmbodimentMap,
-  checkProviderAllowance,
+  // `checkProviderAllowance` was imported here for the retired wrapper below
+  // and is gone with it — leaving the import would create a fresh dead
+  // reference while closing one, which is KFM-12 recreated by its own fix.
+  // It stays CALLED via its real site, task-router.js:1016.
   recordProviderCall,
   getProviderCallsToday,
   getProviderUsageToday,
@@ -249,10 +252,28 @@ export function resolveTaskLane(taskType, opts = {}) {
   return resolveLane(modelRouting, taskType, opts);
 }
 
-/** Per-provider allowance check bound to the real config. */
-export async function checkRoutedProviderAllowance(env, providerId, opts = {}) {
-  return checkProviderAllowance(env, providerId, { tokenEconomy, routingConfig: modelRouting, ...opts });
-}
+/**
+ * RETIRED 2026-08-15 — `checkRoutedProviderAllowance()` was here.
+ *
+ * A three-line config-binding wrapper over `checkProviderAllowance()` with
+ * **zero callers anywhere**, found independently by two routes on the same
+ * day: `AUDIT-2026-08-15-UNSEEN-CORNERS.md` #25 (by reading) and OB-001's
+ * gate-call audit (by mechanism). Two independent methods agreeing on a dead
+ * export is as settled as this project's evidence rules get.
+ *
+ * **It was never needed.** The only path that checks a provider's allowance is
+ * `task-router.js routeTask()`, which already holds `tokenEconomy` and
+ * `routingConfig` in scope and calls `checkProviderAllowance()` directly at
+ * `task-router.js:1016`. The binding this wrapper provided is binding the
+ * caller does not need. Nothing lost capability; the sibling gate is CALLED
+ * and verifier-covered (8 sites in `scripts/verify-routing.js`).
+ *
+ * Deleted rather than left in place — unlike `checkAndRecordPull()` above it,
+ * which is kept because a real caller could plausibly appear one day. Nothing
+ * will ever want this one: any future caller inside the router already has the
+ * config, and any caller outside it should not be making allowance decisions.
+ * Recovering it is `git show` on this commit.
+ */
 
 /** Today's per-provider usage plus each provider's known cap and soft-stop —
  * the quota view for the admin status endpoint (plan item 3.5). */

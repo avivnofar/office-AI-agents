@@ -812,6 +812,48 @@ check('KFM-08: the stage sign-off path calls it too',
 check('the one writer refuses outright when it cannot read the roster, rather than running a gate that passes everything',
   /if \(!ctx\.roster\.length\)/.test(lifecycleTool));
 
+/* ═══════ §13 assertPhaseCompletable() is on a live path — OB-001 ════════ */
+section('§13 assertPhaseCompletable — wired, not verifier-only');
+
+// It was NOT-CALLED: only scripts/verify-lifecycle.js reached it. These prove
+// the BUILDING->IN-REVIEW guard now runs it, which is the whole point of the
+// gate-call audit — a guard proven by a test and run by nothing is not a guard.
+const twoPhases = [{ id: 'scaffold' }, { id: 'interface' }];
+const baseBuilt = {
+  ...L.newRecord({ slug: 'phase-gate-fixture' }).record,
+  build_completed: ['scaffold', 'interface'],
+};
+const goodShift = L.closeShift(L.openShift({ phase: 'interface', agentId: 4 }).shift,
+  { status: 'COMPLETED', artifacts: ['interface.js'] }).shift;
+
+check('a build closed over a genuinely COMPLETED shift still advances',
+  L.canAdvance({ ...baseBuilt, shift: goodShift }, 'IN-REVIEW', { phases: twoPhases, roster: ROSTER }).ok,
+  L.canAdvance({ ...baseBuilt, shift: goodShift }, 'IN-REVIEW', { phases: twoPhases, roster: ROSTER }).reason || '');
+
+// The hand-edit closeShift() cannot refuse, because it never ran.
+const forgedShift = { ...goodShift, incomplete_artifacts: ['half-written.js'] };
+check('[FAILS-OLD] a hand-edited COMPLETED shift carrying INCOMPLETE artifacts is refused',
+  !L.canAdvance({ ...baseBuilt, shift: forgedShift }, 'IN-REVIEW', { phases: twoPhases, roster: ROSTER }).ok);
+check('…and the refusal names the incomplete artifact, not just "refused"',
+  /half-written\.js/.test(L.canAdvance({ ...baseBuilt, shift: forgedShift }, 'IN-REVIEW', { phases: twoPhases, roster: ROSTER }).reason || ''));
+
+// The arm that only works because the phase id comes from build_completed
+// rather than from the shift itself — see the call site's comment.
+const staleShift = { ...goodShift, phase: 'scaffold' };
+check('[FAILS-OLD] a build claiming "interface" finished over a shift closed on "scaffold" is refused',
+  !L.canAdvance({ ...baseBuilt, shift: staleShift }, 'IN-REVIEW', { phases: twoPhases, roster: ROSTER }).ok);
+check('…and the refusal names both phases, so the reader can see which one is unsupported',
+  /scaffold[\s\S]*interface|interface[\s\S]*scaffold/.test(
+    L.canAdvance({ ...baseBuilt, shift: staleShift }, 'IN-REVIEW', { phases: twoPhases, roster: ROSTER }).reason || ''));
+
+// The honest limit, asserted so a later reader cannot mistake it for coverage.
+check('KNOWN LIMIT, asserted: a record with NO shift at all still advances — every live record is this shape',
+  L.canAdvance({ ...baseBuilt, shift: null }, 'IN-REVIEW', { phases: twoPhases, roster: ROSTER }).ok);
+
+const lifecycleSrcNow = read('workers/deliverable-lifecycle.js');
+check('KFM-08: the call site is in the BUILDING->IN-REVIEW guard, not only in this verifier',
+  /'BUILDING->IN-REVIEW':[\s\S]{0,2600}?assertPhaseCompletable\(/.test(lifecycleSrcNow));
+
 console.log(`\n${pass}/${pass + fail} checks passed.`);
 if (fail) { console.log(`${fail} FAILED`); process.exit(1); }
 process.exit(0);

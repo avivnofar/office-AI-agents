@@ -258,10 +258,64 @@ const PULL_LOG_TABLE_SQL = `CREATE TABLE IF NOT EXISTS pull_log (
 )`;
 
 /**
- * Enforces "max 1 pull/day, repo-wide" (General rule, applies regardless
- * of project-permissions push state). No-ops (allows, logs a warning) if
- * env.DB isn't available — same graceful-no-op pattern this repo already
- * uses for other optional bindings (GITHUB_TOKEN, etc.).
+ * ══════════════════════════════════════════════════════════════════════════
+ * RETIRED 2026-08-15 — NOT CALLED, AND THERE IS NOTHING TO CALL IT FROM.
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * Found by `back-office-AI-agents/tools/gate-call-audit/` on its first real
+ * run (OB-001, boarded 2026-08-06 and unbuilt for 40 days): defined, exported,
+ * **zero call sites anywhere in the repo**, while three separate documents
+ * described the cap as enforced. It is kept rather than deleted, with the
+ * reasoning attached, because the third state — a gate that exists, is never
+ * called and is never retired — is what let the previous reader assume a
+ * protection that was not there.
+ *
+ * ── WHAT IT WAS BUILT TO PROTECT ─────────────────────────────────────────
+ *
+ * `config/project-permissions.json`'s `push_semantics`: "Pull (read-only
+ * checkout/fetch) is always allowed regardless of push, but capped at 1/day
+ * repo-wide." That rule is about **checking out an external project's repo** —
+ * a git clone/fetch of somebody else's code.
+ *
+ * ── WHY IT CANNOT BE WIRED, RATHER THAN MERELY NOT HAVING BEEN ───────────
+ *
+ * Two independent reasons, and both had to be checked before retiring it:
+ *
+ * 1. **The Worker never pulls.** It has no git and no filesystem. Its only
+ *    repo access is fine-grained GitHub Contents API reads — `office-context.js`
+ *    reading `BOARD.md`, `architect-liaison.js` reading session records,
+ *    `branch-watch.js:220` listing branches, `repo-write.js:288`'s pre-write
+ *    existence check. Those are not checkouts, and capping them at one a day
+ *    would stop the office running: `office_context_enabled` alone reads
+ *    back-office on every tick. Wiring this gate to them would not be enforcing
+ *    the rule; it would be applying a checkout rule to something that is not a
+ *    checkout.
+ *
+ * 2. **The one thing that DOES pull cannot reach this code.** The Architect's
+ *    headless midnight run does `git pull` across the three checkouts — that is
+ *    the real pull the rule describes. It runs on the owner's machine, in a
+ *    different process, with no `env.DB` and no import of this module. It also
+ *    already pulls once per night by construction, which satisfies the cap
+ *    without any gate at all.
+ *
+ * So the gate is in the wrong process for the only pull that happens, and the
+ * process it lives in does not do the thing it caps. That is a completed
+ * question, not an open one.
+ *
+ * ── WHAT WAS CORRECTED ALONGSIDE THIS ────────────────────────────────────
+ *
+ * The prose asserting the enforcement (KFM-09) was the actual defect, not the
+ * unused function. Three sites, all corrected in the same commit:
+ * `config/project-permissions.json` `push_semantics`, `workers/chore-runner.js`,
+ * and `database/schema.sql`'s `pull_log` comment.
+ *
+ * `pull_log` stays in the schema. It has never held a row (nothing has ever
+ * called this), dropping it would be the one irreversible act in a retirement
+ * that is otherwise fully reversible, and A15's no-deletion posture covers it.
+ *
+ * **To un-retire:** a real checkout path inside the Worker would have to exist
+ * first. If one is ever added, this function is complete and correct as
+ * written — call it there and delete this block.
  */
 export async function checkAndRecordPull(env, { label = 'pull' } = {}) {
   if (!env?.DB) {
