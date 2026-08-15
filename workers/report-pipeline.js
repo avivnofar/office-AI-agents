@@ -2,6 +2,15 @@
  * workers/report-pipeline.js — the office's substantive reports, drafted by a
  * model and reviewed by another before they are published.
  *
+ * NOTE ON `droppedRowsNote()` BELOW: it is a deliberate second copy of the
+ * function of the same name in `workers/office-context.js`, not an oversight.
+ * This module imports NOTHING — that is what lets `scripts/verify-report-pipeline.js`
+ * load and call it under plain `node` with no bindings, and importing
+ * office-context.js (which reaches for config and KV) would end it. The
+ * duplication is the smaller cost, and `verify-report-pipeline.js` §13 asserts
+ * the two renderers agree so the copies cannot drift silently — which is the
+ * actual risk A9's "never two copies" rule is about.
+ *
  * Written 2026-08-08. INERT until SIM_KV simulation-state carries
  * `report_pipeline_enabled: true`. Default OFF, `=== true` only.
  *
@@ -466,6 +475,26 @@ function clip(text, max = BLOCKED_BY_MAX_CHARS) {
   return s.length <= max ? s : `${s.slice(0, max).trimEnd()}… [clipped, full text on the board]`;
 }
 
+/**
+ * Kept identical to office-context.js droppedRowsNote() — see this file's
+ * header for why it is copied rather than imported, and
+ * verify-report-pipeline.js §13 for the assertion that the two agree.
+ *
+ * Audit 2026-08-15, finding #3: a count that silently excludes the rows it
+ * could not read publishes a number it cannot support. The weekly report's
+ * "Board totals" line did exactly that — `f.board.malformed` was carried into
+ * the fact pack and read by nothing — so a corrupted board and a
+ * smaller-but-clean board produced identical client-facing text.
+ */
+function droppedRowsNote(malformed, noun = 'row') {
+  const list = Array.isArray(malformed) ? malformed.filter(Boolean) : [];
+  if (!list.length) return '';
+  const plural = list.length === 1 ? noun : `${noun}s`;
+  const parts = list.join(' · ').split('·').map((s) => s.trim()).filter(Boolean);
+  const detail = parts.length <= 2 ? parts.join(' · ') : `${parts.slice(0, 2).join(' · ')} (+${parts.length - 2} more)`;
+  return ` **${list.length} ${plural} could not be read and are NOT included in this count** — ${detail}.`;
+}
+
 /** Kept identical to office-context.js estimateTokens() and
  *  provider-common.js's — length/3, deliberately over-estimating. */
 function estimateTokens(text) {
@@ -643,7 +672,12 @@ export function buildFactPack(f = {}) {
   push('=== 4. THE OFFICE\'S OWN WORK — DELEGATION BOARD (source: back-office campus/shared/board/BOARD.md) ===');
   if (f.board?.counts) {
     const c = f.board.counts;
-    push(`Board totals: ${c.total} tasks — ${['READY', 'IN-PROGRESS', 'BLOCKED', 'NOT-READY', 'DONE'].filter((s) => c[s]).map((s) => `${c[s]} ${s}`).join(' · ')}.`);
+    // The dropped-row note (audit 2026-08-15, finding #3). `f.board.malformed`
+    // has been carried into this fact pack since the board parser existed and
+    // was read by nothing, so this client-facing line published a total that
+    // silently excluded every row the parser could not read. A corrupted board
+    // and a smaller clean board produced identical text here.
+    push(`Board totals: ${c.total} tasks — ${['READY', 'IN-PROGRESS', 'BLOCKED', 'NOT-READY', 'DONE'].filter((s) => c[s]).map((s) => `${c[s]} ${s}`).join(' · ')}.${droppedRowsNote(f.board.malformed, 'board task')}`);
     // The old form of this line was `DISPATCHED: ${count ?? '<a sentence>'}`,
     // and the sentence read as prose to reuse rather than a marked fact. The
     // first live draft duly wrote "As the office does not yet record

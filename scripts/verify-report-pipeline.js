@@ -1456,6 +1456,59 @@ check('[new] the refreshed pack is persisted back onto the row, so a LATER retry
 check('[new] updateReportRow() now accepts a factPack patch key (fact_pack column) -- the write above has somewhere to land',
   /\['factPack', 'fact_pack'\]/.test(read('workers/report-pipeline.js')));
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * §13  A count that drops rows says so — audit 2026-08-15, finding #3.
+ *
+ * Before this, `f.board.malformed` was carried all the way into the fact pack
+ * and read by nothing. The board parser excluded unreadable rows from `counts`
+ * and the only trace was one console.warn in office-context.js — so the
+ * client-facing "Board totals" line was textually IDENTICAL whether the board
+ * was clean or half-unreadable. These checks assert the two states now differ.
+ * ═════════════════════════════════════════════════════════════════════════ */
+section('§13  Dropped rows are visible in every count that drops them');
+
+const boardCounts = { total: 2, READY: 2 };
+const packClean = rp.buildFactPack({
+  reportType: 'weekly', periodLabel: 'week-09',
+  board: { counts: boardCounts, malformed: [], tasks: [] },
+});
+const packDropped = rp.buildFactPack({
+  reportType: 'weekly', periodLabel: 'week-09',
+  board: {
+    counts: boardCounts, tasks: [],
+    malformed: ['OB-099: unreadable State ("absent")', 'OB-100: unreadable State ("REDY")'],
+  },
+});
+
+// Scoped to the Board-totals LINE, not the whole pack: a minimal fixture
+// leaves requirements/questions/lifecycle unset, and those legitimately render
+// their own "could not be read" lines. Asserting against the whole pack tests
+// the fixture, not the fix.
+const boardLine = (pack) => pack.split('\n').find((l) => l.startsWith('Board totals:')) || '';
+check('[new] a clean board renders NO dropped-row note',
+  /^Board totals: 2 tasks — 2 READY\.$/.test(boardLine(packClean)), boardLine(packClean));
+check('[FAILS-OLD] a board with unreadable rows no longer renders identically to a clean one',
+  packDropped !== packClean);
+check('[new] the note states HOW MANY rows were dropped',
+  /\*\*2 board tasks could not be read and are NOT included in this count\*\*/.test(packDropped),
+  packDropped.split('\n').find((l) => /Board totals/.test(l)) || '(no Board totals line)');
+check('[new] ...and WHY, by naming the offending rows',
+  /OB-099: unreadable State/.test(packDropped));
+
+// The two copies of the renderer must not drift. report-pipeline.js keeps a
+// local copy because it imports nothing (see that file's header); this is the
+// assertion that makes the duplication safe rather than merely convenient.
+check('[new] office-context.js exports droppedRowsNote()',
+  typeof officeContext.droppedRowsNote === 'function');
+if (typeof officeContext.droppedRowsNote === 'function') {
+  const sameInput = ['OB-099: unreadable State ("absent")', 'OB-100: unreadable State ("REDY")'];
+  const fromContext = officeContext.droppedRowsNote(sameInput, 'board task');
+  check('[new] the two copies of droppedRowsNote() render the SAME text for the same input',
+    packDropped.includes(fromContext.trim()), `office-context said: ${fromContext.trim()}`);
+  check('[new] both render empty for an empty malformed list',
+    officeContext.droppedRowsNote([], 'board task') === '' && !/could not be read/.test(boardLine(packClean)));
+}
+
 /* ══════════════════════════════════════════════════════════════════════════ */
 section('─────────────────────────────────────────────────────────────');
 console.log(`\n  ${pass} passed, ${fail} failed  (${pass + fail} checks)`);

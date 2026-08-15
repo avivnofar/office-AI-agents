@@ -1279,6 +1279,38 @@ function boardCountLine(counts) {
 }
 
 /**
+ * The sentence that makes a dropped row visible. Appended to EVERY count that
+ * excluded rows, everywhere that count is rendered.
+ *
+ * ── WHY THIS EXISTS (audit 2026-08-15, finding #3) ────────────────────────
+ *
+ * The parsers in this file have always recorded unreadable rows in `malformed`
+ * and excluded them from `counts`. Nothing ever rendered that. The only signal
+ * was one `console.warn` in getOfficeContext() — a server log nobody reads —
+ * so **a corrupted board and a smaller-but-clean board were textually
+ * identical in every report the office publishes, including the client-facing
+ * weekly's "Board totals" line.** A count that silently drops its failures
+ * reports a number it cannot support.
+ *
+ * The number is deliberately stated even though the reasons are truncated: how
+ * MANY rows vanished is the fact that changes how much a reader should trust
+ * the total, and it must survive any shortening of the detail.
+ *
+ * At the time of writing the live board dropped ZERO rows — this is a latent
+ * defect being closed before it bites, not an active miscount being corrected.
+ *
+ * @param {string[]} malformed  entries from a parse* function
+ * @param {string} noun         what was dropped, e.g. 'board task'
+ * @returns {string} '' when nothing was dropped, else a leading-space sentence
+ */
+export function droppedRowsNote(malformed, noun = 'row') {
+  const list = Array.isArray(malformed) ? malformed.filter(Boolean) : [];
+  if (!list.length) return '';
+  const plural = list.length === 1 ? noun : `${noun}s`;
+  return ` **${list.length} ${plural} could not be read and are NOT included in this count** — ${firstFew(list.join(' · '), 2)}.`;
+}
+
+/**
  * Builds the office-context block.
  *
  * @param {object} snapshot  from fetchOfficeSnapshot()
@@ -1418,7 +1450,7 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
     sections.push({
       label: 'board-counts',
       priority: PRIORITY.status,
-      text: `Delegation board (back-office campus/shared/board/BOARD.md): ${board.counts.total} tasks — ${boardCountLine(board.counts)}.`,
+      text: `Delegation board (back-office campus/shared/board/BOARD.md): ${board.counts.total} tasks — ${boardCountLine(board.counts)}.${droppedRowsNote(board.malformed, 'board task')}`,
     });
 
     const mine = opts.agentId ? board.tasks.filter((t) => t.agentId === opts.agentId) : [];
