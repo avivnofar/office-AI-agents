@@ -18,8 +18,9 @@ systems the owner actually maintains**:
 - **Claude**, embedded as the AI Search bar in
   [Data Center](https://avivnofar.github.io/data-center/), an IT/
   cybersecurity knowledge-base web app.
-- **Gemini**, embedded in [Notebook-X](https://github.com/avivnofar/Notebook-X),
-  a separate knowledge-notebook web app.
+- **Gemini**, embedded in [Notebook-X](https://notebook-x.vercel.app),
+  a separate knowledge-notebook web app. The app is public; its source
+  repo (`avivnofar/Notebook-X`) is private.
 
 Each persona asks real IT/cybersecurity questions to whichever one of these
 two systems its question targets, judges whether the answer actually held

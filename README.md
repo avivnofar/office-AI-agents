@@ -2,7 +2,7 @@
 
 > An office of AI personas whose job is to **use and stress-test two
 > production AI systems** — Claude (in [Data Center](https://avivnofar.github.io/data-center/))
-> and Gemini (in [Notebook-X](https://github.com/avivnofar/Notebook-X)) — by
+> and Gemini (in [Notebook-X](https://notebook-x.vercel.app)) — by
 > asking them real questions, judging the answers, and flagging genuine
 > capability gaps back to the project owner for review.
 
@@ -70,7 +70,7 @@ question batches (spread across six slots through the day so asks trickle
 out rather than burst, with Notebook-X calls additionally paced ~20s apart
 by `gemini-pacer.js`), a daily report, a standup, spare time — against
 both [Data Center](https://avivnofar.github.io/data-center/) (Claude) and
-[Notebook-X](https://github.com/avivnofar/Notebook-X) (Gemini). State
+[Notebook-X](https://notebook-x.vercel.app) (Gemini). State
 persists between ticks in Cloudflare KV.
 
 Live since **2026-07-19** — the first activation of the Q&A engine. The
@@ -90,7 +90,7 @@ itself. Friday and Saturday are skipped (Israeli weekend).
 The former nightly Notebook-X content-fill automation
 (`notebook-x-daily.yml` + `notebook-x-daily.mjs`) was deleted 2026-07-18 —
 superseded by the Q&A engine, which now covers
-[Notebook-X](https://github.com/avivnofar/Notebook-X) through the personas'
+[Notebook-X](https://notebook-x.vercel.app) through the personas'
 own read-only question path. See `CLAUDE.md`'s "Connection to Notebook-X"
 for the history (including the production incident that shaped the standing
 no-automated-writes rule).
@@ -338,10 +338,12 @@ office-AI-agents/
   knowledge base app with a Claude-powered AI Search bar. The office's
   primary target; its 🔐 Admin tab is a read-only dashboard onto this
   repo's live simulation data.
-- **[Notebook-X](https://github.com/avivnofar/Notebook-X)** — a second,
+- **[Notebook-X](https://notebook-x.vercel.app)** — a second,
   separate target project, covered since 2026-07-18 through the persona
   simulation's own Q&A path (read-only Gemini questions against its
   notebooks; the former nightly GitHub Actions automation is retired).
+  The live app is public; **its source repo is private**, so links here
+  point at the running app rather than the code.
 
 Both are deliberately separate repos from this one: this repo is
 project-agnostic simulation/testing infrastructure, not either product

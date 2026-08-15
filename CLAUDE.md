@@ -46,7 +46,7 @@
 
 An office of 11 AI personas that use and stress-test two production AI
 systems — Claude (embedded in [Data Center](https://avivnofar.github.io/data-center/))
-and Gemini (embedded in [Notebook-X](https://github.com/avivnofar/Notebook-X))
+and Gemini (embedded in [Notebook-X](https://notebook-x.vercel.app))
 — by asking them real IT/cybersecurity questions, evaluating the answers,
 and flagging genuine capability gaps back to the owner for review. This repo
 was migrated out of `data-center/agents/` (2026-06-19) into its own repo so
@@ -638,7 +638,10 @@ names them, and names the repo they live in — it does not link a path here.
 
 ## Connection to `Notebook-X`
 
-[`avivnofar/Notebook-X`](https://github.com/avivnofar/Notebook-X) is a
+`avivnofar/Notebook-X` (**a private repo** — the running app is public at
+[notebook-x.vercel.app](https://notebook-x.vercel.app), and that is what
+every link in this repo's visitor-facing docs points at, since a link to
+the repo 404s for anyone who is not the owner) is a
 **second, separate** target project this repo automates against. Today the
 only automation touching it is the Q&A engine's Notebook-X question path
 (`agent-base.js _askNotebookX()` → `workers/notebookx-client.js`, read-only
