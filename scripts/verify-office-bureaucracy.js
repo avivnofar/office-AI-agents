@@ -1341,7 +1341,15 @@ const BOARD_PATH = path.join(root, '..', 'back-office-AI-agents', 'campus', 'sha
 let boardSrc = null;
 let boardSkipReason = null;
 try {
-  boardSrc = readFileSync(BOARD_PATH, 'utf8');
+  // NORMALISED, and this check learned it the hard way in its own first hour:
+  // it went green on an LF working copy, then red the moment git re-checked the
+  // board out with CRLF under `core.autocrlf=true` — the `Counts:` line matcher
+  // is bounded and newline-anchored, so it stopped matching and reported "not
+  // stated" for a line that was plainly there. Same defect as OB-070 and as the
+  // one fixed in verify-report-pipeline.js this session, committed a third time
+  // by the session fixing the second. **Any regex over a checked-out file on
+  // Windows is CRLF-sensitive; normalise at the read, never at the pattern.**
+  boardSrc = readFileSync(BOARD_PATH, 'utf8').replace(/\r\n/g, '\n');
 } catch (e) {
   boardSkipReason = `back-office-AI-agents is not checked out beside this repo (${e.code || 'unreadable'})`;
 }
