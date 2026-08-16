@@ -1005,18 +1005,23 @@ const weeklyFn = runnerSrc.slice(
   runnerSrc.indexOf('async function generateMonthlyReport')
 );
 
-check('[new] the three existing template commits are still there, at the same paths',
-  /\$\{base\}\/week-\$\{pad\(weekNumber, 2\)\}-summary\.md/.test(weeklyFn)
-  && /\$\{base\}\/week-\$\{pad\(weekNumber, 2\)\}-data\.csv/.test(weeklyFn)
-  && /\$\{base\}\/week-\$\{pad\(weekNumber, 2\)\}-public-summary\.md/.test(weeklyFn));
+// OB-086 (2026-08-16) rewrote these three paths to carry the simulation year.
+// Asserted as a PROPERTY rather than as three spellings (KFM-04c): the trio
+// still exists, still shares one stem, and that stem now carries a year.
+check('[new] the three existing template commits are still there, as a year-qualified trio sharing one stem',
+  /\$\{base\}\/\$\{stem\}-summary\.md/.test(weeklyFn)
+  && /\$\{base\}\/\$\{stem\}-data\.csv/.test(weeklyFn)
+  && /\$\{base\}\/\$\{stem\}-public-summary\.md/.test(weeklyFn));
+check('[new] OB-086 — that stem carries the simulation year AND the week, so year 2 cannot overwrite year 1',
+  /const stem = `year-\$\{[^`]*year_number[^`]*\}-week-\$\{pad\(weekNumber, 2\)\}`/.test(weeklyFn));
 check('[new] with the same commit messages',
   /chore\(office\): week \$\{weekNumber\} executive summary \[skip ci\]/.test(weeklyFn));
 check('[new] the pipeline is ADDITIVE — its commit happens inside runReportPipeline, not in the template block',
-  !/commitFileToRepo\([^)]*week-\$\{pad\(weekNumber, 2\)\}-report/.test(weeklyFn));
+  !/commitFileToRepo\([^)]*\$\{stem\}-report/.test(weeklyFn));
 check('[new] the written report goes to a DIFFERENT path, so it can never overwrite the template output',
-  rp.reportPath('weekly', 'week-07') === 'reports/weekly/week-07-report.md');
+  rp.reportPath('weekly', rp.periodLabelFor('weekly', 7, 1)) === 'reports/weekly/year-1-week-07-report.md');
 check('[new] and the rejected one goes somewhere else again',
-  rp.rejectedReportPath('weekly', 'week-07') === 'reports/_drafts/weekly-week-07.md');
+  rp.rejectedReportPath('weekly', rp.periodLabelFor('weekly', 7, 1)) === 'reports/_drafts/weekly-year-1-week-07.md');
 
 // The gated no-op, exercised for real: a throwing DB and a throwing KV, and
 // the fetch tripwire still armed. If the gate did not return first, one of
@@ -1105,7 +1110,81 @@ check('[new] the index is only written when the report itself committed',
 section('§9  Housekeeping');
 
 check('[new] period labels are stable and sortable',
-  rp.periodLabelFor('weekly', 7) === 'week-07' && rp.periodLabelFor('monthly', 2) === 'month-02');
+  rp.periodLabelFor('weekly', 7, 1) === 'year-1-week-07' && rp.periodLabelFor('monthly', 2, 1) === 'year-1-month-02');
+
+/* ── OB-086 / KFM-17 — the rollover, 2026-08-16 ──────────────────────────────
+ *
+ * `current_week` resets to 0 at simulation year end, so a yearless label put
+ * every published weekly and monthly report on a one-year overwrite clock —
+ * and, because the same label is the duplicate-publish guard's D1 key, it also
+ * meant year 2 would be REFUSED rather than published. One missing field, two
+ * opposite failures.
+ *
+ * The metric on OB-086 asks for two things: the year in the name, AND a check
+ * that fails if a new yearless template is ever added. Both are below.
+ * ─────────────────────────────────────────────────────────────────────────── */
+section('§9d OB-086 — generated paths survive the year rollover');
+
+check('[new] the label carries the simulation year',
+  rp.periodLabelFor('weekly', 7, 2) === 'year-2-week-07');
+check('[FAILS-OLD] year 2 week 07 no longer collides with year 1 week 07 — the actual defect',
+  rp.periodLabelFor('weekly', 7, 1) !== rp.periodLabelFor('weekly', 7, 2)
+  && rp.reportPath('weekly', rp.periodLabelFor('weekly', 7, 1))
+     !== rp.reportPath('weekly', rp.periodLabelFor('weekly', 7, 2)));
+check('[FAILS-OLD] ...and the OLD label would have collided, which is why this check exists',
+  rp.legacyPeriodLabelFor('weekly', 7) === rp.legacyPeriodLabelFor('weekly', 7));
+check('[new] labels still sort within a year, and years sort before weeks roll',
+  ['year-1-week-02', 'year-1-week-10', 'year-2-week-01'].join() ===
+  [rp.periodLabelFor('weekly', 10, 1), rp.periodLabelFor('weekly', 2, 1), rp.periodLabelFor('weekly', 1, 2)].sort().join());
+check('[new] a missing/invalid year defaults to 1 rather than producing a yearless name',
+  rp.periodLabelFor('weekly', 7) === 'year-1-week-07'
+  && rp.periodLabelFor('weekly', 7, 0) === 'year-1-week-07'
+  && rp.periodLabelFor('weekly', 7, null) === 'year-1-week-07');
+
+// The migration, which is the half that can silently double-publish.
+check('[new] year 1 also offers the pre-2026-08-16 yearless label, so an already-published period is still found',
+  rp.periodLabelCandidates('weekly', 8, 1).join() === 'year-1-week-08,week-08');
+check('[new] year 2+ offers ONLY the year-qualified label — no other year ever wrote a yearless one',
+  rp.periodLabelCandidates('weekly', 8, 2).join() === 'year-2-week-08');
+check('[new] reportPath() is built from the canonical label only, so nothing NEW is ever written yearless',
+  rp.reportPath('weekly', rp.periodLabelCandidates('weekly', 8, 1)[0]) === 'reports/weekly/year-1-week-08-report.md');
+
+/* THE STANDING CHECK OB-086 ASKS FOR.
+ * Scans the runner and the pipeline for generated paths that interpolate a
+ * period INDEX (week/month/day) without a year anywhere in the same template
+ * literal. A new yearless template reintroduces the defect, and this fails.
+ * Deliberately source-scanning: the point is to catch a path that does not
+ * exist yet, which no behavioural test can do. */
+const pathTemplates = [];
+for (const src of [runnerSrc, pipelineSrc]) {
+  for (const m of src.matchAll(/`([^`\n]*\$\{[^`\n]*)`/g)) {
+    const lit = m[1];
+    if (!/(?:\.md|\.csv|\.json)$/.test(lit)) continue;          // paths only
+    if (!/\$\{[^}]*\b(?:weekNumber|monthNumber|nextDay|periodLabel|stem)\b/.test(lit)) continue;
+    pathTemplates.push(lit);
+  }
+}
+const yearless = pathTemplates.filter((lit) => {
+  // `${stem}` and `${periodLabel}` carry the year in the value, asserted above.
+  if (/\$\{stem\}|\$\{periodLabel\}/.test(lit)) return false;
+  return !/year[-_]?\$?\{?|year_number/.test(lit);
+});
+check(`[new] every generated path with a period index carries a year (${pathTemplates.length} scanned, ${yearless.length} yearless)`,
+  yearless.length === 0);
+if (yearless.length) for (const l of yearless) console.log(`        yearless path template: ${l}`);
+// FALSIFIABILITY: the scanner must actually be able to say no.
+check('[new] FALSIFIABILITY: the scanner FLAGS a yearless template when given one',
+  (() => {
+    const probe = ['campus/shared/daily/day-${pad(nextDay, 3)}-summary.md'];
+    return probe.filter((lit) => !/\$\{stem\}|\$\{periodLabel\}/.test(lit)
+      && !/year[-_]?\$?\{?|year_number/.test(lit)).length === 1;
+  })());
+check('[new] ...and does NOT flag the year-qualified replacement that shipped',
+  (() => {
+    const probe = ['campus/shared/daily/year-${newStats.year_number || 1}-day-${pad(nextDay, 3)}-summary.md'];
+    return probe.filter((lit) => !/\$\{stem\}|\$\{periodLabel\}/.test(lit)
+      && !/year[-_]?\$?\{?|year_number/.test(lit)).length === 0;
+  })());
 check('[new] daysUntil() returns null for an unreadable due date, never a guess',
   rp.daysUntil(null) === null && rp.daysUntil('not a date') === null);
 check('[new] daysUntil() computes a real remaining count',
@@ -1426,11 +1505,21 @@ const runReportPipelineSrc = (() => {
   return runnerSrc.slice(start, end);
 })();
 
+// Asserted as properties, not spellings (KFM-04c): OB-086 turned the single
+// lookup into a loop over every label the period may have published under, and
+// a check pinned to the old one-line call would have gone red for a change that
+// strengthened exactly what it was guarding.
 check('[new] getApprovedReportRow is actually CALLED, not just imported',
-  /const approvedForGuard = await getApprovedReportRow\(env, reportType, periodLabel\);/.test(runReportPipelineSrc));
+  /await getApprovedReportRow\(env, reportType,/.test(runReportPipelineSrc));
 check('[new] the guard refuses when an approved row exists',
-  /if \(approvedForGuard\) \{/.test(runReportPipelineSrc)
+  /if \(!approvedForGuard\) continue;/.test(runReportPipelineSrc)
   && /reason: `already_approved:/.test(runReportPipelineSrc));
+check('[new] OB-086 — the guard checks EVERY label the period may have published under, not only today\'s',
+  /for \(const label of guardLabels\)/.test(runReportPipelineSrc)
+  && /guardLabels = /.test(runReportPipelineSrc));
+check('[new] OB-086 — a refusal says WHICH label matched, so a legacy hit is legible rather than looking like a bug',
+  /matchedLabel: label/.test(runReportPipelineSrc)
+  && /PRE-2026-08-16 yearless label/.test(runReportPipelineSrc));
 check('[new] the guard runs BEFORE the fact pack is built (buildReportFacts)',
   runReportPipelineSrc.indexOf('const approvedForGuard = await getApprovedReportRow') <
   runReportPipelineSrc.indexOf('buildReportFacts('));
@@ -1439,7 +1528,7 @@ check('[new] the guard runs BEFORE every model call in the function (callReportM
   runReportPipelineSrc.indexOf('callReportModel('));
 check('[new] the guard is NOT gated behind bypassGate — a manual re-fire against an already-published period must refuse exactly like a cron tick',
   !/if \(!bypassGate[^)]*\)[\s\S]{0,40}getApprovedReportRow/.test(runReportPipelineSrc)
-  && /const approvedForGuard = await getApprovedReportRow\(env, reportType, periodLabel\);\r?\n\s*if \(approvedForGuard\)/.test(runReportPipelineSrc));
+  && /for \(const label of guardLabels\) \{\r?\n\s*const approvedForGuard = await getApprovedReportRow\(/.test(runReportPipelineSrc));
 
 // ── [FAILS-OLD] transcribed row-selection logic ────────────────────────────
 // getPendingReportRow()'s real SQL is `WHERE status = 'drafted'`;

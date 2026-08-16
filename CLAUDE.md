@@ -26,7 +26,18 @@
 > | `workers/owner-notify.js` | **(2026-08-10)** the hop that reaches him: one GitHub Issue a day plus a **Sunday heartbeat sent even when there is nothing to report** — which is the only mechanism that makes silence informative. **This is NOT the gap-digest Issue path the 2026-07-18 rebuild banned**; that rule is about machine-generated gap reports, this is owner-approved correspondence, labelled `owner-channel`. Switch `owner_channel_enabled`, **code default OFF** |
 > | `workers/deliverable-lifecycle.js` | **(2026-08-10)** what happens to a deliverable AFTER it is built: eight stages, one forward exit, and that exit is the **CEO**. Build → admin review → gaps to a **meeting** → discussion and a **binding vote** → improvement round → back to review → … → CEO approval. **No cap on rounds**; a deliverable going round without converging is a *finding*, not a reason to stop or to ship. Pure — imports nothing. **No switch of its own**, deliberately: it rides on `office_context_enabled`, which is ON. Its writer is `scripts/lifecycle.mjs`; its record lives in `warehouse-office-AI-agents/tasks/<slug>/STATE.json` and **the Worker cannot write it — `WAREHOUSE_REPO_TOKEN` is deliberately unset and this design does not need it.** |
 >
-> **The two claims in this file most likely to mislead:**
+> **The three claims in this file most likely to mislead:**
+> - **It says 11 agents throughout. There are 13.** Agent 12 (The Workflow) and
+>   Agent 13 (The Cyber Expert) joined the roster on 2026-08-07;
+>   `config/agents-config.json` ships 13 and this file still says 11 in five
+>   places, including its own section heading below. *(Added 2026-08-16 — audit
+>   finding #21, which had it the other way round: it read `aviv-brain`'s "now
+>   13" as the error against "every office document says 11". **`aviv-brain` was
+>   right and the office's own file was the stale one.** `README.md` already
+>   discloses the 13-vs-11 gap correctly with its reason and board task OB-013;
+>   this file did not, which is why the correction lands here and not there.
+>   Historical reports saying 11 were true when written and are not edited —
+>   A15.)*
 > - It describes the repo as if the Q&A engine were the whole of it. The office
 >   now also runs a **delegation board**, **client requirements**, an
 >   **improvement loop**, a **report pipeline**, an **owner questions channel**

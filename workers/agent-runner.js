@@ -135,6 +135,7 @@ import {
   parseReportReviewDecision, validateReportBody, renderReportFile, renderRejectedReportFile,
   reportPath, rejectedReportPath, periodLabelFor, daysUntil,
   getPendingReportRow, getLatestReportRow, getApprovedReportRow, insertReportRow, updateReportRow,
+  periodLabelCandidates,
   DRAFTER_AGENT_ID, REVIEWER_AGENT_ID, REPORT_TYPES, estimateReviewFit, pickDraftLane,
   LATEST_INDEX_PATH, parseLatestIndex, renderLatestIndex, addToLatestIndex, wordCount,
 } from './report-pipeline.js';
@@ -2052,7 +2053,7 @@ function noteProviderSubstitution(role, planned, actual, sink) {
  * D1 (report_pipeline) and is picked up rather than rewritten, the same
  * self-healing shape the guides pipeline uses.
  */
-async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentRows = [], pipelineSummary = null, sinceIso, bypassGate = false }) {
+async function runReportPipeline(env, { reportType, periodLabel, legacyLabels = [], dateStr, agentRows = [], pipelineSummary = null, sinceIso, bypassGate = false }) {
   if (!bypassGate && !(await reportPipelineOn(env))) {
     console.log(`[report-pipeline] report_pipeline_enabled is off — ${reportType} ${periodLabel} not drafted (gated no-op)`);
     return { ran: false, skipped: true, reason: 'report_pipeline_disabled' };
@@ -2082,16 +2083,33 @@ async function runReportPipeline(env, { reportType, periodLabel, dateStr, agentR
   // skippable by bypassGate -- that flag overrides the report_pipeline_enabled
   // switch for a supervised manual fire, not this safety check; a manual
   // re-trigger against a published period must refuse exactly like a cron tick.
-  const approvedForGuard = await getApprovedReportRow(env, reportType, periodLabel);
-  if (approvedForGuard) {
-    const latestForGuard = await getLatestReportRow(env, reportType, periodLabel);
-    const reason = `${reportType} ${periodLabel} was already approved (row ${approvedForGuard.id}, published ${approvedForGuard.updated_at || approvedForGuard.created_at})`
+  // OB-086 (2026-08-16): the guard checks EVERY label this period may have
+  // published under, not just today's. `periodLabel` now carries the
+  // simulation year (`year-1-week-08`); the office published year 1 under the
+  // yearless `week-08` before that change, and those files are deliberately
+  // not renamed. Checking only the new label would read a published period as
+  // unpublished and emit a SECOND report for it at the new path -- the same
+  // harm this guard exists to prevent. `legacyLabels` is empty from year 2 on.
+  const guardLabels = Array.isArray(legacyLabels) && legacyLabels.length
+    ? [periodLabel, ...legacyLabels.filter((l) => l && l !== periodLabel)]
+    : [periodLabel];
+  for (const label of guardLabels) {
+    const approvedForGuard = await getApprovedReportRow(env, reportType, label);
+    if (!approvedForGuard) continue;
+    const latestForGuard = await getLatestReportRow(env, reportType, label);
+    const viaLegacy = label !== periodLabel
+      ? ` (matched the PRE-2026-08-16 yearless label '${label}' for '${periodLabel}' -- that period published before report paths carried a year, and its file is deliberately not renamed)`
+      : '';
+    const reason = `${reportType} ${periodLabel} was already approved${viaLegacy} (row ${approvedForGuard.id}, published ${approvedForGuard.updated_at || approvedForGuard.created_at})`
       + (latestForGuard && latestForGuard.id !== approvedForGuard.id
         ? ` -- most recent attempt since then was '${latestForGuard.status}' (row ${latestForGuard.id}, ${latestForGuard.updated_at || latestForGuard.created_at}), which does not undo the earlier publish`
         : '')
       + ' -- refusing to re-draft over a published report';
     console.warn(`[report-pipeline] duplicate-publish guard refused: ${reason}`);
-    return { ran: false, reason: `already_approved: ${reason}`, existingRowId: approvedForGuard.id };
+    return {
+      ran: false, reason: `already_approved: ${reason}`,
+      existingRowId: approvedForGuard.id, matchedLabel: label,
+    };
   }
 
   const routingOn = await routingEnabledForReports(env);
@@ -3226,7 +3244,7 @@ async function generateWeeklySummary(env, yearState, weekNumber) {
 
   const md = `# Weekly Executive Summary — Week ${weekNumber}
 
-*Permission: private/special (AI staff + owner). See campus/shared/weekly/week-${pad(weekNumber, 2)}-public-summary.md (back-office) for the public excerpt.*
+*Permission: private/special (AI staff + owner). See campus/shared/weekly/year-${yearState?.stats?.year_number || 1}-week-${pad(weekNumber, 2)}-public-summary.md (back-office) for the public excerpt.*
 
 ## Executive Summary
 
@@ -3302,10 +3320,14 @@ diagnostics. No customer-facing issues to report.
   // content publishes until the gate (OB-014) exists, and this file is
   // unreviewed regardless of its name. Same guarded path stages 1-2 use.
   const base = 'campus/shared/weekly';
+  // OB-086 / KFM-17: `current_week` resets to 0 at year end, so all three of
+  // these were on a one-year overwrite clock. `stem` carries the simulation
+  // year; files written before 2026-08-16 keep their yearless names (A15).
+  const stem = `year-${yearState?.stats?.year_number || 1}-week-${pad(weekNumber, 2)}`;
   const files = {
-    summary: await commitFileToRepo(env, BACKOFFICE_REPO_NAME, `${base}/week-${pad(weekNumber, 2)}-summary.md`, md, `chore(office): week ${weekNumber} executive summary [skip ci]`),
-    csv: await commitFileToRepo(env, BACKOFFICE_REPO_NAME, `${base}/week-${pad(weekNumber, 2)}-data.csv`, csv, `chore(office): week ${weekNumber} data export [skip ci]`),
-    public: await commitFileToRepo(env, BACKOFFICE_REPO_NAME, `${base}/week-${pad(weekNumber, 2)}-public-summary.md`, publicMd, `chore(office): week ${weekNumber} public summary [skip ci]`),
+    summary: await commitFileToRepo(env, BACKOFFICE_REPO_NAME, `${base}/${stem}-summary.md`, md, `chore(office): week ${weekNumber} executive summary [skip ci]`),
+    csv: await commitFileToRepo(env, BACKOFFICE_REPO_NAME, `${base}/${stem}-data.csv`, csv, `chore(office): week ${weekNumber} data export [skip ci]`),
+    public: await commitFileToRepo(env, BACKOFFICE_REPO_NAME, `${base}/${stem}-public-summary.md`, publicMd, `chore(office): week ${weekNumber} public summary [skip ci]`),
   };
 
   let weeklyMeeting = null;
@@ -3332,9 +3354,12 @@ diagnostics. No customer-facing issues to report.
   // weekly summary block must not fail because a provider was slow.
   let writtenReport = { ran: false, reason: 'not_attempted' };
   try {
+    const weeklyYear = yearState?.stats?.year_number || 1;
     writtenReport = await runReportPipeline(env, {
       reportType: 'weekly',
-      periodLabel: periodLabelFor('weekly', weekNumber),
+      periodLabel: periodLabelFor('weekly', weekNumber, weeklyYear),
+      // OB-086: year 1 also published under the yearless `week-NN`.
+      legacyLabels: periodLabelCandidates('weekly', weekNumber, weeklyYear).slice(1),
       dateStr: todayDateStr(),
       agentRows,
       pipelineSummary: pipelineLines,
@@ -3357,7 +3382,7 @@ diagnostics. No customer-facing issues to report.
  *
  * Same switch, same rules, same never-throws posture as the weekly.
  */
-async function generateMonthlyReport(env, monthNumber) {
+async function generateMonthlyReport(env, monthNumber, yearNumber = 1) {
   const agentRows = [];
   for (const config of agentsConfig.agents) {
     const agent = instantiateAgent(config.id, env);
@@ -3372,7 +3397,8 @@ async function generateMonthlyReport(env, monthNumber) {
   try {
     return await runReportPipeline(env, {
       reportType: 'monthly',
-      periodLabel: periodLabelFor('monthly', monthNumber),
+      periodLabel: periodLabelFor('monthly', monthNumber, yearNumber),
+      legacyLabels: periodLabelCandidates('monthly', monthNumber, yearNumber).slice(1),
       dateStr: todayDateStr(),
       agentRows,
       pipelineSummary: null,
@@ -3625,7 +3651,7 @@ export async function runWorkDayCycle(env) {
     // `reports` rows and the fact pack reads them, so a report generated
     // first would be a report of the month that omits the month's meeting.
     if (MILESTONE_MEETINGS[milestoneKey] === 'monthly') {
-      monthlyReport = await generateMonthlyReport(env, Math.ceil(nextDay / 30));
+      monthlyReport = await generateMonthlyReport(env, Math.ceil(nextDay / 30), yearState.stats?.year_number || 1);
     }
   }
 
@@ -3689,8 +3715,14 @@ export async function runWorkDayCycle(env) {
   const report = isOffDay
     ? { committed: false, skipped: true, reason: 'rest_day_zero_write', policy: 'OFFICE-POLICY.md A13' }
     : await commitFileToRepo(
-      env, BACKOFFICE_REPO_NAME, `campus/shared/daily/day-${pad(nextDay, 3)}-summary.md`, markdownWithHeadline,
-      `chore(office): day ${nextDay} summary [skip ci]`
+      // OB-086 / KFM-17: `nextDay` resets to 0 at year end, so a yearless
+      // `day-001-summary.md` would overwrite year 1's. The year comes from
+      // `newStats`, NOT `newState.stats` -- the latter is already incremented
+      // when this is the rollover day, and this file summarises the day that
+      // just ENDED. Files written before 2026-08-16 keep their yearless names
+      // and are not renamed (A15).
+      env, BACKOFFICE_REPO_NAME, `campus/shared/daily/year-${newStats.year_number || 1}-day-${pad(nextDay, 3)}-summary.md`, markdownWithHeadline,
+      `chore(office): year ${newStats.year_number || 1} day ${nextDay} summary [skip ci]`
     );
 
   return {
@@ -3992,7 +4024,7 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
     // `reports` rows and the fact pack reads them, so a report generated
     // first would be a report of the month that omits the month's meeting.
     if (MILESTONE_MEETINGS[milestoneKey] === 'monthly') {
-      monthlyReport = await generateMonthlyReport(env, Math.ceil(nextDay / 30));
+      monthlyReport = await generateMonthlyReport(env, Math.ceil(nextDay / 30), yearState.stats?.year_number || 1);
     }
   }
 
@@ -4083,8 +4115,14 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
   const report = isOffDay
     ? { committed: false, skipped: true, reason: 'rest_day_zero_write', policy: 'OFFICE-POLICY.md A13' }
     : await commitFileToRepo(
-      env, BACKOFFICE_REPO_NAME, `campus/shared/daily/day-${pad(nextDay, 3)}-summary.md`, markdownWithHeadline,
-      `chore(office): day ${nextDay} summary [skip ci]`
+      // OB-086 / KFM-17: `nextDay` resets to 0 at year end, so a yearless
+      // `day-001-summary.md` would overwrite year 1's. The year comes from
+      // `newStats`, NOT `newState.stats` -- the latter is already incremented
+      // when this is the rollover day, and this file summarises the day that
+      // just ENDED. Files written before 2026-08-16 keep their yearless names
+      // and are not renamed (A15).
+      env, BACKOFFICE_REPO_NAME, `campus/shared/daily/year-${newStats.year_number || 1}-day-${pad(nextDay, 3)}-summary.md`, markdownWithHeadline,
+      `chore(office): year ${newStats.year_number || 1} day ${nextDay} summary [skip ci]`
     );
 
   return {
@@ -5097,9 +5135,15 @@ export default {
               });
             }
             const windowDays = body.report === 'monthly' ? 30 : 7;
+            // OB-086: the supervised trigger carries the year exactly as the
+            // cron path does. bypassGate skips the SWITCH, never the
+            // duplicate-publish guard, so a manual re-fire against a published
+            // period must still refuse -- including via a legacy label.
+            const triggerYear = yearState.stats?.year_number || 1;
             result = await runReportPipeline(env, {
               reportType: body.report,
-              periodLabel: periodLabelFor(body.report, n),
+              periodLabel: periodLabelFor(body.report, n, triggerYear),
+              legacyLabels: periodLabelCandidates(body.report, n, triggerYear).slice(1),
               dateStr: todayDateStr(),
               agentRows,
               sinceIso: new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000).toISOString(),

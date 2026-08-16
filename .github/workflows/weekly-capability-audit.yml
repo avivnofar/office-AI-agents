@@ -32,6 +32,12 @@ on:
 jobs:
   capability-audit:
     runs-on: ubuntu-latest
+    # OB-085 (2026-08-16): needed so the growth-watch step can extend
+    # reports/growth/LEDGER.jsonl. Scoped to this job and no wider — nothing
+    # else here writes, and `contents: write` on a workflow that posts model
+    # output to an API is the permission worth keeping narrow.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -116,20 +122,66 @@ jobs:
       # stated reason. `trendFor()` compares each metric against the last run
       # that could read IT, so a laptop run and a CI run interleave without
       # either one reporting a private store as having shrunk to zero.
-      # `--no-append` HERE, DELIBERATELY, AND IT IS A REAL LIMITATION:
-      # this job does not commit, so the CI run REPORTS a trend into the run
-      # summary and does not extend the ledger. The ledger therefore grows from
-      # local runs only, and a week with no local run leaves a gap that
-      # `trendFor()` handles correctly (it compares against the last run that
-      # measured that metric) but does not fill. Giving this job write
-      # permission and a commit step is the fix and is BOARDED (OB-085) rather
-      # than added in the same session that deploys three other subsystems.
-      - name: Growth watch — measure the unbounded stores and report the trend
+      # ── OB-085 CLOSED, 2026-08-16 ────────────────────────────────────────
+      #
+      # `--no-append` is GONE. This job now extends the ledger, so the trend
+      # survives a week with no local run. What that changes and what it must
+      # not change:
+      #
+      #   · The CI row carries `not_measured` WITH A REASON for every
+      #     back-office and warehouse metric, because this job holds no
+      #     credential for either private repo. That is written to the ledger
+      #     exactly as measured. NOTHING HERE FILLS A ZERO, and nothing may:
+      #     `trendFor()` compares each metric against the last run that
+      #     measured THAT metric, so an honest `not_measured` degrades the
+      #     trend's resolution while a zero would publish the back-office
+      #     journals collapsing to nothing every Sunday — KFM-13's shape,
+      #     committed by the instrument built to watch for it.
+      #   · Recording the measurement must never cost the audit (KFM-14), so a
+      #     failed append or push does not abort the job. It is CAPTURED here
+      #     and re-raised at the end, the same shape `gate_exit` already uses
+      #     in this file — the run still goes red, after the findings are
+      #     posted and the summary is written.
+      - name: Growth watch — measure the unbounded stores and extend the ledger
+        id: growth
         if: steps.config.outputs.ready == 'true'
         env:
           AGENTS_API_BASE: ${{ vars.AGENTS_API_BASE }}
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
-        run: node scripts/growth-watch.mjs --no-append > /tmp/growth.md || true
+        run: |
+          set +e
+          node scripts/growth-watch.mjs > /tmp/growth.md
+          echo "growth_exit=$?" >> "$GITHUB_OUTPUT"
+
+      # Commits ONLY the ledger. `git add` names the one path deliberately:
+      # the audit steps above write to /tmp, but a `git add -A` here would
+      # sweep up anything a future step happens to leave in the tree and
+      # commit it under an unrelated message.
+      #
+      # `[skip ci]` matches every other automated commit in this repo.
+      # Rebase-and-retry because the live Worker commits to this same branch
+      # on its own cron and a Sunday 06:00 UTC run can collide with it.
+      - name: Commit the growth ledger row
+        id: ledger_commit
+        if: steps.config.outputs.ready == 'true'
+        run: |
+          set +e
+          if git diff --quiet -- reports/growth/LEDGER.jsonl; then
+            echo "No ledger change to commit (growth-watch may not have appended)."
+            echo "commit_exit=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add reports/growth/LEDGER.jsonl
+          git commit -m "chore(growth): weekly growth-watch ledger row [skip ci]"
+          ok=1
+          for attempt in 1 2 3; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && git push origin "HEAD:${GITHUB_REF_NAME}" && { ok=0; break; }
+            echo "push attempt $attempt failed, retrying"
+            sleep 5
+          done
+          echo "commit_exit=$ok" >> "$GITHUB_OUTPUT"
 
       - name: Summary
         if: steps.config.outputs.ready == 'true'
@@ -170,4 +222,15 @@ jobs:
         if: steps.config.outputs.ready == 'true' && steps.audit.outputs.gate_exit != '0'
         run: |
           echo "::error::The capability gate exited ${{ steps.audit.outputs.gate_exit }} — a non-dormant agent cannot produce a declared output kind, and it is not boarded. See the findings document in the summary above; the findings have already been posted to the board inbox."
+          exit 1
+
+      # OB-085: the growth watch must not be able to fail SILENTLY either.
+      # Separate from the gate above and placed after it, because these are
+      # two different failures and merging them would hide which one fired
+      # (KFM-06). A lost ledger row costs trend resolution, not the audit —
+      # which is why it is re-raised here rather than aborting the job.
+      - name: Fail the run if the growth ledger could not be measured or recorded
+        if: steps.config.outputs.ready == 'true' && (steps.growth.outputs.growth_exit != '0' || steps.ledger_commit.outputs.commit_exit != '0')
+        run: |
+          echo "::error::growth-watch exited ${{ steps.growth.outputs.growth_exit }} and the ledger commit exited ${{ steps.ledger_commit.outputs.commit_exit }}. The trend for this week was NOT recorded; the next run will compare against the last run that measured each metric, so the trend degrades in resolution rather than becoming wrong. Do NOT backfill this row by hand — a measurement taken later is not a measurement of this week."
           exit 1

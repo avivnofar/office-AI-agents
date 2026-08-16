@@ -322,7 +322,13 @@ console.log('\n-- Publishing-split call-site check (0.4 stage 1: meeting reports
 console.log('\n-- Publishing-split call-site check (0.4 stage 2: daily summaries) --');
 {
   const runnerSrc = fs.readFileSync(path.join(REPO_ROOT, 'workers', 'agent-runner.js'), 'utf8');
-  const dayWriteRe = /commitFileToRepo\(\s*\n\s*env,\s*(\w+),\s*`([^`]*day-\$\{pad\(nextDay, 3\)\}-summary\.md)`/g;
+  // Comment lines are allowed between the call and its first argument: OB-086
+  // put an explanatory block there on 2026-08-16 and this pattern went red for
+  // it, which is KFM-04c — the assertion is about the REPO a daily summary is
+  // written to, and a comment above the argument changes nothing about that.
+  // The path capture stays deliberately loose before `day-` so the year prefix
+  // OB-086 added is matched rather than excluded.
+  const dayWriteRe = /commitFileToRepo\(\s*(?:\n\s*(?:\/\/[^\n]*\n\s*)*)?env,\s*(\w+),\s*`([^`]*day-\$\{pad\(nextDay, 3\)\}-summary\.md)`/g;
   const matches = [...runnerSrc.matchAll(dayWriteRe)];
   const callSiteChecks = [
     ['both day-summary call sites found (finalizeScheduledDay + runWorkDayCycle)', matches.length === 2],
@@ -359,7 +365,10 @@ console.log('\n-- Publishing-split call-site check (0.4 stage 3: weekly raw trio
   const runnerSrc = fs.readFileSync(path.join(REPO_ROOT, 'workers', 'agent-runner.js'), 'utf8').replace(/\r\n/g, '\n');
   const fnMatch = runnerSrc.match(/async function generateWeeklySummary\([\s\S]*?\n}\n/);
   const fnBody = fnMatch ? fnMatch[0] : '';
-  const weeklyWriteRe = /commitFileToRepo\(env, (\w+), `\$\{base\}\/(week-\$\{pad\(weekNumber, 2\)\}-[\w.-]+)`/g;
+  // The three filenames share a `${stem}` since OB-086 (2026-08-16) — the stem
+  // carries the simulation year so year 2 cannot overwrite year 1. What this
+  // check is about is unchanged: which REPO the trio is written to.
+  const weeklyWriteRe = /commitFileToRepo\(env, (\w+), `\$\{base\}\/(\$\{stem\}-[\w.-]+)`/g;
   const matches = [...fnBody.matchAll(weeklyWriteRe)];
   const callSiteChecks = [
     ['generateWeeklySummary() found in workers/agent-runner.js', !!fnMatch],

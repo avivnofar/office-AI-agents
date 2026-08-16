@@ -32,11 +32,20 @@
  * know whether the sample is representative or merely convenient (KFM-03: a
  * count must say what it dropped).
  *
- * Volume check: six `case_batch` blocks Sun–Thu (`config/daily-schedule.json`)
- * against 40–130 answers a day. 1-in-8 selects roughly 5–16 a day, of which at
- * most 6 can be sent — so the cap bites on busy days and the rate binds on
- * quiet ones, and both are recorded. `MIN_CALIBRATION_SAMPLE = 20` is reachable
- * in three to four working days.
+ * Volume check, ~~40–130 answers a day~~ — **struck 2026-08-16, measured.** The
+ * office answers **22–29 questions on a full working day**, not 40–130: 29 · 24
+ * · 22 · 27 · 24 on 2026-08-09..13, against 200 cases generated each day (the
+ * rest are `case_not_asked`). The old figure was never measured against D1.
+ *
+ * With six `case_batch` blocks Sun–Thu (`config/daily-schedule.json`) and ~24
+ * answers a day, 1-in-8 selects **about 3 a day** and the per-block cap of 6
+ * never binds. So **the rate binds and the pacing cap does not** — the reverse
+ * of what this header used to assume. `MIN_CALIBRATION_SAMPLE = 20` is
+ * therefore reachable in **six to seven working days**, not three to four:
+ * calendar-wise about a week and a half, since the office rests Friday–Saturday.
+ *
+ * That projection assumes a selector that actually samples. See `hashToUnit()`
+ * — until 2026-08-16 it did not, and the realized rate on real ids was 2.4%.
  *
  * The judgment lane also serves the weekly report's review. One extra call per
  * block against a 1,000-req/min provider does not starve it; the 20-second
@@ -82,6 +91,16 @@
  * systematic rather than random sample and any conclusion drawn from it carries
  * that. `renderCalibrationReport()` prints this.
  *
+ * **"Position-independent" was FALSE when first written, and that is worth
+ * keeping rather than quietly correcting.** It was a claim about a hash nobody
+ * had measured on the id shape production actually uses; measured on 2026-08-16
+ * it was the opposite — selection was so determined by a case's index that a
+ * third of working days had nothing selectable at all. It is true now because
+ * `hashToUnit()` was fixed, not because it was ever checked before. A stated
+ * bias section is only as good as the measurement behind each of its claims,
+ * and this one shipped with the honest-sounding half documented and the
+ * load-bearing half assumed.
+ *
  * Ships behind `judge_sampler_enabled`, default OFF, same shape as every other
  * switch here.
  */
@@ -93,6 +112,25 @@ export const JUDGE_SAMPLER_FLAG = 'judge_sampler_enabled';
 
 /** One answer in eight is selected for a real evaluation. See the header. */
 export const JUDGE_SAMPLE_RATE = 0.125;
+
+/**
+ * **What selected this row.** Same discipline as `reports.scorer_id`, and for
+ * the same reason that one exists: two divisors survived four weeks undetected
+ * for exactly one reason — *the rows did not say* (KFM-28, check 5).
+ *
+ * `v1` was `hashToUnit`'s raw `h / 2^32`, whose per-day selection was so
+ * clustered that a third of working days had nothing selectable at all. It
+ * produced **zero** rows in production: the switch went on 2026-08-16 00:52
+ * Israel and the defect was found the same morning before any judgement was
+ * written. So there is no history under `v1` to preserve, and none was
+ * rescored — there was nothing to rescore. That is luck about timing, not a
+ * licence: a selector change after rows exist is a scale change and would need
+ * the cutover treatment `UNIFIED_FROM` got in `quality-metric.js`.
+ *
+ * Named `@0.125` because a rate change is also a selector change — a bucket
+ * means nothing without the threshold it was compared against.
+ */
+export const SELECTOR_ID = 'hash-select-v2@0.125';
 
 /**
  * What the 20-second unknown-cap pacing floor allows per block, measured.
@@ -152,15 +190,60 @@ export async function judgeSamplerEnabled(env) {
 }
 
 /**
- * A stable unit-interval hash of a case id. FNV-1a, which is small, has no
- * dependencies and is deterministic across invocations — the last property is
- * the one that matters: the same case is selected or not selected every time
- * anybody re-runs this, so the sample is reproducible and auditable rather than
- * a thing that happened once.
+ * A stable unit-interval hash of a case id. FNV-1a **plus a finalizer**, which
+ * is small, has no dependencies and is deterministic across invocations — the
+ * last property is the one that matters: the same case is selected or not
+ * selected every time anybody re-runs this, so the sample is reproducible and
+ * auditable rather than a thing that happened once.
  *
  * NOT `Math.random()`: a random sample cannot be re-derived, so a reader asking
  * "why was that case judged and not this one" has no answer, and a rerun
  * silently produces a different population.
+ *
+ * ── WHY THE FINALIZER, MEASURED 2026-08-16 ─────────────────────────────────
+ *
+ * This function used to end at `h / 0x100000000` — the raw FNV-1a state divided
+ * into the unit interval. **That is the HIGH 32 bits, and FNV-1a barely moves
+ * them with the LAST bytes of its input.** Each step is `h = (h ^ c) * PRIME`,
+ * and multiplication propagates bits only upward through carries, so the top of
+ * the word is dominated by the input's *prefix* while the trailing characters
+ * land in the low bits that the division throws away.
+ *
+ * Production case ids are `qa-<year>-w<week>-d<dow>-<NNN>`. Every id the office
+ * asks **in one day shares a 15-character prefix** and differs only in the last
+ * three digits — precisely the input shape that defect is blind to.
+ *
+ * **The aggregate rate hid it completely.** Over the full 52-week namespace the
+ * old hash selected 12.09%, against a declared 12.5% — correct, and the reason
+ * nobody looked. The defect lives entirely in the per-day distribution, which is
+ * the only scale that matters, because the sample accrues one day at a time and
+ * the send cap is per block. Measured over 260 simulated working days, selectable
+ * cases out of each day's 200:
+ *
+ *   | selector        | mean | sd   | median | days with ZERO selectable |
+ *   |-----------------|------|------|--------|---------------------------|
+ *   | old, `h/2^32`   | 24.2 | 28.9 | 8      | **80 of 260 (31%)**       |
+ *   | with finalizer  | 25.2 | 5.0  | 25     | 0 of 260                  |
+ *
+ * A uniform selector has sd ≈ 4.7. The old one was six times that, and on
+ * roughly a third of days **no case in the whole namespace could be selected at
+ * any rate ≤ 0.125** — the sampler was structurally incapable of sampling.
+ *
+ * Confirmed against the office's real answered cases, not simulated ones: of
+ * 125 ids actually asked between 2026-08-07 and 2026-08-16, the old selector
+ * would have picked **3 (2.4%)**, and on 2026-08-13 — a full working day, 22
+ * distinct asks — it would have picked **none**, because that day's entire
+ * 200-id namespace hashed above the threshold.
+ *
+ * The fix is murmur3's `fmix32` avalanche step, which diffuses the low bits
+ * (where the trailing digits actually are) up into the high ones. FNV-1a is
+ * unchanged as the mixing stage; determinism and reproducibility are unchanged.
+ *
+ * See `scripts/verify-judge-sampler.js` §2b, which measures uniformity on the
+ * REAL id shape per day and carries the old expression as a falsifying control.
+ * §2's original rate check passed throughout: it drew `case-0`…`case-3999`,
+ * ids that vary in length and in every position, so it measured a namespace
+ * production does not have (KFM-28).
  */
 export function hashToUnit(key) {
   const s = String(key ?? '');
@@ -169,7 +252,14 @@ export function hashToUnit(key) {
     h ^= s.charCodeAt(i);
     h = Math.imul(h, 0x01000193) >>> 0;
   }
-  return h / 0x100000000;
+  // fmix32 — the avalanche step. Without it the division below reads only the
+  // bits the input's trailing characters never reached.
+  h ^= h >>> 16;
+  h = Math.imul(h, 0x85ebca6b) >>> 0;
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35) >>> 0;
+  h ^= h >>> 16;
+  return (h >>> 0) / 0x100000000;
 }
 
 /**
@@ -401,12 +491,26 @@ export const JUDGEMENT_TABLE_SQL = `CREATE TABLE IF NOT EXISTS quality_judgement
   judge_reason TEXT,
   outcome TEXT NOT NULL,
   sample_bucket REAL,
+  selector_id TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )`;
 
+/**
+ * `selector_id` was added 2026-08-16, after the table already existed in
+ * production (created empty ahead of the first live write). `CREATE TABLE IF
+ * NOT EXISTS` does not retrofit a column onto an existing table, so the live
+ * database needed:
+ *
+ *   ALTER TABLE quality_judgements ADD COLUMN selector_id TEXT;
+ *
+ * Run and read back 2026-08-16 against 0 rows. Kept here rather than in
+ * `database/schema.sql` for the same reason the CREATE is (see above).
+ */
+export const JUDGEMENT_SELECTOR_MIGRATION_SQL = 'ALTER TABLE quality_judgements ADD COLUMN selector_id TEXT';
+
 export const JUDGEMENT_INSERT_SQL = `INSERT INTO quality_judgements
-  (id, case_id, agent_id, project, cheap_quality, cheap_scorer_id, judge_score, judge_provider, judge_reason, outcome, sample_bucket)
- VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+  (id, case_id, agent_id, project, cheap_quality, cheap_scorer_id, judge_score, judge_provider, judge_reason, outcome, sample_bucket, selector_id)
+ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
 /**
  * Validates one judgement row. Pure, so the verifier exercises every refusal
@@ -416,7 +520,7 @@ export function buildJudgementRow({
   caseId = null, agentId = null, project = null,
   cheapQuality = null, cheapScorerId = null,
   judgeScore = null, judgeProvider = null, judgeReason = null,
-  outcome, sampleBucket = null,
+  outcome, sampleBucket = null, selectorId = SELECTOR_ID,
 }) {
   if (!JUDGE_OUTCOMES.includes(outcome)) {
     return { valid: false, reason: `unknown outcome "${outcome}" — add it to JUDGE_OUTCOMES rather than passing a free string` };
@@ -443,6 +547,7 @@ export function buildJudgementRow({
       judge_reason: judgeReason ? String(judgeReason).slice(0, 300) : null,
       outcome,
       sample_bucket: typeof sampleBucket === 'number' ? sampleBucket : null,
+      selector_id: selectorId || null,
     },
   };
 }
@@ -466,7 +571,7 @@ export async function recordJudgement(env, fields) {
     await env.DB.prepare(JUDGEMENT_TABLE_SQL).run();
     await env.DB.prepare(JUDGEMENT_INSERT_SQL)
       .bind(crypto.randomUUID(), r.case_id, r.agent_id, r.project, r.cheap_quality, r.cheap_scorer_id,
-        r.judge_score, r.judge_provider, r.judge_reason, r.outcome, r.sample_bucket)
+        r.judge_score, r.judge_provider, r.judge_reason, r.outcome, r.sample_bucket, r.selector_id)
       .run();
     return { recorded: true, outcome: r.outcome };
   } catch (e) {
@@ -485,7 +590,7 @@ export async function runCalibration(env) {
   try {
     await env.DB.prepare(JUDGEMENT_TABLE_SQL).run();
     const res = await env.DB.prepare(
-      'SELECT case_id, agent_id, project, cheap_quality, cheap_scorer_id, judge_score, judge_provider, outcome, created_at FROM quality_judgements'
+      'SELECT case_id, agent_id, project, cheap_quality, cheap_scorer_id, judge_score, judge_provider, outcome, sample_bucket, selector_id, created_at FROM quality_judgements'
     ).all();
     rows = res.results || [];
   } catch (e) {
@@ -497,12 +602,33 @@ export async function runCalibration(env) {
   for (const r of rows) byOutcome[r.outcome] = (byOutcome[r.outcome] || 0) + 1;
 
   const judged = rows.filter((r) => r.outcome === 'judged' && typeof r.judge_score === 'number');
-  const pairs = judged.map((r) => ({ cheap: r.cheap_quality, judge: r.judge_score }));
+
+  // KFM-28 applied to this instrument's own population: rows chosen by
+  // different selectors are not one sample. A selector determines WHICH cases
+  // can appear at all, so pooling across two of them measures the selectors as
+  // much as the scores. Correlate within the current selector and say so,
+  // rather than pooling and carrying a caveat nobody reads (KFM-07).
+  const bySelector = {};
+  for (const r of judged) {
+    const k = r.selector_id || 'unrecorded';
+    bySelector[k] = (bySelector[k] || 0) + 1;
+  }
+  const selectorsPresent = Object.keys(bySelector);
+  const mixedSelectors = selectorsPresent.length > 1;
+  const scope = mixedSelectors ? judged.filter((r) => r.selector_id === SELECTOR_ID) : judged;
+  const pairs = scope.map((r) => ({ cheap: r.cheap_quality, judge: r.judge_score }));
 
   return {
     ok: true,
     selectedTotal: rows.length,
     byOutcome,
+    selectorId: SELECTOR_ID,
+    bySelector,
+    // Stated rather than left to be inferred from `bySelector`: a reader who
+    // sees only `n` must not think it counted every judged row.
+    correlatedOver: mixedSelectors
+      ? `${SELECTOR_ID} only — ${judged.length} judged row(s) span ${selectorsPresent.length} selectors and are NOT one sample`
+      : `all ${judged.length} judged row(s) (single selector)`,
     // The realized rate is what actually got sent, and it is reported next to
     // the intended one because the gap between them is the sample's honesty.
     intendedRate: JUDGE_SAMPLE_RATE,

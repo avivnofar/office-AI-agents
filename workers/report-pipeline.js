@@ -1586,11 +1586,83 @@ export async function updateReportRow(env, id, patch) {
 
 /* ──────────────────────────── Period labelling ─────────────────────────── */
 
-/** `week-07` / `month-02`. Stable, sortable, and the same shape the existing
- *  reports/weekly/week-NN-*.md files already use. */
-export function periodLabelFor(reportType, n) {
+/**
+ * `year-1-week-07` / `year-1-month-02`. Stable and sortable.
+ *
+ * ── OB-086 / KFM-17, 2026-08-16: THE YEAR IS NOT DECORATION ────────────────
+ *
+ * This returned `week-07` until 2026-08-16, and the missing year was a live
+ * defect in **two** places at once, because this label is not only a filename:
+ *
+ *  1. **The published path.** `reportPath()` builds
+ *     `reports/weekly/<label>-report.md` in the PUBLIC repo. `current_week`
+ *     resets to 0 at year end (`agent-runner.js`, `isYearEnd`), so year 2's
+ *     week-07 would have written straight over year 1's published — possibly
+ *     owner-edited — report.
+ *  2. **The duplicate-publish guard's key.** `getApprovedReportRow()` looks up
+ *     `(report_type, period_label)`. So the guard would NOT have let the
+ *     overwrite through — it would have done the opposite and refused to
+ *     publish year 2 at all, on the grounds that "week-07 was already
+ *     approved" a year earlier. **Both outcomes are wrong, and they are the
+ *     same missing field.** A guard whose key cannot distinguish two periods
+ *     does not protect the first one; it erases the second.
+ *
+ * **Simulation year, not calendar year.** The index that collides is a
+ * simulation index — `current_week` is `ceil(current_day / 7)` over a 365-day
+ * simulation year that advances six days a calendar week (Sunday–Friday;
+ * Saturday is the rest day, A13). A simulation year is therefore ~366 calendar
+ * days but is not aligned to one, so a calendar year would not reliably
+ * separate the two cycles. `campus/shared/promotions/promotion-results-year-N.md`
+ * already set this precedent.
+ *
+ * @param {string} reportType  'weekly' | 'monthly'
+ * @param {number} n           the period index within the simulation year
+ * @param {number} yearNumber  `yearState.stats.year_number`, 1-based
+ */
+export function periodLabelFor(reportType, n, yearNumber = 1) {
+  const num = String(n ?? 0).padStart(2, '0');
+  const year = Number.isInteger(yearNumber) && yearNumber > 0 ? yearNumber : 1;
+  return `year-${year}-${reportType === 'monthly' ? 'month' : 'week'}-${num}`;
+}
+
+/**
+ * The label this function returned BEFORE the year was added — `week-07`.
+ *
+ * Kept because the office already published under it: live D1 on 2026-08-16
+ * held approved rows for `week-07` and `week-08` and a rejected `week-09`, and
+ * the matching files are in the public repo. Those are **not renamed** (A15 —
+ * corrections are appended, history is not rewritten, and every link to them
+ * would break).
+ *
+ * The consequence has to be handled rather than noted: if the guard looked up
+ * only the new label, sim week 8 would read as never-published and the office
+ * would draft it again and publish to `year-1-week-08-report.md` **beside**
+ * the existing `week-08-report.md` — one period, two published reports. That
+ * is the same defect this change exists to prevent, arriving from the other
+ * direction, and it would have fired within days: `current_week` was 8 when
+ * this was written.
+ *
+ * Year 1 only. No other simulation year ever wrote a label in this shape, so
+ * returning one for year 2+ would invent a collision rather than resolve one.
+ */
+export function legacyPeriodLabelFor(reportType, n) {
   const num = String(n ?? 0).padStart(2, '0');
   return reportType === 'monthly' ? `month-${num}` : `week-${num}`;
+}
+
+/**
+ * Every label under which this period may ALREADY have published, newest shape
+ * first. The duplicate-publish guard checks all of them; `reportPath()` uses
+ * only `[0]`, so nothing new is ever written at a yearless path.
+ *
+ * This is the "tolerate two shapes and say which is which" OB-086 asks for:
+ * the guard reports WHICH label matched, so a refusal naming `week-08` is
+ * legible as a pre-2026-08-16 publication rather than looking like a bug.
+ */
+export function periodLabelCandidates(reportType, n, yearNumber = 1) {
+  const canonical = periodLabelFor(reportType, n, yearNumber);
+  const year = Number.isInteger(yearNumber) && yearNumber > 0 ? yearNumber : 1;
+  return year === 1 ? [canonical, legacyPeriodLabelFor(reportType, n)] : [canonical];
 }
 
 /** Whole days from `fromIso` to the commitment date, or null when the due

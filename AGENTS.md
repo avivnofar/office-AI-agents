@@ -199,6 +199,25 @@ Agent 10, which never runs via `agent-stub.js` at all (see below). All
 seven have `can_generate_assets: true` (see `config/asset-platforms.json`
 and `year-tracker.json`'s `asset_pipeline`).
 
+### Three agents carry a QA title. They are three different jobs.
+
+*(Added 2026-08-16 — audit finding #16, OB-088. The three titles existed from
+the start and were cross-referenced nowhere, so nothing told a reader — or an
+agent reading the roster — which one A3's improvement loop means. The names are
+unchanged; persona flavour text is never edited to resolve an ambiguity in the
+documentation.)*
+
+| # | Name | Title as written | What it actually is | Clearance |
+|---|---|---|---|---|
+| 1 | The Perfectionist | *Quality Assurance **Lead*** | **Not a lead.** A Phase-1 line agent who answers Q&A cases like agents 2–4; the word "Lead" is persona flavour, and this agent has no authority over anyone. | standard |
+| 6 | The QA | *Quality Assurance* | The **admin** who audits individual agents and models. In `OFFICE-POLICY.md` **A3** this is the reviewer who "presents what changed in quality metrics". | sudo |
+| 8 | The Lead QA | *Chief Quality Officer* | The **actual lead**, and the one who **decides** in A3's three-reviewer meeting. Project-wide scope. | sudo |
+
+**The trap, stated plainly:** agent **1**'s role string contains "Lead" and
+agent **8**'s does not, while agent 8 is the lead and agent 1 is not. Read the
+`clearance` column, never the title — `standard` cannot be a reviewer of
+anyone, and that is enforced in code by `fileSuggestion()`'s clearance routing.
+
 | # | Name | Role | Clearance | Purpose |
 |---|------|------|-----------|---------|
 | 5 | The IT Chief | Senior IT Admin | sudo | Hard cases — network optimization, firewall, application-layer issues, client escalations. Raises `quarterly_demand`. |

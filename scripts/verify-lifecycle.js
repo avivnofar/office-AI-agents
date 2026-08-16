@@ -847,12 +847,52 @@ check('…and the refusal names both phases, so the reader can see which one is 
     L.canAdvance({ ...baseBuilt, shift: staleShift }, 'IN-REVIEW', { phases: twoPhases, roster: ROSTER }).reason || ''));
 
 // The honest limit, asserted so a later reader cannot mistake it for coverage.
-check('KNOWN LIMIT, asserted: a record with NO shift at all still advances — every live record is this shape',
+check('KNOWN LIMIT, asserted: a record with NO shift at all still advances — the shape every record predating 2026-08-16 has',
   L.canAdvance({ ...baseBuilt, shift: null }, 'IN-REVIEW', { phases: twoPhases, roster: ROSTER }).ok);
 
 const lifecycleSrcNow = read('workers/deliverable-lifecycle.js');
 check('KFM-08: the call site is in the BUILDING->IN-REVIEW guard, not only in this verifier',
   /'BUILDING->IN-REVIEW':[\s\S]{0,2600}?assertPhaseCompletable\(/.test(lifecycleSrcNow));
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * §13b  OB-077 — THE SHIFT WRITER NOW EXISTS
+ *
+ * Until 2026-08-16 `openShift()`/`closeShift()` had no production caller, so
+ * `record.shift` was a field three consumers read and nothing wrote. The
+ * previous check above ("a record with NO shift still advances") was true of
+ * EVERY record because no record could have one — which made the limit look
+ * like a design choice rather than a missing writer.
+ *
+ * OB-077's metric requires this section to say which of its two answers was
+ * taken. **Taken: wire the writer.** The single-shift limit is unchanged and
+ * still asserted above; what changed is that a shift can now be produced by
+ * the one contracted writer, so the limit is now about the SCHEMA rather than
+ * about the absence of any caller. The shift HISTORY question stays open and
+ * is re-boarded.
+ * ══════════════════════════════════════════════════════════════════════════ */
+console.log('\n-- §13b OB-077: the shift writer --');
+
+const lifecycleToolSrc = read('scripts/lifecycle.mjs');
+check('OB-077: scripts/lifecycle.mjs — the ONE contracted writer — imports both shift builders',
+  /openShift, closeShift,/.test(lifecycleToolSrc));
+check('OB-077: ...and actually CALLS them, which is the half that was missing',
+  /openShift\(\{ phase: arg\(argv, 'phase'\)/.test(lifecycleToolSrc)
+  && /const closed = closeShift\(r\.shift, \{/.test(lifecycleToolSrc));
+check('OB-077: `shift` is a registered command, so the capability is reachable (KFM-10)',
+  /shift: cmdShift/.test(lifecycleToolSrc)
+  && /init\|status\|advance\|ingest\|refusal\|regen\|shift/.test(lifecycleToolSrc));
+check('OB-077: no SECOND writer was introduced — the Worker still cannot write a shift (CTL-02)',
+  !/openShift|closeShift/.test(read('workers/agent-runner.js')));
+check('OB-077: an open shift is REFUSED rather than overwritten, or `next` and the half-written files are lost',
+  /shift_already_open/.test(lifecycleToolSrc));
+check('OB-077: a shift naming an off-roster agent is refused (OB-075 applied to this record too)',
+  /code: 'attribution_refused'[\s\S]{0,200}?not on the roster/.test(lifecycleToolSrc));
+// The refusals themselves stay in the builder, exercised at §5 above. Asserted
+// here only that the command REPORTS them rather than re-implementing them —
+// two copies of a refusal is the defect underneath the defect (KFM-16).
+check('OB-077: the command reports the builder\'s refusal instead of carrying its own copy of the rules',
+  /code: 'close_refused', reason: closed\.reason/.test(lifecycleToolSrc)
+  && !/stoppedBecause[\s\S]{0,80}must name/.test(lifecycleToolSrc));
 
 console.log(`\n${pass}/${pass + fail} checks passed.`);
 if (fail) { console.log(`${fail} FAILED`); process.exit(1); }

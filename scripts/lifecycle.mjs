@@ -94,6 +94,7 @@ import {
   bindingGapsAwaitingVote, convergenceFinding, tallyVote, recordRefusal,
   renderRefusal, detectRefusals, resumeBrief, assertPhaseCompletable,
   checkRecordAttribution, checkSignoffAttribution,
+  openShift, closeShift,
 } from '../workers/deliverable-lifecycle.js';
 import { checkAttribution } from '../workers/meeting-attendance.js';
 
@@ -397,6 +398,108 @@ function cmdAdvance(argv, ctx) {
   const out = { command: 'advance', slug, from: r.stage, to, round: next.round, written: !ctx.dry, next: nextAction(next).say };
   Object.assign(out, project(ctx, next));
   return out;
+}
+
+/**
+ * OB-077 (2026-08-16) — **the shift writer, which did not exist.**
+ *
+ * `openShift()` and `closeShift()` were written with `canAdvance()` already
+ * reading `record.shift` in three places, and with `assertPhaseCompletable()`
+ * wired to validate it — and **nothing anywhere could produce one.** Every live
+ * record carried `shift: null`, so all three consumers were reading a field no
+ * code path wrote, and `verify-lifecycle.js` was the only caller of either
+ * builder. That is KFM-26 in its purest form: the guard, the validator and the
+ * schema were all built; the writer was the step that did not happen.
+ *
+ * It is WIRED rather than retired because the thing it records is policy, not
+ * convenience. OFFICE-POLICY.md **A5** says a task is not expected to finish in
+ * one sitting, that a shift *ends* rather than being cut off, and that the
+ * agent "writes what it completed and where it stopped" — **never a partial
+ * write that looks finished.** Retiring the builders would have deleted the
+ * only mechanism that records A5, leaving a policy with no artifact.
+ *
+ * It goes HERE and nowhere else for the reason CTL-02 states: `lifecycle.mjs`
+ * is THE ONE WRITER of a lifecycle record. The Worker cannot write `STATE.json`
+ * at all (`WAREHOUSE_REPO_TOKEN` is deliberately unset), and adding a second
+ * writer to carry shifts would trade a missing feature for the failure mode
+ * that entry exists to celebrate not having.
+ *
+ * The refusals live in `closeShift()` and are NOT duplicated here — a SUSPENDED
+ * close with no `next`, or a COMPLETED close carrying `incomplete_artifacts`,
+ * is refused by the builder and reported by this command.
+ *
+ *   lifecycle.mjs shift --slug s --open  --phase interface [--agent 4]
+ *   lifecycle.mjs shift --slug s --close --status SUSPENDED --next "..." \
+ *                       --stopped-because overtime_required [--done a,b] \
+ *                       [--artifacts x.js] [--incomplete-artifacts y.js]
+ *   lifecycle.mjs shift --slug s --close --status COMPLETED --artifacts a.js
+ */
+function cmdShift(argv, ctx) {
+  const slug = arg(argv, 'slug');
+  if (!slug) return refuse('--slug is required');
+  const opening = flag(argv, 'open');
+  const closing = flag(argv, 'close');
+  if (opening === closing) return refuse('pass exactly one of --open or --close');
+
+  const st = readState(ctx, slug);
+  if (!st.ok) return refuse(st.reason);
+  const r = st.state.lifecycle;
+  if (!r) return refuse(`${slug} has no lifecycle record — run \`init\` first`);
+  if (r.location !== st.location) r.location = st.location;
+
+  const list = (name) => {
+    const v = arg(argv, name);
+    return v == null ? null : String(v).split(',').map((s) => s.trim()).filter(Boolean);
+  };
+
+  if (opening) {
+    // Refused rather than silently replaced: an OPEN or SUSPENDED shift that
+    // is overwritten takes `next` and `incomplete_artifacts` with it, and
+    // those are precisely what the resuming shift needs. A5 — resume means
+    // resume, and it cannot resume from a record that was written over.
+    if (r.shift && r.shift.status !== 'COMPLETED') {
+      return {
+        command: 'shift', slug, refused: true, code: 'shift_already_open',
+        reason: `the shift on phase "${r.shift.phase}" is ${r.shift.status} and was never closed — close it before opening another, or its "next" and half-written artifacts are lost, which is the partial-that-looks-finished failure A5 exists to prevent`,
+      };
+    }
+    const agentRaw = arg(argv, 'agent');
+    const agentId = agentRaw == null ? null : Number(agentRaw);
+    // The same standard every other claim on this record is held to (OB-075):
+    // a shift asserts that an agent did work, so a named agent must exist.
+    if (agentId != null && !ctx.roster.some((a) => a.id === agentId)) {
+      return {
+        command: 'shift', slug, refused: true, code: 'attribution_refused',
+        reason: `--agent ${agentRaw} is not on the roster — a shift naming an agent that does not run is the fabricated-participation shape OB-075 gated`,
+      };
+    }
+    const opened = openShift({ phase: arg(argv, 'phase'), agentId, at: ctx.now, note: arg(argv, 'note') });
+    if (!opened.ok) return { command: 'shift', slug, refused: true, code: 'open_refused', reason: opened.reason };
+    r.shift = opened.shift;
+    st.state.lifecycle = r;
+    if (!ctx.dry) writeState(st.path, st.state);
+    return { command: 'shift', slug, opened: true, phase: r.shift.phase, agent_id: r.shift.agent_id, written: !ctx.dry };
+  }
+
+  if (!r.shift) return refuse(`${slug} has no open shift to close`);
+  if (r.shift.status === 'COMPLETED') return refuse(`the shift on "${r.shift.phase}" is already COMPLETED`);
+  const closed = closeShift(r.shift, {
+    status: arg(argv, 'status'),
+    stoppedBecause: arg(argv, 'stopped-because'),
+    next: arg(argv, 'next'),
+    done: list('done'),
+    artifacts: list('artifacts'),
+    incompleteArtifacts: list('incomplete-artifacts'),
+    at: ctx.now,
+  });
+  if (!closed.ok) return { command: 'shift', slug, refused: true, code: 'close_refused', reason: closed.reason };
+  r.shift = closed.shift;
+  st.state.lifecycle = r;
+  if (!ctx.dry) writeState(st.path, st.state);
+  return {
+    command: 'shift', slug, closed: true, status: r.shift.status, phase: r.shift.phase,
+    written: !ctx.dry, next: nextAction(r).say,
+  };
 }
 
 /**
@@ -732,9 +835,9 @@ function main(argv) {
     return 4;
   }
 
-  const commands = { init: cmdInit, status: cmdStatus, advance: cmdAdvance, ingest: cmdIngest, refusal: cmdRefusal, regen: cmdRegen };
+  const commands = { init: cmdInit, status: cmdStatus, advance: cmdAdvance, ingest: cmdIngest, refusal: cmdRefusal, regen: cmdRegen, shift: cmdShift };
   if (!commands[cmd]) {
-    console.error('usage: lifecycle.mjs <init|status|advance|ingest|refusal|regen> [--slug s] [options]');
+    console.error('usage: lifecycle.mjs <init|status|advance|ingest|refusal|regen|shift> [--slug s] [options]');
     return 2;
   }
   // At least ONE root must exist to search at all — refusing here rather

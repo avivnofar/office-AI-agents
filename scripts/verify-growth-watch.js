@@ -213,6 +213,64 @@ check('an absent ledger reads as an empty history, not an error', readLedger(pat
 
 fs.rmSync(tmp, { recursive: true, force: true });
 
+/* ═══════════════════════════════════════════════════════════════════════════
+ * §7  OB-085 — THE CI JOB CAN ACTUALLY EXTEND THE LEDGER
+ *
+ * The tool worked from the day it was written; what was missing was a caller
+ * that could RECORD, which is KFM-26's shape (built right, wired short). These
+ * assert the wiring rather than the tool, because "the ledger grows from local
+ * runs only" was true while every check in this file was green.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+console.log('\n── §7 OB-085: the weekly CI job extends the ledger ──');
+
+const wf = fs.readFileSync(
+  path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')),
+    '..', '.github', 'workflows', 'weekly-capability-audit.yml'),
+  'utf8',
+).replace(/\r\n/g, '\n');
+// Comments in this file DISCUSS --no-append at length (it was removed there),
+// so strip them first — a check that cannot tell a directive from prose about
+// a directive reports the opposite of the truth (KFM-04c).
+const wfCode = wf.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+
+check('the growth-watch step no longer passes --no-append',
+  /growth-watch\.mjs/.test(wfCode) && !/--no-append/.test(wfCode));
+check('the job is granted contents: write, without which the commit cannot land',
+  /permissions:\s*\n\s*contents: write/.test(wfCode));
+check('there is a step that commits the ledger',
+  /git commit -m "chore\(growth\)/.test(wfCode) && /git add reports\/growth\/LEDGER\.jsonl/.test(wfCode));
+check('the commit names ONLY the ledger path — never `git add -A`, which would sweep up unrelated files',
+  !/git add\s+(-A|--all|\.)\s/.test(wfCode));
+check('the push retries, because the live Worker commits to this same branch on its own cron',
+  /git pull --rebase/.test(wfCode) && /for attempt in/.test(wfCode));
+check('a failed measurement or commit is RE-RAISED, so this cannot fail silently (KFM-05)',
+  /growth_exit != '0' \|\| steps\.ledger_commit\.outputs\.commit_exit != '0'/.test(wfCode));
+check('...and it is re-raised AFTER the findings are posted, so a lost row never costs the audit (KFM-14)',
+  wfCode.indexOf('Post findings to the board inbox') < wfCode.indexOf('growth ledger could not be measured'));
+check('the ledger failure is a SEPARATE step from the capability gate, so which one fired is legible (KFM-06)',
+  /gate_exit != '0'/.test(wfCode) && /commit_exit != '0'/.test(wfCode)
+  && wfCode.indexOf("gate_exit != '0'") !== wfCode.indexOf("commit_exit != '0'"));
+
+// THE INVARIANT OB-085 NAMES BY NAME. The CI row will carry `not_measured`
+// for both private repos; writing a zero instead would publish the
+// back-office journals collapsing to nothing every Sunday.
+const ciUnreachable = trendFor(
+  'ci_private_store',
+  [{ at: '2026-08-09T00:00:00.000Z', metrics: { ci_private_store: { reachable: true, value: 40 } } }],
+  { reachable: false, reason: 'no credential for back-office in CI', _at: '2026-08-16T00:00:00.000Z' },
+);
+check('an unreachable store summarises as not_measured, never as zero',
+  ciUnreachable.status === 'not_measured' && ciUnreachable.value === null && ciUnreachable.delta === null);
+check('...and it carries the REASON, so a reader can tell "we could not look" from "there is nothing there"',
+  /credential/.test(ciUnreachable.reason || ''));
+check('...and a LATER reachable run still trends against the last run that measured it, skipping the CI blank',
+  trendFor('ci_private_store', [
+    { at: '2026-08-09T00:00:00.000Z', metrics: { ci_private_store: { reachable: true, value: 40 } } },
+    { at: '2026-08-16T00:00:00.000Z', metrics: { ci_private_store: { reachable: false, reason: 'no credential' } } },
+  ], { reachable: true, value: 52, _at: '2026-08-23T00:00:00.000Z' }).delta === 12);
+check('nothing in the workflow rewrites a not_measured row before committing it',
+  !/not_measured/.test(wfCode.split('Commit the growth ledger row')[1] || ''));
+
 console.log(`\n=== ${passed} passed, ${failed} failed ===`);
 if (failed) { console.log('Growth-watch verification FAILED.'); process.exit(1); }
 console.log('All scenarios matched expectations.');

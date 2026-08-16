@@ -139,6 +139,74 @@ for (let i = 0; i < N; i += 1) if (isSelectedForJudging(`case-${i}`, 0.5).select
 check('FALSIFIABILITY: raising the rate to 50% actually selects about half', Math.abs(hitsHalf / N - 0.5) < 0.03);
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * §2b  THE RATE HOLDS ON THE ID SHAPE PRODUCTION ACTUALLY USES
+ *
+ * §2 above passed every day while the selector was broken, and the reason is
+ * the whole point of this section: it draws `case-0`…`case-3999` — ids that
+ * differ in LENGTH and in EVERY position. Production ids are
+ * `qa-<year>-w<week>-d<dow>-<NNN>`, and every id the office asks in ONE DAY
+ * shares a 15-character prefix and differs only in the last three digits.
+ *
+ * The aggregate rate over all weeks was 12.09% — correct — while the per-day
+ * rate ranged from 0 to 108 out of 200. **A sample accrues one day at a time,
+ * so the per-day distribution is the only one that matters**, and measuring the
+ * aggregate hid the defect completely (KFM-28: a number can be right for the
+ * pooled population and meaningless at the grouping actually used).
+ *
+ * The old expression is kept below as a CONTROL. Per this project's standard,
+ * a test that describes a fix is not a test that catches a bug: §2b asserts the
+ * control FAILS the same thresholds the live function must pass.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+section('§2b uniformity on the real case-id shape, measured PER DAY');
+
+const dayIds = (w, d) => [...Array(200).keys()]
+  .map((i) => `qa-2026-w${String(w).padStart(2, '0')}-d${d}-${String(i + 1).padStart(3, '0')}`);
+
+/** Selected-out-of-200 for each of 260 simulated working days. */
+const perDayCounts = (fn) => {
+  const out = [];
+  for (let w = 1; w <= 52; w += 1) {
+    for (let d = 1; d <= 5; d += 1) out.push(dayIds(w, d).filter((id) => fn(id) < JUDGE_SAMPLE_RATE).length);
+  }
+  return out;
+};
+const spread = (xs) => {
+  const m = xs.reduce((a, b) => a + b, 0) / xs.length;
+  return { mean: m, sd: Math.sqrt(xs.reduce((a, b) => a + (b - m) ** 2, 0) / xs.length), zero: xs.filter((x) => x === 0).length };
+};
+
+/** THE CONTROL: `hashToUnit` exactly as it stood before 2026-08-16 — FNV-1a
+ *  with no finalizer, divided out of the high 32 bits. Frozen, never re-synced
+ *  to the live function; if it is, this section stops proving anything. */
+const hashV1 = (key) => {
+  const s = String(key ?? '');
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i += 1) { h ^= s.charCodeAt(i); h = Math.imul(h, 0x01000193) >>> 0; }
+  return h / 0x100000000;
+};
+
+const live = spread(perDayCounts(hashToUnit));
+const v1 = spread(perDayCounts(hashV1));
+// A uniform selector over 200 ids at p=0.125 has mean 25 and sd sqrt(200*.125*.875) = 4.68.
+check(`per-day mean lands near the declared rate (${live.mean.toFixed(1)} of 200, expect ~25)`,
+  Math.abs(live.mean - 25) < 3);
+check(`per-day spread is near-binomial (sd ${live.sd.toFixed(1)}, expect ~4.7, must stay under 10)`,
+  live.sd < 10);
+check(`EVERY working day has selectable cases (${live.zero} of 260 days with none)`, live.zero === 0);
+
+check(`CONTROL: the pre-2026-08-16 hash FAILS the spread check (sd ${v1.sd.toFixed(1)})`, v1.sd >= 10);
+check(`CONTROL: the pre-2026-08-16 hash left whole days unsamplable (${v1.zero} of 260)`, v1.zero > 0);
+check(`CONTROL: and its per-day MEAN looked fine (${v1.mean.toFixed(1)} of 200) — which is why the aggregate check missed it`,
+  Math.abs(v1.mean - 25) < 3);
+// The real day the office ran on 2026-08-13: 22 distinct asks, none selectable
+// under v1. Named rather than described, so a future change that reintroduces
+// the defect fails on a case that actually happened.
+check('CONTROL: 2026-08-13 (qa-2026-w07-d5-*) had ZERO selectable cases under the old hash',
+  dayIds(7, 5).filter((id) => hashV1(id) < JUDGE_SAMPLE_RATE).length === 0);
+check('and that same real day is samplable now',
+  dayIds(7, 5).filter((id) => hashToUnit(id) < JUDGE_SAMPLE_RATE).length > 0);
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * §3  THE PROMPT CANNOT CONTAMINATE THE MEASUREMENT
  * ═══════════════════════════════════════════════════════════════════════════ */
 section('§3 the judge is not anchored, and is told length is not quality');
