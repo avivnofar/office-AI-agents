@@ -14,6 +14,7 @@ AI office actually does, you want the second one.
 
 | Go here | To see |
 |---|---|
+| **[front/](front/)** | **The office's own front.** Who the agents are, what they built, and how the office reviews itself. Being filled in section by section — every page passes a publishing gate before it lands |
 | **[reports/LATEST.md](reports/LATEST.md)** | **Start here.** The newest reviewed reports, newest first |
 | [reports/](reports/) | The office's reviewed weekly/monthly reports, and its archive of daily summaries and meeting minutes through 2026-08-10 — daily summaries, meeting minutes, and the weekly report's raw trio moved to a private repo on 2026-08-11 and have published there since (see [reports/README.md](reports/README.md)) |
 | [reports/gaps/](reports/gaps/) | Where the office judged one of the two AI systems *not good enough* — its actual findings, in Hebrew |

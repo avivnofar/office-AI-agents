@@ -92,7 +92,13 @@ function indexWithout({ lanes = [], modules = [], symbols = {} } = {}) {
 
 const YESTERDAY = indexWithout({
   lanes: ['lanes.image.roles.draft', 'lanes.image.roles.polish'],
-  modules: ['workers/owner-page.js'],
+  // `front-gate.js` joined this list on 2026-08-16, the day the publishing gate
+  // was built. It did not exist on 2026-08-09, so the historical index must not
+  // contain it — exactly what this subtraction list is for, and the same reason
+  // `owner-page.js` is here. Without it, supplying the gate today would have
+  // silently rewritten what the audit says about the Designer's state a week
+  // ago, which is the one thing a [FAILS-OLD] control exists to prevent.
+  modules: ['workers/owner-page.js', 'workers/front-gate.js'],
   symbols: {
     'workers/provider-common.js': ['renderAssetProvenance'],
     'workers/meeting-decisions.js': ['computeOutputCensus'],
@@ -164,10 +170,26 @@ check('the Designer can now produce a `visual_asset`',
   JSON.stringify(tDesigner.kinds.find((k) => k.kind === 'visual_asset')));
 check('...so her role verdict moves off CANNOT_PRODUCE_ITS_OWN_OUTPUT',
   tDesigner.roleVerdict !== 'CANNOT_PRODUCE_ITS_OWN_OUTPUT', tDesigner.roleVerdict);
-check('...and she is PARTLY, not FULLY, supplied — the publishing gate and localization are still missing',
-  tDesigner.roleVerdict === 'PARTLY_SUPPLIED', tDesigner.roleVerdict);
-check('...and `front_publication` is still named as unproducible, so the remaining gap is not papered over',
-  tDesigner.unproducibleKinds.includes('front_publication'), tDesigner.unproducibleKinds.join(','));
+// ── 2026-08-16: these two checks CHANGED SIDES, and that is the finding ───
+// They previously asserted PARTLY_SUPPLIED and `front_publication` unproducible,
+// because the publishing gate did not exist — audit finding #17, the Designer
+// as "absolute gatekeeper of the Front" with no gate to operate. `OB-014` built
+// it (`workers/front-gate.js`), so the honest assertion is now the opposite one.
+//
+// Kept as assertions rather than deleted, and worded to say what changed: a
+// check that silently flips from "X is missing" to "X is present" with no trace
+// leaves a reader unable to tell a fixed gap from a gap that was never there.
+check('...and she is now FULLY supplied — the publishing gate was built 2026-08-16 (OB-014, audit #17)',
+  tDesigner.roleVerdict === 'FULLY_SUPPLIED', tDesigner.roleVerdict);
+check('...and `front_publication` is producible, which it was NOT before that date',
+  !tDesigner.unproducibleKinds.includes('front_publication'), tDesigner.unproducibleKinds.join(','));
+check('...supplied by the gate module specifically, not by something merely adjacent to it',
+  tAudit.capabilities.find((c) => c.id === 'front-publishing-gate')?.verdict === 'SUPPLIED',
+  tAudit.capabilities.find((c) => c.id === 'front-publishing-gate')?.verdict);
+// FULLY_SUPPLIED is a statement about capability supply, NOT about whether the
+// Front is done. Asserted here so the verdict cannot be read as the larger claim.
+check('...and FULLY_SUPPLIED still does not mean the Front is written — the content is OB-092..095',
+  tDesigner.kinds.every((k) => k.producible === true) && tDesigner.roleVerdict === 'FULLY_SUPPLIED');
 check('both image capabilities are SUPPLIED today',
   tAudit.capabilities.filter((c) => c.id.startsWith('image-')).every((c) => c.verdict === 'SUPPLIED'));
 
@@ -273,14 +295,58 @@ const perAgentIdx = doc.indexOf('## Per agent');
 check('the gaps section comes BEFORE the per-agent table', gapsIdx > 0 && gapsIdx < perAgentIdx);
 check('every UNSUPPLIED capability appears in the document by id',
   tAudit.capabilities.filter((c) => c.verdict === 'UNSUPPLIED').every((c) => doc.includes(`\`${c.id}\``)));
-check('each gap names whose role needs it, by agent name', /Whose role needs it:.*Agent 9 — The Designer/.test(doc));
+// Was hardcoded to "Agent 9 — The Designer" until 2026-08-16, when her last gap
+// closed and the check went red for the RIGHT reason — a gap was fixed. A check
+// naming a specific agent has to be edited every time that agent's last gap
+// closes, and the edit is indistinguishable from switching it off. So it now
+// asks the real question: whoever owns a gap today must be named in the document.
+const gapOwners = [...new Set(
+  tAudit.capabilities.filter((c) => c.verdict === 'UNSUPPLIED')
+    .flatMap((c) => manifest.capabilities[c.id]?.agents || []),
+)];
+check('there is at least one gap to attribute (if this fails, every capability is supplied — check that before editing)',
+  gapOwners.length > 0, `gap owners: ${gapOwners.join(',')}`);
+check('each gap names whose role needs it, by agent name — for whoever actually owns one today',
+  gapOwners.every((id) => new RegExp(`Whose role needs it:[^\\n]*Agent ${id} —`).test(doc)),
+  `gap owners: ${gapOwners.join(',')}`);
 check('the document names the census as the OTHER mechanism, so neither is mistaken for both',
   /computeOutputCensus/.test(doc) && /absent from the census/.test(doc));
 check('the document warns that "no gaps" means "no gaps anybody wrote down"',
   /non-exhaustive/i.test(doc) || tAudit.counts.unsupplied > 0);
-check('the "what the bible says nothing supplies" section exists and is not empty today',
-  /What the bible says a role does that nothing supplies/.test(doc)
-  && tRoles.some((r) => r.roleVerdict !== 'FULLY_SUPPLIED'));
+/* ── 2026-08-16: this check went red, and what it exposed is worth more than
+ * the check was ─────────────────────────────────────────────────────────────
+ *
+ * It asserted the section exists AND that some role is not FULLY_SUPPLIED. On
+ * 2026-08-16, closing the Designer's publishing gate made **all 13 roles read
+ * FULLY_SUPPLIED — while three capabilities are still UNSUPPLIED.**
+ *
+ * The cause is not that the gaps closed. It is that `gate-call-audit`,
+ * `dependency-vulnerability-audit` and `paper-attack-multi-provider` (all Agent
+ * 13's) are mapped to **no output kind at all**, and `auditRoleClaims()` reaches
+ * capabilities only THROUGH `output_kind_producers`. A capability with no output
+ * kind is invisible to every role verdict, so the role that owns all three of
+ * the office's remaining gaps reports as fully supplied.
+ *
+ * This was masked until today: the Designer's own gap kept "some role is not
+ * FULLY_SUPPLIED" true, so the check passed for a reason unrelated to what it
+ * was testing. Closing her gap removed the last role holding it up. That is the
+ * project's dominant defect shape — a top-line verdict reading healthy while a
+ * named thing is missing underneath — found in the audit tool itself.
+ *
+ * Boarded as OB-097. The checks below assert the CURRENT, WRONG state on
+ * purpose, so the day it is fixed they go red and say so. */
+check('the "what the bible says nothing supplies" section exists',
+  /What the bible says a role does that nothing supplies/.test(doc));
+const unsupplied = tAudit.capabilities.filter((c) => c.verdict === 'UNSUPPLIED');
+const kindMapped = new Set(Object.values(manifest.output_kind_producers).flat());
+const invisible = unsupplied.filter((c) => !kindMapped.has(c.id));
+check('there ARE still unsupplied capabilities', unsupplied.length > 0,
+  unsupplied.map((c) => c.id).join(','));
+check('[KNOWN DEFECT, OB-097] ...and every one of them is mapped to NO output kind, so no role verdict can see it',
+  invisible.length === unsupplied.length, invisible.map((c) => c.id).join(','));
+check('[KNOWN DEFECT, OB-097] ...which is why all 13 roles read FULLY_SUPPLIED while gaps remain open',
+  tRoles.every((r) => r.roleVerdict === 'FULLY_SUPPLIED'),
+  tRoles.filter((r) => r.roleVerdict !== 'FULLY_SUPPLIED').map((r) => `${r.id}:${r.roleVerdict}`).join(','));
 
 /* ── 8. Findings -> board tasks (2026-08-11, Phase 5 — the weekly audit) ── */
 console.log('\n--- 8. Findings -> board tasks, not a report nobody acts on ---');

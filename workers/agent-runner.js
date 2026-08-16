@@ -104,6 +104,13 @@ import {
   ownerChannelEnabled, notifyOwner, selectNotificationItems, recentFailures, OWNER_ISSUE_LABEL,
 } from './owner-notify.js';
 import { improvementLoopEnabled } from './improvement-loop.js';
+// The publishing gate (2026-08-16, OB-014, audit finding #17). Deliberately has
+// NO kill switch — see front-gate.js's header. The gate itself is pure and
+// publishes nothing; `runFrontPublish()` below is the only thing that writes,
+// and it writes through commitFileToRepo() like everything else.
+import {
+  evaluateBatch, renderPublicationRecord, FRONT_PREFIX, FRONT_SECTIONS,
+} from './front-gate.js';
 import {
   learningLoopEnabled, writeActiveContextAmendment, writeJournalEntry, appendAdaptation,
 } from './context-editor.js';
@@ -1028,7 +1035,13 @@ async function processOwnerChannelBlock(env, opts = {}) {
  * Assets are private until the publishing gate says otherwise. `commitFileToRepo()`
  * refuses a base64 write to the public repo outright, because A10's
  * pre-publication scan is a text scan that cannot read bytes — see its header.
- * Putting an image on the Front is `OB-014`'s decision, which is not built.
+ * ~~Putting an image on the Front is `OB-014`'s decision, which is not built.~~
+ * **Updated 2026-08-16: the gate IS built** (`workers/front-gate.js`, the
+ * `front_publish` trigger). It does not change this rule — `evaluateItem()`
+ * criterion 4 refuses a base64 item at curation time as well, so an image is
+ * now refused twice rather than once. Whether an image reaches the Front at all
+ * needs a deliberate mechanism that does not exist yet, and proposing or
+ * rejecting one is `OB-095`.
  */
 const DESIGNER_ASSET_DIR = 'campus/agents/09-the-designer/assets';
 
@@ -1244,6 +1257,147 @@ async function runDesignerAsset(env, {
     model: result.model,
     assetWrite,
     polish,
+  };
+}
+
+/* ─────────────────────── The publishing gate (OB-014) ───────────────────── */
+
+/**
+ * Where a curated batch is declared. One JSON file per batch, in back-office,
+ * written by the Designer (or by a supervised session acting as her runtime —
+ * AUTOMATION-MANIFEST §3's two axes; the persona stays answerable either way).
+ */
+const FRONT_BATCH_DIR = 'campus/shared/front-drafts/batches';
+/** Where the gate's own record of what it did lands. Back-office: the record
+ *  names refusals, and a refusal is internal by construction. */
+const FRONT_RECORD_DIR = 'campus/shared/front-drafts/records';
+
+/** One back-office file, decoded. Local to this path deliberately: three other
+ *  modules have their own copy of this six-line fetch and unifying them is a
+ *  refactor with its own risk, not a side effect of building a gate. */
+async function fetchBackOfficeText(env, filePath) {
+  if (!env.BACKOFFICE_REPO_TOKEN) return { text: null, reason: 'BACKOFFICE_REPO_TOKEN not configured' };
+  const url = `https://api.github.com/repos/${REPO_OWNER}/${BACKOFFICE_REPO_NAME}/contents/${filePath}`;
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'data-center-agent-sim',
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${env.BACKOFFICE_REPO_TOKEN}`,
+    },
+  }).catch((err) => ({ ok: false, status: 0, _err: err?.message }));
+  if (!res?.ok) return { text: null, reason: `GET ${filePath} failed: HTTP ${res?.status ?? 'network error'}` };
+  const body = await res.json().catch(() => null);
+  if (!body?.content) return { text: null, reason: `${filePath}: no content field` };
+  try {
+    return { text: decodeURIComponent(escape(atob(body.content.replace(/\n/g, '')))), reason: null };
+  } catch (err) {
+    return { text: null, reason: `${filePath}: decode failed — ${err.message}` };
+  }
+}
+
+/**
+ * ONE curated batch, end to end: read the manifest → read each draft → run the
+ * gate → publish or refuse → record either way.
+ *
+ * ── WHY THE WORKER AND NOT A LOCAL SCRIPT ────────────────────────────────
+ *
+ * Because `commitFileToRepo()` is here, and it is the only write path that runs
+ * A10's mandatory scan. A local script committing with `git push` would be a
+ * second door beside the governed one — precisely the thing `PUBLISHING-GATE.md`
+ * refused to build when it declined to write "enforcement" against a world where
+ * the Worker still pushed raw reports unguarded.
+ *
+ * ── THE ORDER OF OPERATIONS IS THE CONTROL ───────────────────────────────
+ *
+ * Gate first, over the WHOLE batch, then write. Never item-by-item-then-check:
+ * a batch is the unit the Designer curates and a partial publish is a Front the
+ * visitor stumbles into mid-change. If any item is refused, NOTHING publishes —
+ * including the items that were clean.
+ *
+ * `dryRun: true` runs the gate and writes nothing, the same shape
+ * `design_asset`'s `commit: false` uses. The record is still returned, so a
+ * refusal can be read before anything is attempted.
+ */
+async function runFrontPublish(env, { batchId, dryRun = false } = {}) {
+  const id = String(batchId || '').replace(/[^a-zA-Z0-9._-]/g, '');
+  if (!id) return { ok: false, reason: 'front_publish_requires_batchId' };
+
+  const manifestPath = `${FRONT_BATCH_DIR}/${id}.json`;
+  const manifestRead = await fetchBackOfficeText(env, manifestPath);
+  if (!manifestRead.text) return { ok: false, reason: 'batch_manifest_unreadable', detail: manifestRead.reason, manifestPath };
+
+  let batch;
+  try {
+    batch = JSON.parse(manifestRead.text);
+  } catch (err) {
+    // A manifest that does not parse is REFUSED, never treated as absent. The
+    // "treat every failure as absent" collapse is KFM-14's whole subject and it
+    // has ~58 instances in this codebase already; this is not the 59th.
+    return { ok: false, reason: 'batch_manifest_unparseable', detail: err.message, manifestPath };
+  }
+
+  // The drafts themselves live as real files, not as strings inside the JSON —
+  // so that what the QA reviewed and what publishes are the same bytes, and so
+  // a draft is reviewable in the repo as markdown rather than as an escaped
+  // blob nobody reads.
+  const items = [];
+  const unreadable = [];
+  for (const decl of Array.isArray(batch.items) ? batch.items : []) {
+    if (!decl?.draft) { unreadable.push({ path: decl?.path ?? null, reason: 'item declares no draft path' }); continue; }
+    const draft = await fetchBackOfficeText(env, decl.draft);
+    if (draft.text === null) { unreadable.push({ path: decl.path ?? null, draft: decl.draft, reason: draft.reason }); continue; }
+    items.push({ ...decl, content: draft.text });
+  }
+  if (unreadable.length) {
+    return { ok: false, reason: 'batch_drafts_unreadable', unreadable, manifestPath };
+  }
+
+  const result = evaluateBatch({ ...batch, items });
+  const date = new Date().toISOString().slice(0, 10);
+  const record = renderPublicationRecord({ ...batch, items }, result, { date });
+
+  const writes = [];
+  if (result.publishable && !dryRun) {
+    for (const item of items) {
+      const commit = await commitFileToRepo(
+        env, REPO_NAME, item.path, item.content,
+        `front: publish ${item.path} (batch ${id}, QA sign-off agent ${batch?.qaSignOff?.agentId}) [skip ci]`,
+      );
+      writes.push({ path: item.path, committed: !!commit.committed, reason: commit.reason || null });
+      // A security refusal here is the scan doing its job on content the gate
+      // let through — the gate checks COVERAGE, the scanner checks CONTENT, and
+      // they are different questions. It stops the batch: the remaining items
+      // are not written, because a half-published batch is the state this whole
+      // mechanism exists to prevent.
+      if (!commit.committed) break;
+    }
+  }
+
+  const published = result.publishable && !dryRun && writes.length === items.length && writes.every((w) => w.committed);
+
+  // The record is written for a REFUSED batch too. A gate whose refusals leave
+  // no trace is a gate nobody can audit.
+  let recordWrite = null;
+  if (!dryRun) {
+    recordWrite = await commitFileToRepo(
+      env, BACKOFFICE_REPO_NAME, `${FRONT_RECORD_DIR}/${date}-${id}.md`, record,
+      `front-gate: ${published ? 'published' : 'refused'} batch ${id} [skip ci]`,
+    );
+  }
+
+  return {
+    ok: true,
+    batchId: id,
+    dryRun,
+    publishable: result.publishable,
+    published,
+    counts: result.counts,
+    refusals: result.refusals,
+    writes,
+    recordPath: recordWrite ? `${FRONT_RECORD_DIR}/${date}-${id}.md` : null,
+    recordCommitted: recordWrite ? !!recordWrite.committed : null,
+    // Returned so a caller can read the gate's reasoning without a second fetch.
+    record,
   };
 }
 
@@ -5282,6 +5436,27 @@ export default {
               polishInstruction: body.polishInstruction || null,
             });
             if (result?.provenance) result.provenance = `[${result.provenance.length} chars — written to ${result.provenancePath}]`;
+            break;
+          }
+          case 'front_publish': {
+            // THE PUBLISHING GATE (OB-014, 2026-08-16). Reads a curated batch
+            // manifest from back-office, runs every criterion, and publishes to
+            // the public repo through commitFileToRepo() — which runs A10's
+            // mandatory scan — or refuses and records why.
+            //
+            // Body: { batchId, dryRun? }
+            //
+            // NO KILL SWITCH, deliberately — see front-gate.js's header. There
+            // is nothing to disable: this endpoint is the only caller, and not
+            // calling it is the off state.
+            if (!body.batchId) return json({ error: 'front_publish_requires_batchId' }, 400, origin);
+            result = await runFrontPublish(env, { batchId: body.batchId, dryRun: body.dryRun === true });
+            // The rendered record is long and is already committed (or returned
+            // in a dry run for reading); truncate it in the response so a
+            // refusal's REASONS stay the readable part.
+            if (result?.record && body.fullRecord !== true) {
+              result.record = `[${result.record.length} chars — ${result.recordPath ? `written to ${result.recordPath}` : 'dry run, pass fullRecord:true to read it'}]`;
+            }
             break;
           }
           case 'warehouse_write': {

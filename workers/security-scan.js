@@ -115,6 +115,23 @@ export const SCANNED_PREFIXES = Object.freeze([
   'README',
   'PROJECT-CONTEXT-SUMMARY',
   'AGENTS.md',
+  // ── 2026-08-16, OB-014 ──────────────────────────────────────────────────
+  // The public Front. Added in the same commit that built the publishing
+  // gate, and BEFORE any Front content existed — which is the only ordering
+  // that would have caught this, because the failure is silent in both
+  // directions. `scanOutbound()` returns `{clean: true, scanned: false}` for
+  // an out-of-scope path, and `repo-write.js commitFileToRepo()` refuses only
+  // when `scanned.scanned` is true. So the office's most visitor-facing
+  // content would have published past A10's mandatory check with a success
+  // response, no refusal, and nothing anywhere saying it had not been read.
+  //
+  // The Front is nested under ONE prefix specifically so this list needs one
+  // entry rather than five (landing/team/portfolio/press/product) — see
+  // `workers/front-gate.js` FRONT_PREFIX. `assertScanCoverage()` there checks
+  // this line still holds instead of assuming it, and
+  // `scripts/verify-front-gate.js` §1 keeps the old six-entry list as a frozen
+  // control, asserting a Front path goes UNSCANNED without this entry.
+  'front/',
 ]);
 
 /** True when a path in the PUBLIC repo is subject to A10's scan. */

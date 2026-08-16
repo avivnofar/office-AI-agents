@@ -554,12 +554,15 @@
     "front-publishing-gate": {
       "what": "The gate the Designer operates: content accumulates in front-drafts/, she curates, and a batch publishes after QA sign-off.",
       "supplied_by": {
-        "kind": "none",
-        "ref": null,
-        "why": "NOT BUILT. Board OB-014, plan 6.3, and it depends on plan 0.4 — today the Worker pushes raw reports straight to the public repo, which is the opposite of a gate. The Designer is described as 'the absolute gatekeeper of the Front'; there is no gate for her to operate."
+        "kind": "module",
+        "ref": "workers/front-gate.js",
+        "symbol": "evaluateBatch",
+        "why": "SUPPLIED 2026-08-16, closing audit finding #17 — the Designer's bible role is 'absolute gatekeeper of the Front' and until this date there was no gate for her to operate. Eight criteria: four mechanical and enforced, four judgement calls the gate does NOT make and instead refuses to publish without the RECORD of (named agent, timestamp, verdict, evidence). Published through the `front_publish` trigger, which writes via commitFileToRepo() — the only path running A10's mandatory scan.",
+        "caveat": "The blocker was real and is genuinely lifted: plan 0.4's publishing split is live-verified for every report type that can fire (meetings, daily summaries, the weekly raw trio and side plots all land in back-office; promotions cannot fire before a day_365 milestone). KNOWN LIMIT, found on the second batch and boarded as OB-096: a mechanical check that a record EXISTS cannot check that the record is RESPONSIVE to the question asked — criteria 5-8 all share that shape. Deliberately has NO kill switch: a switch that disables a refusal mechanism is a hole, not a switch."
       },
-      "exercised_by": null,
-      "cost": "n/a",
+      "exercised_by": "scripts/verify-front-gate.js",
+      "proved_live": "2026-08-16 — two batches published end to end and read back from the public repo (front/press/2026-08-12-notebook-x-findings.md, front/team/04-the-trainee.md), plus a deliberately broken NEGATIVE CONTROL batch refused by the live gate on criteria 1, 5 and 7 with nothing written (front/press/negative-control.md returns 404). Records in back-office campus/shared/front-drafts/records/.",
+      "cost": "free — the gate itself is pure and makes no model call. The content it gates costs whatever its lanes cost.",
       "agents": [
         9
       ]
