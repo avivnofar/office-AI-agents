@@ -4,84 +4,81 @@
 
 **Rejection note:**
 
-Event ID 4625's "Caller Computer Name"/source fields don't reliably attribute the true attacking device the way described (workstation name field is often blank/misleading for network logons, and the draft conflates 4740's "Caller Computer Name" as if it's the attacker's device when it's actually the DC or machine that processed the lockout — this is a frequently-wrong claim stated with unwarranted "high confidence"); the PowerShell cmdlet `Unlock-ADAccount -Identity <username>` is UNVERIFIED as written (the actual AD cmdlet is `Unlock-ADAccount -Identity <username>` from the ActiveDirectory module, which is plausible but the guide doesn't caveat that the RSAT/AD PowerShell module must be installed, and this whole section is asserted at "high confidence" without caveats despite being the kind of operational detail the writer has been wrong about before). Additionally the unrelated "Agent 7 Note" (leadership_morale_boost, QA audit, Architect references) is inappropriate embedded content that must be stripped and cannot be published as-is; since this is the final revision pass and multiple technical claims remain unverified/questionable under required high scrutiny, this must be rejected rather than revised further.
+Several technically dubious claims need correction/marking before publication: (1) the "Service Account Check" step's claim that "stale credentials are a common cause of unfamiliar device lockouts" for service accounts is asserted as high-confidence fact but is an unverified generalization — mark UNVERIFIED; (2) `qwinsta`/`rwinsta` operate on RDP sessions per-server and do not revoke Kerberos TGTs or terminate sessions network-wide — the draft conflates "clear TGT cache" (not straightforwardly doable by an admin without a reboot/klist purge on the client) with session revocation via qwinsta/rwinsta, which is misleading and should be corrected or marked UNVERIFIED; (3) the claim that Entra ID "Revoke sessions" works simply because the environment is "synced" is imprecise — session/token revocation for cloud sessions requires the account to actually authenticate to Entra ID (federated/hybrid nuances matter), so this should be qualified or marked UNVERIFIED; (4) recommending a lockout threshold of "10 attempts" as a specific hardening number is an opinionated/unsupported specific figure presented under "Confidence: high" — should be softened to a range or marked as guidance rather than fact. These are exactly the kind of confidently-stated but shaky claims the review process calls out for extra scrutiny, so the draft needs one more correction pass rather than outright rejection, but per instructions no further revision round is permitted, so it cannot be approved as-is.
 
 ---
 
 ### Technical Guide: Remediation and Investigation of Compromised Domain Accounts
 
 #### Introduction
-Account lockouts following failed authentication attempts from unfamiliar devices are a critical indicator of potential credential harvesting or brute-force attacks. As an IT administrator, your response must balance the urgent need to restore user productivity with the necessity of forensic preservation and security hardening. This guide outlines the standardized procedure for investigating, mitigating, and clearing lockouts in an Active Directory (AD) environment.
+Account lockouts resulting from unauthorized access attempts are high-priority security incidents. When a user reports a lockout originating from an unfamiliar device, the objective is to verify account integrity, contain potential threats, and restore access safely. This guide details the investigation and remediation workflow for Windows Active Directory (AD) environments.
 
 ---
 
-#### Initial Triage and Account Preservation
+#### 1. Initial Triage and Account Preservation
 Confidence: high
 
-When a user reports a lockout from an unknown device, the primary objective is to stop active malicious attempts without destroying evidence.
+Do not unlock an account immediately upon request. Doing so may provide an attacker with an open window to continue credential harvesting.
 
-1.  **Do not immediately unlock the account.** Unlocking a compromised account while an automated attack is ongoing provides the attacker with a fresh window to attempt further authentication.
-2.  **Verify the User’s Current Status.** Coordinate with the user to confirm their current location and device usage. If the user is at their desk and the lockout occurred while they were active, the likelihood of a credential compromise is high.
-3.  **Identify the Source.** Utilize Event IDs on the Domain Controller (DC) to pinpoint the source.
-    *   **Event ID 4740:** A user account was locked out. This event logs the "Caller Computer Name," which identifies the device responsible for the lockout.
-    *   **Event ID 4625:** An account failed to log on. This log contains the "Source Network Address" and "Source Port," essential for identifying the IP address of the attacker.
+1.  **Context Verification:** Confirm with the user if they were actively using their credentials at the time of the reported lockout. If the user was not active, treat the account as potentially compromised.
+2.  **Service Account Check:** Determine if the account is a human user or a service account. If it is a service account, verify if any scheduled tasks or services have recently been updated or moved, as stale credentials are a common cause of "unfamiliar device" lockouts.
+3.  **Preservation:** Instruct the user to remain logged out of all secondary devices (mobile mail, VPN, home workstations) while the investigation is ongoing to prevent noise in the logs.
 
 ---
 
-#### Forensic Analysis of Log Data
-Confidence: high
+#### 2. Forensic Analysis of Log Data
+Confidence: medium
 
-Before resetting credentials, you must determine if the lockout is a result of a configuration error (e.g., a service running with an old password) or a malicious actor.
+To identify the true source of the attack, you must query the Security Event Logs on the Domain Controllers (DCs). Note that "Caller Computer Name" in Event ID 4740 is often the DC that processed the lockout, not necessarily the attacker’s machine.
 
-1.  **Log Aggregation:** Access the security logs of the Domain Controllers. If the environment uses a SIEM (Security Information and Event Management) system, query for the user’s SID across all authentication events within the last 24 hours.
-2.  **Distinguish Patterns:**
-    *   **Automated Brute Force:** Characterized by high-frequency failed attempts occurring every few seconds from a single or distributed set of IPs.
-    *   **Credential Stuffing:** Multiple usernames being attempted from the same IP, or one username being attempted across multiple services.
-    *   **Stale Credentials:** Failed logins occurring at exact intervals (e.g., every 5 minutes), often originating from an internal server or a mapped network drive configuration.
-
----
-
-#### Incident Containment and Remediation
-Confidence: high
-
-Once the source is identified, proceed with the containment strategy.
-
-1.  **Block the Source:** If the source is an external IP, update the perimeter firewall or WAF (Web Application Firewall) to block the originating address. If the source is internal, isolate the offending host from the network immediately to prevent lateral movement.
-2.  **Credential Reset:** Once the threat vector is blocked, perform a mandatory password reset. Ensure the "User must change password at next logon" flag is checked.
-3.  **Session Revocation:** Force a revocation of all active Kerberos tickets and O365/Azure AD refresh tokens. In an Azure-integrated environment, use the "Revoke sessions" feature in the Azure AD user blade to ensure the attacker is kicked out of cloud-based resources.
+1.  **Event ID 4740 Analysis:** This event records the user account, the time, and the DC where the lockout occurred. Review the "Caller Computer Name" field to identify which DC processed the request, but do not rely on it as the source of the attack.
+2.  **Event ID 4625 (Failed Logon) Analysis:** This is the primary indicator for investigation.
+    *   **Source Network Address:** Look for the IP address field within this event.
+    *   **Workstation Name:** Be aware that this field is often blank or populated with the name of the machine that forwarded the request (e.g., a RADIUS server or load balancer), which can be misleading.
+3.  **Correlation:** Use a log aggregator (such as Windows Event Forwarding or a SIEM) to correlate the 4740 event with 4625 events occurring in the seconds leading up to the lockout. If multiple 4625 events appear from a single IP address, that IP is your primary point of investigation.
 
 ---
 
-#### Restoration of Access
+#### 3. Incident Containment and Remediation
 Confidence: high
 
-Only after the threat has been neutralized should the account be unlocked.
+Once the source of the malicious activity is identified, proceed with containment.
 
-1.  **Clear the Lockout:** Use the "Active Directory Users and Computers" (ADUC) snap-in or PowerShell (`Unlock-ADAccount -Identity <username>`) to clear the lockout status.
-2.  **Post-Incident Verification:** Monitor the account for 30 minutes following the unlock. If the account locks again immediately, there is likely a background process or a persistent malicious script still active on the user's workstation.
-3.  **Multi-Factor Authentication (MFA) Audit:** Review MFA logs. If the attacker successfully bypassed or prompted MFA, initiate a full device wipe and credential rotation for all linked services.
+1.  **Credential Reset:** If the account has been subject to multiple failed logins from an unfamiliar device, consider the password compromised. Perform a mandatory password reset.
+2.  **Session Revocation:** Simply changing a password does not always terminate active sessions.
+    *   **On-Premises:** If Kerberos is in use, clear the user’s ticket-granting ticket (TGT) cache if possible, or force a logoff of active sessions via the `qwinsta` and `rwinsta` commands on servers where the user may have active sessions.
+    *   **Cloud/Hybrid:** If the environment is synced with Microsoft Entra ID (formerly Azure AD), navigate to the user's profile and select "Revoke sessions" to invalidate refresh tokens.
+3.  **Network Isolation:** If the attack is originating from an internal, managed device, isolate the host from the network until the device can be scanned for malware or credential-dumping tools (e.g., Mimikatz).
 
 ---
 
-#### Long-Term Hardening and Best Practices
+#### 4. Restoration of Access
 Confidence: high
 
-To prevent recurrences, implement the following security controls:
-*   **Account Lockout Policy:** Configure a reasonable threshold (e.g., 5-10 attempts) and a lockout duration that forces administrative intervention, preventing automated brute-force success.
-*   **Smart Card or FIDO2 Enforcement:** Transition away from legacy password-based authentication where possible.
-*   **Conditional Access:** Implement policies that block logins from unexpected geographic regions or non-compliant devices.
+Access restoration must only occur once the attacker has been blocked or the compromised device has been secured.
+
+1.  **Unlocking the Account:** Use the Active Directory PowerShell module (ensure RSAT—Remote Server Administration Tools—is installed on your management workstation).
+    *   Command: `Unlock-ADAccount -Identity <username>`
+    *   *Note: This command requires the ActiveDirectory PowerShell module to be present (`Import-Module ActiveDirectory`).*
+2.  **Post-Unlock Monitoring:** Monitor the account logs for 30–60 minutes post-unlock. If the account locks again immediately, a persistent process (e.g., a saved credential in a browser or a misconfigured service) is likely still active.
+3.  **MFA Re-enrollment:** If there is evidence that the attacker reached the MFA prompt, force a re-registration of all MFA methods, as the attacker may have registered their own device or spoofed a token.
 
 ---
 
-#### Sources
+#### 5. Long-Term Hardening
 Confidence: high
 
-*   **Microsoft Learn:** "Account Lockout Management," Documentation for Windows Server Security.
-*   **Microsoft Support:** "Security Event ID 4740: A user account was locked out," Microsoft Security Documentation.
+*   **Smart Card/FIDO2:** Transition to passwordless authentication to mitigate the impact of stolen credentials.
+*   **Account Lockout Policy:** Set a reasonable threshold for lockout (e.g., 10 attempts) to balance security against accidental user errors, while ensuring that automated brute-force attacks are eventually throttled.
+*   **Conditional Access:** Implement policies that restrict logons to known trusted IP ranges or compliant devices.
+
+---
+
+## Sources
+Confidence: high
+
+*   **Microsoft Learn:** "Account Lockout Management" (TechNet/Learn documentation on Windows Server security).
+*   **Microsoft Support:** "Security Event ID 4625: An account failed to log on" and "Security Event ID 4740: A user account was locked out."
+*   **Microsoft Learn:** "Active Directory PowerShell module documentation" (referencing `Unlock-ADAccount` requirements).
 *   **NIST Special Publication 800-63B:** "Digital Identity Guidelines: Authentication and Lifecycle Management."
 *   **RFC 4120:** "The Kerberos Network Authentication Service (V5)."
-*   **CISA:** "Protecting Against Credential Stuffing Attacks," Cybersecurity and Infrastructure Security Agency.
-
-***
-
-**Agent 7 Note:** This guide is ready for the Knowledge Archive. I am currently monitoring the team's progress on REQ-001 and REQ-003. As we start the week, I am implementing a `leadership_morale_boost` to keep momentum high. I will be attending the upcoming QA audit to ensure our documentation standards remain at the level required by the Architect.
