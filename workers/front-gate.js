@@ -166,6 +166,109 @@ function refusal(criterion, code, message) {
   return { criterion, code, message };
 }
 
+/* ── OB-096: A NON-EMPTY RECORD IS NOT A RESPONSIVE ONE ─────────────────────
+ *
+ * On the gate's second-ever batch (`2026-08-16-team-01`) the Designer answered
+ * `mistakesShown.evidence` — *"does this batch DISCLOSE a mistake the office
+ * made?"* — with a flaw she had spotted in the page under review: *"'I'm at a
+ * 30 raw meter value' is vague."* Both are useful observations; only one of
+ * them is the question. The gate could not tell, because it checked that the
+ * field was **non-empty**, not that it answered what was asked. Criteria 5–8
+ * all share that shape.
+ *
+ * ── WHAT WAS NOT DONE, AND WHY IT WOULD HAVE BEEN WORSE ───────────────────
+ *
+ * The tempting fix is to score the text — look for "we", "the office",
+ * "wrong", a past-tense admission. **That is scoring judgement with a
+ * heuristic, which is this project's most-repeated defect**, and here it would
+ * be worse than usual in both directions: it would reject an honest disclosure
+ * phrased unusually, and accept a critique that happened to contain the right
+ * words. A curator who learns which words pass is a curator writing for the
+ * checker.
+ *
+ * ── WHAT IS CHECKABLE, WITHOUT JUDGING ANYTHING ───────────────────────────
+ *
+ * A disclosure and a critique differ **referentially**, not stylistically. A
+ * disclosure of a mistake is IN the content being published — it can be
+ * pointed at. A flaw spotted during review is ABOUT the content and exists
+ * nowhere in it. So the claim now has to carry a locator, and the locator is a
+ * fact the gate can verify: the named path must be one of this batch's items,
+ * and the quoted text must actually appear in that item's content.
+ *
+ * This is the same technique the whole gate is built on — **it enforces the
+ * RECORD of a judgement, never the judgement** — applied one level finer. The
+ * gate still does not know whether the quoted sentence discloses a mistake.
+ * It knows the answer is about published content rather than about the review,
+ * which is exactly the confusion OB-096 found.
+ *
+ * ── THE LIMIT, STATED SO NOBODY READS MORE INTO IT ────────────────────────
+ *
+ * A curator can satisfy this by quoting any sentence from the batch. **It is
+ * not proof that a mistake was disclosed and must never be described as one.**
+ * What it makes impossible is the specific, observed failure: answering with
+ * something that is not in the published text at all. Criteria 5, 6 and 8 have
+ * the same weakness and do NOT get this treatment in the same session —
+ * `disagreementShown.evidence` is often a reference to a meeting record rather
+ * than to batch content, so the same locator would be wrong there. That is
+ * `OB-105`, deliberately not guessed at here.
+ */
+export function disclosureLocatorRefusals(mistakes, items) {
+  const out = [];
+  const at = mistakes.disclosedAt;
+  if (!at || typeof at !== 'object') {
+    out.push(refusal(7, 'mistakes_disclosure_unlocated',
+      'mistakesShown.included is true and names evidence, but carries no `disclosedAt: { path, quote }`. '
+      + 'A mistake the office DISCLOSES is in the text being published and can be pointed at; a flaw noticed '
+      + 'during review is about the text and is not in it. The gate cannot tell those apart from prose, so it '
+      + 'asks where the disclosure is. If your observation is a review finding rather than a disclosure, it '
+      + 'belongs in the batch\'s curation notes, not here — and the batch then has no mistake to show, which '
+      + 'is a legitimate answer that must be given as one.'));
+    return out;
+  }
+  const path = String(at.path || '').trim();
+  const quote = String(at.quote || '').trim();
+  if (!path || !quote) {
+    out.push(refusal(7, 'mistakes_disclosure_locator_incomplete',
+      'mistakesShown.disclosedAt needs BOTH a `path` naming an item in this batch and a `quote` of the '
+      + 'disclosing text. A path with no quote does not say where, and a quote with no path does not say '
+      + 'which file.'));
+    return out;
+  }
+  const item = (items || []).find((i) => String(i?.path || '') === path);
+  if (!item) {
+    out.push(refusal(7, 'mistakes_disclosure_path_not_in_batch',
+      `mistakesShown.disclosedAt.path is "${path}", which is not one of this batch's ${(items || []).length} item(s). `
+      + 'The disclosure must be in what this batch publishes — a mistake shown somewhere else is not shown by this batch.'));
+    return out;
+  }
+  // Whitespace-insensitive, because the quote is retyped by a person and a
+  // wrapped line would otherwise fail for a reason that is not about the claim.
+  const flat = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+
+  // THREE OUTCOMES, NOT TWO (KFM-13). An item with no content is a question
+  // the gate COULD NOT ASK, and collapsing that into "the quote is absent"
+  // would be a red for an environmental reason rather than a real one
+  // (KFM-04b) — which is how a reader learns that red means nothing. It is
+  // not hypothetical: the archived copy of batch `2026-08-16-team-01` carries
+  // `content: ''` on its only item, because the batch record is stored without
+  // the text it published.
+  if (!flat(item.content)) {
+    out.push(refusal(7, 'mistakes_disclosure_uncheckable',
+      `"${path}" carries no content in this batch record, so the gate cannot check whether the quoted `
+      + 'disclosure appears in it. This is "could not check", not "not there" — supply the item content, '
+      + 'which criterion 1\'s language scan needs for the same reason.'));
+    return out;
+  }
+
+  if (!flat(item.content).includes(flat(quote))) {
+    out.push(refusal(7, 'mistakes_disclosure_quote_absent',
+      `mistakesShown.disclosedAt.quote does not appear in "${path}". `
+      + 'This is the OB-096 shape: the answer describes something that is not in the published text, which is '
+      + 'what a review finding looks like and what a disclosure does not.'));
+  }
+  return out;
+}
+
 /** A timestamp comparison that treats an unparseable date as unusable, not as zero. */
 function parsedTime(value) {
   if (!value) return null;
@@ -331,6 +434,8 @@ export function evaluateBatch(batch) {
   } else if (!mistakes.included && !String(mistakes.evidence || '').trim()) {
     batchRefusals.push(refusal(7, 'mistakes_omission_unexplained',
       'mistakesShown.included is false and no reason is given. A batch may legitimately contain no mistake — but it must say why, so "nothing went wrong this period" and "we left it out" stay distinguishable.'));
+  } else if (mistakes.included) {
+    batchRefusals.push(...disclosureLocatorRefusals(mistakes, items));
   }
 
   // ── Criterion 8: a disagreement is published as a disagreement ──────────

@@ -46,7 +46,7 @@ import {
   admitBlock, blockCost, isSameBlock, meterEnv,
   SUBREQUEST_CEILING, TICK_TAIL_RESERVE, TICK_TAIL_RESERVE_NO_CASES, FINALIZE_RESERVE,
   CASE_FLOOR_FRACTION, CASE_LOOKAHEAD, CASE_COST_MAX, BLOCK_COST, LANE_CASES,
-  DO_CALL_CEILING, WEIGHTS, meterGlobalFetch,
+  DO_CALL_CEILING, WEIGHTS, meterGlobalFetch, recordAdmissions, ADMISSIONS_TABLE_SQL,
 } from '../workers/subrequest-budget.js';
 
 const require = createRequire(import.meta.url);
@@ -505,6 +505,56 @@ section('§6b  The Durable Object case path ships OFF');
   check('a real case_batch tick with the flag absent never calls the DO case route',
     caseRoutePings === 0, `pings=${caseRoutePings}`);
   check('...and it still did the work on the Worker path', tally.d1 > 0);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * §6c  THE ADMISSIONS RECORDER (OB-098, 2026-08-16)
+ *
+ * `BLOCK_COST`'s twelve entries can only stop being guesses if the real
+ * estimate-vs-actual pairs survive the tick that produced them. Until today
+ * they did not: `cycle.admissions = admissions` REPLACES the previous tick's
+ * array and the cycle is deleted at day end, so a measurement taken correctly
+ * on every tick since the budget shipped was discarded within thirty minutes.
+ *
+ * Two properties are asserted here, and the second matters more than the
+ * first: recording must be UNABLE to cost the tick (KFM-14). A recorder that
+ * throws on a D1 hiccup would turn a lost measurement into a lost day.
+ * ═════════════════════════════════════════════════════════════════════════ */
+section('§6c  Admissions are recorded durably, and recording cannot cost the tick');
+
+{
+  const rows = [];
+  const fakeDb = {
+    prepare: (sql) => ({
+      bind: (...args) => ({ __sql: sql, args }),
+      run: async () => ({ success: true }),
+    }),
+    batch: async (stmts) => { rows.push(...stmts); return []; },
+  };
+  const admissions = [
+    { block: 'meeting', at: '16:30', decision: 'run', estimate: 34, actual: 31 },
+    { block: 'guide_review', at: '16:30', decision: 'defer', estimate: 12, actual: 0 },
+  ];
+  const res = await recordAdmissions({ DB: fakeDb }, 'year-1-day-053', admissions);
+  check('both admissions are persisted', res.recorded === 2, JSON.stringify(res));
+  check('estimate and actual are stored SEPARATELY, not as a delta',
+    rows.length === 2 && rows[0].args.includes(34) && rows[0].args.includes(31));
+  check('the table is created lazily rather than via database/schema.sql',
+    /CREATE TABLE IF NOT EXISTS block_admissions/.test(ADMISSIONS_TABLE_SQL));
+
+  const noDb = await recordAdmissions({}, 'd', admissions);
+  check('no D1 binding is reported, not thrown', noDb.recorded === 0 && noDb.reason === 'no_db_binding');
+
+  const throwingDb = { prepare: () => { throw new Error('D1 unavailable'); } };
+  let threw = false;
+  let out = null;
+  try { out = await recordAdmissions({ DB: throwingDb }, 'd', admissions); } catch { threw = true; }
+  check('[FALSIFYING] a D1 failure is swallowed — a lost measurement never costs the tick (KFM-14)',
+    !threw && out?.recorded === 0 && out?.reason === 'record_error');
+
+  const empty = await recordAdmissions({ DB: fakeDb }, 'd', []);
+  check('an empty tick records nothing and says why, rather than writing a blank row',
+    empty.recorded === 0 && empty.reason === 'nothing_to_record');
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

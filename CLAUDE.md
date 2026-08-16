@@ -607,7 +607,10 @@ rebuild specifically: `node scripts/verify-qa-engine.js`.
 
 ## Connection to `data-center`
 
-[`avivnofar/data-center`](https://github.com/avivnofar/data-center) is the
+[`avivnofar/data-center`](https://avivnofar.github.io/data-center/) — **a
+private repo**, so the link points at the running app, the same correction
+KFM-22 applied to the seven Notebook-X links on 2026-08-15 and missed here —
+is the
 app this office simulation works on — its `index.html` 🔐 Admin tab is the
 read-only dashboard for this Worker's data (status, session feed, reports,
 suggestions). The two repos are deliberately separate: this repo is

@@ -333,8 +333,33 @@ check('the document warns that "no gaps" means "no gaps anybody wrote down"',
  * project's dominant defect shape — a top-line verdict reading healthy while a
  * named thing is missing underneath — found in the audit tool itself.
  *
- * Boarded as OB-097. The checks below assert the CURRENT, WRONG state on
- * purpose, so the day it is fixed they go red and say so. */
+ * ── OB-097 CLOSED 2026-08-16, AND THE KNOWN-DEFECT CHECKS DID THEIR JOB ────
+ *
+ * The three checks below used to assert the WRONG state on purpose, so that
+ * fixing it would turn them red. It did, and they have been rewritten to
+ * assert the corrected behaviour instead. That is the intended lifecycle of a
+ * `[KNOWN DEFECT]` check and the reason to prefer one over a comment: a
+ * comment describing a defect goes stale silently, and this went red on the
+ * hour the defect was fixed.
+ *
+ * **The fix was not to complete the mapping.** 24 of the manifest's 46
+ * capabilities are named by no output kind, and most of them are
+ * infrastructure a role USES rather than something it PRODUCES —
+ * `mood-state-machine`, `board-read`, `invocation-budget`. Inventing output
+ * kinds for those would have been fabricating a taxonomy so a metric could
+ * reach it. Instead `auditRoleClaims()` now reads each role's ATTRIBUTED
+ * capabilities (`c.agents` includes this id — data the manifest already
+ * carried and nothing consulted) and refuses to report `FULLY_SUPPLIED` while
+ * any of them is UNSUPPLIED, under a fourth verdict
+ * `OUTPUTS_SUPPLIED_CAPABILITY_GAP`. The output-kind verdict is preserved
+ * beside it as `outputVerdict`, so the two facts are not merged (KFM-06).
+ *
+ * Proven falsifiable by running, twice and in both directions, before this was
+ * written: (1) marking `mood-state-machine` — a capability mapped to NO output
+ * kind — unsupplied flipped agents 1, 9 and 13 from `FULLY_SUPPLIED` to
+ * `OUTPUTS_SUPPLIED_CAPABILITY_GAP`, which the old code could not have
+ * noticed; (2) removing ONE of the three board references made the gate exit 1
+ * with a named FAIL, and restoring it returned exit 0 with a KNOWN row. */
 check('the "what the bible says nothing supplies" section exists',
   /What the bible says a role does that nothing supplies/.test(doc));
 const unsupplied = tAudit.capabilities.filter((c) => c.verdict === 'UNSUPPLIED');
@@ -342,11 +367,28 @@ const kindMapped = new Set(Object.values(manifest.output_kind_producers).flat())
 const invisible = unsupplied.filter((c) => !kindMapped.has(c.id));
 check('there ARE still unsupplied capabilities', unsupplied.length > 0,
   unsupplied.map((c) => c.id).join(','));
-check('[KNOWN DEFECT, OB-097] ...and every one of them is mapped to NO output kind, so no role verdict can see it',
+check('[OB-097] unsupplied capabilities mapped to no output kind still exist — the condition that hid them',
   invisible.length === unsupplied.length, invisible.map((c) => c.id).join(','));
-check('[KNOWN DEFECT, OB-097] ...which is why all 13 roles read FULLY_SUPPLIED while gaps remain open',
-  tRoles.every((r) => r.roleVerdict === 'FULLY_SUPPLIED'),
-  tRoles.filter((r) => r.roleVerdict !== 'FULLY_SUPPLIED').map((r) => `${r.id}:${r.roleVerdict}`).join(','));
+check('[OB-097] ...and a role holding one no longer reads FULLY_SUPPLIED',
+  tRoles.filter((r) => r.capabilityGaps.length > 0).every((r) => r.roleVerdict !== 'FULLY_SUPPLIED'),
+  tRoles.filter((r) => r.capabilityGaps.length > 0).map((r) => `${r.id}:${r.roleVerdict}`).join(',') || 'no role holds a gap');
+check('[OB-097] the output-kind verdict is preserved separately, not merged away',
+  tRoles.every((r) => typeof r.outputVerdict === 'string')
+  && tRoles.filter((r) => r.roleVerdict === 'OUTPUTS_SUPPLIED_CAPABILITY_GAP')
+      .every((r) => r.outputVerdict === 'FULLY_SUPPLIED'),
+  tRoles.filter((r) => r.roleVerdict === 'OUTPUTS_SUPPLIED_CAPABILITY_GAP').map((r) => `${r.id}:${r.outputVerdict}`).join(','));
+
+/* The falsifying probe, so this section can be shown able to say no rather
+ * than merely observed passing — the standard the rest of this suite uses. */
+{
+  const probe = auditRoleClaims(
+    { capabilities: tAudit.capabilities, agents: tAudit.agents.map((a) => (a.id === 1 ? { ...a, gaps: [{ id: 'invented-gap' }] } : a)) },
+    manifest, manifest.output_kind_producers);
+  const one = probe.find((r) => r.id === 1);
+  check('[OB-097 probe] a role given an unsupplied capability is refused FULLY_SUPPLIED',
+    one.roleVerdict === 'OUTPUTS_SUPPLIED_CAPABILITY_GAP' && one.outputVerdict === 'FULLY_SUPPLIED',
+    `${one.roleVerdict}/${one.outputVerdict}`);
+}
 
 /* ── 8. Findings -> board tasks (2026-08-11, Phase 5 — the weekly audit) ── */
 console.log('\n--- 8. Findings -> board tasks, not a report nobody acts on ---');

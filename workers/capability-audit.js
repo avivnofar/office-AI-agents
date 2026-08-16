@@ -326,6 +326,50 @@ export function auditRoleClaims(audit, manifest, producibleKinds) {
     });
 
     const unproducible = kinds.filter((k) => !k.producible && !k.unmapped);
+
+    /* ── OB-097, 2026-08-16: A VERDICT THAT COULD NOT GO FALSE ─────────────
+     *
+     * Until today this returned only the `outputVerdict` below, and **all 13
+     * roles read `FULLY_SUPPLIED` while three capabilities were UNSUPPLIED.**
+     * The Designer's own gap was the last thing holding a compound assertion
+     * in `verify-capability-audit.js` §7 false; closing OB-014 revealed the
+     * metric had been permissive all along (KFM-30).
+     *
+     * The cause is structural, not a bug in the expression: this function
+     * reaches capabilities ONLY through `output_kind_producers`, and **24 of
+     * the manifest's 46 capabilities are named by no output kind at all** —
+     * `gate-call-audit`, `dependency-vulnerability-audit` and
+     * `paper-attack-multi-provider` among them. So Agent 13, who owns every
+     * remaining gap in the office, was invisible to the question.
+     *
+     * ── WHY THE MAPPING WAS NOT "COMPLETED" INSTEAD ───────────────────────
+     *
+     * That was the other available fix and it is the wrong one. Most of those
+     * 24 are INFRASTRUCTURE — `mood-state-machine`, `board-read`,
+     * `invocation-budget`, `agent-journal` — capabilities a role uses rather
+     * than things a role produces. Forcing them into an output-kind vocabulary
+     * would mean inventing output kinds that nobody produces, i.e. fabricating
+     * a taxonomy to make a metric reachable. The manifest already carries the
+     * honest edge: every capability names the `agents` it is for, and
+     * `auditCapabilities()` already computes each agent's `gaps` from it. The
+     * information was there; nothing read it.
+     *
+     * ── AND THE TWO ARE KEPT APART (KFM-06) ───────────────────────────────
+     *
+     * "cannot produce its declared output" and "depends on a capability
+     * nothing supplies" are different facts with different remedies, so they
+     * are two fields. `roleVerdict` is the compound a reader and the CI gate
+     * want first; `outputVerdict` is preserved unchanged underneath it, so
+     * nothing that was true before has been merged away.
+     */
+    const outputVerdict = kinds.length === 0
+      ? 'NO_OUTPUT_KINDS_DECLARED'
+      : (kinds.every((k) => k.producible) ? 'FULLY_SUPPLIED'
+        : (kinds.some((k) => k.producible) ? 'PARTLY_SUPPLIED' : 'CANNOT_PRODUCE_ITS_OWN_OUTPUT'));
+
+    // Attributed by the manifest, not inferred: `c.agents` includes this id.
+    const capabilityGaps = (a.gaps || []).map((g) => g.id);
+
     return {
       id: a.id,
       name: a.name,
@@ -334,12 +378,16 @@ export function auditRoleClaims(audit, manifest, producibleKinds) {
       kinds,
       unproducibleKinds: unproducible.map((k) => k.kind),
       unmappedKinds: kinds.filter((k) => k.unmapped).map((k) => k.kind),
-      // The verdict a reader wants first: can this role produce ANY of what it
-      // is for?
-      roleVerdict: kinds.length === 0
-        ? 'NO_OUTPUT_KINDS_DECLARED'
-        : (kinds.every((k) => k.producible) ? 'FULLY_SUPPLIED'
-          : (kinds.some((k) => k.producible) ? 'PARTLY_SUPPLIED' : 'CANNOT_PRODUCE_ITS_OWN_OUTPUT')),
+      // The output-kind question, unchanged, exposed so the compound below can
+      // never be mistaken for it.
+      outputVerdict,
+      capabilityGaps,
+      // The verdict a reader wants first: can this role produce what it is for,
+      // AND does everything it depends on exist? A role holding an UNSUPPLIED
+      // capability may not report FULLY_SUPPLIED, whatever its outputs say.
+      roleVerdict: outputVerdict === 'FULLY_SUPPLIED' && capabilityGaps.length > 0
+        ? 'OUTPUTS_SUPPLIED_CAPABILITY_GAP'
+        : outputVerdict,
     };
   });
 }

@@ -317,6 +317,11 @@ const PULL_LOG_TABLE_SQL = `CREATE TABLE IF NOT EXISTS pull_log (
  * first. If one is ever added, this function is complete and correct as
  * written — call it there and delete this block.
  */
+/**
+ * @unread-export RETIRED 2026-08-15 by the gate-call audit, deliberately
+ *     kept as a tombstone with its un-retirement condition -- see the block
+ *     above.
+ */
 export async function checkAndRecordPull(env, { label = 'pull' } = {}) {
   if (!env?.DB) {
     console.warn(`[permission-guard] No D1 binding — pull-count enforcement skipped for "${label}" (allowed by default).`);

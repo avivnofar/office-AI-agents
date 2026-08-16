@@ -31,6 +31,11 @@
 
 export const REVIEWERS = Object.freeze({ QA: 6, TEAM_LEAD: 7, LEAD_QA: 8 });
 export const CEO_ID = 11;
+/**
+ * @unread-export A3 puts the Architect in the room for opinion, not verdict.
+ *     The id is named here so the composition is stated in one place; no code
+ *     path selects on it yet.
+ */
 export const ARCHITECT_ID = 10;
 
 export const DECISION_OUTCOMES = Object.freeze(['kept', 'dropped', 'extended']);

@@ -1387,19 +1387,65 @@ if (boardSrc === null) {
     `${poisonedParse.tasks?.length} parsed, ${poisonedParse.malformed?.length} malformed`);
 
   // KFM-07: a hand-maintained count is the number a reader sees, so derive it.
-  const stated = /\*\*Counts:\*\*\s*(\d+)\s*tasks/.exec(boardSrc);
-  check('§14 — the board states its own task count in a re-derivable form', !!stated);
+  const stated = /\*\*Counts:\*\*\s*(\d+)\s*live tasks/.exec(boardSrc);
+  check('§14 — the board states its own live-task count in a re-derivable form', !!stated);
   check('§14 — ...and that hand-maintained count agrees with the derived one (KFM-07)',
     !!stated && Number(stated[1]) === headingIds.length,
     stated ? `header says ${stated[1]}, headings give ${headingIds.length}` : 'no Counts line');
 
-  const countsLine = /\*\*Counts:\*\*[\s\S]{0,240}?\.\n/.exec(boardSrc)?.[0] || '';
+  /* ── OB-089, 2026-08-16: THE BOARD NOW HAS TWO FILES ────────────────────
+   *
+   * 26 `DONE` blocks moved to `BOARD-ARCHIVE.md` — the live file is fetched
+   * WHOLE on every office-context build while only 60 tasks reach a prompt,
+   * and it was growing at ~23.5 KB/day. So `DONE` is no longer derivable from
+   * `BOARD.md`, and the naive repair would have been to drop it from this
+   * loop. That would quietly stop checking the one state most likely to
+   * accumulate unnoticed.
+   *
+   * Instead the archive is derived too, and a THIRD assertion was added that
+   * neither file could make alone: **every id is on exactly one of the two.**
+   * That is the invariant the move could actually have broken, and before
+   * today there was nothing for it to be an invariant about. A structural
+   * change to what a check reads is the moment to ask what the change made
+   * possible, not only what it broke.
+   */
+  // Same CRLF normalisation as the board read above, for the same reason.
+  let archiveSrc = null;
+  try {
+    archiveSrc = readFileSync(
+      path.join(root, '..', 'back-office-AI-agents', 'campus', 'shared', 'board', 'BOARD-ARCHIVE.md'),
+      'utf8').replace(/\r\n/g, '\n');
+  } catch { /* reported by the check below, never counted as a pass */ }
+  const archiveParse = archiveSrc ? officeContext.parseBoard(archiveSrc) : null;
+  check('§14 — the closed-task archive exists and parses with the same parser',
+    !!archiveParse && archiveParse.ok === true, archiveParse?.reason || 'BOARD-ARCHIVE.md not readable');
+  check('§14 — every archived task is `DONE` — the archive holds closed work only',
+    !!archiveParse?.ok && archiveParse.tasks.every((t) => t.state === 'DONE'),
+    (archiveParse?.tasks || []).filter((t) => t.state !== 'DONE').map((t) => `${t.id}:${t.state}`).join(','));
+
+  const statedDone = /(\d+)\s*`DONE`, moved/.exec(boardSrc);
+  check('§14 — ...and the header\'s archived-`DONE` count agrees with the archive itself',
+    !!statedDone && !!archiveParse?.ok && Number(statedDone[1]) === archiveParse.tasks.length,
+    statedDone ? `header ${statedDone[1]} vs archive ${archiveParse?.tasks?.length}` : 'archived count not stated');
+
+  if (archiveParse?.ok) {
+    const liveIds = new Set(realBoard.tasks.map((t) => t.id));
+    const archIds = new Set(archiveParse.tasks.map((t) => t.id));
+    const both = [...liveIds].filter((id) => archIds.has(id));
+    check('§14 — no task id is on BOTH the board and the archive (a move, not a copy)',
+      both.length === 0, both.join(','));
+  }
+
+  const countsLine = /\*\*Counts:\*\*[\s\S]{0,300}?\.\n/.exec(boardSrc)?.[0] || '';
   for (const state of officeContext.BOARD_STATES) {
+    if (state === 'DONE') continue;               // lives in the archive now, asserted above
     const statedState = new RegExp(`(\\d+)\\s*\`${state}\``).exec(countsLine);
     check(`§14 — ...and the stated \`${state}\` count matches the derived one`,
       !!statedState && Number(statedState[1]) === realBoard.counts[state],
       statedState ? `header ${statedState[1]} vs derived ${realBoard.counts[state]}` : 'not stated');
   }
+  check('§14 — no `DONE` task remains on the live board (the retirement path actually ran)',
+    (realBoard.counts.DONE || 0) === 0, `${realBoard.counts.DONE} still on the board`);
 }
 
 console.log(`\n${pass}/${pass + fail} checks passed.`);

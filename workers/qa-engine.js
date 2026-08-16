@@ -96,6 +96,10 @@ export function getActiveQaAgents() {
 }
 
 /** Back-compat alias — agent-runner.js's public API name during the transition. */
+/**
+ * @unread-export a back-compat alias from the 2026-07-18 Netvill-to-Q&A
+ *     rename, kept so an older caller does not break silently.
+ */
 export const getActiveCaseAgents = getActiveQaAgents;
 
 /**
@@ -194,6 +198,10 @@ export function generateAssignedDailyBatch(dayIndex, opts = {}) {
  * with a budget-derived count) — kept for parity with the old
  * generateWeeklyCaseBatches().
  */
+/**
+ * @unread-export the whole-week batch shape, kept for ad-hoc tooling; the
+ *     live cron path calls `generateAssignedDailyBatch()` per block instead.
+ */
 export function generateWeeklyQuestionBatches(questionsPerDay, opts = {}) {
   const batches = [];
   for (let day = 1; day <= WEEK_DAYS; day++) {
@@ -236,4 +244,8 @@ export async function persistQuestions(env, questions) {
 }
 
 /** Back-compat alias during the transition (agent-runner.js import name). */
+/**
+ * @unread-export a back-compat alias from the 2026-07-18 Netvill-to-Q&A
+ *     rename, kept so an older caller does not break silently.
+ */
 export const persistCrmCases = persistQuestions;

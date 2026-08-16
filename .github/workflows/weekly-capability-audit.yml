@@ -90,6 +90,10 @@ jobs:
 
       - name: Also render the human-readable findings document (for the run log)
         if: steps.config.outputs.ready == 'true'
+        # swallow-ok: the SAME command's exit code is already captured as
+        # `gate_exit` in the step above and re-raised in the final step. This
+        # is a second render for the run summary, not a second gate — reading
+        # the code twice would double-report one failure (KFM-06).
         run: node scripts/capability-audit.mjs > /tmp/findings.md || true
 
       - name: Post findings to the board inbox
@@ -100,6 +104,35 @@ jobs:
             -H "Content-Type: application/json" \
             -d @/tmp/findings.json \
             -o /tmp/result.json
+
+      # ── FAILURE-MODE WALK (2026-08-16, OB-101) ───────────────────────────
+      #
+      # KNOWN-FAILURE-MODES.md's closing section has claimed since 2026-08-15
+      # that `scripts/failure-mode-walk.mjs` is "run weekly by
+      # .github/workflows/weekly-capability-audit.yml". Neither the script nor
+      # this step existed. That was the TWELFTH false mechanization claim in a
+      # file whose own correction block is about eleven of them — and the
+      # largest, because it claimed the whole mechanized subset was walked.
+      #
+      # This step is the second half of the fix. It rides this job for the same
+      # reason growth-watch does: same weekly cadence, same audience.
+      #
+      # COVERAGE HERE IS PARTIAL AND SAYS SO. Two of the six checks (`labels`,
+      # `citedfile`) read the private back-office repo, for which this job holds
+      # no credential. They report `NOT_WALKED` WITH A REASON and do not count
+      # as passes — a checklist walker reporting "0 problems" because it could
+      # not see the checklist would be KFM-13's shape committed by the
+      # instrument built to catch it.
+      #
+      # It is captured and re-raised at the end, like every other gate in this
+      # file, so it cannot fail silently (KFM-05, applied to itself).
+      - name: Failure-mode walk — the mechanized subset of KNOWN-FAILURE-MODES.md
+        id: fmwalk
+        if: steps.config.outputs.ready == 'true'
+        run: |
+          set +e
+          node scripts/failure-mode-walk.mjs > /tmp/fmwalk.md
+          echo "fmwalk_exit=$?" >> "$GITHUB_OUTPUT"
 
       # ── GROWTH WATCH (2026-08-16, audit #12/#18/#19/#20/#24) ──────────────
       #
@@ -186,6 +219,10 @@ jobs:
       - name: Summary
         if: steps.config.outputs.ready == 'true'
         run: |
+          echo "### Failure-mode walk" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/fmwalk.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "_the failure-mode walk produced no output_" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "### Growth watch" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           cat /tmp/growth.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "_growth watch produced no output_" >> "$GITHUB_STEP_SUMMARY"
@@ -222,6 +259,17 @@ jobs:
         if: steps.config.outputs.ready == 'true' && steps.audit.outputs.gate_exit != '0'
         run: |
           echo "::error::The capability gate exited ${{ steps.audit.outputs.gate_exit }} — a non-dormant agent cannot produce a declared output kind, and it is not boarded. See the findings document in the summary above; the findings have already been posted to the board inbox."
+          exit 1
+
+      # OB-101: the failure-mode walk must not be able to fail silently either.
+      # Kept as its own step and its own message rather than merged with the
+      # gate above — two different failures, and merging them would hide which
+      # one fired (KFM-06). Placed after the findings post and the summary, so
+      # the walk's own output is readable at the moment it goes red.
+      - name: Fail the run if the failure-mode walk found a blocking problem
+        if: steps.config.outputs.ready == 'true' && steps.fmwalk.outputs.fmwalk_exit != '0'
+        run: |
+          echo "::error::The failure-mode walk exited ${{ steps.fmwalk.outputs.fmwalk_exit }} — a check in the mechanized subset of KNOWN-FAILURE-MODES.md refused. The full walk is in the summary above; NOT_WALKED entries are reported and never counted as passes."
           exit 1
 
       # OB-085: the growth watch must not be able to fail SILENTLY either.

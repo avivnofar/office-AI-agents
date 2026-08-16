@@ -616,7 +616,7 @@
       "supplied_by": {
         "kind": "none",
         "ref": null,
-        "why": "BUILT 2026-08-15 (board OB-001, READY since 2026-08-06 and undispatched for 40 days). CORRECTED 2026-08-15 — this row said 'NO TOOL', which stopped being true the moment the tool was built, and a manifest that keeps reporting a capability as absent after it exists is the mirror image of one reporting a capability it does not have. The verdict below stays UNSUPPLIED and that is HONEST, not stale: the tool lives in back-office-AI-agents tools/gate-call-audit/ (private), this manifest resolves refs against THIS repo's own files, and there is no ref that would resolve here. Same limitation docs/KNOWN-FAILURE-MODES.md discloses for its own weekly walker, which has no credential for either private repo. Reported as 'the public-repo audit cannot see it' rather than papered over with a path that would not resolve. First run 2026-08-15: 24 CALLED, 16 UNPROVEN, 4 NOT-CALLED — four of its own first verdicts were wrong and hand-checking caught them; after the same day's fixes, 31/13/0 plus 3 RETIRED. Verified by tools/gate-call-audit/verify-gate-call-audit.js, 23 checks."
+        "why": "BUILT 2026-08-15 (board OB-001, READY since 2026-08-06 and undispatched for 40 days). CORRECTED 2026-08-15 — this row said 'NO TOOL', which stopped being true the moment the tool was built, and a manifest that keeps reporting a capability as absent after it exists is the mirror image of one reporting a capability it does not have. The verdict below stays UNSUPPLIED and that is HONEST, not stale: the tool lives in back-office-AI-agents tools/gate-call-audit/ (private), this manifest resolves refs against THIS repo's own files, and there is no ref that would resolve here. Same limitation docs/KNOWN-FAILURE-MODES.md discloses for its own weekly walker, which has no credential for either private repo. Reported as 'the public-repo audit cannot see it' rather than papered over with a path that would not resolve. First run 2026-08-15: 24 CALLED, 16 UNPROVEN, 4 NOT-CALLED — four of its own first verdicts were wrong and hand-checking caught them; after the same day's fixes, 31/13/0 plus 3 RETIRED. Verified by tools/gate-call-audit/verify-gate-call-audit.js, 23 checks. BOARD OB-102 (2026-08-16): the gap this row now reports is the AUDIT'S, not the office's -- the capability exists and this instrument structurally cannot resolve a ref into a private repo. Boarded so the verdict is acknowledged rather than standing red forever, and so the limitation is somebody's task rather than a paragraph."
       },
       "exercised_by": null,
       "cost": "n/a",
@@ -629,7 +629,7 @@
       "supplied_by": {
         "kind": "none",
         "ref": null,
-        "why": "NO TOOL. Nothing in this repo enumerates dependencies or checks them against advisories. The repo has almost no runtime dependencies, which lowers the stakes and does not change the verdict."
+        "why": "NO TOOL. Nothing in this repo enumerates dependencies or checks them against advisories. The repo has almost no runtime dependencies, which lowers the stakes and does not change the verdict. BOARD OB-103 (2026-08-16): opened when the role verdict was made falsifiable and this became a blocking finding for the first time -- it had been invisible to every role verdict since the capability was declared, because it is mapped to no output kind."
       },
       "exercised_by": null,
       "cost": "n/a",
@@ -642,7 +642,7 @@
       "supplied_by": {
         "kind": "none",
         "ref": null,
-        "why": "NOT BUILT. The `conversation` lane's controlled-random pool could serve it and no code path asks it to. Named here so the gap is a row rather than an omission."
+        "why": "NOT BUILT. The `conversation` lane's controlled-random pool could serve it and no code path asks it to. Named here so the gap is a row rather than an omission. BOARD OB-104 (2026-08-16): opened for the same reason as OB-103, in the same session, and it is the sharper of the two -- the `conversation` lane already carries the multi-provider machinery this needs, so the missing piece is a caller, which is KFM-26's shape."
       },
       "exercised_by": null,
       "cost": "n/a",

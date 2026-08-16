@@ -1030,6 +1030,11 @@ export function convergenceFinding(record = {}, { roundThreshold = 3 } = {}) {
  * went out", and only the shift that stopped knows which.
  */
 
+/**
+ * @unread-export the three shift states, exported for a reader and for
+ *     `scripts/verify-lifecycle.js`; the module's own validators compare against
+ *     the literals in the same file.
+ */
 export const SHIFT_STATUSES = Object.freeze(['OPEN', 'SUSPENDED', 'COMPLETED']);
 
 export function openShift({ phase, agentId = null, at = null, note = null } = {}) {
@@ -1426,6 +1431,11 @@ export function parseStageValue(value) {
  * the other.
  */
 
+/**
+ * @unread-export the board-line path, written by `scripts/lifecycle.mjs`
+ *     from its own constant. Named here because this module documents the
+ *     two-artifacts-one-act contract that path belongs to.
+ */
 export const IN_FLIGHT_PATH = 'campus/shared/lifecycle/IN-FLIGHT.md';
 
 export function renderInFlightFile(records = [], { at = null } = {}) {

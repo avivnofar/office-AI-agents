@@ -298,6 +298,78 @@ export const BLOCK_COST = {
 /** Conservative default for a block type nobody has measured yet. */
 export const UNMEASURED_BLOCK_COST = 20;
 
+/* ── OB-098: THE MEASUREMENT WAS BEING TAKEN AND THROWN AWAY ────────────────
+ *
+ * `OB-098` asks for every constant above to be replaced by a figure read from
+ * production, and states that *"the data needed already exists and needs no
+ * new instrumentation: `runScheduledBlock()` returns, and the day cycle
+ * stores, an `admissions` array."*
+ *
+ * **Checked 2026-08-16, and that premise is false.** `agent-runner.js` builds
+ * `admissions` fresh per invocation, assigns it with `cycle.admissions =
+ * admissions` — replacing, not appending, so each tick discards the previous
+ * tick's row — and `clearCycleState()` deletes the whole cycle at the day's
+ * last block. The array reaches exactly two places: one HTTP response nobody
+ * reads, and KV for the remainder of one day. **Nothing accumulates, and the
+ * task as written could never have been delivered.**
+ *
+ * That is this session's recurring shape with the sharpest possible twist: not
+ * a measurement nothing reads (`OB-100`, Cerebras' rate), but a measurement
+ * taken correctly and then **overwritten by the next one**. The estimate and
+ * the actual were both computed, per block, on every tick since 2026-08-16 —
+ * and every one of them was gone within thirty minutes.
+ *
+ * So this is the instrumentation the task said was unnecessary. It follows
+ * `recordRepoWrite()` exactly, for the same reason: created lazily and
+ * deliberately NOT in `database/schema.sql` (a table this small does not earn
+ * a migration), it runs after the work, and **it cannot throw** — a lost
+ * measurement must never cost the thing being measured (KFM-14).
+ *
+ * `estimate` and `actual` are stored SEPARATELY rather than as a delta,
+ * because their difference is the whole question and a stored delta cannot
+ * later be re-asked in the other direction.
+ */
+export const ADMISSIONS_TABLE_SQL = `CREATE TABLE IF NOT EXISTS block_admissions (
+  id TEXT PRIMARY KEY,
+  day TEXT NOT NULL,
+  block TEXT NOT NULL,
+  at TEXT,
+  decision TEXT NOT NULL,
+  estimate INTEGER,
+  actual INTEGER,
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)`;
+
+/**
+ * Persists one tick's admissions. Returns a count rather than throwing, and
+ * every failure path is swallowed with a log line.
+ *
+ * @param {object} env
+ * @param {string} day - the simulated day these admissions belong to
+ * @param {Array<{block: string, at: string, decision: string, estimate: number, actual: number}>} admissions
+ */
+export async function recordAdmissions(env, day, admissions) {
+  try {
+    if (!env?.DB) return { recorded: 0, reason: 'no_db_binding' };
+    const rows = (admissions || []).filter((a) => a && typeof a.block === 'string');
+    if (!rows.length) return { recorded: 0, reason: 'nothing_to_record' };
+    await env.DB.prepare(ADMISSIONS_TABLE_SQL).run();
+    const stmt = env.DB.prepare(
+      `INSERT INTO block_admissions (id, day, block, at, decision, estimate, actual)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    );
+    await env.DB.batch(rows.map((a) => stmt.bind(
+      crypto.randomUUID(), day ?? null, a.block, a.at ?? null, a.decision ?? null,
+      Number.isFinite(a.estimate) ? a.estimate : null,
+      Number.isFinite(a.actual) ? a.actual : null,
+    )));
+    return { recorded: rows.length };
+  } catch (err) {
+    console.warn(`[subrequest-budget] could not record ${admissions?.length ?? 0} admission(s), continuing: ${err?.message || err}`);
+    return { recorded: 0, reason: 'record_error' };
+  }
+}
+
 export function blockCost(type) {
   return typeof BLOCK_COST[type] === 'number' ? BLOCK_COST[type] : UNMEASURED_BLOCK_COST;
 }
@@ -329,7 +401,16 @@ export function admitBlock(ledger, type) {
  * Why a batch stopped. These are the values that make "cut short"
  * distinguishable from "finished" — see `summarizeBatchState()`.
  */
+/**
+ * @unread-export batch stop reasons, exported so a consumer can compare
+ *     against a name rather than a literal; today `summarizeBatchState()` in
+ *     this file is the only reader and it uses the local binding.
+ */
 export const STOP_COMPLETED = 'completed';
+/**
+ * @unread-export see STOP_COMPLETED immediately above -- same reason, same
+ *     file.
+ */
 export const STOP_BUDGET = 'budget_exhausted';
 
 /**

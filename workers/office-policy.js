@@ -268,6 +268,11 @@ export function buildPolicyBlock(shape = 'brief', opts = {}) {
  * The one-line pointer for anything that must NAME the policy without carrying
  * it — the midnight run's session record, a report footer, a board note.
  */
+/**
+ * @unread-export the one-line policy pointer for a session record or report
+ *     footer. Built for a caller that has not been wired yet -- KFM-26's shape,
+ *     recorded here rather than left looking incidental.
+ */
 export function policyPointer() {
   return `${POLICY_REPO} ${POLICY_PATH} (owner-approved ${POLICY_APPROVED_DATE}, owner is the only editor, re-check ${POLICY_RECHECK_DATE})`;
 }

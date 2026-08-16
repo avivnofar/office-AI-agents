@@ -245,6 +245,27 @@ const acknowledged = partial.filter((r) => {
 });
 const unacknowledged = partial.filter((r) => !acknowledged.includes(r));
 
+/* ── OB-097, 2026-08-16: the fourth severity ────────────────────────────────
+ *
+ * OUTPUTS_SUPPLIED_CAPABILITY_GAP — every declared output kind is producible
+ * AND the role depends on a capability nothing supplies. It is its own row
+ * rather than folded into PARTLY_SUPPLIED because the remedy is different:
+ * PARTLY_SUPPLIED means a thing the role makes cannot be made, this means a
+ * tool the role needs does not exist. Merging them would produce a count that
+ * is true and useless (KFM-06), which is the defect this whole gate was
+ * rewired for.
+ *
+ * The SAME acknowledgement rule applies and it is the same checked claim: the
+ * blocking capability's own manifest entry must name an `OB-NNN`. This is what
+ * keeps the gate from being permanently red on Agent 13's three standing gaps
+ * while still failing the moment a NEW unsupplied capability appears against
+ * any role.
+ */
+const capGapped = live.filter((r) => r.roleVerdict === 'OUTPUTS_SUPPLIED_CAPABILITY_GAP');
+const capAcknowledged = capGapped.filter((r) =>
+  r.capabilityGaps.length > 0 && r.capabilityGaps.every((cid) => BOARD_REF.test(reasonById.get(cid) || '')));
+const capUnacknowledged = capGapped.filter((r) => !capAcknowledged.includes(r));
+
 const say = (s) => console.error(s);
 say('\n[capability-audit] GATE — measured on roleVerdict (can the role produce its own declared output?),');
 say('                   not on canWork (does it have any supplied capability at all).');
@@ -253,11 +274,13 @@ for (const r of cannotProduce) say(`  FAIL  Agent ${r.id} (${r.name}) CANNOT PRO
 for (const r of undeclared) say(`  FAIL  Agent ${r.id} (${r.name}) declares NO output kinds — this role could not be checked at all, which is not the same as checking it and finding it fine`);
 for (const r of unacknowledged) say(`  FAIL  Agent ${r.id} (${r.name}) cannot produce ${r.unproducibleKinds.join(', ')} — blocked by ${blockersOf(r).join(', ')}, and no blocking capability names a board task. Board it or fix it.`);
 for (const r of acknowledged) say(`  KNOWN Agent ${r.id} (${r.name}) cannot produce ${r.unproducibleKinds.join(', ')} — blocked by ${blockersOf(r).join(', ')}, boarded. Reported, not failed.`);
+for (const r of capUnacknowledged) say(`  FAIL  Agent ${r.id} (${r.name}) produces every declared output kind BUT depends on unsupplied capability/ies ${r.capabilityGaps.join(', ')}, and no blocking capability names a board task. Board it or fix it.`);
+for (const r of capAcknowledged) say(`  KNOWN Agent ${r.id} (${r.name}) produces every declared output kind but depends on unsupplied ${r.capabilityGaps.join(', ')}, boarded. Reported, not failed.`);
 if (audit.counts.agentsWhoCannotWork > 0) say(`  FAIL  ${audit.counts.agentsWhoCannotWork} non-dormant agent(s) have ZERO supplied capabilities (the old check, kept — it catches a role with no declared output kinds AND nothing supplied)`);
 
-const failures = cannotProduce.length + undeclared.length + unacknowledged.length + audit.counts.agentsWhoCannotWork;
+const failures = cannotProduce.length + undeclared.length + unacknowledged.length + capUnacknowledged.length + audit.counts.agentsWhoCannotWork;
 say(failures
   ? `\n[capability-audit] ${failures} blocking finding(s). Exiting 1.`
-  : `\n[capability-audit] no blocking findings (${acknowledged.length} known-and-boarded gap(s) reported above). Exiting 0.`);
+  : `\n[capability-audit] no blocking findings (${acknowledged.length + capAcknowledged.length} known-and-boarded gap(s) reported above). Exiting 0.`);
 
 process.exit(failures > 0 ? 1 : 0);

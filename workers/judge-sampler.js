@@ -506,6 +506,11 @@ export const JUDGEMENT_TABLE_SQL = `CREATE TABLE IF NOT EXISTS quality_judgement
  * Run and read back 2026-08-16 against 0 rows. Kept here rather than in
  * `database/schema.sql` for the same reason the CREATE is (see above).
  */
+/**
+ * @unread-export a one-off ALTER run by hand against live D1 on 2026-08-16
+ *     and read back. Kept as the record of what was run, deliberately not as
+ *     something code executes.
+ */
 export const JUDGEMENT_SELECTOR_MIGRATION_SQL = 'ALTER TABLE quality_judgements ADD COLUMN selector_id TEXT';
 
 export const JUDGEMENT_INSERT_SQL = `INSERT INTO quality_judgements

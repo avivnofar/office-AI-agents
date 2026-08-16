@@ -136,7 +136,7 @@ import {
   createTickBudget, collectOutstanding, summarizeBatchState, summarizeDayDeferrals,
   isSameBlock, LANE_CASES, SUBREQUEST_CEILING, admitBlock, blockCost,
   meterEnv, meterGlobalFetch, CASE_LOOKAHEAD, EXTERNAL_FETCH_ALLOWANCE_PER_CASE,
-  TICK_TAIL_RESERVE, TICK_TAIL_RESERVE_NO_CASES, FINALIZE_RESERVE,
+  TICK_TAIL_RESERVE, TICK_TAIL_RESERVE_NO_CASES, FINALIZE_RESERVE, recordAdmissions,
 } from './subrequest-budget.js';
 import { checkGeminiPacingSlot } from './gemini-pacer.js';
 import { callClaudeMessages } from './claude-client.js';
@@ -4541,6 +4541,16 @@ async function runScheduledBlockInner(env, israelTime, dayOfWeek, ctx) {
   cycle.agentStats = Object.fromEntries(agentStats);
   cycle.budget = budget.snapshot();
   cycle.admissions = admissions;
+
+  // OB-098, 2026-08-16. This line is the whole of that task's blocker. The
+  // assignment above REPLACES the previous tick's admissions and
+  // `clearCycleState()` deletes the cycle at day end, so until now every
+  // estimate-vs-actual pair the office computed was discarded within thirty
+  // minutes. D1 is where it can accumulate across days, which is the only
+  // shape in which BLOCK_COST's twelve guesses can ever be replaced by
+  // measurements. It cannot throw (KFM-14) and is deliberately NOT awaited
+  // for its result — a lost row costs trend resolution, never the tick.
+  await recordAdmissions(env, cycle.day, admissions);
 
   if (!isLastBlock) {
     // ── THE WRITE THAT WAS BEING LOST (OB-074, 2026-08-16) ─────────────────

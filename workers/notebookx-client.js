@@ -149,6 +149,12 @@ export async function getNotebookXHealth() {
  * @param {number} [opts.intervalMs=12000] - delay between polls
  * @returns {Promise<{warm: boolean, attempts: number, elapsedMs: number}>}
  */
+/**
+ * @unread-export a cold-start poller for a Notebook-X automation path that
+ *     was retired 2026-07-18 with `notebook-x-daily.mjs`. Kept because the Q&A
+ *     engine's read-only ask path may need it if that project ever goes cold
+ *     again.
+ */
 export async function waitForNotebookXWarm({ timeoutMs = 300_000, intervalMs = 12_000 } = {}) {
   const start = Date.now();
   let attempts = 0;
@@ -186,6 +192,11 @@ export async function waitForNotebookXWarm({ timeoutMs = 300_000, intervalMs = 1
  * @param {number} [opts.timeoutMs=180000] - overall retry budget (3min)
  * @param {number} [opts.intervalMs=15000] - delay between ingest attempts
  * @returns {Promise<{outcome: string, verified: boolean, attempts: number, before: object|null, after: object|null, lastResult: object|null}>}
+ */
+/**
+ * @unread-export belongs to the same retired 2026-07-18 write path; kept
+ *     because it is the one place that distinguishes an ingest that failed from
+ *     one that claimed success and changed nothing.
  */
 export async function ingestAndVerify(targetNotebookId, { timeoutMs = 180_000, intervalMs = 15_000 } = {}) {
   const beforeList = await listKnowledgeNotebooks();

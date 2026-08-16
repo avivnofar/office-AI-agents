@@ -96,6 +96,12 @@ export async function runChoreRotationSlot(env, { projectKey, label = 'chore_rot
 }
 
 /** 16:30-17:00 IL wind-down block: no new work, just an explicit log line. */
+/**
+ * @unread-export the 16:30 wind-down log line. `chore-runner.js` is dormant
+ *     end to end -- `fetchTodoSection()` degrades to a permanent no-op since
+ *     TODO.md was deleted 2026-07-18 -- so its whole surface is unread, not this
+ *     one export.
+ */
 export function windDown() {
   console.log('[chore-runner] Wind-down (16:30-17:00 IL) — no new chore work started.');
   return { ok: true };

@@ -146,9 +146,19 @@ const goodBatch = {
     verdict: 'approved',
     notes: 'Read end to end. The claim about autonomy is narrower than the section title implied; asked for it to be narrowed and it was.',
   },
-  mistakesShown: { included: true, evidence: 'The page states the sampler selected 2.4% against a declared 12.5%.' },
+  // OB-096: a claim to be showing a mistake now has to say WHERE, and the
+  // quote must be in the item it names. See disclosureLocatorRefusals().
+  mistakesShown: {
+    included: true,
+    evidence: 'The page states the sampler selected 2.4% against a declared 12.5%.',
+    disclosedAt: { path: FRONT_PAGE, quote: 'selected 2.4% against a declared 12.5%' },
+  },
   disagreementShown: { applicable: false },
-  items: [{ ...baseItem, revisedAt: '2026-08-16T10:00:00Z' }],
+  items: [{
+    ...baseItem,
+    revisedAt: '2026-08-16T10:00:00Z',
+    content: 'The Designer curates the Front. The sampler selected 2.4% against a declared 12.5%.',
+  }],
 };
 
 const good = evaluateBatch(goodBatch);
@@ -188,6 +198,44 @@ check('showing NO mistake is allowed but must say why',
   has(evaluateBatch({ ...goodBatch, mistakesShown: { included: false } }), 'mistakes_omission_unexplained'));
 check('...and IS allowed once the reason is given',
   evaluateBatch({ ...goodBatch, mistakesShown: { included: false, evidence: 'This batch is the team section; the mistakes belong to press/ and publish there.' } }).publishable);
+
+/* ── OB-096: a non-empty record is not a responsive one ────────────────────
+ *
+ * The gate's second-ever live batch answered criterion 7 — "does this batch
+ * DISCLOSE a mistake the office made?" — with a flaw the Designer had spotted
+ * in the page under review. Non-empty, useful, and not the question.
+ *
+ * The fix does NOT score the text, which would be scoring judgement with a
+ * heuristic. It asks for a locator, because a disclosure and a critique differ
+ * REFERENTIALLY: a disclosure is in the published text and can be pointed at;
+ * a review finding is about the text and is not in it. The first case below is
+ * the real answer from batch `2026-08-16-team-01`, checked in situ against the
+ * archived batch before these fixtures were written. */
+{
+  const withLoc = (disclosedAt) => evaluateBatch({
+    ...goodBatch, mistakesShown: { included: true, evidence: 'something happened', disclosedAt },
+  });
+  check('[OB-096, the real case] a claim with no locator is refused',
+    has(evaluateBatch({ ...goodBatch, mistakesShown: { included: true, evidence: "'I'm at a 30 raw meter value' is vague" } }),
+      'mistakes_disclosure_unlocated'));
+  check('a locator naming a path but no quote is refused',
+    has(withLoc({ path: FRONT_PAGE }), 'mistakes_disclosure_locator_incomplete'));
+  check('a locator naming a file that is not in this batch is refused',
+    has(withLoc({ path: 'front/team/99-nobody.md', quote: 'anything' }), 'mistakes_disclosure_path_not_in_batch'));
+  check('a quote that does not appear in the published text is refused — the OB-096 shape',
+    has(withLoc({ path: FRONT_PAGE, quote: "'I'm at a 30 raw meter value' is vague" }), 'mistakes_disclosure_quote_absent'));
+  check('a real disclosure, quoted from the page, is ACCEPTED',
+    evaluateBatch(goodBatch).publishable);
+  check('...and the quote match survives a line wrap, so formatting is not the finding',
+    withLoc({ path: FRONT_PAGE, quote: 'selected 2.4%\n   against a declared 12.5%' }).publishable);
+  check('an item with NO content is "could not check", not "quote absent" (KFM-13)',
+    has(evaluateBatch({
+      ...goodBatch,
+      items: [{ ...baseItem, revisedAt: '2026-08-16T10:00:00Z', content: '' }],
+    }), 'mistakes_disclosure_uncheckable'));
+  check('the locator is required ONLY when a mistake is claimed, never when none is',
+    evaluateBatch({ ...goodBatch, mistakesShown: { included: false, evidence: 'nothing went wrong in this batch\'s period.' } }).publishable);
+}
 
 check('an undeclared disagreement applicability is refused',
   has(evaluateBatch({ ...goodBatch, disagreementShown: {} }), 'disagreement_applicability_undeclared'));

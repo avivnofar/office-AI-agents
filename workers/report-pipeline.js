@@ -213,7 +213,16 @@ export const TARGET_WORDS = Object.freeze({ min: 550, max: 950 });
 /** Lane names are config/model-routing.json keys. Kept as strings here so
  *  this module needs no config import — see the header. */
 export const REVIEW_LANE = 'judgment';
+/**
+ * @unread-export lane names as constants for a reader;
+ *     `planReportProviders()` in this same file resolves lanes from the config,
+ *     so the string is not imported anywhere.
+ */
 export const DRAFT_LANE_HEBREW = 'hebrew_composition';
+/**
+ * @unread-export see DRAFT_LANE_HEBREW immediately above -- same reason,
+ *     same file.
+ */
 export const DRAFT_LANE_OTHER = 'routine_volume';
 /** AD-028's lane. See pickDraftLane(). */
 export const DRAFT_LANE_REPORT = 'report_drafting';
