@@ -1151,9 +1151,54 @@ export class AgentBase {
 
   /* ───────────────────── 6. Durable Object persistence ───────────────── */
 
+  /**
+   * ── COALESCED STATE WRITES (OB-074, 2026-08-16) ──────────────────────────
+   *
+   * Measured on a real 30-case tick: 87 Durable Object fetches, ~2.9 per
+   * case, against a 50-subrequest invocation budget. Almost all of them are
+   * saveState() PUTs — startSession() writes, every mood change writes, and
+   * endSession() writes, three round trips per case to persist a value where
+   * only the last one is ever read back.
+   *
+   * OPT-IN, and deliberately so. `saveState()` is called from meetings, HTTP
+   * triggers and the weekly reset as well as from case batches, and those
+   * callers are entitled to a write that has actually landed when the call
+   * returns. So the default is unchanged write-through; only
+   * `processCaseBatch()` turns coalescing on, and it turns it off again by
+   * flushing at the end of each agent's cases — next to the journal flush
+   * that already uses exactly this shape (see `_journalBuffer`).
+   *
+   * The durability trade, stated: if the isolate dies between the first case
+   * and the flush, that agent's mood movement for the batch is lost. Nothing
+   * else is — the interactions, reports and improvement-loop rows are written
+   * per case to D1 and are not buffered. Mood is persona colour, not client
+   * work, and this is the same judgement `flushJournal()` already made.
+   */
+  beginCoalescedState() {
+    this._coalesceState = true;
+    this._stateDirty = false;
+  }
+
+  /** Writes the buffered state, if any, and returns to write-through mode. */
+  async flushAgentState() {
+    const wasDirty = this._stateDirty;
+    this._coalesceState = false;
+    this._stateDirty = false;
+    if (!wasDirty) return null;
+    return this.saveState();
+  }
+
   /** Serializes the full agent state to its Durable Object. */
   async saveState() {
     if (!this.doStub) return null;
+
+    // Buffered: record that a write is owed and let flushAgentState() make it.
+    // The snapshot is deliberately NOT built here — it would be thrown away,
+    // and building it reads `this` at the wrong moment.
+    if (this._coalesceState) {
+      this._stateDirty = true;
+      return null;
+    }
 
     const snapshot = {
       id: this.id,

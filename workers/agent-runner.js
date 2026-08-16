@@ -30,6 +30,13 @@
  */
 
 export { AgentStateDO } from './state-manager.js';
+import { probeSubrequestCeiling } from './state-manager.js';
+// OB-074 Phase 3, SHIPPED OFF. The runner is REGISTERED here rather than
+// imported by state-manager.js, which would be a cycle — see
+// case-batch-do.js's header for why the dependency is inverted.
+import {
+  setCaseBatchRunner, caseDoEnabled, CASE_DO_INSTANCE, CASE_DO_PATH,
+} from './case-batch-do.js';
 
 import agentsConfig from '../config/agents-config.json';
 import simulationConfig from '../config/simulation-config.json';
@@ -123,6 +130,14 @@ import { runCrossEmbodimentComparison, renderComparisonFinding } from './embodim
 import { architectLiaisonEnabled, processArchitectLiaisonBlock } from './architect-liaison.js';
 import { runChoreRotationSlot } from './chore-runner.js';
 import { localizeForFront } from './localization-engine.js';
+// THE INVOCATION BUDGET (OB-074, 2026-08-16). See subrequest-budget.js's header
+// for the measurement this is built on and why the case share is a floor.
+import {
+  createTickBudget, collectOutstanding, summarizeBatchState, summarizeDayDeferrals,
+  isSameBlock, LANE_CASES, SUBREQUEST_CEILING, admitBlock, blockCost,
+  meterEnv, meterGlobalFetch, CASE_LOOKAHEAD, EXTERNAL_FETCH_ALLOWANCE_PER_CASE,
+  TICK_TAIL_RESERVE, TICK_TAIL_RESERVE_NO_CASES, FINALIZE_RESERVE,
+} from './subrequest-budget.js';
 import { checkGeminiPacingSlot } from './gemini-pacer.js';
 import { callClaudeMessages } from './claude-client.js';
 import {
@@ -385,6 +400,98 @@ async function getSuggestions(env) {
  * back to the static config defaults if SIM_KV isn't bound yet.
  */
 const SIM_STATE_KEY = 'simulation-state';
+
+/**
+ * ── ONE SWITCH READ PER INVOCATION (OB-074, 2026-08-16) ────────────────────
+ *
+ * Measured on a real 30-case tick: `simulation-state` was fetched from KV
+ * **63 times in one invocation** — roughly twice per case. Nine modules each
+ * keep their own `SIM_STATE_KEY` and each re-reads the switches on every call
+ * (`improvement-loop.js`, `judge-sampler.js`, `office-context.js`,
+ * `report-pipeline.js`, `guide-engine.js`, `context-editor.js`,
+ * `meeting-engine.js`, `owner-notify.js`, and this file). At one subrequest
+ * each that is 62 wasted out of a 50-subrequest budget.
+ *
+ * Rather than edit nine modules — nine chances to miss one, and nine future
+ * modules that would not know the rule — the cache is installed on the ENV
+ * those modules already read through. `tickEnv()` returns a shallow copy of
+ * `env` whose `SIM_KV` memoizes exactly one key, `simulation-state`, for the
+ * lifetime of that copy. The copy is created once per invocation inside
+ * `runScheduledBlock()` and never escapes it, so the cache cannot outlive the
+ * tick — which matters, because an isolate is reused across invocations and a
+ * module-level cache here would serve yesterday's switch states.
+ *
+ * ONLY `simulation-state` is cached, and ANY put/delete clears the memo. A
+ * switch cannot change mid-tick except by this Worker changing it, and if it
+ * does, the memo is already gone. Every other key passes straight through.
+ *
+ * This does NOT make the switches stale for the toggle endpoint: the HTTP
+ * handler runs on the unwrapped `env`, so a read-back after a toggle is a
+ * real KV read. `verify-subrequest-budget.js` §3 proves both halves.
+ */
+function tickEnv(env) {
+  if (!env) return env;
+  const out = { ...env };
+
+  // ── ONE LAZY TABLE CREATE PER INVOCATION (OB-074) ────────────────────────
+  //
+  // Several tables are created lazily rather than living in schema.sql —
+  // `claude_budget_usage` (model-router.js), `provider_usage`
+  // (task-router.js), `quality_judgements` (judge-sampler.js), `repo_writes`
+  // (repo-write.js). Each guard runs `CREATE TABLE IF NOT EXISTS` before its
+  // real statement, and those guards sit on per-case paths: measured at TWO
+  // `claude_budget_usage` creates per data-center case, one from
+  // getClaudeBudgetStatus() and one from recordClaudeSpend().
+  //
+  // The second one in an invocation cannot do anything the first did not.
+  // Suppressing it is not a behaviour change, it is removing a repeat — and
+  // at ~2 subrequests per case it was close to a fifth of a case's cost.
+  // Keyed on the exact SQL text, per invocation, so a table this tick has not
+  // touched is still created normally.
+  if (env.DB) {
+    const db = env.DB;
+    const created = new Set();
+    out.DB = {
+      ...db,
+      prepare: (sql) => {
+        if (/^\s*CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS/i.test(sql)) {
+          if (created.has(sql)) {
+            const noop = { bind: () => noop, run: async () => ({ success: true, meta: {} }), first: async () => null, all: async () => ({ results: [] }) };
+            return noop;
+          }
+          created.add(sql);
+        }
+        return db.prepare(sql);
+      },
+      batch: (...a) => db.batch(...a),
+      exec: (...a) => db.exec(...a),
+    };
+  }
+
+  if (!env.SIM_KV) return out;
+  const kv = env.SIM_KV;
+  let memo = null;          // { value } once populated — null means "not yet read"
+  const wrapped = {
+    async get(key, type) {
+      if (key !== SIM_STATE_KEY) return kv.get(key, type);
+      // The memo holds the RAW stored value. Callers pass type 'json' here
+      // without exception, but a text read of the same key stays correct
+      // because we re-serialize rather than hand back the object.
+      if (!memo) memo = { raw: await kv.get(key, 'text') };
+      if (memo.raw == null) return null;
+      if (type === 'json') { try { return JSON.parse(memo.raw); } catch { return null; } }
+      return memo.raw;
+    },
+    async put(key, value, options) { memo = null; return kv.put(key, value, options); },
+    async delete(key) { memo = null; return kv.delete(key); },
+    list: (...a) => kv.list(...a),
+  };
+  if (typeof kv.getWithMetadata === 'function') {
+    wrapped.getWithMetadata = (...a) => kv.getWithMetadata(...a);
+  }
+  out.SIM_KV = wrapped;
+  return out;
+}
 
 async function getSimulationState(env) {
   const base = { ...simulationConfig.SIMULATION, paused: false };
@@ -2942,10 +3049,23 @@ async function composeDailyHeadline(env, markdown, isOffDay) {
   return withDailyHeadline(markdown, hebrewCall.text);
 }
 
-function renderDailySummary(yearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office, branches) {
+function renderDailySummary(yearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office, branches, deferrals = null) {
   const agentLines = summary.agents
     .map((a) => `- Agent ${a.agentId}: ${a.handled}/${a.caseCount} cases, mood ${a.mood}, irritation ${a.irritation}${a.isAngry ? ' (ANGRY)' : ''}${a.isPanic ? ' (PANIC)' : ''}`)
     .join('\n') || '_No agents processed cases today._';
+
+  // OB-074 remedy (c): the day's throughput cost, stated at the top rather
+  // than left to be inferred from a batch table further down. A day that
+  // deferred most of its cases must not read like a day that did the work.
+  const deferralLine = deferrals && deferrals.totalCases
+    ? (deferrals.deferred > 0
+      ? `\n> **Case throughput: ${deferrals.processed}/${deferrals.totalCases} asked — ${deferrals.deferred} DEFERRED to the invocation budget (OB-074).**\n` +
+        `> Deferred is not dropped: the cases stay in the day cycle and are drained oldest-first at the next case batch.\n` +
+        (deferrals.cutShort.length
+          ? `> Cut short: ${deferrals.cutShort.map((c) => `${c.block} (${c.processed}/${c.totalCases})`).join(', ')}.\n`
+          : '')
+      : `\n> **Case throughput: ${deferrals.processed}/${deferrals.totalCases} asked — none deferred.**\n`)
+    : '';
 
   const startedLines = sidePlotStarted.map((p) => `- Started: ${p.type} (agents ${p.agents.join(', ')})`).join('\n');
   const updateLines = sidePlotUpdates.map((u) => `- ${u.type}: ${u.stage} (${u.status})`).join('\n');
@@ -2956,7 +3076,7 @@ function renderDailySummary(yearState, summary, standup, sidePlotStarted, sidePl
   return `# Day ${yearState.current_day} Summary — ${new Date().toISOString()}
 
 Week ${yearState.current_week}, Month ${yearState.current_month}, Quarter ${yearState.current_quarter} (Year ${yearState.stats.year_number || 1}).
-${milestone ? `\n**Milestone: ${milestone.label}** — ${milestone.description}\n` : ''}
+${milestone ? `\n**Milestone: ${milestone.label}** — ${milestone.description}\n` : ''}${deferralLine}
 ## Case Handling
 
 ${agentLines}
@@ -2981,8 +3101,21 @@ ${/* A7: "Open branches and their age appear in the daily report." Rendered even
 function renderScheduleSection(scheduleInfo) {
   const { schedule, batches, toolTask, aiExperience, spareTime, weeklySummary, versionBumps, choreRotation, guideDraft, guideReview, guideVerify } = scheduleInfo;
 
+  // ── DEFERRED IS NOT DONE, AND THE REPORT SAYS WHICH (OB-074, 2026-08-16) ──
+  // This line used to read "N case(s)", which is the number ASSIGNED to the
+  // batch and says nothing about whether any of them ran. Every batch printed
+  // the same way whether it completed, was cut short by the invocation budget,
+  // or never started — so a day on which 6 of 200 cases were asked read
+  // exactly like a day on which all 200 were. That is remedy (c) of OB-074:
+  // make the cost visible rather than silent.
   const batchLines = batches
-    .map((b) => `- ${b.block.time || '—'} ${b.block.label}: ${b.cases.length} case(s)`)
+    .map((b) => {
+      const s = summarizeBatchState(b);
+      const mark = s.state === 'completed' ? 'completed'
+        : s.state === 'cut_short' ? `**CUT SHORT** — ${s.deferred} deferred`
+        : '**not started**';
+      return `- ${b.block.time || '—'} ${b.block.label}: ${s.processed}/${s.totalCases} case(s) — ${mark}`;
+    })
     .join('\n') || '_No case batches (off day)._';
 
   const toolTaskLine = toolTask
@@ -3159,14 +3292,31 @@ function partitionCasesByShare(cases, blocks) {
  * (see agents/agent-base.js flagCapabilityGap()), not from a batch-level
  * quality scan here.
  */
-async function processCaseBatch(env, batchCases, agentInstances, agentStats) {
-  // Lightweight, free case classification/routing via Cloudflare Workers AI
-  // (config/token-economy.json routing_model). Best-effort — null on
-  // any failure, never blocks dispatch.
-  for (const c of batchCases) {
-    const routing = await callCFRouter({ ai: env.AI, caseDescription: `${c.title}. ${c.description || ''}` });
-    if (routing) c.cf_category = routing.category;
-  }
+// OB-074 Phase 3: hand the real case runner to the Durable Object side. This
+// runs once, at bundle load, and is the inversion that keeps state-manager.js
+// from importing this file. See case-batch-do.js's header.
+setCaseBatchRunner((env, cases, agentInstances, agentStats, budget) =>
+  processCaseBatch(env, cases, agentInstances, agentStats, budget));
+
+async function processCaseBatch(env, batchCases, agentInstances, agentStats, budget = null) {
+  // ── THE ROUTER PRE-PASS IS GONE (OB-074, 2026-08-16) ─────────────────────
+  //
+  // This loop used to run one Cloudflare Workers AI call PER CASE IN THE
+  // BATCH, before a single question was asked — 30 subrequests on a Sun-Thu
+  // 0.15 share, 80 on Friday's opening batch, against a 50-subrequest
+  // invocation budget. It was the single largest line item in the tick and
+  // the reason the cap was already blown before any work happened.
+  //
+  // What it bought: `c.cf_category`. Grepped across all three repos on
+  // 2026-08-16 — **that field is written here and read by nothing.** One
+  // occurrence in the codebase, this one. It is not persisted (the cases were
+  // already written to D1 by persistQuestions() before this runs), not read by
+  // qa-engine, not read by the router, not read by any report. KFM-12, at
+  // 30-80 subrequests a tick.
+  //
+  // Deleted rather than gated: there is no switch position that makes an
+  // unread field worth a Workers AI call. `callCFRouter` itself is untouched
+  // and still imported for its other callers.
 
   const byAgent = new Map();
   for (const c of batchCases) {
@@ -3174,9 +3324,26 @@ async function processCaseBatch(env, batchCases, agentInstances, agentStats) {
     byAgent.get(c.assigned_to).push(c);
   }
 
+  // What actually got done, so the caller can tell CUT SHORT from FINISHED.
+  // `processedIds` is the discriminator: the caller advances its cursor by
+  // what is in here, never by what it handed in.
+  const outcome = { processed: 0, deferred: 0, processedIds: new Set(), stoppedForBudget: false };
+
   for (const [agentId, agentCases] of byAgent) {
+    if (outcome.stoppedForBudget) {
+      outcome.deferred += agentCases.length;
+      continue;
+    }
+
     let agent = agentInstances.get(agentId);
     if (!agent) {
+      // Instantiating an agent costs a Durable Object read, which the meter
+      // counts on its own. Only the affordability check belongs here.
+      if (budget && !budget.canAfford(CASE_LOOKAHEAD, LANE_CASES)) {
+        outcome.stoppedForBudget = true;
+        outcome.deferred += agentCases.length;
+        continue;
+      }
       agent = instantiateAgent(agentId, env);
       await agent.loadState();
       agentInstances.set(agentId, agent);
@@ -3196,16 +3363,47 @@ async function processCaseBatch(env, batchCases, agentInstances, agentStats) {
     // the persona (state line in the persona system prompt, agent-2's own
     // cooldown logic in agent-2-productive.js handleCase()); it no longer
     // suppresses the core ask-and-evaluate task.
+    // ── COALESCED STATE WRITES (OB-074) ──────────────────────────────────
+    // Measured: 87 Durable Object fetches on a 30-case tick — ~2.9 per case,
+    // almost all of them saveState() PUTs from startSession/mood/endSession.
+    // Inside one batch those are three round trips to write a mood that only
+    // the last value of matters. beginCoalescedState() marks the state dirty
+    // instead of writing it; flushAgentState() writes once, next to the
+    // journal flush that already works this way. Outside a batch (HTTP
+    // triggers, meetings) saveState() is unchanged and still writes through.
+    if (typeof agent.beginCoalescedState === 'function') agent.beginCoalescedState();
+
     for (const c of agentCases) {
+      // Phase 2: the loop asks the ledger before EVERY case, against what the
+      // tick has REALLY spent so far (meterEnv counts it) rather than against
+      // a running estimate. `CASE_LOOKAHEAD` is the p90, so a case that turns
+      // out to be the expensive kind can overshoot by at most
+      // CASE_COST_MAX - CASE_LOOKAHEAD, which is exactly what
+      // TICK_TAIL_RESERVE is sized to absorb.
+      if (budget && !budget.canAfford(CASE_LOOKAHEAD, LANE_CASES)) {
+        outcome.stoppedForBudget = true;
+        outcome.deferred += 1;
+        continue;
+      }
+
+      // The external `fetch()` calls this case is about to make are the one
+      // thing the meter cannot see. Charged up front so they cannot be
+      // discovered too late. See EXTERNAL_FETCH_ALLOWANCE_PER_CASE.
+      if (budget) budget.charge(EXTERNAL_FETCH_ALLOWANCE_PER_CASE, LANE_CASES);
+
       const raw = await agent.handleCase(c);
-      const outcome = extractOutcome(raw);
+      const caseOutcome = extractOutcome(raw);
       stats.handled += 1;
+      outcome.processed += 1;
+      if (c.id) outcome.processedIds.add(c.id);
       if (c.difficulty === 'advanced') stats.advancedCases += 1;
 
-      if (outcome.escalation?.type === 'TRAINEE_PANIC') {
-        await handleTraineePanic(env, outcome.escalation);
+      if (caseOutcome.escalation?.type === 'TRAINEE_PANIC') {
+        await handleTraineePanic(env, caseOutcome.escalation);
         stats.escalations += 1;
       }
+      // No charge here: every binding call this case made was metered as it
+      // happened. Charging again would double-count.
     }
 
     // journal.md — one commit per agent per batch tick, covering every case
@@ -3218,7 +3416,18 @@ async function processCaseBatch(env, batchCases, agentInstances, agentStats) {
     } catch {
       // journal bookkeeping must never fail a case batch
     }
+
+    // The one real state write for this agent this batch. Must run even when
+    // the budget stopped us mid-batch, or the moods of the cases that DID run
+    // are lost — which would make a cut-short batch corrupt as well as short.
+    try {
+      if (typeof agent.flushAgentState === 'function') await agent.flushAgentState();
+    } catch {
+      // state bookkeeping must never fail a case batch
+    }
   }
+
+  return outcome;
 }
 
 /**
@@ -3943,6 +4152,135 @@ async function logScheduledError(env, { israelTime, dayOfWeek, blockType, error 
 }
 
 /**
+ * One `case_batch` block, under the invocation budget (OB-074, 2026-08-16).
+ *
+ * ── DEFERRED IS DRAINED BEFORE NEW WORK ──────────────────────────────────
+ *
+ * The queue is the cycle. `daily-cycle-state` in SIM_KV already holds every
+ * batch, its cases and its cursor; it is already persisted between ticks and
+ * already cleared at day end. A second store beside it would give the office
+ * two answers to "what is still owed", so this reuses it — no new queue, as
+ * instructed.
+ *
+ * Carry-over runs FIRST, oldest batch first, and only then this block's own
+ * cases. Without that ordering the day's tail starves behind heads that keep
+ * being refilled — which is exactly what production was doing before this
+ * change, re-asking the same first cases at every tick while the tail of the
+ * 200-case day was never reached.
+ *
+ * ── WHY IT DOES NOT SET done ON A SHORT RUN ──────────────────────────────
+ *
+ * `done` moves only when the cursor reaches the end. The old code set
+ * `batch.done = true` on the line after `processCaseBatch()` returned,
+ * unconditionally — so a batch that threw at case 2 of 30 was recorded
+ * identically to one that finished all 30. That single assignment is what
+ * made deferred work indistinguishable from completed work.
+ */
+async function runCaseBatchBlock(env, cycle, block, agentInstances, agentStats, budget, sim = null) {
+  // Everything this function spends is case work and is charged to the case
+  // lane, so the floor is measured against real spend. Restored to 'other'
+  // before returning — see the finally.
+  budget.setLane(LANE_CASES);
+  try {
+    return await runCaseBatchBlockInner(env, cycle, block, agentInstances, agentStats, budget, sim);
+  } finally {
+    budget.setLane('other');
+  }
+}
+
+/**
+ * OB-074 Phase 3 — SHIPPED OFF, and this is the only gate.
+ *
+ * When `case_do_enabled` is absent (the shipped default) this returns null and
+ * the caller runs the batch exactly as it did before: no Durable Object is
+ * contacted, no payload is serialized, the branch is not entered. When it is
+ * true, the same cases go to the Durable Object instead, which has a measured
+ * outbound ceiling well above the Worker's 50.
+ *
+ * The cursor is NOT moved here. It is moved by the caller from `processedIds`,
+ * whichever path produced them, so "deferred is not done" has one
+ * implementation rather than two that can drift.
+ */
+async function maybeRunCasesInDO(env, cases, sim) {
+  if (!caseDoEnabled(sim)) return null;
+  if (!env.AGENT_STATE || !cases.length) return null;
+  const stub = env.AGENT_STATE.get(env.AGENT_STATE.idFromName(CASE_DO_INSTANCE));
+  const res = await stub.fetch(`https://agent-state${CASE_DO_PATH}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ cases }),
+  });
+  const out = await res.json();
+  return { ...out, processedIds: new Set(out.processedIds || []) };
+}
+
+async function runCaseBatchBlockInner(env, cycle, block, agentInstances, agentStats, budget, sim) {
+  const own = cycle.batches.find((b) => isSameBlock(b.block, block));
+  const carry = collectOutstanding(cycle, block);
+
+  const planned = budget.caseSlots(CASE_LOOKAHEAD);
+  const record = {
+    block: block.label || block.time,
+    // OB-074 Phase 3 read-back: which path actually served this batch, and
+    // whether the Durable Object switch is on. A claim that the new path is
+    // inert is worth nothing; this is the tick saying so itself.
+    path: caseDoEnabled(sim) ? 'durable_object' : 'worker',
+    caseDoEnabled: caseDoEnabled(sim),
+    plannedSlots: planned,
+    carriedOver: carry.length,
+    ownCases: own ? (own.cases?.length || 0) - (own.cursor || 0) : 0,
+    processed: 0,
+    deferred: 0,
+    stoppedForBudget: false,
+  };
+
+  // 1) Drain carry-over, oldest first. Each item knows which batch it came
+  //    from, so a partial drain advances that batch's cursor and no other.
+  for (const item of carry) {
+    if (!budget.canAfford(CASE_LOOKAHEAD, LANE_CASES)) {
+      record.stoppedForBudget = true;
+      break;
+    }
+    const res = (await maybeRunCasesInDO(env, [item.case], sim))
+      || await processCaseBatch(env, [item.case], agentInstances, agentStats, budget);
+    record.processed += res.processed;
+    if (res.processed > 0) {
+      // The cursor is advanced by what was PROCESSED, never by what was
+      // handed in. Carry-over is drained in order, so cursor = index + 1.
+      item.batch.cursor = Math.max(num0(item.batch.cursor), item.index + 1);
+      if (item.batch.cursor >= (item.batch.cases?.length || 0)) item.batch.done = true;
+    }
+    if (res.stoppedForBudget) { record.stoppedForBudget = true; break; }
+  }
+
+  // 2) This block's own cases, from wherever it left off.
+  if (own && !own.done && !record.stoppedForBudget) {
+    const start = clamp0(num0(own.cursor), own.cases?.length || 0);
+    const pending = (own.cases || []).slice(start);
+    if (pending.length) {
+      const res = (await maybeRunCasesInDO(env, pending, sim))
+        || await processCaseBatch(env, pending, agentInstances, agentStats, budget);
+      record.processed += res.processed;
+      own.cursor = start + res.processed;
+      if (own.cursor >= own.cases.length) own.done = true;
+      else own.deferrals = num0(own.deferrals) + 1;
+      if (res.stoppedForBudget) record.stoppedForBudget = true;
+    } else if ((own.cases?.length || 0) === 0) {
+      own.done = true;   // an empty share is genuinely complete
+    }
+  }
+
+  // What is still owed across the whole day, after this tick.
+  const day = summarizeDayDeferrals(cycle);
+  record.deferred = day.deferred;
+  record.budget = budget.snapshot();
+  return record;
+}
+
+function num0(v) { return typeof v === 'number' && Number.isFinite(v) ? v : 0; }
+function clamp0(v, hi) { return Math.min(hi, Math.max(0, v)); }
+
+/**
  * Cron entry point for one Israel-time tick (called from `scheduled()` with
  * the tick's { time, dayOfWeek }). Looks up which daily-schedule.json
  * block(s), if any, are due right now; on the day's first due block it
@@ -3955,12 +4293,59 @@ async function logScheduledError(env, { israelTime, dayOfWeek, blockType, error 
  * are a cheap no-op.
  */
 export async function runScheduledBlock(env, israelTime, dayOfWeek) {
-  const sim = await getSimulationState(env);
-  if (sim.paused) return { skipped: true, reason: 'paused' };
-
   const schedule = getDaySchedule(dayOfWeek);
   const dueBlocks = schedule.blocks.filter((b) => b.time === israelTime);
   if (!dueBlocks.length) return { skipped: true, reason: 'no_block_at_time', israelTime, dayOfWeek };
+
+  // ── OB-074: the invocation budget ────────────────────────────────────────
+  // A floor for cases, not a priority. `casesDue` decides whether the floor
+  // exists at all: on the 15 of 21 daily ticks that carry no case_batch,
+  // reserving 60% of the budget for cases would throttle the meeting, report
+  // and guide blocks to protect a floor nobody is going to use.
+  const casesDue = dueBlocks.some((b) => b.type === 'case_batch');
+  // The day's last tick also runs finalizeScheduledDay() after the block
+  // loop, and that is the tick's most important output — the daily summary.
+  // Reserve for it explicitly; see FINALIZE_RESERVE.
+  const lastTick = israelTime === schedule.blocks[schedule.blocks.length - 1].time;
+  const budget = createTickBudget({
+    casesDue,
+    tailReserve: (casesDue ? TICK_TAIL_RESERVE : TICK_TAIL_RESERVE_NO_CASES)
+      + (lastTick ? FINALIZE_RESERVE : 0),
+  });
+
+  // ── OB-074: everything below runs on the per-tick env ────────────────────
+  //
+  // ORDER MATTERS AND IS NOT INTERCHANGEABLE. `meterEnv()` goes on FIRST so it
+  // wraps the real bindings; `tickEnv()`'s `simulation-state` memo goes on TOP
+  // of it, so a memo hit never reaches the metered `get` and is never charged.
+  // Wrapped the other way round the memo would save the KV round trip and
+  // still bill for it, and the ledger would report ~63 switch reads that did
+  // not happen.
+  //
+  // Both wrappers live and die with this function call, so neither can leak
+  // into the next tick through a reused isolate — which is the whole reason
+  // the cache is not a module-level Map.
+  env = tickEnv(meterEnv(env, (n) => budget.spendMetered(n)));
+
+  // External fetch() is the operation the 50-cap actually counts, and it is
+  // not a binding — the provider clients, notebookx-client and every GitHub
+  // commit call the global directly. Swapped for the tick and restored in the
+  // finally at the very bottom of this function. See meterGlobalFetch().
+  const restoreFetch = meterGlobalFetch((n) => budget.spendMetered(n));
+  try {
+    return await runScheduledBlockInner(env, israelTime, dayOfWeek, {
+      schedule, dueBlocks, casesDue, budget,
+    });
+  } finally {
+    restoreFetch();
+  }
+}
+
+async function runScheduledBlockInner(env, israelTime, dayOfWeek, ctx) {
+  const { schedule, dueBlocks, casesDue, budget } = ctx;
+
+  const sim = await getSimulationState(env);
+  if (sim.paused) return { skipped: true, reason: 'paused' };
 
   const isOffDay = schedule === dailyScheduleConfig.saturday_schedule;
   const isFirstBlock = israelTime === schedule.blocks[0].time;
@@ -3987,7 +4372,11 @@ export async function runScheduledBlock(env, israelTime, dayOfWeek) {
       dayOfWeek,
       inspection: sim.inspection_mode,
       cases,
-      batches: partitionCasesByShare(cases, schedule.blocks).map((b) => ({ ...b, done: false })),
+      // `cursor` (OB-074) is how many of this batch's cases have actually been
+      // processed. `done` is set ONLY when cursor reaches cases.length, so a
+      // batch that was cut short by the budget is distinguishable from one
+      // that finished — see subrequest-budget.js summarizeBatchState().
+      batches: partitionCasesByShare(cases, schedule.blocks).map((b) => ({ ...b, done: false, cursor: 0, deferrals: 0 })),
       agentStats: {},
       results: {
         toolTask: null, aiExperience: null, standup: null, spareTime: [], weeklySummary: null, versionBumps: [], choreRotation: null,
@@ -4016,14 +4405,59 @@ export async function runScheduledBlock(env, israelTime, dayOfWeek) {
     }
   };
 
-  for (const block of dueBlocks) {
+  // ── OB-074: CASES FIRST AT A SHARED TICK ─────────────────────────────────
+  // The reserved floor guarantees cases CAN run; running them first means
+  // they do not have to rely on the guarantee. The only ticks this reorders
+  // are the ones where a case_batch shares an invocation with something else
+  // — Sun-Thu 08:00 (where `architect_liaison` is listed first in
+  // daily-schedule.json and therefore spent the budget first) and Friday
+  // 08:00/09:00/10:00. Every other tick is a single block or has no cases,
+  // and its order is untouched. This is the opposite of deprioritising cases,
+  // which is the failure the owner named: with ~40 open board tasks, "cases
+  // last" is "cases never".
+  const orderedBlocks = casesDue
+    ? [...dueBlocks].sort((a, b) => (a.type === 'case_batch' ? 0 : 1) - (b.type === 'case_batch' ? 0 : 1))
+    : dueBlocks;
+
+  const admissions = [];
+
+  for (const block of orderedBlocks) {
+    // Real spend for THIS block, from the meter. Recorded so `BLOCK_COST`'s
+    // estimates can be checked against what blocks actually cost instead of
+    // being trusted — the estimate is what decides admission, and an estimate
+    // nobody re-measures is how this whole defect started.
+    const spentBefore = budget.spent();
+    let decision = 'ran';
+    let estimate = null;
     try {
-      if (block.type === 'case_batch') {
-        const batch = cycle.batches.find((b) => b.block.time === block.time && b.block.label === block.label);
-        if (batch && !batch.done) {
-          await processCaseBatch(env, batch.cases, agentInstances, agentStats);
-          batch.done = true;
+      // Non-case blocks must fit in what cases have not reserved. A block
+      // that does not fit is DEFERRED and said so — never run half-way and
+      // never silently skipped. `oversize` runs anyway; see admitBlock().
+      if (block.type !== 'case_batch') {
+        const admit = admitBlock(budget, block.type);
+        decision = admit.decision;
+        estimate = admit.cost;
+        if (admit.decision === 'defer') {
+          await logScheduledError(env, {
+            israelTime, dayOfWeek, blockType: block.type,
+            error: new Error(
+              `deferred by invocation budget (OB-074): needs ~${admit.cost} subrequests, ` +
+              `${budget.remainingFor(block.type)} left of ${budget.usable} usable ` +
+              `(cases floor ${budget.caseFloor}, spent ${budget.spent()})`
+            ),
+          });
+          continue;
         }
+        // NOT charged here — `admit.cost` is an admission estimate, and the
+        // meter is about to count what this block really spends. Charging
+        // both would bill every block twice.
+        budget.setLane(block.type);
+      }
+
+      if (block.type === 'case_batch') {
+        cycle.results.caseBudget = await runCaseBatchBlock(
+          env, cycle, block, agentInstances, agentStats, budget, sim
+        );
       } else if (block.type === 'tool_task_window') {
         cycle.results.toolTask = await maybeOpenAssetTask(env, dayOfWeek, cycle.day);
       } else if (block.type === 'report') {
@@ -4095,14 +4529,54 @@ export async function runScheduledBlock(env, israelTime, dayOfWeek) {
       }
     } catch (err) {
       await logScheduledError(env, { israelTime, dayOfWeek, blockType: block.type, error: err });
+    } finally {
+      budget.setLane('other');
+      admissions.push({
+        block: block.type, at: block.time, decision, estimate,
+        actual: budget.spent() - spentBefore,
+      });
     }
   }
 
   cycle.agentStats = Object.fromEntries(agentStats);
+  cycle.budget = budget.snapshot();
+  cycle.admissions = admissions;
 
   if (!isLastBlock) {
-    await setCycleState(env, cycle);
-    return { ok: true, day: cycle.day, dayOfWeek, israelTime, blocks: dueBlocks.map((b) => b.type) };
+    // ── THE WRITE THAT WAS BEING LOST (OB-074, 2026-08-16) ─────────────────
+    //
+    // This is the single most consequential line in the fix, and it needed no
+    // new logic — only to be reached. `setCycleState()` sits AFTER the block
+    // loop, so on any tick that ran out of subrequests inside a block, the
+    // runtime threw here instead and the cycle was never written. The next
+    // tick then found no cycle, regenerated the whole day, and restarted the
+    // batch from the head of the list.
+    //
+    // That is what produced the live evidence in `interactions` on
+    // 2026-08-16: "Hardening SSH access on an internet-facing Linux host"
+    // asked four times between 06:31 and 09:02, while the tail of the 200-case
+    // day was never reached once. The office was not dropping the remainder,
+    // it was re-asking the head all day.
+    //
+    // Two things now protect it. `TICK_TAIL_RESERVE` holds back 8 subrequests
+    // that no block may spend, so this write has budget left to succeed; and
+    // the try/catch means that if it fails anyway, the tick still returns and
+    // says so, rather than throwing out of the cron handler.
+    try {
+      await setCycleState(env, cycle);
+    } catch (err) {
+      await logScheduledError(env, { israelTime, dayOfWeek, blockType: 'cycle_persist', error: err });
+      return {
+        ok: false, cyclePersisted: false, day: cycle.day, dayOfWeek, israelTime,
+        blocks: dueBlocks.map((b) => b.type), budget: cycle.budget,
+      };
+    }
+    return {
+      ok: true, cyclePersisted: true, day: cycle.day, dayOfWeek, israelTime,
+      blocks: dueBlocks.map((b) => b.type), budget: cycle.budget, admissions,
+      caseBudget: cycle.results.caseBudget || null,
+      deferred: summarizeDayDeferrals(cycle).deferred,
+    };
   }
 
   let finalize;
@@ -4113,7 +4587,10 @@ export async function runScheduledBlock(env, israelTime, dayOfWeek) {
     finalize = { error: err.message };
   }
   await clearCycleState(env);
-  return { ok: true, day: cycle.day, dayOfWeek, israelTime, blocks: dueBlocks.map((b) => b.type), finalize };
+  return {
+    ok: true, day: cycle.day, dayOfWeek, israelTime, blocks: dueBlocks.map((b) => b.type),
+    finalize, budget: cycle.budget, admissions, deferred: summarizeDayDeferrals(cycle).deferred,
+  };
 }
 
 /**
@@ -4256,7 +4733,13 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
     console.warn(`[branch-watch] could not list branches, continuing: ${err?.message || err}`);
     return null;
   });
-  const markdown = renderDailySummary(displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone, scheduleInfo, office, branches);
+  // OB-074: the day's real case throughput, read off the cursors the batches
+  // carry. Only the scheduled path can report this — runWorkDayCycle() (the
+  // non-functional whole-day path) has no per-tick budget and passes null.
+  const markdown = renderDailySummary(
+    displayYearState, summary, standup, sidePlotStarted, sidePlotUpdates, milestone,
+    scheduleInfo, office, branches, summarizeDayDeferrals(cycle)
+  );
   // OFFICE-POLICY A9 (2026-08-11) — see composeDailyHeadline()'s comment for
   // why this runs AFTER the free render and is guarded on isOffDay: no model
   // call whose result would be thrown away on a rest day.
@@ -5315,6 +5798,41 @@ export default {
             // the provider it uses today.
             result = await updateSimulationState(env, { routing_enabled: !!body.enabled });
             break;
+          case 'subrequest_probe': {
+            // OB-074: MEASURE the invocation ceiling instead of quoting it —
+            // in the Worker and inside a Durable Object, with the same loop
+            // against the same D1 binding, so the difference is the headroom.
+            //
+            // The 50-vs-"roughly 150" figures the task was framed with came
+            // from documentation. Cloudflare's limits page states no
+            // Durable-Object subrequest number at all (checked 2026-08-16),
+            // and this project has been burned three times by a documented
+            // platform fact that had stopped being true. Read-only
+            // (`SELECT 1`), bounded, admin-gated.
+            const max = Number.isFinite(body.max) ? body.max : 400;
+            const kinds = Array.isArray(body.kinds) ? body.kinds : ['d1', 'kv', 'do'];
+            const workerSide = {};
+            for (const k of kinds) workerSide[k] = await probeSubrequestCeiling(env, max, k);
+            const doSide = {};
+            for (const k of kinds) {
+              try {
+                const stub = env.AGENT_STATE.get(env.AGENT_STATE.idFromName(`subrequest-probe-${k}`));
+                doSide[k] = await (await stub.fetch('https://agent-state/subrequest-probe', {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ max, kind: k }),
+                })).json();
+              } catch (err) {
+                doSide[k] = { where: 'durable_object', kind: k, error: String(err?.message || err) };
+              }
+            }
+            result = {
+              worker: workerSide,
+              durableObject: doSide,
+              note: 'completed = cheap D1 subrequests that landed before the runtime refused. '
+                + 'The Worker figure includes the few subrequests this request already spent.',
+            };
+            break;
+          }
           case 'routing_status':
             // Read-back for the supervised test: the flag, the lane table as
             // RESOLVED (not as written), and today's per-provider counters.

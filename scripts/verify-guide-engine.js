@@ -220,7 +220,22 @@ check('Sun-Thu: guide_draft at 16:00', hasBlock(dailySchedule.full_day_schedule,
 check('Sun-Thu: guide_draft is ordered AFTER the 16:00 report block',
   dailySchedule.full_day_schedule.blocks.findIndex((b) => b.time === '16:00' && b.type === 'report') <
   dailySchedule.full_day_schedule.blocks.findIndex((b) => b.time === '16:00' && b.type === 'guide_draft'));
-check('Sun-Thu: guide_review at 16:30', hasBlock(dailySchedule.full_day_schedule, '16:30', 'guide_review'));
+// 16:30 -> 16:00 on 2026-08-16 (OB-074). The 16:30 tick measured 71 subrequests
+// against Cloudflare's 50-per-invocation cap, so guide_review was being refused
+// by the invocation budget every Sun-Thu — a block deferred every single day is
+// a block that never runs. Moving it onto guide_draft's own tick is safe
+// because processGuideReviewBlock() is already self-healing: it checks D1 for
+// today's draft and generates it in the same invocation when missing, so
+// draft-then-review inside one tick is a path the pipeline was built for.
+//
+// The PROPERTY this check protects is "review never runs before draft", not
+// any particular clock time. Asserted directly below so it survives the next
+// move, the way the Friday pair already does.
+check('Sun-Thu: guide_review at 16:00 (moved off the crowded 16:30 tick, OB-074)',
+  hasBlock(dailySchedule.full_day_schedule, '16:00', 'guide_review'));
+check('Sun-Thu: guide_review is ordered AFTER guide_draft',
+  dailySchedule.full_day_schedule.blocks.findIndex((b) => b.type === 'guide_draft') <
+  dailySchedule.full_day_schedule.blocks.findIndex((b) => b.type === 'guide_review'));
 
 check('Friday: guide_draft at 10:30 (after the Friday report block)',
   hasBlock(dailySchedule.friday_schedule, '10:30', 'guide_draft') &&

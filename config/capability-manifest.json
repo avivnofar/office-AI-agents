@@ -783,6 +783,58 @@
       "agents": [
         13
       ]
+    },
+    "invocation-budget": {
+      "what": "Keep a per-invocation subrequest budget for a scheduled tick: reserve a guaranteed floor for client cases, size each batch to what actually fits, and record what did not fit as DEFERRED rather than dropping it.",
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/subrequest-budget.js",
+        "symbol": "createTickBudget",
+        "caveat": "THE LIMITS ARE MEASURED, NOT QUOTED (subrequest_probe trigger, live Worker, 2026-08-16): external fetch() 50 per invocation; Durable Object stub calls 200, with a DIFFERENT error string ('Too many API requests', which never appears in the incident rows); D1 and KV >=400 with no refusal, i.e. NOT the constraint. Cloudflare's own prose reads as though D1 and KV count, and the first calibration built from it throttled a tick to three cases when the platform allowed forty. THE METER IS EXACT FOR BINDINGS AND CONSERVATIVE FOR THE REST: meterEnv() wraps D1/KV/DO/AI/APP_API and meterGlobalFetch() swaps the global for the tick, so the ledger counts real spend rather than an estimate. The one row NOT measured is the APP_API service binding, charged at a full fetch because probing it spends real Anthropic budget. WHAT IT DOES NOT DO: it cannot interrupt a block mid-flight. Non-case blocks are admitted or deferred on a BLOCK_COST estimate, and those estimates are provisional - derived from a stub harness that measured a real meeting at 12 when the live tick measured 31. Every tick now records each block's real cost in its `admissions` array, so the next session can replace them with production numbers instead of scaled guesses."
+      },
+      "exercised_by": "scripts/verify-subrequest-budget.js",
+      "verifier_note": "103 checks. Sections 5-6 execute the REAL runScheduledBlock() for every tick of Sun-Thu, Friday and Saturday under counting bindings and fail if any tick exceeds either measured limit - the mechanization of KFM-31. Proven against the pre-change code, which fails 8 of 11 ticks.",
+      "agents": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11,
+        12,
+        13
+      ],
+      "cost": "none - pure bookkeeping. It spends no provider and makes no model call; it only decides how much of a tick's platform budget each kind of work may use."
+    },
+    "case-engine-in-durable-object": {
+      "what": "Run a case batch inside a Durable Object instead of the Worker, behind a switch.",
+      "supplied_by": {
+        "kind": "module",
+        "ref": "workers/case-batch-do.js",
+        "symbol": "runCaseBatchInDO",
+        "caveat": "BUILT, DEPLOYED, AND SHIPPED OFF - and the measurement says it should STAY off, which is the finding rather than the caution. OB-074 was opened believing a Durable Object gets 'roughly 150' subrequests against the Worker's 50. MEASURED 2026-08-16: it gets 50, identical, with the identical error. Moving one batch inside one DO call relocates the same ceiling and buys nothing. What a Durable Object does give is a FRESH 50 PER INVOCATION, so real capacity would come from calling it many times (the Worker allows 200 such calls) - a fan-out design this module is not. AN EARLIER READING OF THIS PROBE SAID >=120 AND WAS WRONG: the DO route ignored its `kind` parameter and measured D1 while the label said fetch. Recorded rather than quietly corrected, because it is a wrong number that AGREED WITH THE EXPECTED ANSWER and survived a deploy. Gate: SIM_KV simulation-state.case_do_enabled, absent = OFF. The switch is the owner's to flip."
+      },
+      "exercised_by": "scripts/verify-subrequest-budget.js",
+      "verifier_note": "Section 6b proves inertness by RUNNING a real case tick with the flag absent and counting calls to the DO case route (zero), not by reading the source. Also proves absent/null/'true'-the-string all resolve to OFF, and that agent-runner registered the runner so the path is not a dead end if it is ever switched on.",
+      "agents": [
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        11,
+        12,
+        13
+      ],
+      "cost": "none in provider terms, but NOT free: when switched on it adds one Durable Object round trip per batch, which is itself a metered subrequest, in exchange for zero extra outbound headroom (measured). That is the argument for leaving it off."
     }
   },
   "_output_kind_producers_meta": "WHICH CAPABILITY COULD PRODUCE EACH KIND OF OUTPUT A ROLE IS FOR. This is the join that makes the audit's load-bearing half possible: `agents.<id>.output_kinds` says what the role produces, and this says which capability would have to work for that to happen. It lives here as DATA rather than as a string match inside workers/capability-audit.js, because 'a visual_asset comes from the image lane' is a judgement about this office and not something a module should infer from a substring. A kind with an EMPTY producer list is reported as `unmapped` — a gap in this file rather than necessarily in the office — and deliberately not as a gap in the office, because the two have different fixes.",
