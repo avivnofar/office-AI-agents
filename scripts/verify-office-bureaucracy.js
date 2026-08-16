@@ -1311,6 +1311,89 @@ check('§13b — the census draws its role kinds from the SAME manifest the capa
 check('§13b — the fix records WHY membership and rendering must agree',
   /computed, for three meeting types,[\s\S]{0,24}and consumed by nobody/.test(meSrc13));
 
+/* ── §14. THE REAL BOARD PARSES COMPLETELY ────────────────────────────────
+ *
+ * OB-099, 2026-08-16. Every check above this one runs parseBoard() against a
+ * FIXTURE. That proved the parser correct and proved nothing about the file the
+ * office actually reads — and the file the office actually reads had thirteen
+ * tasks it could not see. They carried a decorated `State:` value (`DONE
+ * *(2026-08-16, third session)*`, `**READY — 2026-08-16.** ~~BLOCKED~~`) and
+ * parseBoard() requires the value to be EXACTLY one of BOARD_STATES, so all
+ * thirteen were dropped: no agent prompt, no `office_context_status` count, no
+ * report that quotes board state. OB-033 was this same defect, fixed once, in
+ * one task; it recurred thirteen times because that fix was an edit and not a
+ * check.
+ *
+ * So this section asserts the PROPERTY the edit was standing in for: every
+ * `### OB-NNN` heading reaches parseBoard(). It is the only check in this file
+ * that reads a real file from another repo, deliberately — a fixture cannot
+ * catch this class at all, which is exactly how thirteen of them accumulated
+ * under a green suite.
+ *
+ * UNREACHABLE IS NOT PASS AND IS NOT FAIL. back-office is private and the
+ * public repo's CI job holds no credential for it, so a run without it records
+ * a SKIP with its reason. Counting an unreadable board as a pass would be
+ * KFM-13's shape committed inside the check written to catch KFM-03's.
+ * ──────────────────────────────────────────────────────────────────────── */
+section('§14. The REAL board — every heading reaches parseBoard() (OB-099)');
+
+const BOARD_PATH = path.join(root, '..', 'back-office-AI-agents', 'campus', 'shared', 'board', 'BOARD.md');
+let boardSrc = null;
+let boardSkipReason = null;
+try {
+  boardSrc = readFileSync(BOARD_PATH, 'utf8');
+} catch (e) {
+  boardSkipReason = `back-office-AI-agents is not checked out beside this repo (${e.code || 'unreadable'})`;
+}
+
+if (boardSrc === null) {
+  console.log(`SKIP  §14 — the real board could not be read: ${boardSkipReason}. NOT counted as a pass.`);
+} else {
+  const headingIds = (boardSrc.match(/^### (OB-\d+) — /gm) || []).map((h) => h.slice(4).split(' ')[0]);
+  const realBoard = officeContext.parseBoard(boardSrc);
+
+  check('§14 — the real board parses at all', realBoard.ok === true, realBoard.reason);
+  check('§14 — [FAILS-OLD] every `### OB-NNN` heading reaches parseBoard() — none silently dropped',
+    realBoard.ok && realBoard.tasks.length === headingIds.length,
+    `${headingIds.length} headings vs ${realBoard.tasks?.length} parsed`);
+  check('§14 — ...and the malformed list is empty, which is the same fact said the other way',
+    realBoard.ok && realBoard.malformed.length === 0,
+    (realBoard.malformed || []).join(' | '));
+
+  // The STRICT-WRITER half. OB-099 chose this over teaching the parser to read a
+  // leading token, because a tolerant reader would only have made the next batch
+  // invisible in some new way. The decoration is not deleted — it moves verbatim
+  // onto a `State note:` line, which parseBoard() ignores.
+  const decorated = (boardSrc.match(/^- \*\*State:\*\* .*$/gm) || [])
+    .map((l) => l.replace(/^- \*\*State:\*\* /, '').trim())
+    .filter((v) => !officeContext.BOARD_STATES.includes(v));
+  check('§14 — no `State:` line carries decoration (the strict writer, not a tolerant reader)',
+    decorated.length === 0, decorated.slice(0, 3).join(' | '));
+
+  // A check that has never seen the thing it refuses is not a check.
+  const poisoned = boardSrc.replace(/^- \*\*State:\*\* READY$/m, '- **State:** READY *(unblocked 2026-08-16)*');
+  const poisonedParse = officeContext.parseBoard(poisoned);
+  check('§14 — [FAILS-OLD] proof this catches one: a single decorated line drops a task and is reported',
+    poisonedParse.ok && poisonedParse.tasks.length === headingIds.length - 1
+      && poisonedParse.malformed.length === 1,
+    `${poisonedParse.tasks?.length} parsed, ${poisonedParse.malformed?.length} malformed`);
+
+  // KFM-07: a hand-maintained count is the number a reader sees, so derive it.
+  const stated = /\*\*Counts:\*\*\s*(\d+)\s*tasks/.exec(boardSrc);
+  check('§14 — the board states its own task count in a re-derivable form', !!stated);
+  check('§14 — ...and that hand-maintained count agrees with the derived one (KFM-07)',
+    !!stated && Number(stated[1]) === headingIds.length,
+    stated ? `header says ${stated[1]}, headings give ${headingIds.length}` : 'no Counts line');
+
+  const countsLine = /\*\*Counts:\*\*[\s\S]{0,240}?\.\n/.exec(boardSrc)?.[0] || '';
+  for (const state of officeContext.BOARD_STATES) {
+    const statedState = new RegExp(`(\\d+)\\s*\`${state}\``).exec(countsLine);
+    check(`§14 — ...and the stated \`${state}\` count matches the derived one`,
+      !!statedState && Number(statedState[1]) === realBoard.counts[state],
+      statedState ? `header ${statedState[1]} vs derived ${realBoard.counts[state]}` : 'not stated');
+  }
+}
+
 console.log(`\n${pass}/${pass + fail} checks passed.`);
 if (fail) { console.log(`${fail} FAILED`); process.exit(1); }
 process.exit(0);

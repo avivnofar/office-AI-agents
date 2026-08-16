@@ -41,6 +41,8 @@ import {
   getProviderUsageToday,
   hasKnownCap,
   dailyCapFor,
+  capFor,
+  paceSpacingFor,
   PROVIDER_REGISTRY,
   LANE_KINDS,
   EMBODIMENT_KIND,
@@ -375,6 +377,22 @@ export async function getRoutingQuotaStatus(env, asOf = new Date()) {
     providers: Object.keys(PROVIDER_REGISTRY).map((id) => {
       const cap = dailyCapFor(tokenEconomy, id);
       const row = byProvider[id];
+      // OB-100: report the pacing a null-cap provider is ACTUALLY held at, and
+      // what that number was derived from. Before this, every null-cap provider
+      // read identically here — `capUnknown: true` and nothing else — so
+      // Cerebras, paced at 3 calls/min against a MEASURED 1,000/min ceiling,
+      // was indistinguishable from a provider nobody had ever measured. The
+      // wrong number was not hidden by a bug; it was simply never displayed.
+      //
+      // capFor(), NOT dailyCapFor(). The first cut of this used dailyCapFor and
+      // reported a 1000ms pacing for Cohere — which is never paced at all, its
+      // cap being MONTHLY, so capFor() finds it and checkProviderAllowance()
+      // takes the counted branch. A status line must show the branch the code
+      // ACTUALLY takes; showing a different one is the defect this whole field
+      // was added to expose, reintroduced by the display of it.
+      const pace = capFor(tokenEconomy, id).cap === null
+        ? paceSpacingFor(tokenEconomy, id, modelRouting)
+        : null;
       return {
         provider: id,
         callsToday: row?.call_count ?? 0,
@@ -386,6 +404,9 @@ export async function getRoutingQuotaStatus(env, asOf = new Date()) {
         // null cap means UNKNOWN, never unlimited — such a provider is
         // constrained by wall-clock pacing instead of a count.
         capUnknown: cap === null,
+        pacingMs: pace?.spacingMs ?? null,
+        pacingBasis: pace?.basis ?? null,
+        ratePerMinute: pace?.ratePerMinute ?? null,
       };
     }),
   };
@@ -422,6 +443,8 @@ export {
   getProviderUsageToday,
   hasKnownCap,
   dailyCapFor,
+  capFor,
+  paceSpacingFor,
   PROVIDER_REGISTRY,
   LANE_KINDS,
   EMBODIMENT_KIND,

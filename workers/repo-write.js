@@ -90,9 +90,23 @@ export const REPO_TO_PROJECT_KEY = {
 // fallback and no default. A repo whose secret is unmapped or unset is a
 // DENIAL — see resolveRepoWrite() step 4.
 //
-// WAREHOUSE_REPO_TOKEN is mapped but NOT SET on the Worker, deliberately —
+// ~~WAREHOUSE_REPO_TOKEN is mapped but NOT SET on the Worker, deliberately —
 // the second lock on the warehouse code-write exception. No session may set
-// it to make a test pass (plan 4.1, owner action).
+// it to make a test pass (plan 4.1, owner action).~~
+//
+// CORRECTED 2026-08-16 (appended, A15 — the sentence above is kept as the
+// record of what was true until 2026-08-11). **THE OWNER SET
+// WAREHOUSE_REPO_TOKEN HIMSELF ON 2026-08-11**, which is his to do and was
+// never the thing the rule forbade — the rule was that no SESSION may set it
+// to make a test pass, and that still stands. Verified by reading the live
+// secret list off the Worker on 2026-08-16: the secret is present.
+//
+// **The second lock is therefore OPEN, and only the code rule remains.** That
+// is the load-bearing consequence and it was still being denied in five places
+// across this repo five days later, this comment among them. A permission
+// claim that has stopped being true is the most expensive kind of stale
+// documentation, because a reader checking whether a path is safe finds a
+// stated impossibility and stops looking.
 export const REPO_TO_TOKEN_SECRET = {
   [REPO_NAME]: 'GITHUB_TOKEN',
   [BACKOFFICE_REPO_NAME]: 'BACKOFFICE_REPO_TOKEN',

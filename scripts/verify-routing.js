@@ -31,6 +31,7 @@ import {
   capFor,
   dailyCapFor,
   hasKnownCap,
+  paceSpacingFor,
   LANE_KINDS,
   EMBODIMENT_KIND,
   SIM_STATE_KEY,
@@ -450,17 +451,71 @@ const missingCred = await checkProviderAllowance({ SIM_KV: null, DB: null }, 'gr
 check('a provider with no credential is denied by name, not silently skipped',
   missingCred.allowed === false && missingCred.reason === 'missing_credential:GROQ_API_KEY', missingCred.reason);
 
-// Unknown cap: paced, never treated as unlimited.
+/* ── 4c. Pacing: a null DAILY cap does not mean an unmeasured RATE ───────── */
+//
+// OB-100, 2026-08-16. These checks were written against `cerebras` and asserted
+// that it is paced at the blanket 20s floor. That was TRUE and it was the
+// defect: Cerebras' per-minute rate was measured at 1,000 on 2026-08-06 and
+// written into token-economy.json, and no code path read `requests_per_minute`,
+// so the office scheduled the provider at 3 calls/min — 0.3% of a limit it had
+// already established. Measured cost in production: Cerebras reviewed 0 of 7
+// reports that went through a revision round, because a REVISE fires a second
+// judgment-lane call seconds after the first and the floor denied it.
+//
+// Rewritten as PROPERTY assertions rather than re-pinned to new numbers
+// (KFM-04c): the properties are "a measured rate sizes the spacing", "an
+// unmeasured rate keeps the floor", and "the two are distinguishable in the
+// denial reason". Each branch is exercised on a provider that really is in that
+// state today, so neither branch can rot into a test of nothing.
+console.log('\n--- Pacing: derived from a measured rate, floor only where unmeasured ---');
+
+const cerebrasPace = paceSpacingFor(tokenEconomy, 'cerebras', routingConfig);
+const imagesPace = paceSpacingFor(tokenEconomy, 'cloudflare-images', routingConfig);
+
+check('cerebras has a MEASURED per-minute rate in the config',
+  tokenEconomy.providers.cerebras.requests_per_minute === 1000);
+check('...and the pacing is now DERIVED from it, not from the blanket floor',
+  cerebrasPace.basis === 'measured_rate' && cerebrasPace.ratePerMinute === 1000, JSON.stringify(cerebrasPace));
+check('...at 60000/(rate x soft_stop_fraction), the same 60% headroom the counted path uses',
+  cerebrasPace.spacingMs === Math.ceil(60_000 / (1000 * routingConfig.soft_stop_fraction)), cerebrasPace.spacingMs);
+check('[FAILS-OLD] the derived spacing is strictly TIGHTER than the 20s floor it replaced',
+  cerebrasPace.spacingMs < routingConfig.unknown_cap_min_spacing_ms, cerebrasPace.spacingMs);
+check('mistral, measured at 50/min, derives a LOOSER spacing than cerebras — the rate drives it',
+  paceSpacingFor(tokenEconomy, 'mistral', routingConfig).spacingMs
+    > cerebrasPace.spacingMs);
+
+check('cloudflare-images publishes NO rate, so it is null in the config (unknown, never unlimited)',
+  tokenEconomy.providers.cloudflare_images.requests_per_minute === null);
+check('...and it therefore KEEPS the 20s floor — the floor still exists and still binds',
+  imagesPace.basis === 'unknown' && imagesPace.spacingMs === routingConfig.unknown_cap_min_spacing_ms);
+check('the floor still matches gemini-pacer.js\'s proven 20s conservative floor',
+  routingConfig.unknown_cap_min_spacing_ms === tokenEconomy.notebook_x_gemini_pacing.min_spacing_ms_between_calls);
+check('the floor is also the CEILING: no derived spacing may be looser than it',
+  Object.keys(PROVIDER_REGISTRY)
+    .map((id) => paceSpacingFor(tokenEconomy, id, routingConfig).spacingMs)
+    .every((ms) => ms <= routingConfig.unknown_cap_min_spacing_ms));
+
+// Both branches are still PACED — the point was never to stop pacing.
 const pacedEnv = onEnv({});
 const first = await checkProviderAllowance(pacedEnv, 'cerebras', { tokenEconomy, routingConfig, now: 1_000_000 });
-check('an unknown-cap provider is allowed on its first call', first.allowed === true && first.capUnknown === true);
-const tooSoon = await checkProviderAllowance(pacedEnv, 'cerebras', { tokenEconomy, routingConfig, now: 1_005_000 });
-check('an unknown-cap provider is PACED, not treated as unlimited', tooSoon.allowed === false);
-check('...and the pacing denial reason is `unknown_cap_paced`', tooSoon.reason === 'unknown_cap_paced', tooSoon.reason);
-const laterOk = await checkProviderAllowance(pacedEnv, 'cerebras', { tokenEconomy, routingConfig, now: 1_000_000 + routingConfig.unknown_cap_min_spacing_ms + 1 });
-check('...and it is allowed again once the spacing has elapsed', laterOk.allowed === true);
-check('the spacing floor matches gemini-pacer.js\'s proven 20s conservative floor',
-  routingConfig.unknown_cap_min_spacing_ms === tokenEconomy.notebook_x_gemini_pacing.min_spacing_ms_between_calls);
+check('a measured-rate provider is allowed on its first call', first.allowed === true && first.capUnknown === true);
+const tooSoon = await checkProviderAllowance(pacedEnv, 'cerebras', { tokenEconomy, routingConfig, now: 1_000_000 + cerebrasPace.spacingMs - 1 });
+check('a measured-rate provider is STILL PACED, not treated as unlimited', tooSoon.allowed === false);
+check('...and its denial reason is `rate_paced`, naming what actually produced it (KFM-27)',
+  tooSoon.reason === 'rate_paced', tooSoon.reason);
+check('...and the denial reports the spacing and the rate it came from',
+  tooSoon.pacing.spacingMs === cerebrasPace.spacingMs && tooSoon.pacing.ratePerMinute === 1000);
+const laterOk = await checkProviderAllowance(pacedEnv, 'cerebras', { tokenEconomy, routingConfig, now: 1_000_000 + cerebrasPace.spacingMs + 1 });
+check('...and it is allowed again once its derived spacing has elapsed', laterOk.allowed === true);
+
+const imgEnv = onEnv({});
+await checkProviderAllowance(imgEnv, 'cloudflare-images', { tokenEconomy, routingConfig, now: 1_000_000 });
+const imgTooSoon = await checkProviderAllowance(imgEnv, 'cloudflare-images', { tokenEconomy, routingConfig, now: 1_005_000 });
+check('an UNMEASURED provider is denied 5s later — the 20s floor is untouched', imgTooSoon.allowed === false);
+check('...and its reason stays `unknown_cap_paced`, which is now true only where it is true',
+  imgTooSoon.reason === 'unknown_cap_paced', imgTooSoon.reason);
+check('[FAILS-OLD] the two paced cases are DISTINGUISHABLE — one reason string could not tell them apart',
+  tooSoon.reason !== imgTooSoon.reason);
 
 /* ── 5. Degradation ladder ──────────────────────────────────────────────── */
 console.log('\n--- Degradation: deny -> backup -> skip, never a throw ---');

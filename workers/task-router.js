@@ -769,6 +769,75 @@ export function hasKnownCap(tokenEconomy, providerId) {
 }
 
 /**
+ * The wall-clock spacing this provider is actually paced at, and WHY.
+ *
+ * ── OB-100, 2026-08-16. THE MEASUREMENT WAS TAKEN AND NOTHING READ IT. ─────
+ *
+ * `config/model-routing.json`'s `_unknown_cap_meta` promised: *"Once a real
+ * cap is established by the supervised test, fill it into token-economy.json
+ * and the count check takes over automatically; nothing here needs editing."*
+ * The real cap WAS established on 2026-08-06 — Cerebras **1,000 requests per
+ * minute**, Mistral **50** — read off live rate-limit headers and written into
+ * `config/token-economy.json`. The count check did not take over, because the
+ * numbers landed in `requests_per_minute` and `capFor()` reads only
+ * `requests_per_day` / `requests_per_month`. **No code path has ever read
+ * `requests_per_minute`.**
+ *
+ * So both providers kept falling through to the blanket 20-second floor, which
+ * permits **3 calls per minute**. Measured against Cerebras' measured 1,000,
+ * the office was scheduling at 0.3% of a limit it had already established —
+ * and paying for it in the one place it is most visible: **every report that
+ * went through a revision round was finally reviewed by the BACKUP provider,
+ * never the primary — 0 of 7 in the live `report_pipeline` table**, because a
+ * REVISE issues a second `runReview()` seconds after the first
+ * (`agent-runner.js`) and the floor denies it.
+ *
+ * KFM-26's shape applied to a measurement rather than to a gate: the right
+ * thing was built, and wired nowhere.
+ *
+ * ── WHAT THIS RETURNS, AND WHAT IT HONESTLY CANNOT DO ─────────────────────
+ *
+ * A KNOWN per-minute rate is paced from that rate at the same 60% soft stop
+ * the counted path uses — `60000 / (rpm × soft_stop_fraction)`. Cerebras 100ms,
+ * Mistral 2000ms. An UNKNOWN rate keeps the 20-second floor, unchanged.
+ *
+ * **This is not enforcement below ~60 seconds and must not be read as such.**
+ * KFM-16 established that Workers KV caches reads at the edge for up to 60
+ * seconds, so a spacing shorter than that cannot be held by a KV timestamp
+ * however the code is arranged. The honest statement is that a measured-rate
+ * spacing is ADVISORY, permissive-direction, and the constraint that actually
+ * bounds this provider is the **50-subrequest invocation ceiling**
+ * (`subrequest-budget.js`), which caps calls per tick regardless. That is why
+ * moving Cerebras from 3/min to a nominal 600/min is safe: the tick ceiling,
+ * not the pacer, is what stands between the office and the free tier.
+ *
+ * Deriving the number rather than choosing one also means a corrected
+ * `requests_per_minute` in the config changes the pacing with no code edit —
+ * which is what the config already promised and could not deliver.
+ *
+ * @returns {{spacingMs: number, basis: 'measured_rate'|'unknown', ratePerMinute: number|null}}
+ */
+export function paceSpacingFor(tokenEconomy, providerId, routingConfig) {
+  const fallbackMs = routingConfig?.unknown_cap_min_spacing_ms ?? 20_000;
+  const key = PROVIDER_REGISTRY[providerId]?.tokenEconomyKey;
+  const rpm = key ? (tokenEconomy?.providers?.[key]?.requests_per_minute ?? null) : null;
+
+  // A null rate means UNKNOWN, never unlimited — the same rule the null daily
+  // cap carries, and the reason the 20s floor exists at all.
+  if (!Number.isFinite(rpm) || rpm <= 0) {
+    return { spacingMs: fallbackMs, basis: 'unknown', ratePerMinute: null };
+  }
+
+  const fraction = routingConfig?.soft_stop_fraction ?? 0.6;
+  const permitted = rpm * fraction;
+  // Never below 1ms and never ABOVE the unknown-rate floor: a provider that
+  // published a rate slower than 3/min should be paced at least as hard as one
+  // that published nothing.
+  const spacingMs = Math.min(fallbackMs, Math.max(1, Math.ceil(60_000 / permitted)));
+  return { spacingMs, basis: 'measured_rate', ratePerMinute: rpm };
+}
+
+/**
  * Wall-clock pacing for a provider whose daily cap is UNKNOWN.
  *
  * An unknown cap cannot be enforced by counting, and treating it as
@@ -777,6 +846,10 @@ export function hasKnownCap(tokenEconomy, providerId) {
  * by a KV timestamp. Mechanism and 20s floor both lifted from
  * workers/gemini-pacer.js, which solves the same problem for the same
  * reason — a quota this repo cannot observe.
+ *
+ * `minSpacingMs` is chosen by `paceSpacingFor()` since 2026-08-16 (OB-100):
+ * a measured per-minute rate sizes it, an unmeasured one keeps the 20s floor.
+ * This function is unchanged and takes the number it is given.
  *
  * Check-and-set, like the pacer: an allowed check consumes the slot. If a
  * later gate then denies the call, the slot is spent without a call being
@@ -832,14 +905,23 @@ export async function checkProviderAllowance(env, providerId, {
   const { cap, period } = capFor(tokenEconomy, providerId);
 
   if (cap === null) {
-    const spacing = routingConfig?.unknown_cap_min_spacing_ms ?? 20_000;
-    const pacing = await checkUnknownCapPacing(env, providerId, spacing, now ?? asOf.getTime());
+    // OB-100: the spacing is DERIVED from a measured per-minute rate where one
+    // exists, and only falls back to the blanket 20s floor where it does not.
+    // See paceSpacingFor().
+    const spacing = paceSpacingFor(tokenEconomy, providerId, routingConfig);
+    const pacing = await checkUnknownCapPacing(env, providerId, spacing.spacingMs, now ?? asOf.getTime());
+    // TWO DENIAL REASONS, DELIBERATELY. `unknown_cap_paced` said something
+    // false about Cerebras and Mistral for ten days — their rate is known and
+    // measured; it was their DAILY cap that was unknown, and the label named
+    // the wrong one. A reader of an `attempts` array could not tell a provider
+    // nobody had measured from one measured and then ignored. KFM-27: a number
+    // (or a reason) must be named after what actually produced it.
     return {
       ...base,
       allowed: pacing.allowed,
       capUnknown: true,
-      reason: pacing.allowed ? null : 'unknown_cap_paced',
-      pacing,
+      reason: pacing.allowed ? null : (spacing.basis === 'measured_rate' ? 'rate_paced' : 'unknown_cap_paced'),
+      pacing: { ...pacing, spacingMs: spacing.spacingMs, basis: spacing.basis, ratePerMinute: spacing.ratePerMinute },
     };
   }
 

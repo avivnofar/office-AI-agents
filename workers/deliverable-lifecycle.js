@@ -88,11 +88,30 @@
  * `completed`/`history` that `run-controller.js` already reads. One file, with
  * the artifact, so a record cannot outlive or drift from the thing it records.
  *
- * **The live Worker cannot write there and MUST NOT BE MADE ABLE TO.**
+ * ~~**The live Worker cannot write there and MUST NOT BE MADE ABLE TO.**
  * `WAREHOUSE_REPO_TOKEN` is mapped in `config/project-permissions.json` and
  * deliberately unset — two independent locks (the code rule and the absent
- * token), and this module does not touch either. That is a constraint on the
- * design, and the design absorbs it rather than working around it:
+ * token), and this module does not touch either.~~
+ *
+ * **CORRECTED 2026-08-16 (appended, A15). ONE OF THE TWO LOCKS IS OPEN.** The
+ * owner set `WAREHOUSE_REPO_TOKEN` himself on 2026-08-11 — verified by reading
+ * the live secret list off the Worker — and `agent-runner.js`'s
+ * `warehouse_write` trigger is a real call site that will commit **any path**
+ * to the warehouse, `tasks/<slug>/STATE.json` included. So "cannot" is now
+ * "does not": the endpoint is admin-token gated and manual, reserved for
+ * owner-directed Architect sessions, and no autonomous path reaches it.
+ *
+ * **This matters most to `CTL-02`** in `docs/KNOWN-FAILURE-MODES.md`, which
+ * recorded a control that held and gave its reason as *"the Worker cannot write
+ * STATE.json at all, so the office could propose a fabricated reviewer and
+ * never write one."* The OUTCOME still holds — the back record replayed clean
+ * — but the reason is now a design rule and an absent caller rather than an
+ * absent credential, which is a weaker guarantee and is written down as one. A
+ * control whose stated basis has quietly changed is still a control; it is just
+ * no longer the control anybody verified.
+ *
+ * The constraint below is therefore a DESIGN constraint, and the design absorbs
+ * it rather than working around it:
  *
  *   THE OFFICE DECIDES IN BACK-OFFICE. THE WAREHOUSE-SIDE RUN APPLIES.
  *
@@ -1141,8 +1160,15 @@ export function shiftAllowance(allowance = {}, { phase = null } = {}) {
   if (allowance.allowed === true) return { proceed: true, reason: null, stopBecause: null };
 
   const reason = allowance.reason || 'unknown';
+  // OB-100: a paced provider has two distinguishable cases and the message says
+  // which. "No known cap" was written when neither was measured; it is false of
+  // a provider whose per-minute rate IS measured and whose DAILY cap is the
+  // unknown one. Reads the basis the allowance reports rather than restating a
+  // fact about a provider it cannot see.
   const detail = allowance.capUnknown
-    ? `${allowance.providerId || 'provider'} has no known cap and is wall-clock paced; the slot is not open yet`
+    ? (allowance.pacing?.basis === 'measured_rate'
+      ? `${allowance.providerId || 'provider'} is wall-clock paced at ${allowance.pacing.spacingMs}ms, derived from its measured ${allowance.pacing.ratePerMinute}/min rate; the slot is not open yet`
+      : `${allowance.providerId || 'provider'} has no known cap and is wall-clock paced; the slot is not open yet`)
     : `${allowance.providerId || 'provider'} is at ${allowance.callsToday ?? '?'} calls against a ${allowance.softStop ?? '?'} soft stop (60% of ${allowance.cap ?? '?'})`;
 
   return {
@@ -1414,9 +1440,15 @@ export function renderInFlightFile(records = [], { at = null } = {}) {
     '> location (warehouse `tasks/`, back-office `tools/`; see LOCATIONS in',
     '> `workers/deliverable-lifecycle.js`), not one hardcoded root. **The',
     '> STATE.json is authoritative**; if this file and it disagree, this file is',
-    '> the stale one and the next run of that tool fixes it. It exists because the',
-    '> live Worker cannot read the warehouse — `WAREHOUSE_REPO_TOKEN` is',
-    '> deliberately unset — and a meeting handed a gap COUNT cannot act on it.',
+    // CORRECTED 2026-08-16. This rendered line told every reader of the
+    // generated file that `WAREHOUSE_REPO_TOKEN` is unset. It has been set
+    // since 2026-08-11. A derived file is regenerated rather than appended to,
+    // so the correction lives in this generator and in the plan log — but the
+    // sentence it EMITS has to be true, and a false permission claim inside a
+    // published artifact is worse than the same claim in a comment.
+    '> the stale one and the next run of that tool fixes it. It exists because',
+    '> nothing in the live Worker READS the warehouse — no call site fetches',
+    '> from it — and a meeting handed a gap COUNT cannot act on it.',
     '',
     `*(Generated ${at || 'undated'} · ${live.length} in flight)*`,
     '',

@@ -149,9 +149,14 @@ const QUESTIONS_PATH = 'channel/to-owner/OPEN-QUESTIONS.md';
  * deliverable in review VISIBLE — to a meeting that must assign the reviews, to
  * an agent who owes one, and to the weekly report.
  *
- * It lives in back-office because the Worker CANNOT READ THE WAREHOUSE, where
+ * It lives in back-office because ~~the Worker CANNOT READ THE WAREHOUSE, where
  * the authoritative record is: `WAREHOUSE_REPO_TOKEN` is deliberately unset and
- * stays unset. `scripts/lifecycle.mjs` rewrites this file wholesale from the
+ * stays unset~~ — **CORRECTED 2026-08-16: the owner set `WAREHOUSE_REPO_TOKEN`
+ * on 2026-08-11, verified against the live secret list, so "cannot" is no
+ * longer true.** The reason this file lives here is now the DESIGN rule rather
+ * than an absent credential: the office decides in back-office and the
+ * warehouse-side run applies, so there is exactly one writer of a lifecycle
+ * record. `scripts/lifecycle.mjs` rewrites this file wholesale from the
  * warehouse records on every run.
  */
 const LIFECYCLE_PATH = 'campus/shared/lifecycle/IN-FLIGHT.md';
@@ -644,9 +649,13 @@ export function parseBoard(markdown) {
       //
       // `Stage:` is the deliverable lifecycle's projection onto the board —
       // where a BUILT thing has got to in the review loop (see
-      // workers/deliverable-lifecycle.js). It exists because the office cannot
+      // workers/deliverable-lifecycle.js). It exists because ~~the office cannot
       // read the warehouse: `WAREHOUSE_REPO_TOKEN` is deliberately unset and
-      // stays unset, so this one line is how a meeting learns that a
+      // stays unset~~ — CORRECTED 2026-08-16: the owner set that secret on
+      // 2026-08-11 (verified against the live secret list), so the reason is
+      // no longer an absent credential. It is that NOTHING IN THE WORKER READS
+      // THE WAREHOUSE — no call site fetches from it, only `warehouse_write`
+      // pushes to it — so this one line is still how a meeting learns that a
       // deliverable is sitting in IN-REVIEW waiting on four admins.
       //
       // IT IS THE SAME KIND OF THING `Dispatched:` AND `Offered:` ARE, and it

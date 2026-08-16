@@ -57,7 +57,21 @@ function section(title) {
   console.log(`\n${title}`);
 }
 
-const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8');
+// NORMALISED 2026-08-16 (OB-070's defect class, second instance — KFM-04b).
+// One source-text check here matched a try/catch across `[\s\S]{0,200}` bounds.
+// The owner's `core.autocrlf=true` checks agent-runner.js out with CRLF, which
+// adds one character per line, and 6,196 extra characters push a bounded match
+// past its limit. The property being asserted was TRUE in the source the whole
+// time: the same regex matches once line endings are normalised.
+//
+// Fixed in the shared reader rather than in the one regex, deliberately. Every
+// source-text assertion in this file is bounded the same way, so patching the
+// regex that happened to be caught would leave the next one to be found by a
+// red run on somebody's laptop. A verifier that is red for an ENVIRONMENTAL
+// reason is worse than no verifier — it teaches the reader that red means
+// nothing. Same remedy and same reasoning as `verify-permissions.js`'s
+// publishing-split block.
+const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 
 /* ══════════════════════════════════════════════════════════════════════════
  * §1  THE SWITCH — off is off, and off is the default
