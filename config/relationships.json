@@ -2,7 +2,7 @@
   "_meta": {
     "version": "0.1.0",
     "status": "specified",
-    "description": "Cross-agent dynamics for the 11-agent simulation: rivalries, partnerships, and trait inheritance. Consumed by meeting-engine.js and agent-runner.js to decide who gets pulled into a session, audit, huddle, or escalation, and how mood/trait effects propagate between agents.",
+    "description": "Cross-agent dynamics for the 13-agent office: rivalries, partnerships, and trait inheritance. Consumed by meeting-engine.js and agent-runner.js to decide who gets pulled into a session, audit, huddle, or escalation, and how mood/trait effects propagate between agents.",
     "agent_index": {
       "1": "The Perfectionist",
       "2": "The Productive",
@@ -14,7 +14,9 @@
       "8": "The Lead QA",
       "9": "The Designer",
       "10": "The Architect",
-      "11": "The CEO"
+      "11": "The CEO",
+      "12": "The Workflow",
+      "13": "The Cyber Expert"
     }
   },
   "rivalries": [
@@ -225,7 +227,8 @@
       8,
       9,
       10,
-      12
+      12,
+      13
     ],
     "monthly": [
       11,
@@ -233,7 +236,8 @@
       7,
       8,
       10,
-      12
+      12,
+      13
     ],
     "quarterly": [
       11,
@@ -269,5 +273,6 @@
       12
     ]
   },
-  "_meta_meeting_attendees_2026_08_07": "Weekly gained Agent 10 (The Architect) and Agent 12 (The Workflow); daily_standup and monthly gained 12; closing_qa_review added as a new meeting type (QA 6, Team Lead 7, Workflow 12). THE ARCHITECT WAS NEVER EXCLUDED FROM MEETINGS — relationships.json already seated him in monthly, quarterly, semi_yearly and yearly. What he is excluded from is the EMBODIMENT SHUFFLE (assignEmbodiment() in task-router.js skips him by id AND by name), which is a different mechanism and STAYS AS IT IS. His meeting participation runs on a FREE provider through the meeting engine (Gemini/Groq, Cloudflare fallback) and MUST NEVER be routed to Anthropic — that budget is for owner-directed Architect work and genuine data-center Q&A, and office meeting participation is exactly the persona chatter it forbids. See runMeeting()'s header. Owner decision, 2026-08-07."
+  "_meta_meeting_attendees_2026_08_07": "Weekly gained Agent 10 (The Architect) and Agent 12 (The Workflow); daily_standup and monthly gained 12; closing_qa_review added as a new meeting type (QA 6, Team Lead 7, Workflow 12). THE ARCHITECT WAS NEVER EXCLUDED FROM MEETINGS — relationships.json already seated him in monthly, quarterly, semi_yearly and yearly. What he is excluded from is the EMBODIMENT SHUFFLE (assignEmbodiment() in task-router.js skips him by id AND by name), which is a different mechanism and STAYS AS IT IS. His meeting participation runs on a FREE provider through the meeting engine (Gemini/Groq, Cloudflare fallback) and MUST NEVER be routed to Anthropic — that budget is for owner-directed Architect work and genuine data-center Q&A, and office meeting participation is exactly the persona chatter it forbids. See runMeeting()'s header. Owner decision, 2026-08-07.",
+  "_meta_meeting_attendees_2026_08_17": "AGENT 13 (The Cyber Expert) GAINED `weekly` AND `monthly`. Agents 12 and 13 joined the roster on the SAME day, 2026-08-07; the block above records every list 12 was added to and never once names 13. The result, measured rather than assumed: over 2026-08-10..17 the back-office journal (one entry per attendee per meeting) recorded 33/28/29/22 entries for agents 1-4, 5-12 for agents 5/6/7/12, exactly 1 each for 8/9/10/11 — and ZERO for 13. He was the only agent on the roster that no meeting, no block and no D1 row reached; his sole scheduled path was `.github/workflows/weekly-capability-audit.yml`, which runs OUTSIDE the Worker. WHY WEEKLY AND MONTHLY AND NOT THE DAILY TWO: these are A12's two SUBSTANTIVE meetings, and his work is weekly-cadence by construction — the capability audit runs Sunday 06:00 UTC and the KNOWN-FAILURE-MODES walk is a weekly reading. Seating him at the daily standup would be a chair filled every day by an agent whose input arrives once a week, which is this project's own 'a scheduled path with no real input' failure. HIS REAL INPUT AT THAT TABLE, so this is not a decorative seat: 12 board tasks (10 READY), the findings ledger, and the capability audit posted to the board inbox the Sunday before. COST: none in subrequests — a meeting is ONE model call whose prompt lists the attendees; the only per-attendee cost is one journal commit, on the Friday 12:00 tick, which admitted at 34 estimated against a measured actual well under it. AND IT CLOSES A FABRICATION ROUTE FROM THE OTHER SIDE: KFM-01's instance was model-generated transcripts giving Agent 13 speaking lines and board self-assignments in meetings he did not attend. enforceAttendeeGate() now refuses those. Seating him legitimately is the fix at the layer where the absence actually was."
 }
