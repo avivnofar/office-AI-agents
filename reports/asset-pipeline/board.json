@@ -9,7 +9,8 @@
       "tested",
       "optimized",
       "implemented"
-    ]
+    ],
+    "tool_task_window_retired_2026_08_17": "The four standing-project items below (qa-knowledge-base, archives-app, designer-tooling-suite, architect-org-products) each carry a `retirement_reason`. They are the four config/ai-tools.json weekly_rotation pointed the retired tool_task_window block at. Nothing about the PIPELINE is retired — a returned asset still enters here — only the daily block that watched for new queued items that a human alone can create."
   },
   "items": [
     {
@@ -35,9 +36,17 @@
           "day": 5,
           "stage": "queued",
           "note": "asset-task issue filed (auto, tool_task_window)"
+        },
+        {
+          "day": null,
+          "date": "2026-08-17",
+          "stage": "queued",
+          "note": "tool_task_window retired from the schedule (OB-132) — this item keeps its stage and its Issue; only the timer watching it is gone."
         }
       ],
-      "asset_task_issue_filed": true
+      "asset_task_issue_filed": true,
+      "scheduled_window_retired": "2026-08-17",
+      "retirement_reason": "RETIRED FROM THE SCHEDULE 2026-08-17 (OB-132). Its asset-task Issue was filed once, on the simulation day recorded above, and the item has sat at stage \"queued\" ever since — advancing it is a human act performed inside an external tool with no unattended API, and it has not happened. The Sun-Thu 11:30 tool_task_window block that watched this item was removed from config/daily-schedule.json the same day: it fired every weekday, was admitted as decision:run, and could never do anything again. The item is NOT deleted and the capability is NOT gone — POST /api/agents/trigger {\"type\":\"asset_task_window\"} still files its Issue the day a human genuinely picks this up."
     },
     {
       "id": "archives-app",
@@ -64,9 +73,17 @@
           "day": 6,
           "stage": "queued",
           "note": "asset-task issue filed (auto, tool_task_window)"
+        },
+        {
+          "day": null,
+          "date": "2026-08-17",
+          "stage": "queued",
+          "note": "tool_task_window retired from the schedule (OB-132) — this item keeps its stage and its Issue; only the timer watching it is gone."
         }
       ],
-      "asset_task_issue_filed": true
+      "asset_task_issue_filed": true,
+      "scheduled_window_retired": "2026-08-17",
+      "retirement_reason": "RETIRED FROM THE SCHEDULE 2026-08-17 (OB-132). Its asset-task Issue was filed once, on the simulation day recorded above, and the item has sat at stage \"queued\" ever since — advancing it is a human act performed inside an external tool with no unattended API, and it has not happened. The Sun-Thu 11:30 tool_task_window block that watched this item was removed from config/daily-schedule.json the same day: it fired every weekday, was admitted as decision:run, and could never do anything again. The item is NOT deleted and the capability is NOT gone — POST /api/agents/trigger {\"type\":\"asset_task_window\"} still files its Issue the day a human genuinely picks this up."
     },
     {
       "id": "designer-tooling-suite",
@@ -91,9 +108,17 @@
           "day": 7,
           "stage": "queued",
           "note": "asset-task issue filed (auto, tool_task_window)"
+        },
+        {
+          "day": null,
+          "date": "2026-08-17",
+          "stage": "queued",
+          "note": "tool_task_window retired from the schedule (OB-132) — this item keeps its stage and its Issue; only the timer watching it is gone."
         }
       ],
-      "asset_task_issue_filed": true
+      "asset_task_issue_filed": true,
+      "scheduled_window_retired": "2026-08-17",
+      "retirement_reason": "RETIRED FROM THE SCHEDULE 2026-08-17 (OB-132). Its asset-task Issue was filed once, on the simulation day recorded above, and the item has sat at stage \"queued\" ever since — advancing it is a human act performed inside an external tool with no unattended API, and it has not happened. The Sun-Thu 11:30 tool_task_window block that watched this item was removed from config/daily-schedule.json the same day: it fired every weekday, was admitted as decision:run, and could never do anything again. The item is NOT deleted and the capability is NOT gone — POST /api/agents/trigger {\"type\":\"asset_task_window\"} still files its Issue the day a human genuinely picks this up."
     },
     {
       "id": "architect-org-products",
@@ -118,9 +143,17 @@
           "day": 8,
           "stage": "queued",
           "note": "asset-task issue filed (auto, tool_task_window)"
+        },
+        {
+          "day": null,
+          "date": "2026-08-17",
+          "stage": "queued",
+          "note": "tool_task_window retired from the schedule (OB-132) — this item keeps its stage and its Issue; only the timer watching it is gone."
         }
       ],
-      "asset_task_issue_filed": true
+      "asset_task_issue_filed": true,
+      "scheduled_window_retired": "2026-08-17",
+      "retirement_reason": "RETIRED FROM THE SCHEDULE 2026-08-17 (OB-132). Its asset-task Issue was filed once, on the simulation day recorded above, and the item has sat at stage \"queued\" ever since — advancing it is a human act performed inside an external tool with no unattended API, and it has not happened. The Sun-Thu 11:30 tool_task_window block that watched this item was removed from config/daily-schedule.json the same day: it fired every weekday, was admitted as decision:run, and could never do anything again. The item is NOT deleted and the capability is NOT gone — POST /api/agents/trigger {\"type\":\"asset_task_window\"} still files its Issue the day a human genuinely picks this up."
     },
     {
       "id": "commandflow",

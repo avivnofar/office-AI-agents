@@ -953,7 +953,16 @@ export function parseRequirements(markdown) {
 
 /* ─────────────────────────────── Fetching ─────────────────────────────── */
 
-async function fetchBackOfficeFile(env, filePath) {
+/*
+ * EXPORTED 2026-08-17, for `agent-runner.js processAdminDeskBlock()`. It was
+ * module-private and had no reason not to be until a second caller needed to
+ * read one known back-office path — the admin-desk block reads a deliverable's
+ * SPEC/README so a reviewer reviews the artifact rather than its summary.
+ *
+ * A second copy of these ten lines in agent-runner.js would be a second place
+ * the auth header, the base64/UTF-8 decode and the failure shape could drift.
+ */
+export async function fetchBackOfficeFile(env, filePath) {
   const url = `https://api.github.com/repos/${BACKOFFICE_REPO_OWNER}/${BACKOFFICE_REPO_NAME}/contents/${filePath}`;
   const res = await fetch(url, {
     headers: {
@@ -997,7 +1006,7 @@ async function fetchBackOfficeFile(env, filePath) {
  * requests every half hour to avoid asking him to maintain a table of contents
  * is the correct trade and it is not close.
  */
-async function fetchBackOfficeDir(env, dirPath) {
+export async function fetchBackOfficeDir(env, dirPath) {
   const url = `https://api.github.com/repos/${BACKOFFICE_REPO_OWNER}/${BACKOFFICE_REPO_NAME}/contents/${dirPath}`;
   const res = await fetch(url, {
     headers: {

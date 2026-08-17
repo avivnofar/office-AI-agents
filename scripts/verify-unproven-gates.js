@@ -57,7 +57,7 @@ import { getClaudeBudgetStatus, resolveTaskLane, resolveImageRoles } from '../wo
 import { actionItemsToBoardEnabled, resolveAttendeeIds } from '../workers/meeting-engine.js';
 // The five added 2026-08-16. The first four became importable only because the
 // modules holding them were made loadable — see §7/§8/§9 and this file's header.
-import { isRestDay, checkReports, checkBranches, branchVerdict } from './report-watchdog.mjs';
+import { isRestDay, checkReports, checkBranches, branchVerdict, checkWorkerLiveness, isWorkerCommit } from './report-watchdog.mjs';
 import { resolveGate } from './cross-project-health-check.mjs';
 import { guidesEnabled } from '../workers/guide-engine.js';
 import { checkKvPacingSlot } from '../workers/gemini-pacer.js';
@@ -346,6 +346,49 @@ check('KFM-13: a FAILED check reports ok=NULL, never false — "could not check"
 check('...and says in words that the check was not performed', /WAS NOT PERFORMED/.test(reportsBroken.detail));
 check('...and is marked offline rather than claiming the github-api method',
   reportsBroken.method === 'offline');
+
+/* ── checkWorkerLiveness — the gate the GitHub Action judges on (OB-130) ────
+ *
+ * Added 2026-08-17 with the caller. `report-watchdog.mjs`'s only caller
+ * anywhere was one line inside the midnight run's prompt, and the owner
+ * disabled that run — so the office had no external check at all from
+ * 2026-08-15. `.github/workflows/external-check.yml` is the caller, and this
+ * is the gate its exit code comes from, so it gets the same three-outcome
+ * treatment `checkReports` above gets: found / did-not / COULD-NOT-TELL.
+ */
+check('a Worker commit is recognised by its message prefix, not its author',
+  isWorkerCommit('chore(agents): data-center capability-gap digest — 2026-08-16 [skip ci]') === true
+  && isWorkerCommit('chore(office): weekly QA instruments 2026-08-16 [skip ci]') === true
+  && isWorkerCommit('office: Agent 6 review on verifier-count-ledger round 0 [skip ci]') === true);
+check('FALSIFIABLE: a human session commit is NOT counted as the Worker being alive',
+  isWorkerCommit('Agent 13 joined the roster ten days ago and was seated at no meeting') === false
+  && isWorkerCommit('') === false);
+const liveYes = await checkWorkerLiveness('2026-08-17', {
+  exec: () => JSON.stringify([
+    { commit: { message: 'a human session commit' } },
+    { commit: { message: 'chore(agents): guide draft rejected — x [skip ci]' } },
+  ]),
+});
+check('FALSIFIABLE: one Worker commit among human ones is a pass, and only it is counted',
+  liveYes.ok === true && liveYes.commits === 1);
+const liveNo = await checkWorkerLiveness('2026-08-17', {
+  exec: () => JSON.stringify([{ commit: { message: 'a human session commit' } }]),
+});
+check('REFUSES: a day of human commits with no Worker commit is an ALARM, not a pass',
+  liveNo.ok === false && liveNo.commits === 0);
+check('...and the alarm says the cron may not be firing, rather than only a count',
+  /cron may not be firing/.test(liveNo.detail));
+const liveBroken = await checkWorkerLiveness('2026-08-17', {
+  exec: () => { throw new Error('gh: not authenticated'); },
+});
+check('KFM-13 again: an unreachable API is ok=NULL, never false — "could not tell" is not "did not run"',
+  liveBroken.ok === null && /WAS NOT PERFORMED/.test(liveBroken.detail));
+check('...and it does not claim the github-api method it never reached',
+  liveBroken.method === 'unreachable');
+check('a non-list response is a failed check, not zero commits',
+  (await checkWorkerLiveness('2026-08-17', { exec: () => '{"message":"Not Found"}' })).ok === null);
+check('the liveness signal labels itself WEAK — it is not the daily-summary check',
+  liveYes.signal === 'weak');
 
 // checkBranches + branchVerdict — policy A7's evidence.
 const fakeRefs = (lines) => (cmd, args) => {

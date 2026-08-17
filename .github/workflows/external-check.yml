@@ -1,0 +1,121 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# THE EXTERNAL CHECK — policy A16's caller (OB-130)
+#
+#   > A16. Watching the watchers
+#   > The Workflow catches stalled work, idle agents and missed metric lines.
+#   > He cannot catch a failure that stops him from running.
+#   > An external check is therefore required: something outside the Worker
+#   > that asks "was a report written today?" and says so if not.
+#
+# `scripts/report-watchdog.mjs` was built for this on 2026-08-10 and its ONLY
+# caller anywhere was one line inside the midnight Architect run's own prompt.
+# The owner disabled that run, so **the office has had no external check since
+# 2026-08-15** — a watchdog with no caller, which is the same defect shape the
+# watchdog was built to catch, one level up.
+#
+# ── WHY A GITHUB ACTION, AND WHY IT NEEDS NO NEW SECRET ─────────────────────
+#
+# A16 asks for something outside the Worker. A workflow here is outside it on
+# every axis that matters: a GitHub runner, not Cloudflare's edge; Actions cron,
+# not the Worker's own cron; GitHub's API, not the Worker's routes. If the
+# Worker stops being invoked, this still runs and still answers.
+#
+# It runs `--liveness`, which asks whether the LIVE WORKER COMMITTED ANYTHING TO
+# THIS PUBLIC REPO TODAY. That is a weaker question than the daily-summary check
+# `--reports` makes, and the script labels it as weaker everywhere it prints.
+# It is the question that can be asked with the automatic `GITHUB_TOKEN` and no
+# cross-repo credential: the daily summaries live in the PRIVATE
+# back-office-AI-agents repo, and reading a second private repo from here would
+# need a new secret, which the remedy for OB-130 rules out.
+#
+# The signal is real. Measured over 2026-08-06..2026-08-17: the Worker committed
+# to this repo on every non-Saturday, 1-14 commits a day, and zero on the one
+# Saturday. A work day with none has not happened while the office was healthy.
+#
+# ── HOW IT ALARMS: THE RUN GOES RED. NO ISSUE IS FILED. ────────────────────
+#
+# Deliberate. This repo's standing rule is that machine-generated findings never
+# open a GitHub Issue (CLAUDE.md, the 2026-07-18 rebuild), and the one Issue path
+# that does exist — `owner-notify.js` — is owner-approved correspondence with its
+# own label and its own kill switch. A watchdog is neither. A failed workflow run
+# is GitHub's own alarm: a red X on the Actions tab and the failure email the
+# owner already receives for every other workflow in this repo. No new channel,
+# no new consent, nothing to mute separately.
+#
+# Exit codes come from the script and all three are distinct:
+#   0  the Worker wrote today, or today is Saturday (A13's rest day)
+#   1  IT DID NOT — the run fails
+#   2  the check could not be performed — the run ALSO fails, because
+#      "I could not tell" must never be filed as health. That is this project's
+#      most-repeated defect and reproducing it inside the check built to catch
+#      it would be grotesque.
+# ─────────────────────────────────────────────────────────────────────────────
+name: External check (A16)
+
+on:
+  schedule:
+    # 16:00 UTC = 19:00 Israel (IDT). After the office day's last block
+    # (16:30 Israel) and well before midnight, so "today" is unambiguous in
+    # both zones and a late block still has two and a half hours to land.
+    #
+    # DST CAVEAT, the same one wrangler.toml carries: this is written for IDT
+    # (UTC+3). When Israel moves to IST (UTC+2, late October) this fires at
+    # 18:00 local instead of 19:00 — still after the day closes, so it keeps
+    # working, but the comment above stops being literally true.
+    - cron: '0 16 * * *'
+  workflow_dispatch:
+    inputs:
+      date:
+        description: 'Check a specific Israel date (YYYY-MM-DD). Leave blank for today.'
+        required: false
+        default: ''
+
+permissions:
+  # Read-only, and that is the whole grant. This job commits nothing, opens
+  # nothing and comments nowhere — it reads the commit list and sets an exit
+  # code. A watchdog with write access is a watchdog that can damage the thing
+  # it is watching.
+  contents: read
+
+jobs:
+  external-check:
+    name: Did the Worker write today?
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run the A16 external check
+        env:
+          # `gh` picks this up automatically. It is the automatic per-run token,
+          # not a secret anybody configured — scoped to this repo, read-only per
+          # the permissions block above, and it expires when the run ends.
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          ARGS="--liveness"
+          if [ -n "${{ github.event.inputs.date }}" ]; then
+            ARGS="$ARGS --date=${{ github.event.inputs.date }}"
+          fi
+          echo "running: node scripts/report-watchdog.mjs $ARGS"
+          set +e
+          node scripts/report-watchdog.mjs $ARGS | tee watchdog.txt
+          CODE=${PIPESTATUS[0]}
+          set -e
+          echo "watchdog exit code: $CODE"
+          {
+            echo "## A16 external check"
+            echo
+            echo '```'
+            cat watchdog.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          case "$CODE" in
+            0) echo "PASS — the Worker wrote today (or today is the rest day)." ;;
+            1) echo "::error title=The office did not report::The Worker wrote nothing to this repo today. A16: report it, do not try to fix the Worker from here (A1)." ; exit 1 ;;
+            2) echo "::error title=The check could not be performed::This is NOT a pass. The watchdog could not reach the API." ; exit 1 ;;
+            *) echo "::error title=Watchdog crashed::Unexpected exit code $CODE — treat as unchecked, not as healthy." ; exit 1 ;;
+          esac

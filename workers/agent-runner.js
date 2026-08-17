@@ -82,7 +82,18 @@ import { resolveIssueTarget } from './permission-guard.js';
 // read-back ONLY (2026-08-10): the meeting and per-agent shapes are the two that
 // actually bind, and a probe that reports only the generous `report` shape cannot
 // tell you that the meeting shape is at 98% and trimming the board out of view.
-import { getOfficeContext, getOfficeSnapshot, fetchOfficeSnapshot, officeContextEnabled, buildOfficeContext, BUDGETS as OFFICE_BUDGETS, CACHE_KEY as OFFICE_SNAPSHOT_CACHE_KEY } from './office-context.js';
+import { getOfficeContext, getOfficeSnapshot, fetchOfficeSnapshot, officeContextEnabled, buildOfficeContext, fetchBackOfficeFile, fetchBackOfficeDir, BUDGETS as OFFICE_BUDGETS, CACHE_KEY as OFFICE_SNAPSHOT_CACHE_KEY } from './office-context.js';
+// The admin tier's scheduled draw from real queues (2026-08-17). Pure — every
+// fetch, model call and write for it is in processAdminDeskBlock() below.
+import {
+  carriedDeliverables, reviewAssignments, approvalQueue,
+  probationDecisionDraw, recentIncidents, deskSummary, producedAnything,
+  PROBATION_TEAM_LEAD, PROBATION_QA, PROBATION_DECIDER, IT_CHIEF_ID,
+  CEO_ID as DESK_CEO_ID, INCIDENT_WINDOW_HOURS, MAX_INCIDENTS_PER_NOTE,
+} from './admin-desk.js';
+// The lifecycle's own live index of what is in flight and who owes what on it.
+// `LOCATIONS` gives the back-office directory a readable deliverable sits in.
+import { LOCATIONS } from './deliverable-lifecycle.js';
 // Same read-back-only rule as the line above (2026-08-10). These two constants
 // are the office's TRANSCRIPTION of two facts that live in the owner's policy
 // file; `office_context_status` compares them against the live parse so a drift
@@ -1008,6 +1019,518 @@ async function processQaInstrumentsBlock(env, opts = {}) {
     out.errors.push(`commit: ${err?.message}`);
   }
   out.rendered = body;
+  return out;
+}
+
+/* ═══════════════════════ The admin desk (2026-08-17) ══════════════════════ */
+
+/** Where a lifecycle proposal is written. The office decides here; the warehouse-side run applies. */
+const LIFECYCLE_INBOX_DIR = 'campus/shared/lifecycle-inbox';
+
+/**
+ * The `reports.type` every desk files under.
+ *
+ * A DISTINCT type, not `status`. The drought this block exists to end is
+ * measured as *"no `reports` row since 2026-08-11"*, and filing under `status`
+ * would end it in a way nobody could tell apart from the 16:00 AI-experience
+ * reports the case workers file. A separate value keeps "the admin tier
+ * produced" answerable by a query rather than by inference.
+ */
+const ADMIN_DESK_REPORT_TYPE = 'admin_desk';
+
+/** Cap on how much of a deliverable's own text a reviewer is shown, in characters. */
+const ADMIN_DESK_ARTIFACT_CHARS = 6000;
+
+/**
+ * The files an admin-desk reviewer will try to read, in order, before deciding
+ * it cannot see the artifact. SPEC first — a review against the specification
+ * is the review the lifecycle asks for; README is the fallback.
+ */
+const ADMIN_DESK_ARTIFACT_FILES = Object.freeze(['SPEC.md', 'README.md']);
+
+/**
+ * A judgment-lane call for one desk. Returns `{ text, provider, reason }` and
+ * never throws — a desk that cannot reach a model must produce nothing, not
+ * half a review.
+ *
+ * `maxTokens` is deliberately above Cerebras' `MIN_OUTPUT_TOKENS` (512): that
+ * model's reasoning is charged against `max_tokens` and a small budget comes
+ * back empty with `finishReason: 'length'`, which is the defect the routing
+ * supervised test found on 2026-08-10 and which an HTTP 200 hid.
+ */
+async function adminDeskJudgment(env, { agentId, systemPrompt, prompt, maxTokens = 1200, eventId }) {
+  try {
+    const routed = await routeTaskTypeCall(env, 'judgment', {
+      prompt, systemPrompt, maxTokens, agentId: eventId || `admin-desk-${agentId}`,
+    });
+    if (!routed.ok) return { text: null, provider: routed.provider || null, reason: routed.reason || 'routed_call_failed' };
+    const text = routed.result?.text ?? null;
+    // An empty string from a 200 is NOT a success. Same check `routeTask()`
+    // learned to make: `finishReason` existed for exactly this and was not read.
+    if (!text || !String(text).trim()) return { text: null, provider: routed.provider, reason: 'empty_text_from_provider' };
+    return { text: String(text).trim(), provider: routed.provider, reason: null };
+  } catch (err) {
+    return { text: null, provider: null, reason: `threw: ${err?.message}` };
+  }
+}
+
+/**
+ * Pulls a labelled decision word out of a model's answer.
+ *
+ * ── WHY THIS IS NOT AN INLINE REGEX (2026-08-17) ──────────────────────────
+ *
+ * It was three of them, and one lost a real verdict on the first live run.
+ * Agent 5 was asked to end with `VERDICT: approve|revise|abstain`, wrote
+ * **`**Verdict:** revise`** — markdown emphasis, which is what a model that has
+ * been writing bold headings for four hundred words does — and
+ * `/VERDICT:\s*(...)/i` did not match the `**` between the colon and the word.
+ * The review was filed with `verdict: null`, indistinguishable from a reviewer
+ * who never reached a verdict at all.
+ *
+ * A parser strict enough to drop a decision that was plainly made is not
+ * refusing, it is losing. So emphasis and stray colons are stripped before
+ * matching, and a genuine no-match still returns null for the caller to refuse
+ * on — the distinction that matters is kept, the formatting noise is not.
+ */
+function parseDecisionWord(text, label, allowed) {
+  const flat = String(text || '').replace(/[*_`]/g, ' ').replace(/\s+/g, ' ');
+  const m = new RegExp(`${label}\\s*:?\\s*:?\\s*(${allowed.join('|')})\\b`, 'i').exec(flat);
+  return m ? m[1].toLowerCase() : null;
+}
+
+/** Files one admin-desk `reports` row. Best-effort — a lost row never costs the work. */
+async function fileAdminDeskReport(env, agentId, title, content) {
+  try {
+    if (!env.DB) return null;
+    const id = crypto.randomUUID();
+    await env.DB.prepare(
+      `INSERT INTO reports (id, agent_id, type, title, content, severity) VALUES (?, ?, ?, ?, ?, ?)`
+    ).bind(id, agentId, ADMIN_DESK_REPORT_TYPE, title, content, 'info').run();
+    return id;
+  } catch (err) {
+    console.warn(`[admin-desk] report row for agent ${agentId} failed: ${err?.message}`);
+    return null;
+  }
+}
+
+/**
+ * ── THE ADMIN DESK ─────────────────────────────────────────────────────────
+ *
+ * Four desks, four real queues, and NOTHING WRITTEN when a queue is empty. See
+ * `workers/admin-desk.js` for which queue each desk reads and who fills it.
+ *
+ * ── NO KILL SWITCH OF ITS OWN ──────────────────────────────────────────────
+ *
+ * Deliberate, and the same decision `deliverable-lifecycle.js` and the office
+ * policy took: it rides on `office_context_enabled`, which is live ON. Three of
+ * the four desks read the office snapshot and genuinely cannot work without it,
+ * so a second flag would guard nothing new — and an eleventh switch whose
+ * documented state goes stale the moment someone toggles it is `OB-040`'s
+ * problem made worse. There is also a specific trap here: a block built to end
+ * a six-day output drought, deployed defaulting OFF, ends nothing.
+ *
+ * ── AN UNREADABLE QUEUE IS NOT AN EMPTY ONE ────────────────────────────────
+ *
+ * If the office snapshot or its lifecycle index cannot be read, that is
+ * reported as an error and the desks that need it produce nothing *for a stated
+ * reason*. It is never collapsed into "queue empty". This project's dominant
+ * defect is absence read as fact.
+ */
+async function processAdminDeskBlock(env, opts = {}) {
+  if (!opts.bypassGate && !(await officeContextEnabled(env))) {
+    console.log('[admin-desk] office_context_enabled is not true — block is a no-op');
+    return { skipped: true, reason: 'office_context_disabled' };
+  }
+
+  const today = todayDateStr();
+  const out = { today, desks: [], produced: 0, filed: [], errors: [] };
+
+  /* ── the office snapshot: the board and the lifecycle's in-flight index ── */
+  let snapshot = null;
+  try {
+    snapshot = await getOfficeSnapshot(env, { allowFetch: true });
+  } catch (err) {
+    out.errors.push(`office snapshot threw: ${err?.message}`);
+  }
+  const records = snapshot?.lifecycle?.records || null;
+  const boardTasks = snapshot?.board?.tasks || null;
+  const lifecycleReadable = Array.isArray(records) && Array.isArray(boardTasks);
+  if (!lifecycleReadable) {
+    out.errors.push(
+      'the lifecycle in-flight index or the board could not be read from the office snapshot — '
+      + 'the review and approval desks produced nothing because their queue was UNREADABLE, which is not the same fact as empty'
+    );
+  }
+
+  const { carried, frozen } = lifecycleReadable
+    ? carriedDeliverables(records, boardTasks)
+    : { carried: [], frozen: [] };
+  out.frozen = frozen;
+
+  /* ══════════════ Desk 1 — deliverable review (agents 5-9, 11-13) ═════════ */
+  const reviewDesk = { desk: 'deliverable_review', agentIds: [], queued: 0, produced: 0, reason: null };
+  if (lifecycleReadable) {
+    // What is already sitting in the inbox, per slug. Without this the desk
+    // re-files the same reviews every weekday: `owed_by` does not move until
+    // the next `scripts/lifecycle.mjs ingest`, which may be days away.
+    const alreadyFiled = {};
+    const inReview = carried.filter((r) => r?.stage === 'IN-REVIEW');
+    for (const record of inReview) {
+      const dir = await fetchBackOfficeDir(env, `${LIFECYCLE_INBOX_DIR}/${record.slug}`);
+      if (dir.reason) {
+        // A 404 means no inbox folder yet, which is a real empty. Anything else
+        // is unreadable, and an unreadable inbox must NOT be read as "nothing
+        // filed" — that would re-file reviews already waiting to be ingested.
+        if (!/HTTP 404/.test(dir.reason)) {
+          out.errors.push(`${record.slug}: inbox unreadable (${dir.reason}) — no review drawn for it this tick`);
+          alreadyFiled[record.slug] = (record.owed_by || []).map(Number);
+        } else {
+          alreadyFiled[record.slug] = [];
+        }
+        continue;
+      }
+      alreadyFiled[record.slug] = (dir.entries || [])
+        .map((e) => /-review-agent(\d+)\.json$/.exec(e?.name || ''))
+        .filter(Boolean)
+        .map((m) => Number(m[1]));
+    }
+
+    const assigned = reviewAssignments(carried, { alreadyFiled });
+    reviewDesk.queued = assigned.draw.length + assigned.deferred.length;
+    reviewDesk.deferred = assigned.deferred.map((d) => `Agent ${d.agentId} on ${d.slug} (${d.kind})`);
+    reviewDesk.skipped = assigned.skipped;
+
+    const artifactCache = new Map();
+    for (const item of assigned.draw) {
+      // The artifact itself, so the reviewer reviews the thing and not a
+      // summary of it. A deliverable in the warehouse is not readable from the
+      // Worker at all — nothing here fetches from that repo — and in that case
+      // this desk REFUSES to file a review rather than reviewing a description.
+      if (!artifactCache.has(item.slug)) {
+        let found = null;
+        for (const file of ADMIN_DESK_ARTIFACT_FILES) {
+          const got = await fetchBackOfficeFile(env, `${LOCATIONS['back-office-tools'].dir}/${item.slug}/${file}`);
+          if (got.text) { found = { file, text: got.text }; break; }
+        }
+        artifactCache.set(item.slug, found);
+      }
+      const artifact = artifactCache.get(item.slug);
+      if (!artifact) {
+        out.errors.push(
+          `${item.slug}: no readable artifact under back-office \`${LOCATIONS['back-office-tools'].dir}/${item.slug}/\` `
+          + `(${ADMIN_DESK_ARTIFACT_FILES.join(' or ')}). It is most likely warehouse-located, which nothing in the Worker reads. `
+          + 'NO REVIEW WAS FILED — a review of a deliverable the reviewer could not see is fabricated participation.'
+        );
+        continue;
+      }
+
+      const config = getAgentConfig(item.agentId);
+      const gapLines = (item.gaps || []).length
+        ? (item.gaps || []).map((g) => `- ${g}`).join('\n')
+        : '_No gaps have been raised on this deliverable yet._';
+      const owed = item.kind === 'review'
+        ? 'You are a REQUIRED reviewer. A full reasoned review is owed: what you checked, what you found, and a verdict of approve or revise.'
+        : 'You are not a required reviewer here. A brief comment or an EXPLICIT abstention is owed. Silence is never approval — if you have nothing to add, say so and abstain in words.';
+
+      const judged = await adminDeskJudgment(env, {
+        agentId: item.agentId,
+        eventId: `admin-desk:review:${item.slug}:${item.agentId}`,
+        // 2200, not 1400. Measured on the first live run (2026-08-17): both
+        // reviews ran out of budget mid-sentence and neither reached its
+        // VERDICT line, so both were filed with `verdict: null`. A review whose
+        // verdict was cut off is not an abstention — it is an unreadable review.
+        maxTokens: 2200,
+        systemPrompt:
+          `You are ${config?.name || `Agent ${item.agentId}`}, ${config?.role || 'an admin'} in an AI office. `
+          + `${config?.personality?.core || ''} Review in character, in English, and be specific.`,
+        prompt: [
+          `Round ${item.round} review of the deliverable \`${item.slug}\`${item.boardTask ? ` (board task ${item.boardTask})` : ''}.`,
+          '',
+          owed,
+          '',
+          /*
+           * ── WHAT YOU WERE AND WERE NOT GIVEN (2026-08-17) ────────────────
+           *
+           * Added after reading the FIRST live run back. Agent 6's review said
+           * it had *"Ran the script against three local test repositories"* and
+           * *"Executed each of the supported CLI flags"*. It had been handed
+           * one markdown file and had run nothing.
+           *
+           * That is fabricated evidence in a record the lifecycle applies, and
+           * it is the worst failure this desk could have: a review claiming
+           * execution is exactly the artifact a later reader would trust most.
+           * The office's own rule — distinguish verified-by-running from
+           * inferred-by-reading — has to be stated IN the prompt, because a
+           * persona asked to "review" a spec will narrate the review it would
+           * have done if nobody tells it what it actually has.
+           */
+          'WHAT YOU HAVE, EXACTLY: the one document reproduced below, and the gap list above. Nothing else.',
+          'You have NOT run this code. You have NOT executed any command, opened any file other than the one below,',
+          'inspected any source file, or observed any output. Do not write as though you had — no "I ran", no "I executed",',
+          'no "I tested", no invented results. Review what you can actually see, and where a judgement needs something you',
+          'were not given, SAY SO AND NAME WHAT YOU WOULD NEED. An honest "I cannot tell from this" is a real review finding',
+          'here; a fabricated test run is the one thing that would make this review worthless.',
+          '',
+          `Gaps already raised on it by others (${item.openGaps} open):`,
+          gapLines,
+          '',
+          `The deliverable's own \`${artifact.file}\`, in full as given to you:`,
+          '',
+          artifact.text.slice(0, ADMIN_DESK_ARTIFACT_CHARS),
+          artifact.text.length > ADMIN_DESK_ARTIFACT_CHARS
+            ? `\n[TRUNCATED at ${ADMIN_DESK_ARTIFACT_CHARS} characters of ${artifact.text.length} — say so if what you needed was past the cut.]`
+            : '',
+          '',
+          'Be concise — under 400 words. Do not repeat a gap already listed above.',
+          'End with a single line, and leave room for it: VERDICT: approve|revise|abstain',
+        ].filter((l) => l !== '').join('\n'),
+      });
+
+      if (!judged.text) {
+        out.errors.push(`${item.slug}/agent ${item.agentId}: judgment lane produced nothing (${judged.reason}) — no review filed`);
+        continue;
+      }
+
+      const verdict = parseDecisionWord(judged.text, 'VERDICT', ['approve', 'revise', 'abstain']);
+      const proposal = {
+        kind: 'review',
+        agent_id: item.agentId,
+        review_kind: item.kind === 'review' ? 'review' : (verdict === 'abstain' ? 'abstain' : 'comment'),
+        round: item.round,
+        verdict,
+        text: judged.text,
+        at: new Date().toISOString(),
+        // Provenance, because a record that cannot say what produced it cannot
+        // be audited later. Named for what it is: an autonomous block, not a
+        // supervised session.
+        source: `office-AI-agents admin_desk block, ${today}, provider ${judged.provider || 'unrecorded'}`,
+      };
+      const inboxPath = `${LIFECYCLE_INBOX_DIR}/${item.slug}/${today}-review-agent${String(item.agentId).padStart(2, '0')}.json`;
+      try {
+        const commit = await commitFileToRepo(
+          env, BACKOFFICE_REPO_NAME, inboxPath, `${JSON.stringify(proposal, null, 2)}\n`,
+          `office: Agent ${item.agentId} ${proposal.review_kind} on ${item.slug} round ${item.round} [skip ci]`
+        );
+        if (!commit.committed) {
+          out.errors.push(`${inboxPath}: not committed (${commit.reason || 'no reason given'})`);
+          continue;
+        }
+      } catch (err) {
+        out.errors.push(`${inboxPath}: commit threw — ${err?.message}`);
+        continue;
+      }
+
+      await fileAdminDeskReport(
+        env, item.agentId,
+        `Deliverable review — ${item.slug} round ${item.round} (${proposal.review_kind})`,
+        `${judged.text}\n\n---\nFiled to ${inboxPath}. Applies to the lifecycle record on the next \`scripts/lifecycle.mjs ingest\`.`
+      );
+      reviewDesk.agentIds.push(item.agentId);
+      reviewDesk.produced += 1;
+      out.filed.push(inboxPath);
+    }
+    if (!reviewDesk.produced && reviewDesk.queued) reviewDesk.reason = 'every drawn review failed its artifact read, its model call or its commit — see errors';
+  } else {
+    reviewDesk.reason = 'queue unreadable, not empty';
+  }
+  out.desks.push(reviewDesk);
+
+  /* ══════════════════════ Desk 2 — CEO approval (11) ═════════════════════ */
+  const ceoDesk = { desk: 'ceo_approval', agentIds: [], queued: 0, produced: 0, reason: null };
+  if (lifecycleReadable) {
+    const awaiting = approvalQueue(carried);
+    ceoDesk.queued = awaiting.length;
+    for (const record of awaiting.slice(0, 1)) {
+      const config = getAgentConfig(DESK_CEO_ID);
+      const judged = await adminDeskJudgment(env, {
+        agentId: DESK_CEO_ID,
+        eventId: `admin-desk:approval:${record.slug}`,
+        maxTokens: 1000,
+        systemPrompt: `You are ${config?.name || 'The CEO'}, ${config?.role || 'Founder & Chief Executive'}. You are the ONE forward exit of this office's deliverable lifecycle. Nothing reaches the client without you.`,
+        prompt: [
+          `\`${record.slug}\` has reached AWAITING-APPROVAL at round ${record.round}.`,
+          `Open gaps: ${record.open_gaps}. ${record.convergence_note || ''}`,
+          record.recommendation ? `The office's recommendation: ${record.recommendation}` : '',
+          '',
+          'Approve it, or return it to the loop. Returning is not a failure — there is no cap on rounds and a deliverable going round without converging is a finding, not a reason to ship.',
+          'End with a single line: DECISION: approve|return',
+        ].filter((l) => l !== '').join('\n'),
+      });
+      if (!judged.text) {
+        out.errors.push(`${record.slug}: CEO approval call produced nothing (${judged.reason}) — nothing filed`);
+        continue;
+      }
+      const decision = parseDecisionWord(judged.text, 'DECISION', ['approve', 'return']);
+      if (!decision) {
+        out.errors.push(`${record.slug}: the CEO's answer carried no parseable DECISION line — REFUSED rather than guessed, nothing filed`);
+        continue;
+      }
+      const inboxPath = `${LIFECYCLE_INBOX_DIR}/${record.slug}/${today}-approval-agent11.json`;
+      try {
+        const commit = await commitFileToRepo(
+          env, BACKOFFICE_REPO_NAME, inboxPath,
+          `${JSON.stringify({ kind: 'approval', by: DESK_CEO_ID, decision, reason: judged.text, at: new Date().toISOString(), source: `office-AI-agents admin_desk block, ${today}` }, null, 2)}\n`,
+          `office: CEO ${decision} on ${record.slug} [skip ci]`
+        );
+        if (!commit.committed) { out.errors.push(`${inboxPath}: not committed (${commit.reason || 'no reason'})`); continue; }
+      } catch (err) { out.errors.push(`${inboxPath}: commit threw — ${err?.message}`); continue; }
+      await fileAdminDeskReport(env, DESK_CEO_ID, `CEO decision — ${record.slug} (${decision})`, judged.text);
+      ceoDesk.agentIds.push(DESK_CEO_ID);
+      ceoDesk.produced += 1;
+      out.filed.push(inboxPath);
+    }
+  } else {
+    ceoDesk.reason = 'queue unreadable, not empty';
+  }
+  out.desks.push(ceoDesk);
+
+  /* ═════════════ Desk 3 — the probation decision meeting (7, 6, 8) ═══════ */
+  const probationDesk = { desk: 'probation_decision', agentIds: [], queued: 0, produced: 0, reason: null };
+  try {
+    const due = await probationsDueForDecision(env);
+    const { draw, deferred } = probationDecisionDraw(due);
+    probationDesk.queued = due.length;
+    probationDesk.deferred = deferred.map((r) => r.id);
+
+    for (const row of draw) {
+      const target = getAgentConfig(row.agent_id);
+      const shared = [
+        `Probation on ${target?.name || `Agent ${row.agent_id}`} — aspect "${row.aspect}", round ${row.rounds}.`,
+        `The provisional change under review:\n${row.entry_text}`,
+        `It has been live for ${row.action_count} recorded actions (the measurement window is ${PROBATION_ACTIONS_TARGET}).`,
+      ].join('\n\n');
+
+      const behaviour = await adminDeskJudgment(env, {
+        agentId: PROBATION_TEAM_LEAD, maxTokens: 700, eventId: `admin-desk:probation:${row.id}:behaviour`,
+        systemPrompt: `You are ${getAgentConfig(PROBATION_TEAM_LEAD)?.name || 'The Team Lead'}, Agent Coach & Team Manager. In this meeting you present BEHAVIOUR only — not quality, and not a verdict.`,
+        prompt: `${shared}\n\nPresent what this change did to the agent's behaviour over the window. Evidence, not persuasion.`,
+      });
+      const quality = await adminDeskJudgment(env, {
+        agentId: PROBATION_QA, maxTokens: 700, eventId: `admin-desk:probation:${row.id}:quality`,
+        systemPrompt: `You are ${getAgentConfig(PROBATION_QA)?.name || 'The QA'}, Quality Assurance. In this meeting you present QUALITY metrics only — not behaviour, and not a verdict.`,
+        prompt: `${shared}\n\nPresent what this change did to the agent's work quality over the window. Evidence, not persuasion.`,
+      });
+
+      if (!behaviour.text || !quality.text) {
+        out.errors.push(
+          `probation ${row.id}: both axes must be presented before the Lead QA may decide (A3). `
+          + `behaviour=${behaviour.text ? 'ok' : behaviour.reason}, quality=${quality.text ? 'ok' : quality.reason}. NO DECISION RECORDED.`
+        );
+        continue;
+      }
+
+      const verdictCall = await adminDeskJudgment(env, {
+        agentId: PROBATION_DECIDER, maxTokens: 800, eventId: `admin-desk:probation:${row.id}:verdict`,
+        systemPrompt: `You are ${getAgentConfig(PROBATION_DECIDER)?.name || 'The Lead QA'}, Chief Quality Officer. You, and only you, decide this. Both axes have been presented.`,
+        prompt: [
+          shared, '',
+          `The Team Lead on behaviour:\n${behaviour.text}`, '',
+          `The QA on quality:\n${quality.text}`, '',
+          'Decide on both axes. `kept` makes the change permanent, `dropped` reverts the live file, `extended` gives it one more round.',
+          'End with a single line: OUTCOME: kept|dropped|extended',
+        ].join('\n'),
+      });
+      const outcome = parseDecisionWord(verdictCall.text, 'OUTCOME', ['kept', 'dropped', 'extended']);
+      if (!outcome) {
+        out.errors.push(`probation ${row.id}: the Lead QA's answer carried no parseable OUTCOME line — REFUSED rather than guessed, nothing applied`);
+        continue;
+      }
+
+      // Validation and application stay where they already are: recordDecision()
+      // decides whether a decision is VALID, applyDecision() makes a valid one
+      // take effect. This block supplies the meeting, not a second gate.
+      const validated = recordDecision({
+        probationId: row.id, outcome, decidedBy: PROBATION_DECIDER,
+        teamLeadBehavior: behaviour.text, qaQualityMetrics: quality.text,
+        evidence: { actionCount: row.action_count, rounds: row.rounds, source: `admin_desk block ${today}` },
+      });
+      if (!validated.valid) {
+        out.errors.push(`probation ${row.id}: recordDecision() refused — ${validated.reason}`);
+        continue;
+      }
+      const applied = await applyDecision(env, {
+        probationId: validated.decision.probationId, outcome: validated.decision.outcome,
+        decidedBy: PROBATION_DECIDER, decidingActorId: PROBATION_DECIDER,
+        evidence: { teamLeadBehavior: behaviour.text, qaQualityMetrics: quality.text, ...validated.decision.evidence },
+      });
+
+      for (const [agentId, text, label] of [
+        [PROBATION_TEAM_LEAD, behaviour.text, 'behaviour presented'],
+        [PROBATION_QA, quality.text, 'quality presented'],
+        [PROBATION_DECIDER, verdictCall.text, `decided: ${outcome}`],
+      ]) {
+        await fileAdminDeskReport(env, agentId, `Probation decision — ${target?.name || `Agent ${row.agent_id}`}, "${row.aspect}" (${label})`, text);
+        probationDesk.agentIds.push(agentId);
+      }
+      probationDesk.produced += 1;
+      probationDesk.applied = applied;
+    }
+  } catch (err) {
+    out.errors.push(`probation desk threw: ${err?.message}`);
+    probationDesk.reason = `threw: ${err?.message}`;
+  }
+  out.desks.push(probationDesk);
+
+  /* ══════════════ Desk 4 — the IT Chief's incident triage (5) ════════════ */
+  const incidentDesk = { desk: 'incident_triage', agentIds: [], queued: 0, produced: 0, reason: null };
+  try {
+    // The cutoff is built in D1's own `'YYYY-MM-DD HH:MM:SS'` shape and compared
+    // as a string — see recentIncidents(). `new Date()` on that format is
+    // implementation-defined and this is not a place to find that out.
+    const cutoff = new Date(Date.now() - INCIDENT_WINDOW_HOURS * 3600 * 1000)
+      .toISOString().replace('T', ' ').slice(0, 19);
+    const q = env.DB
+      ? await env.DB.prepare(
+        `SELECT created_at, title, content FROM reports WHERE type = 'incident' AND created_at >= ? ORDER BY created_at DESC LIMIT 60`
+      ).bind(cutoff).all()
+      : { results: [] };
+    const { triaged, total, overflow } = recentIncidents(q.results || [], cutoff);
+    incidentDesk.queued = total;
+
+    if (triaged.length) {
+      const config = getAgentConfig(IT_CHIEF_ID);
+      const judged = await adminDeskJudgment(env, {
+        agentId: IT_CHIEF_ID, maxTokens: 1000, eventId: 'admin-desk:incidents',
+        systemPrompt: `You are ${config?.name || 'The IT Chief'}, ${config?.role || 'Senior IT Admin'}. ${config?.personality?.core || ''} You triage; you do not narrate.`,
+        prompt: [
+          `${total} incident(s) were recorded in this office in the last ${INCIDENT_WINDOW_HOURS} hours.`,
+          overflow ? `You are shown the newest ${MAX_INCIDENTS_PER_NOTE}; ${overflow} more exist and are NOT below. Say so in your triage.` : '',
+          '',
+          triaged.map((r) => `- [${r.created_at}] ${r.title} — ${String(r.content || '').slice(0, 300)}`).join('\n'),
+          '',
+          'For each distinct failure: is it the same thing recurring, or something new? Which needs action from a person, and which is noise this office should stop recording as an incident? Be short and be specific. If none of it needs action, say that plainly.',
+        ].filter((l) => l !== '').join('\n'),
+      });
+      if (!judged.text) {
+        out.errors.push(`incident triage: judgment lane produced nothing (${judged.reason}) — nothing filed`);
+        incidentDesk.reason = judged.reason;
+      } else {
+        await fileAdminDeskReport(
+          env, IT_CHIEF_ID,
+          `Incident triage — ${total} in ${INCIDENT_WINDOW_HOURS}h`,
+          `${judged.text}\n\n---\nTriaged ${triaged.length} of ${total} incident rows since ${cutoff}.`
+        );
+        incidentDesk.agentIds.push(IT_CHIEF_ID);
+        incidentDesk.produced = 1;
+        incidentDesk.overflow = overflow;
+      }
+    }
+  } catch (err) {
+    out.errors.push(`incident desk threw: ${err?.message}`);
+    incidentDesk.reason = `threw: ${err?.message}`;
+  }
+  out.desks.push(incidentDesk);
+
+  out.produced = out.desks.reduce((n, d) => n + (d.produced || 0), 0);
+  out.summary = deskSummary(out.desks);
+  out.anythingProduced = producedAnything(out.desks);
+
+  // NO BLOCK ARTIFACT ON AN EMPTY DAY. Every desk that produced something has
+  // already written its own real artifact — an inbox proposal, a `reports` row,
+  // an applied probation decision. A summary file committed on a day when all
+  // four queues were empty would be exactly the thing this block was built to
+  // stop being: output produced because a block is scheduled.
+  console.log(`[admin-desk] ${today}: ${out.produced} produced across ${out.desks.length} desks; ${out.errors.length} error(s)`);
   return out;
 }
 
@@ -3482,8 +4005,27 @@ async function runSpareTimeForAgent(env, agent, { forceIdle }) {
   const program = dailyScheduleConfig.spare_time_program;
   const doInteract = !forceIdle && Math.random() < program.coworker_interaction_chance;
 
+  /*
+   * ── OB-131, CLOSED 2026-08-17 ────────────────────────────────────────────
+   *
+   * This block reaches all thirteen agents and `logInteraction()` was
+   * discarding the row for every agent with no session — which, in the
+   * scheduled path, is ALL of them: `ensureAgentInstances()` builds fresh
+   * instances per invocation and a session never survives from a case_batch
+   * tick's isolate to this one. Measured against live D1 on 2026-08-17: the
+   * last `idle` or `coworker_chat` row is dated 2026-08-10, and agents 5-13
+   * have never had one.
+   *
+   * `openLoggingSession()` is the smallest thing that makes the row legal —
+   * one `agent_sessions` INSERT, mode `spare_time`, no Durable Object write, no
+   * pretence that standing in the corridor was case work. If it fails, the
+   * refusal from `logInteraction()` is now LOUD rather than silent, and this
+   * function reports `logged: false` to its caller either way.
+   */
+  await agent.openLoggingSession('spare_time');
+
   if (!doInteract) {
-    await agent.logInteraction({
+    const wrote = await agent.logInteraction({
       type: 'idle',
       query: '',
       response_summary: 'Spare time: agent went idle to preserve tokens (no API calls made).',
@@ -3492,7 +4034,7 @@ async function runSpareTimeForAgent(env, agent, { forceIdle }) {
       irritation_change: 0,
       state_change: null,
     });
-    return { agentId: agent.id, mode: 'idle' };
+    return { agentId: agent.id, mode: 'idle', logged: wrote.logged, logReason: wrote.reason };
   }
 
   const others = agentsConfig.agents.filter((a) => a.id !== agent.id);
@@ -3506,7 +4048,7 @@ async function runSpareTimeForAgent(env, agent, { forceIdle }) {
     text = `(coworker chat unavailable: ${err.message})`;
   }
 
-  await agent.logInteraction({
+  const wrote = await agent.logInteraction({
     type: 'coworker_chat',
     query: `chat with ${partner.name}`,
     response_summary: String(text).slice(0, 500),
@@ -3515,14 +4057,36 @@ async function runSpareTimeForAgent(env, agent, { forceIdle }) {
     irritation_change: 0,
     state_change: null,
   });
-  return { agentId: agent.id, mode: 'coworker_chat', partner: partner.id, text };
+  return { agentId: agent.id, mode: 'coworker_chat', partner: partner.id, text, logged: wrote.logged, logReason: wrote.reason };
 }
 
 /**
- * Sun-Thu 'tool_task_window' block: per ai-tools.json's weekly_rotation,
- * checks whether today's assigned standing-project board item is queued and
- * not yet filed, and if so opens its asset-task GitHub Issue (human picks it
- * up in the real tool — no programmatic tool calls).
+ * Per ai-tools.json's weekly_rotation, checks whether today's assigned
+ * standing-project board item is queued and not yet filed, and if so opens its
+ * asset-task GitHub Issue (human picks it up in the real tool — no programmatic
+ * tool calls).
+ *
+ * ── NO LONGER SCHEDULED (OB-132, 2026-08-17) ─────────────────────────────
+ *
+ * This WAS the Sun-Thu 11:30 `tool_task_window` block. It is now reachable only
+ * through `POST /api/agents/trigger {"type":"asset_task_window"}`.
+ *
+ * ── WHAT IT DOES WHEN EVERY ITEM IS INELIGIBLE, STATED HERE SO THE NEXT ──
+ * ── READER DOES NOT HAVE TO DISCOVER IT ─────────────────────────────────
+ *
+ * It returns `{ opened: false, reason: 'not_eligible' }` and writes nothing.
+ * That is a correct refusal, and between simulation day 6 and 2026-08-17 it was
+ * the ONLY thing this function ever returned — because the refusal condition
+ * below (`stage !== 'queued' || asset_task_issue_filed`) had become permanently
+ * true for all four standing projects, each of which had had its Issue filed
+ * once, on days 5 through 8. Only a human executing work in an external tool
+ * can clear it, and none has.
+ *
+ * **A correct refusal on a schedule is still a dead path**, and while this ran
+ * daily it was admitted into `block_admissions` as `decision: run` — so every
+ * measurement the office takes of itself read it as working. That is why the
+ * schedule entry was removed rather than the refusal made quieter: the refusal
+ * was never the problem, the timer was.
  */
 async function maybeOpenAssetTask(env, dayOfWeek, nextDay) {
   const rotation = aiToolsConfig.weekly_rotation[String(dayOfWeek)];
@@ -4381,7 +4945,7 @@ async function runScheduledBlockInner(env, israelTime, dayOfWeek, ctx) {
       results: {
         toolTask: null, aiExperience: null, standup: null, spareTime: [], weeklySummary: null, versionBumps: [], choreRotation: null,
         guideDraft: null, guideReview: null, guideVerify: null, architectLiaison: null,
-        ownerChannel: null, qaInstruments: null,
+        ownerChannel: null, qaInstruments: null, adminDesk: null,
       },
     };
   }
@@ -4505,6 +5069,11 @@ async function runScheduledBlockInner(env, israelTime, dayOfWeek, ctx) {
         cycle.results.qaInstruments = await processQaInstrumentsBlock(env, {
           weekNumber: (await getYearState(env)).current_week || 0,
         });
+      } else if (block.type === 'admin_desk') {
+        // The admin tier's draw from real queues (2026-08-17). Self-gating
+        // inside the handler on `office_context_enabled`, like the guide_*
+        // blocks — it has no switch of its own, see processAdminDeskBlock().
+        cycle.results.adminDesk = await processAdminDeskBlock(env);
       } else if (block.type === 'owner_channel') {
         // Self-gating inside the handler, like the guide_* blocks and unlike
         // architect_liaison's call-site gate. Deliberate: this block's FIRST act
@@ -5474,6 +6043,62 @@ export default {
             // Pure threshold check, A3's "blaming the provider" rule. Body:
             // { failingAgentIds, failingDates, embodimentComparisonDone }.
             result = canBlameProvider(body);
+            break;
+          case 'spare_time_block': {
+            // Runs the spare_time block for every agent, directly. ADDED
+            // 2026-08-17 with the OB-131 fix, because that task's metric is
+            // "checked by reading D1 `interactions` for a real tick" and there
+            // was no way to produce one on demand: {"type":"block",
+            // "israelTime":"14:30"} goes through runScheduledBlock(), which
+            // OPENS A DAY CYCLE when none matches — generating and persisting a
+            // whole day of questions as a side effect of testing a block that
+            // asks no questions.
+            //
+            // Body: { forceIdle: true } to exercise the zero-model-call path
+            // (which is what Saturday does), omitted for the real 20% roll.
+            const spare = [];
+            for (const config of agentsConfig.agents) {
+              const agent = instantiateAgent(config.id, env);
+              await agent.loadState();
+              spare.push(await runSpareTimeForAgent(env, agent, { forceIdle: !!body.forceIdle }));
+            }
+            result = {
+              agents: spare.length,
+              logged: spare.filter((s) => s.logged).length,
+              dropped: spare.filter((s) => !s.logged).map((s) => ({ agentId: s.agentId, reason: s.logReason })),
+              modes: spare.reduce((m, s) => ({ ...m, [s.mode]: (m[s.mode] || 0) + 1 }), {}),
+            };
+            break;
+          }
+          case 'asset_task_window':
+            // OB-132, 2026-08-17. This WAS the Sun-Thu 11:30 `tool_task_window`
+            // block. It was retired from the schedule — it fired every weekday,
+            // was admitted with `decision: run`, and returned `not_eligible`
+            // every time since simulation day 6, because all four standing
+            // board items had already had their asset-task Issue filed by day 8
+            // and only a human executing work in an external tool can refill
+            // that queue. See config/daily-schedule.json's
+            // `_tool_task_window_retired_2026_08_17` block for the full reason
+            // and for why it was retired rather than quietly silenced.
+            //
+            // THE CAPABILITY IS NOT GONE, only the timer. Body:
+            // { dayOfWeek: 1..5 } picks the rotation row, { day } stamps the
+            // board history. Run it the day a real asset task is queued.
+            result = await maybeOpenAssetTask(
+              env,
+              Number.isInteger(body.dayOfWeek) ? body.dayOfWeek : 1,
+              Number.isInteger(body.day) ? body.day : (await getYearState(env)).current_day || 0,
+            );
+            break;
+          case 'admin_desk_block':
+            // Runs the Sun-Thu 10:00 admin-desk block directly, gate bypassed
+            // — the same supervised shape `guide_block` and `qa_instruments_block`
+            // use. Body: { bypassGate?: false to honour office_context_enabled }.
+            // Safe to run repeatedly: the review desk skips any agent whose
+            // review is already sitting in the lifecycle inbox, so a second run
+            // in the same day draws the NEXT two reviews rather than re-filing
+            // the first two.
+            result = await processAdminDeskBlock(env, { bypassGate: body.bypassGate !== false });
             break;
           case 'qa_instruments_block':
             // Runs the Friday qa_instruments block directly, gate bypassed —

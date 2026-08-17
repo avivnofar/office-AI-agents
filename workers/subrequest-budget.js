@@ -293,6 +293,25 @@ export const BLOCK_COST = {
   tool_task_window: 8,    // harness 0 (not a tool-task day)
   chore_rotation: 6,      // harness 0
   qa_instruments: 8,      // harness 2
+  /*
+   * `admin_desk` (2026-08-17) is the first entry here sized by ARITHMETIC
+   * rather than by a harness run, and it says so rather than borrowing a
+   * neighbour's number.
+   *
+   * Its worst realistic tick: one office-snapshot refresh (~9 GETs, and only
+   * when the 30-minute cache is stale), up to 3 lifecycle-inbox directory
+   * listings, up to 2 artifact GETs, 2 review model calls, 2 inbox commits,
+   * 3 probation model calls + 1 D1 update, 1 incident D1 read + 1 model call,
+   * and up to 6 `reports` inserts. That is ~30 on the day everything fires at
+   * once and closer to 4 on the ordinary day where three of the four queues
+   * are empty — which is most days, by design.
+   *
+   * Sized at 34 so it is admitted on its own free 10:00 tick (usable ~38 with
+   * no cases due there) and refused rather than half-run if it is ever moved
+   * onto a crowded one. `verify-subrequest-budget.js` will replace this with a
+   * measurement the first time it walks a day that reaches this block.
+   */
+  admin_desk: 34,         // ARITHMETIC, not measured — see the block above
 };
 
 /** Conservative default for a block type nobody has measured yet. */

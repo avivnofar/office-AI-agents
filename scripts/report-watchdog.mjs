@@ -91,6 +91,17 @@ const args = process.argv.slice(2);
 const asJson = args.includes('--json');
 const onlyBranches = args.includes('--branches');
 const onlyReports = args.includes('--reports');
+/*
+ * `--liveness` (OB-130, 2026-08-17) — the mode GitHub Actions runs.
+ *
+ * It asks `checkWorkerLiveness()` alone: did the Worker write to the PUBLIC
+ * repo today? That is the only half of this file answerable with the default
+ * `GITHUB_TOKEN`, and the remedy for OB-130 requires no new secret. It also
+ * skips the branch table, which needs three local checkouts a runner does not
+ * have — a table of three "no checkout" errors every night is noise that
+ * teaches the reader to skim, which is the failure this file's own header names.
+ */
+const onlyLiveness = args.includes('--liveness');
 const dateArg = (args.find((a) => a.startsWith('--date=')) || '').slice(7);
 
 /* ─────────────────────────── Saturday is a rest day ───────────────────── */
@@ -141,7 +152,9 @@ function isRestDay(now = new Date()) {
 async function checkReports(dateStr, { exec = execFileSync } = {}) {
   const result = { date: dateStr, method: null, daily: null, ok: false, detail: null };
 
-  const apiPath = `repos/${OWNER}/${BACKOFFICE_REPO}/commits?path=${DAILY_SUMMARY_PATH}&since=${dateStr}T00:00:00Z&per_page=20`;
+  // `until` added 2026-08-17 for the same reason as in checkWorkerLiveness()
+  // below: unbounded `since` made every past-date check count later days too.
+  const apiPath = `repos/${OWNER}/${BACKOFFICE_REPO}/commits?path=${DAILY_SUMMARY_PATH}&since=${dateStr}T00:00:00Z&until=${dateStr}T23:59:59Z&per_page=20`;
   try {
     const raw = exec('gh', ['api', apiPath], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     const commits = JSON.parse(raw);
@@ -174,6 +187,87 @@ async function checkReports(dateStr, { exec = execFileSync } = {}) {
       detail: `Could not read ${BACKOFFICE_REPO} via \`gh api\` (${ghDetail}). The check WAS NOT PERFORMED. `
         + `For information only, the LOCAL checkout's newest ${DAILY_SUMMARY_PATH} file is `
         + `${newest ? `${newest.f} (mtime ${new Date(newest.mtimeMs).toISOString()})` : 'none'} — a local tree can be days stale and is not evidence either way.`,
+    };
+  }
+}
+
+/* ────────────────────── The liveness check (OB-130) ───────────────────── */
+
+/**
+ * Commit-message prefixes the LIVE WORKER writes, and nothing else does.
+ *
+ * `commitFileToRepo()` is the one place a repo write happens (repo-write.js),
+ * and every autonomous caller of it prefixes its message this way: gap digests,
+ * guide drafts and approvals, weekly and daily reports, the asset board, the
+ * QA instruments file, and the admin desk's lifecycle proposals. A human
+ * session's commits do not — they are written in prose.
+ *
+ * This is the seam that makes the check possible with NO credential: a
+ * session's commit and the Worker's commit are both authored by the owner's
+ * GitHub identity and cannot be told apart by author, but they can be told
+ * apart by message.
+ */
+const WORKER_COMMIT_PREFIXES = Object.freeze(['chore(agents):', 'chore(office):', 'office:', 'designer:']);
+
+export function isWorkerCommit(message) {
+  const first = String(message || '').split('\n')[0].trim();
+  return WORKER_COMMIT_PREFIXES.some((p) => first.startsWith(p));
+}
+
+/**
+ * ── IS THE WORKER STILL RUNNING AT ALL? ──────────────────────────────────
+ *
+ * A16's question is "was a report written today?", and `checkReports()` above
+ * answers it against `campus/shared/daily` in the PRIVATE back-office repo.
+ * That is the better question and it is the one that cannot run from GitHub
+ * Actions: a workflow in the public repo has a `GITHUB_TOKEN` scoped to the
+ * public repo, and reading a second private repo would need a new cross-repo
+ * secret — which the remedy for `OB-130` explicitly rules out.
+ *
+ * So this is the narrower question that CAN be asked with no credential at all:
+ * **did the live Worker write anything to this public repo today?** It is a
+ * weaker signal than the daily summary and it is labelled as one everywhere it
+ * appears. What it is not is a guess: the Worker has committed to this repo on
+ * every non-Saturday since 2026-08-06 (measured over that window: 1-14 commits
+ * a day, zero on the one Saturday), so a work day with none is a real alarm.
+ *
+ * **Why this is still an EXTERNAL check** — it satisfies A16 on all three
+ * counts that matter. Different machine (a GitHub runner, not Cloudflare's
+ * edge), different mechanism (Actions cron, not the Worker's own cron),
+ * different network path. Nothing about it runs inside the thing being watched,
+ * which is the entire property `/api/agents/status` lacks.
+ *
+ * Exit-code discipline is `checkReports()`'s, unchanged: `ok: null` means the
+ * check could not be performed and is NEVER a pass.
+ */
+export async function checkWorkerLiveness(dateStr, { exec = execFileSync, repo = PUBLIC_REPO } = {}) {
+  const result = { date: dateStr, method: null, commits: null, ok: false, detail: null, signal: 'weak' };
+  // BOUNDED AT BOTH ENDS. `since` alone counts every commit AFTER that date,
+  // which is right for "today" and wrong for every other value of --date: a
+  // 2026-08-15 check was reporting 5 commits, all of them from later days.
+  // That made the one path this watchdog can be TESTED on report a pass it had
+  // not measured — the defect the file's own exit-code discipline is about.
+  const apiPath = `repos/${OWNER}/${repo}/commits?since=${dateStr}T00:00:00Z&until=${dateStr}T23:59:59Z&per_page=100`;
+  try {
+    const raw = exec('gh', ['api', apiPath], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    const all = JSON.parse(raw);
+    if (!Array.isArray(all)) throw new Error('the commits API did not return a list');
+    const worker = all.filter((c) => isWorkerCommit(c?.commit?.message));
+    result.method = 'github-api';
+    result.commits = worker.length;
+    result.ok = worker.length > 0;
+    result.detail = result.ok
+      ? `${worker.length} Worker commit(s) to ${repo} since ${dateStr}T00:00Z — most recent "${worker[0]?.commit?.message?.split('\n')[0]}"`
+      : `NO Worker commit reached ${repo} since ${dateStr}T00:00Z (${all.length} commit(s) total, none of them the Worker's). `
+        + 'The cron may not be firing, or every write it attempted failed.';
+    return result;
+  } catch (err) {
+    const ghDetail = String(err.stderr || err.message || err).trim().split('\n')[0];
+    return {
+      ...result,
+      method: 'unreachable',
+      ok: null,
+      detail: `Could not read ${repo} via \`gh api\` (${ghDetail}). The check WAS NOT PERFORMED — this is not a pass.`,
     };
   }
 }
@@ -295,10 +389,18 @@ function branchVerdict(rows) {
 export async function main() {
 
 const dateStr = dateArg || israelDateStr();
-const restDay = !dateArg && isRestDay();
+/*
+ * The rest-day exemption is derived from `dateStr`, not from "no --date was
+ * given". Before 2026-08-17 it read `!dateArg && isRestDay()`, so
+ * `--date=2026-08-15` (a Saturday) was checked as though it were a work day and
+ * would have alarmed. A watchdog that answers a different question when you
+ * name the day is a watchdog nobody can test against a past date.
+ */
+const restDay = isRestDay(new Date(`${dateStr}T00:00:00Z`));
 
-const reports = onlyBranches ? null : await checkReports(dateStr);
-const branches = onlyReports ? null : checkBranches();
+const liveness = (onlyBranches || onlyReports) ? null : await checkWorkerLiveness(dateStr);
+const reports = (onlyBranches || onlyLiveness) ? null : await checkReports(dateStr);
+const branches = (onlyReports || onlyLiveness) ? null : checkBranches();
 const verdict = branches ? branchVerdict(branches) : null;
 
 /*
@@ -310,9 +412,13 @@ const verdict = branches ? branchVerdict(branches) : null;
  */
 let code = 0;
 if (!onlyBranches) {
+  // The heartbeat this run is judging on. `--liveness` judges on the public
+  // repo (the only question a GitHub runner can ask without a new secret);
+  // every other invocation judges on the daily summary, exactly as before.
+  const heartbeat = onlyLiveness ? liveness : reports;
   if (restDay) code = 0;
-  else if (reports.ok === null) code = 2;
-  else if (reports.ok === false) code = 1;
+  else if (heartbeat.ok === null) code = 2;
+  else if (heartbeat.ok === false) code = 1;
 }
 
 /**
@@ -336,12 +442,31 @@ function finish(code) {
 }
 
 if (asJson) {
-  console.log(JSON.stringify({ date: dateStr, restDay, reports, branches, branchVerdict: verdict, exitCode: code }, null, 2));
+  console.log(JSON.stringify({ date: dateStr, restDay, liveness, reports, branches, branchVerdict: verdict, exitCode: code }, null, 2));
   finish(code);
 } else {
 
 console.log(`\nA16 EXTERNAL CHECK — ${dateStr} (Israel)${restDay ? '  [SATURDAY — rest day per policy A13]' : ''}`);
 console.log('='.repeat(72));
+
+if (liveness) {
+  console.log('\nDID THE LIVE WORKER WRITE ANYTHING TODAY?');
+  console.log(`  (public-repo signal — ${liveness.signal.toUpperCase()}er than the daily summary, and labelled so)`);
+  if (restDay) {
+    console.log('  REST DAY — A13 makes Saturday a day with no automated writing.');
+    console.log(`  (for information: ${liveness.detail})`);
+  } else if (liveness.ok === true) {
+    console.log(`  YES — ${liveness.detail}`);
+  } else if (liveness.ok === false) {
+    console.log('  *** NO. THE WORKER WROTE NOTHING TO THE PUBLIC REPO TODAY. ***');
+    console.log(`  ${liveness.detail}`);
+    console.log('  A16: the Workflow cannot report a failure that stops him running.');
+    console.log('  Report it. DO NOT try to fix the Worker from here — A1 forbids it.');
+  } else {
+    console.log('  *** COULD NOT CHECK. This is not a pass. ***');
+    console.log(`  ${liveness.detail}`);
+  }
+}
 
 if (reports) {
   console.log('\nDID THE OFFICE REPORT TODAY?');

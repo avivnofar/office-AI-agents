@@ -1122,8 +1122,48 @@ export class AgentBase {
     return this.fileGapReport(project, caseId, hebrewText, gap.kind);
   }
 
+  /**
+   * ── THE SILENT DROP, CLOSED 2026-08-17 (OB-131) ──────────────────────────
+   *
+   * This method used to open `if (!this.env.DB || !this.session) return null;`
+   * — an early return, no log line, indistinguishable from a successful write
+   * at every call site, because no caller reads the return value.
+   *
+   * **What that cost, measured against live D1 on 2026-08-17:** the last
+   * `idle` or `coworker_chat` row in `interactions` is dated 2026-08-10, and
+   * agents 5-13 have never had one at all. The `spare_time` block reaches all
+   * thirteen agents, and `ensureAgentInstances()` builds fresh instances per
+   * invocation whose `session` is null — so every row it produced was being
+   * discarded here. The finding was written up as nine agents; it is thirteen.
+   *
+   * The remedy has two halves and needs both:
+   *
+   *   1. **The drop is now LOUD.** A refused write returns `{logged: false,
+   *      reason}` and warns. The shape of the return changed from an id to an
+   *      object deliberately: an id-or-null return is exactly what let five
+   *      call sites ignore this for a week.
+   *   2. **`openLoggingSession()`** below gives a caller a way to make the row
+   *      land, rather than leaving "log it" and "have a work session" welded
+   *      together. `runSpareTimeForAgent()` uses it.
+   *
+   * `session_id` stays NOT NULL with its foreign key. Nothing here loosens the
+   * schema — the row still belongs to a real `agent_sessions` row, it is just
+   * possible now to have one without doing case work.
+   *
+   * @returns {Promise<{logged: boolean, id: string|null, reason: string|null}>}
+   */
   async logInteraction({ type, query, response_summary, mood_before, mood_after, irritation_change, state_change, model_source, tool_used }) {
-    if (!this.env.DB || !this.session) return null;
+    if (!this.env.DB) {
+      console.warn(`[interactions] agent ${this.id}: "${type}" NOT logged — no DB binding`);
+      return { logged: false, id: null, reason: 'no_db_binding' };
+    }
+    if (!this.session) {
+      console.warn(
+        `[interactions] agent ${this.id} (${this.name}): "${type}" NOT logged — this agent has no session, `
+        + 'and interactions.session_id is NOT NULL. Call openLoggingSession() first if this row should exist.'
+      );
+      return { logged: false, id: null, reason: 'no_session' };
+    }
 
     const id = crypto.randomUUID();
     await this.env.DB.prepare(
@@ -1146,7 +1186,66 @@ export class AgentBase {
       tool_used || null
     ).run();
 
-    return id;
+    return { logged: true, id, reason: null };
+  }
+
+  /**
+   * Opens the minimum session an `interactions` row needs to exist, for an
+   * agent that is not doing case work.
+   *
+   * ── WHY NOT `startSession()` ──────────────────────────────────────────────
+   *
+   * `startSession()` is the CASE-WORK session: it carries a `case`, counts
+   * `cases_handled`, feeds `endSession()`'s mood arithmetic, and writes the
+   * Durable Object. None of that applies to an agent standing in the corridor
+   * during spare time, and the DO write is the one part of it that is metered
+   * against the invocation budget. Reusing it here would have made spare time
+   * look like work in `agent_sessions` and cost a DO round trip per agent to do
+   * it.
+   *
+   * This is the honest smaller thing: a row to attribute an interaction to,
+   * marked with its own mode so it is never mistaken for a work session.
+   * `ended_at` is set immediately — it opens and closes in the same statement,
+   * because there is no span to measure.
+   *
+   * Returns the session, or null with a warning — never throws, and never
+   * silently. A caller that gets null and logs anyway will get the loud refusal
+   * from `logInteraction()` above.
+   *
+   * @param {string} mode - `agent_sessions.mode`, e.g. 'spare_time'
+   */
+  async openLoggingSession(mode) {
+    if (this.session) return this.session;
+    if (!this.env.DB) {
+      console.warn(`[interactions] agent ${this.id}: cannot open a "${mode}" logging session — no DB binding`);
+      return null;
+    }
+    const now = new Date().toISOString();
+    const session = {
+      id: crypto.randomUUID(),
+      agent_id: this.id,
+      started_at: now,
+      ended_at: now,
+      mode,
+      cases_handled: 0,
+      mood_start: this.mood,
+      mood_end: this.mood,
+      irritation_events: 0,
+      happy_events: 0,
+      extended_session: false,
+      case: null,
+      loggingOnly: true,
+    };
+    try {
+      await this.env.DB.prepare(
+        `INSERT INTO agent_sessions (id, agent_id, started_at, ended_at, mode, mood_start, mood_end) VALUES (?, ?, ?, ?, ?, ?, ?)`
+      ).bind(session.id, this.id, now, now, mode, this.mood, this.mood).run();
+    } catch (err) {
+      console.warn(`[interactions] agent ${this.id}: "${mode}" logging session INSERT failed — ${err?.message}`);
+      return null;
+    }
+    this.session = session;
+    return session;
   }
 
   /* ───────────────────── 6. Durable Object persistence ───────────────── */
