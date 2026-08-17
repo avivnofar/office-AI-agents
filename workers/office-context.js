@@ -675,7 +675,41 @@ export function parseBoard(markdown) {
   const counts = { total: tasks.length };
   for (const s of BOARD_STATES) counts[s] = tasks.filter((t) => t.state === s).length;
 
-  return { ok: true, tasks, counts, malformed };
+  /*
+   * ── IN-PROGRESS WITH NO START RECORD (2026-08-17) ─────────────────────────
+   *
+   * `OB-032`'s Task line has said since 2026-08-08 that *"the board has no
+   * IN-PROGRESS transition written by any path"*. That sentence is now STALE and
+   * its own later notes say so: `dispatch.js applyToBoard()` writes a
+   * `Dispatched:` line, this parser reads it, and `buildReportFacts()` derives a
+   * real `dispatchedCount` from it. The Workflow's two affected productivity
+   * measures became computable on 2026-08-10.
+   *
+   * WHAT SURVIVED IS NARROWER AND WAS INVISIBLE. `dispatch.js` is not the only
+   * way a task reaches `IN-PROGRESS` — a session can hand-edit the `State:` line,
+   * and one has: `OB-081` was moved to IN-PROGRESS on 2026-08-16 by a session and
+   * carries no `Dispatched:` line at all. Measured 2026-08-17: of three
+   * IN-PROGRESS tasks, two had a start record and one did not.
+   *
+   * So the defect is no longer *"nothing records a start"* — it is **"not every
+   * path records a start, and the two are indistinguishable downstream."** A
+   * task with no `Dispatched:` line has no start date, so *time-to-start* and
+   * *work past its metric line* silently skip it rather than reporting it as
+   * unmeasurable. That is this project's dominant shape once more: absence read
+   * as fact.
+   *
+   * Reported, never repaired. Inventing a start date would be strictly worse
+   * than the silence — `OB-032`'s own note warns against solving this by hand,
+   * because *"a state that a human maintains by hand is the same silence with
+   * more steps."* This makes the hand-maintained case VISIBLE; it does not
+   * legitimise it.
+   */
+  const unrecordedStarts = tasks
+    .filter((t) => t.state === 'IN-PROGRESS' && !t.dispatched)
+    .map((t) => `${t.id}: IN-PROGRESS with no "Dispatched:" line — the start was not recorded by dispatch.js,`
+      + ' so this task has no start date and every time-to-start measure silently skips it');
+
+  return { ok: true, tasks, counts, malformed, unrecordedStarts };
 }
 
 /**
@@ -689,6 +723,41 @@ export function parseBoard(markdown) {
  * would report the office as blocked on a decision that has been made.
  */
 export const QUESTION_MARKERS = Object.freeze(['ANSWERED', 'DECLINED', 'WITHDRAWN']);
+
+/**
+ * Is an `Answer:` field a real answer, or the empty placeholder an unanswered
+ * entry is born with?
+ *
+ * WHY THIS EXISTS (2026-08-17). Until today the heading suffix was the ONLY
+ * thing that closed a question, and the `Answer:` field — the field the
+ * contract creates for answers, and the only one the owner would ever think to
+ * fill — was not read by this parser at all. `Q-001` is the live instance: the
+ * owner answered it on 2026-08-12, somebody transcribed his answer into the
+ * `Answer:` field with a note asking for the item to be closed, and because
+ * nobody also edited the `###` heading the office went on reporting it as
+ * *awaiting his decision* for five days — on the `/owner` page he reads, in
+ * every agent prompt, and climbing the age ladder the whole time.
+ *
+ * **The state and the answer lived in two places and only one was
+ * authoritative.** That is the defect, not the missing marker: asking the
+ * client to edit a heading *as well as* write the answer is a second habit, and
+ * `channel/from-owner/README.md`'s criterion 1 is that he must not have to
+ * acquire one.
+ *
+ * The placeholder an open entry carries is a bare em-dash, sometimes followed
+ * by an italic aside (`— *(never asked of him; withdrawn below)*`). Both are
+ * stripped before measuring. The 20-character floor is deliberately generous:
+ * this predicate can only ever CLOSE a question, so a false positive silences a
+ * live question and a false negative merely leaves the status quo. It errs
+ * toward leaving the question open.
+ */
+function hasSubstantiveAnswer(answerField) {
+  const stripped = plain(answerField)
+    .replace(/^[—–-]+\s*/, '')      // the leading placeholder dash
+    .replace(/\((?:[^()]*)\)/g, '') // parenthetical asides, incl. the italic ones
+    .trim();
+  return stripped.length >= 20;
+}
 
 /**
  * Parses channel/to-owner/OPEN-QUESTIONS.md into entries.
@@ -723,11 +792,12 @@ export function parseOpenQuestions(markdown) {
     // nothing it needs the owner for. It is NOT a parse failure, and reporting it
     // as one would put a spurious error into every prompt for as long as the
     // office happened to have no questions.
-    return { ok: true, questions: [], counts: { total: 0, open: 0, closed: 0 }, malformed: [] };
+    return { ok: true, questions: [], counts: { total: 0, open: 0, closed: 0 }, malformed: [], unmarked: [] };
   }
 
   const questions = [];
   const malformed = [];
+  const unmarked = [];
   for (let i = 0; i < starts.length; i += 1) {
     const end = i + 1 < starts.length ? starts[i + 1].index : markdown.length;
     const block = markdown.slice(starts[i].index, end);
@@ -744,16 +814,44 @@ export function parseOpenQuestions(markdown) {
 
     // The marker is a SUFFIX on the heading, so the question text itself may
     // contain any punctuation including the em-dash the heading is split on.
-    const marker = QUESTION_MARKERS.find((k) => new RegExp(`—\\s*${k}\\s*$`).test(starts[i].heading)) || null;
+    const headingMarker = QUESTION_MARKERS.find((k) => new RegExp(`—\\s*${k}\\s*$`).test(starts[i].heading)) || null;
     const question = plain(
       starts[i].heading.replace(/—\s*(?:ANSWERED|DECLINED|WITHDRAWN)\s*$/, '').replace(/~~/g, '')
     );
+
+    /*
+     * AN ANSWER CLOSES A QUESTION, whether or not anyone also edited the
+     * heading. See hasSubstantiveAnswer() for the five-day live instance this
+     * was built from.
+     *
+     * The heading still WINS when it is present — DECLINED and WITHDRAWN are
+     * outcomes that an `Answer:` field cannot express, and inferring ANSWERED
+     * over an explicit WITHDRAWN would overwrite a stated decision with a
+     * guessed one. Inference only ever fills a gap; it never overrides.
+     *
+     * The disagreement is REPORTED rather than quietly repaired. A file whose
+     * heading and body say different things is a fact about the office worth
+     * surfacing — and `unmarked` is what tells a later session to go and write
+     * the marker, which keeps the file readable to a human who is not running
+     * this parser.
+     */
+    const answer = plain(boardField(block, 'Answer')) || null;
+    const inferredAnswer = headingMarker === null && hasSubstantiveAnswer(answer);
+    if (inferredAnswer) {
+      unmarked.push(
+        `${starts[i].id}: carries an answer in its "Answer:" field but its heading has no ANSWERED marker`
+        + ' — counted as ANSWERED from the answer itself; the heading should be marked so the file reads the same to a human'
+      );
+    }
+    const marker = headingMarker || (inferredAnswer ? 'ANSWERED' : null);
 
     const agentMatch = /Agent\s+(\d+)/.exec(askedBy);
     questions.push({
       id: starts[i].id,
       question,
       marker,
+      markerInferred: inferredAnswer,
+      answer,
       open: marker === null,
       askedBy,
       agentId: agentMatch ? Number(agentMatch[1]) : null,
@@ -774,6 +872,11 @@ export function parseOpenQuestions(markdown) {
     questions,
     counts: { total: questions.length, open, closed: questions.length - open },
     malformed,
+    // Separate from `malformed` on purpose: a malformed entry is DROPPED and
+    // never reaches the office, whereas an unmarked-but-answered entry is read
+    // correctly and merely disagrees with its own heading. Folding the two
+    // together would make a bookkeeping nit look like lost input.
+    unmarked,
   };
 }
 
@@ -974,7 +1077,7 @@ export async function fetchOfficeSnapshot(env, { today = new Date().toISOString(
   let questions = null;
   if (questionsFile.reason) {
     if (!/HTTP 404/.test(questionsFile.reason)) errors.push(questionsFile.reason);
-    else questions = { ok: true, questions: [], counts: { total: 0, open: 0, closed: 0 }, malformed: [] };
+    else questions = { ok: true, questions: [], counts: { total: 0, open: 0, closed: 0 }, malformed: [], unmarked: [] };
   } else {
     const parsed = parseOpenQuestions(questionsFile.text);
     if (parsed.ok) questions = parsed;
@@ -1389,7 +1492,7 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
      * only occupant of would be a trim for its own sake.
      */
     const ownerOnly = snapshot?.owner?.classified
-      ? ownerMessageSections(snapshot.owner.classified, { shape, candidates: ownerCandidates }).map(renderSection).filter(Boolean).join('\n')
+      ? ownerMessageSections(snapshot.owner.classified, { shape, candidates: ownerCandidates, malformed: snapshot.owner.malformed }).map(renderSection).filter(Boolean).join('\n')
       : '';
     return {
       text: ownerOnly ? `${policyOnly.text}\n\n${ownerOnly}` : policyOnly.text,
@@ -1427,7 +1530,7 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
    * in this function and is not stylistic ordering.
    */
   if (snapshot?.owner?.classified) {
-    for (const s of ownerMessageSections(snapshot.owner.classified, { shape, candidates: ownerCandidates })) {
+    for (const s of ownerMessageSections(snapshot.owner.classified, { shape, candidates: ownerCandidates, malformed: snapshot.owner.malformed })) {
       sections.push({ ...s, priority: PRIORITY.headline });
     }
   }
@@ -1459,7 +1562,17 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
     sections.push({
       label: 'board-counts',
       priority: PRIORITY.status,
-      text: `Delegation board (back-office campus/shared/board/BOARD.md): ${board.counts.total} tasks — ${boardCountLine(board.counts)}.${droppedRowsNote(board.malformed, 'board task')}`,
+      // The unrecorded-start note rides on the counts line rather than getting a
+      // section of its own: it is a caveat ON the IN-PROGRESS number, and a
+      // reader who sees that number without it has been told something slightly
+      // false. Riding here also means it cannot be dropped while the count it
+      // qualifies survives — two sections could be split by the fitter.
+      text: `Delegation board (back-office campus/shared/board/BOARD.md): ${board.counts.total} tasks — ${boardCountLine(board.counts)}.${droppedRowsNote(board.malformed, 'board task')}`
+        + ((board.unrecordedStarts || []).length
+          ? ` ⚠️ ${board.unrecordedStarts.length} of the ${board.counts['IN-PROGRESS']} IN-PROGRESS task(s) carry NO "Dispatched:" start record`
+            + ` (${board.unrecordedStarts.map((s) => s.split(':')[0]).join(', ')}) — they were started by hand, not by dispatch.js,`
+            + ' so any time-to-start or overdue measure silently omits them rather than reporting them as unmeasurable.'
+          : ''),
     });
 
     const mine = opts.agentId ? board.tasks.filter((t) => t.agentId === opts.agentId) : [];

@@ -492,9 +492,50 @@ function bodyForShape(message, shape) {
  *
  * @returns {Array} sections in `office-context.js`'s shape
  */
-export function ownerMessageSections(classified, { shape = 'agent', candidates = [] } = {}) {
+export function ownerMessageSections(classified, { shape = 'agent', candidates = [], malformed = [] } = {}) {
   const sections = [];
   const c = classified.counts;
+  const refused = (Array.isArray(malformed) ? malformed : []).filter(Boolean);
+
+  /*
+   * ── A REFUSED MESSAGE IS A THIRD STATE, AND IT USED TO BE INVISIBLE ─────
+   *
+   * The line below always promised that *"the owner has written nothing"* and
+   * *"the channel could not be read"* would never look alike. It kept that
+   * promise for a whole-channel read failure — which lands in
+   * `office-context.js`'s `errors` — and broke it for the case that actually
+   * happened: ONE file that parses `ok: false`. A refused message never enters
+   * `classified`, so `c.total` stayed 0 and this section rendered the literal
+   * sentence **"none. The owner has not written to the office."**
+   *
+   * That is what it said, in every prompt, from 2026-08-12 to 2026-08-17, while
+   * `channel/from-owner/2026-08-12-short-slug.md` — seven numbered items,
+   * including a direct instruction and the answer to `Q-001` — sat on disk
+   * refused for having no front-matter block. The refusal itself is right
+   * (`kind` is load-bearing and must not be guessed). Recording it ONLY as a
+   * `console.warn` in a Worker log was the defect.
+   *
+   * So it is rendered here, at headline priority, ahead of everything: the
+   * office cannot read what the client wrote, and that is the loudest fact the
+   * channel can produce — louder than any message it CAN read, because a
+   * message it can read is at least being worked.
+   */
+  if (refused.length) {
+    sections.push({
+      label: 'owner-messages-unreadable',
+      priority: 0,
+      header: `⚠️ THE OWNER WROTE ${refused.length} MESSAGE(S) THE OFFICE CANNOT READ — his words are NOT below.`,
+      // The guidance rides as a trailing ITEM, not as `text`: renderSection()
+      // drops `text` whenever `items` is present, so a section that set both
+      // would silently lose the half that says what to do about it.
+      items: [
+        ...refused.map((r) => `- ${r}`),
+        '- Do not treat the channel as quiet. A refused message is the client talking and the office not listening.'
+          + ' An agent may NOT fix it: `channel/from-owner/README.md` reserves changes in that folder to the owner,'
+          + ' taken with a supervised session. Escalate it as an owner-facing item naming WHICH file and WHAT its header is missing.',
+      ],
+    });
+  }
 
   // The count line renders even at zero. "The owner has written nothing" and
   // "the channel could not be read" are different facts and must not look
@@ -504,7 +545,9 @@ export function ownerMessageSections(classified, { shape = 'agent', candidates =
     label: 'owner-messages-count',
     priority: 0, // PRIORITY.headline — office-context.js owns the enum; this is its value.
     text: c.total === 0
-      ? 'OWNER MESSAGES (back-office channel/from-owner/): none. The owner has not written to the office.'
+      ? `OWNER MESSAGES (back-office channel/from-owner/): none readable.${refused.length
+        ? ` ${refused.length} message(s) were REFUSED and are named above — this is NOT an empty channel.`
+        : ' The owner has not written to the office.'}`
       : `OWNER MESSAGES (back-office channel/from-owner/): ${c.total} on record — `
         + `${c.unactioned} still needing action (${c.unread} never read by the office, ${c.readNotActed} read and not yet acted on), `
         + `${c.acted} acted on and closed.`

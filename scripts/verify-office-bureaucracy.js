@@ -1004,6 +1004,43 @@ const noAsker = officeContext.parseOpenQuestions(GOOD_Q.replace('- **Asked by:**
 check('an entry with no readable "Asked by" line is REFUSED',
   noAsker.ok === true && !noAsker.questions.some((q) => q.id === 'Q-001'));
 
+/* ── §10a — AN ANSWER CLOSES A QUESTION EVEN WHEN THE HEADING WAS NOT EDITED ──
+ *
+ * Added 2026-08-17 from a live five-day failure. `Q-001` in the real file was
+ * answered by the owner on 2026-08-12, the answer was transcribed into the
+ * `Answer:` field with a note asking for the item to be closed, and because
+ * nobody ALSO edited the `###` heading the office reported it as awaiting his
+ * decision — on the `/owner` page, in every prompt, climbing the age ladder.
+ *
+ * The bare `- **Answer:** —` placeholder in GOOD_Q's Q-001 is what an unanswered
+ * entry is born with, so the fixture above still proves the OPEN default; these
+ * checks fill it in and prove the close.
+ */
+const answeredInBody = officeContext.parseOpenQuestions(
+  GOOD_Q.replace('- **Answer:** —', '- **Answer:** *(2026-08-12, owner)* Not a product list — a standing brief; he chooses the product.')
+);
+check('§10a an answer in the Answer field CLOSES the question with no heading marker',
+  answeredInBody.ok && answeredInBody.questions[0].open === false
+  && answeredInBody.questions[0].marker === 'ANSWERED',
+  `open=${answeredInBody.questions?.[0]?.open}`);
+check('§10a …and the inference is FLAGGED, not silent',
+  answeredInBody.questions[0].markerInferred === true);
+check('§10a …and the heading/body disagreement is REPORTED in `unmarked`',
+  answeredInBody.unmarked.some((s) => /Q-001/.test(s) && /heading/.test(s)),
+  JSON.stringify(answeredInBody.unmarked));
+check('§10a …and `unmarked` is kept SEPARATE from `malformed` (reported, not dropped)',
+  answeredInBody.malformed.length === 0 && answeredInBody.questions.length === 3);
+check('§10a the placeholder em-dash is NOT a substantive answer — the entry stays OPEN',
+  qs.questions[0].open === true && qs.questions[0].markerInferred === false);
+check('§10a the answer TEXT is exposed so it can reach whatever the question blocked',
+  /standing brief/.test(answeredInBody.questions[0].answer || ''));
+// An explicit outcome the Answer field cannot express must never be overwritten
+// by an inferred one. DECLINED plus a filled-in answer is exactly that case.
+const declinedWithAnswer = officeContext.parseOpenQuestions(GOOD_Q);
+check('§10a an explicit DECLINED heading WINS over an inferred ANSWERED',
+  declinedWithAnswer.questions[2].marker === 'DECLINED'
+  && declinedWithAnswer.questions[2].markerInferred === false);
+
 // An EMPTY channel is healthy, not broken. Reporting it as a parse failure would
 // put a spurious error into every prompt for as long as the office had nothing
 // to ask.
@@ -1053,6 +1090,43 @@ const dispSnap = { fetched_at: Date.now(), board: dispBoard, requirements: reqs,
 const dispText = officeContext.buildOfficeContext(dispSnap, 'report').text || '';
 check('the holder is RENDERED — an IN-PROGRESS task with no visible holder is a race the prompt invites',
   /HELD: 2026-08-09/.test(dispText), dispText.slice(0, 300));
+/* ── §7a — IN-PROGRESS WITH NO START RECORD IS REPORTED, NOT SKIPPED ────────
+ *
+ * Added 2026-08-17. `dispatch.js` writes a `Dispatched:` line; a session
+ * hand-editing `State:` does not, and `OB-081` on the live board is exactly
+ * that. Downstream the two were indistinguishable, so a hand-started task was
+ * silently omitted from every time-to-start measure instead of being reported
+ * as unmeasurable. No start date is invented — the gap is named.
+ */
+// GOOD_BOARD's own OB-003 is IN-PROGRESS with no `Dispatched:` line, so it is
+// the baseline instance — the flag must already see it before any edit.
+check('§7a the fixture\'s hand-set OB-003 is flagged as an unrecorded start',
+  board.ok && board.unrecordedStarts.length === 1 && /^OB-003:/.test(board.unrecordedStarts[0]),
+  JSON.stringify(board.unrecordedStarts));
+// DISPATCHED_BOARD makes OB-001 IN-PROGRESS *with* a Dispatched line. The
+// discrimination is the point: the dispatched one must NOT be flagged while the
+// hand-set one still is.
+check('§7a a DISPATCHED IN-PROGRESS task is NOT flagged, while the hand-set one still is',
+  dispBoard.unrecordedStarts.length === 1 && /^OB-003:/.test(dispBoard.unrecordedStarts[0]),
+  JSON.stringify(dispBoard.unrecordedStarts));
+const HANDSET_BOARD = GOOD_BOARD.replace('- **State:** READY', '- **State:** IN-PROGRESS');
+const handset = officeContext.parseBoard(HANDSET_BOARD);
+check('§7a a second hand-set IN-PROGRESS task is flagged too — both are named',
+  handset.ok && handset.unrecordedStarts.length === 2
+  && /IN-PROGRESS with no "Dispatched:" line/.test(handset.unrecordedStarts[0]),
+  JSON.stringify(handset.unrecordedStarts));
+check('§7a …and neither is treated as malformed — they still parse and still count',
+  handset.malformed.length === 0 && handset.counts['IN-PROGRESS'] === 2
+  && handset.tasks.length === board.tasks.length);
+check('§7a …and no start date is invented for either',
+  handset.tasks.filter((t) => t.state === 'IN-PROGRESS').every((t) => t.dispatched === null));
+const handsetText = officeContext.buildOfficeContext(
+  { fetched_at: Date.now(), board: handset, requirements: reqs, questions: emptyQ, errors: [] }, 'report'
+).text || '';
+check('§7a …and the caveat is RENDERED on the counts line, naming the task id',
+  /NO "Dispatched:" start record/.test(handsetText) && /OB-\d{3}/.test(handsetText),
+  handsetText.slice(0, 200));
+
 const offerSnap = { fetched_at: Date.now(), board: offerBoard, requirements: reqs, questions: emptyQ, errors: [] };
 const offerText = officeContext.buildOfficeContext(offerSnap, 'report').text || '';
 check('an offered task is rendered as STILL CLAIMABLE by the office, not as taken',

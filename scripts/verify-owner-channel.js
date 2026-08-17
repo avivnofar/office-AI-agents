@@ -272,9 +272,39 @@ section('§4 the age ladder — an entry that ages gets LOUDER');
   check('…and ESCALATED five weeks later — the entry does not render the same on day 1 and day 40',
     agedLater.filter((q) => q.open).every((q) => q.escalation.rung === 'ESCALATED'));
 
+  /*
+   * THE AGEING CHECKS BELOW NEED AN OPEN ENTRY, AND THE LIVE FILE MAY HAVE NONE.
+   *
+   * They read the live file until 2026-08-17, when Q-001 was marked ANSWERED and
+   * the channel reached zero open questions — and these two checks went RED. The
+   * checks were not measuring the ladder at that point; they were measuring
+   * whether the owner happened to be behind on answering. **A verifier that can
+   * only pass while the office is blocked on the client inverts what it is for**,
+   * and "zero open questions" is the healthiest state this channel has.
+   *
+   * So the ladder is exercised against the live file PLUS one synthetic open
+   * entry appended in memory. The live file is still parsed and still asserted
+   * above — what stops being required is that it contain something unanswered.
+   * Nothing is written to disk.
+   */
+  const SYNTHETIC_OPEN = [
+    '', '---', '',
+    '### Q-999 — Synthetic open entry, verifier-only, never written to disk. Does the ladder still rise?',
+    '', '- **Asked by:** Agent 12 — The Workflow', '- **Date:** 2026-08-10',
+    '- **Blocking:** nothing — this entry exists so the ageing checks have an open question to age',
+    '- **What I need:** a decision',
+    '- **If no answer comes:** nothing happens; this entry is a fixture, not a question.', '',
+  ].join('\n');
+  const qsAgeable = parseOpenQuestions(qsMd + SYNTHETIC_OPEN);
+  check('the ageing fixture yields exactly one open entry to age',
+    qsAgeable.ok && qsAgeable.counts.open === 1, `open=${qsAgeable.counts?.open}`);
+  const agedFixture = ageQuestions(qsAgeable.questions, '2026-09-15');
+  check('…an open entry five weeks old is ESCALATED',
+    agedFixture.filter((q) => q.open).every((q) => q.escalation.rung === 'ESCALATED'));
+
   const snapLater = {
     today: '2026-09-15', board: null, requirements: { requirements: [{ id: 'REQ-001', title: 'x', status: 'in progress', urgent: true }], due: '2026-09-07', malformed: [] },
-    questions: qs, lifecycle: null, policy: null, owner: null, submissions: null, errors: [],
+    questions: qsAgeable, lifecycle: null, policy: null, owner: null, submissions: null, errors: [],
   };
   const later = buildOfficeContext(snapLater, 'meeting', { today: '2026-09-15' });
   check('…and a risen question is RE-SURFACED in its own headline section, not merely relabelled',
