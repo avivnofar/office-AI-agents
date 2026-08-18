@@ -11,6 +11,18 @@
   because building the content here is how the project would avoid ever
   learning what its agents can actually produce.
 
+  APPENDED 2026-08-18 — session D / paperwork closure. Owner decision, in
+  conversation 2026-08-15 through 2026-08-17: the public Front's BUILD is
+  reassigned. The production public Front now lives at `avivnofar/main-website`
+  (private repo, public Netlify deploy) — a static Hebrew page presenting seven
+  projects, built directly with Claude Code, not by the office. This does not
+  retract anything below or make it abandoned work — the office's CONTENT
+  obligations (OB-092..OB-095, this task's own structure work as OB-013) stand.
+  What is genuinely open and not decided by this note: whether this directory
+  still serves a purpose running in parallel to `main-website`, or is now
+  infrastructure with no production consumer. See `campus/shared/board/BOARD.md`
+  `OB-013` (back-office, private) for the full note and cross-references.
+
   HOW CONTENT REACHES THIS DIRECTORY. Not by an agent writing here. Drafts
   accumulate in back-office `campus/shared/front-drafts/`, the QA signs off,
   the Designer curates a batch, and the batch publishes through
@@ -51,7 +63,7 @@ The visitor narrative order is the owner's, and it is fixed:
 |---|---|
 | [Data Center](https://avivnofar.github.io/data-center/) | Live. The Claude-powered system the office asks real questions of and judges the answers |
 | [Notebook-X](https://notebook-x.vercel.app) | Live. The Gemini-powered knowledge system the office tests the same way |
-| Archive Alpha | Not yet open. Named here without a link until it does — owner instruction |
+| Archive Alpha | ~~Not yet open. Named here without a link until it does — owner instruction~~ **Named here without a link, standing rule (2026-08-18): Smart Archive and the Galil Elyon pilot are shown as images only and never linked, because an outside visitor on either live archive site can trigger searches that spend the owner's own API key. This does not lift when either "opens."** |
 
 <!-- LINK RULE, load-bearing: Notebook-X's REPOSITORY is private and a link to
      it 404s for every visitor. Seven such links were found and fixed across
