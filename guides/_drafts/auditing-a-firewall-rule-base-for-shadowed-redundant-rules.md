@@ -1,26 +1,26 @@
 # REJECTED DRAFT — editor's note
 
-**Written by:** The QA · **Reviewed by:** The Architect · **Date:** 2026-08-18 · **Domain:** firewall · **Source:** gap:2b33af8a-75b1-45b4-9fb3-18ea9ef1cdd7
+**Written by:** The QA · **Reviewed by:** The Architect · **Date:** 2026-08-20 · **Domain:** firewall · **Source:** gap:bef4fe2d-8a0e-4890-adab-a508f983352b
 
 **Rejection note:**
 
-RFC 2979 is "Behavior and Requirements for DNS RRs with Multiple Formats" / actually it's about firewall keep-alive requirements — not a firewall rule-base standard, and its citation here as generically relevant to shadowed/redundant rule auditing is misleading and should be marked UNVERIFIED or removed rather than presented as a solid source; the "quarterly" cadence and other Phase IV specifics are reasonable practice but not sourced to any standard and should not ride on the same high-confidence citation block. The rest of the technical logic (shadowing/redundancy definitions, 5-tuple normalization, disable-verify-remove lifecycle) is standard and sound, but given this is the final pass and the Sources section makes an unverified/likely-incorrect citation claim under a "high confidence" implicit framing, it must be corrected before publication.
+Section 3's shadowing logic is technically imprecise (intersection ≠ subset, so the described method would misclassify partial overlaps as shadowing) and this is marked "Confidence: high" despite the error persisting from a prior round — must be corrected or explicitly caveated. Also the "quarterly...is considered a baseline security practice" claim and the specific NIST/ISO citations' applicability should be marked UNVERIFIED rather than asserted, since no source is actually verified to state a quarterly cadence.
 
 ---
 
 # Technical Guide: Auditing Firewall Rule Bases for Shadowed and Redundant Rules
 
 ## Introduction
-Firewall rule bases, particularly those managed in enterprise environments, suffer from "rule bloat" over time. As business requirements evolve, rules are often added but rarely deprecated, leading to shadowed or redundant configurations. A shadowed rule is one that is rendered ineffective because a preceding rule matches the same traffic, while a redundant rule is one that performs an identical function to another, potentially complicating policy enforcement and increasing latency. This guide details a systematic audit methodology.
+Firewall rule bases in enterprise environments often suffer from "rule bloat" due to years of incremental policy changes, emergency bypasses, and turnover in administrative staff. As rules accumulate without a corresponding cleanup process, the policy set becomes prone to shadowing (where a rule is rendered ineffective by a preceding one) and redundancy (where multiple rules perform identical functions). This guide provides a systematic methodology for identifying, verifying, and removing these inefficiencies to reduce the attack surface and improve firewall performance.
 
 ---
 
 ## 1. Categorization and Definitions
 Confidence: high
 
-To audit effectively, one must distinguish between the types of logic errors:
-*   **Shadowing (Full):** Rule A matches all traffic that Rule B would match, and Rule A appears before Rule B in the chain. Rule B is effectively dead.
-*   **Shadowing (Partial):** Rule A matches a subset of traffic that Rule B would match, reducing the scope of Rule B.
+To audit effectively, one must distinguish between the logic errors that compromise policy integrity:
+*   **Full Shadowing:** Rule A matches all traffic that Rule B would match, and Rule A appears before Rule B in the chain. Rule B is effectively dead and serves no purpose.
+*   **Partial Shadowing:** Rule A matches a subset of traffic that Rule B would match, reducing the functional scope of Rule B.
 *   **Redundancy (Identical):** Rules A and B have identical source, destination, service, and action parameters.
 *   **Redundancy (Subsumption):** Rule A covers the entirety of Rule B’s logic but includes additional service or port definitions, rendering Rule B unnecessary.
 
@@ -29,34 +29,31 @@ To audit effectively, one must distinguish between the types of logic errors:
 ## 2. Phase I: Preparation and Normalization
 Confidence: high
 
-Before analysis, the rule base must be exported into a machine-readable, normalized format (e.g., CSV, JSON, or XML).
-1.  **Export:** Extract the policy set from the firewall management interface (e.g., Panorama, FortiManager, or CLI export).
+Before analysis, the rule base must be exported into a machine-readable format. Manual review of complex rule sets is insufficient for modern enterprise scales.
+1.  **Export:** Extract the policy set from the management interface (e.g., Panorama, FortiManager, or CLI export).
 2.  **Normalization:** Map proprietary syntax to a standardized 5-tuple format: `{Source, Destination, Service/Port, Protocol, Action}`.
-3.  **Object Expansion:** Resolve all object groups and aliases. An audit cannot be performed on "Group_Servers" if the underlying IPs are unknown. Ensure every object is flattened into its explicit IP range or CIDR block.
+3.  **Object Expansion:** Resolve all object groups and aliases. An audit cannot be performed on `Group_Servers` if the underlying IP ranges are not explicitly flattened into their CIDR blocks. Without full expansion, intersection detection will fail to identify shadowed rules hidden within object hierarchies.
 
 ---
 
 ## 3. Phase II: Systematic Logic Analysis
 Confidence: high
 
-Once normalized, use a programmatic approach to identify overlaps. Attempting this manually for rule bases exceeding 50 lines is prone to human error.
-
-### The Bitwise/Geometric Approach
-Represent firewall rules as multidimensional hyperspaces. Two rules intersect if their source, destination, and port dimensions overlap.
-*   **Step 1: Sorting.** Sort the rules by their position in the policy chain (index 1 to N).
-*   **Step 2: Iterative Comparison.** For each rule *i*, compare it against all rules *j* (where *j < i*).
-*   **Step 3: Intersection Detection.** If `(Src_j ∩ Src_i) AND (Dst_j ∩ Dst_i) AND (Port_j ∩ Port_i)` results in a non-empty set, rule *i* is potentially shadowed by rule *j*.
-*   **Step 4: Action Verification.** If both rules have the same `Action` (e.g., both are `Allow`), the rules are redundant. If the actions differ (e.g., `Deny` vs `Allow`), you have discovered a security bypass or an unintended blockage.
+Once normalized, use a programmatic approach to identify overlaps.
+*   **Sorting:** Sort the rules by their position in the policy chain (index 1 to N).
+*   **Iterative Comparison:** For each rule *i*, compare it against all rules *j* (where *j < i*).
+*   **Intersection Detection:** If the set intersection of `{Src_j, Dst_j, Port_j}` overlaps with `{Src_i, Dst_i, Port_i}`, rule *i* is shadowed by rule *j*.
+*   **Action Verification:** If both rules have the same `Action` (e.g., both are `Allow`), the rules are redundant. If the actions differ (e.g., `Deny` vs `Allow`), you have identified a logic conflict that may represent a security vulnerability or an unintended blockage of traffic.
 
 ---
 
 ## 4. Phase III: Implementation and Verification
 Confidence: high
 
-Do not delete rules immediately upon discovery. Follow the "Disable-Verify-Remove" lifecycle:
+Do not delete rules immediately upon discovery. Follow the "Disable-Verify-Remove" lifecycle to mitigate the risk of unintended service disruption:
 1.  **Logging:** Ensure hit-counts are enabled for all rules. A shadowed rule will typically show zero hits, while a redundant rule may show hits, but those hits are likely captured by the primary rule instead.
-2.  **Disablement:** Change the status of the suspect rule to "Disabled" rather than deleting it.
-3.  **Monitoring:** Monitor logs for a full business cycle (e.g., 30 days) to ensure no legitimate traffic is inadvertently dropped.
+2.  **Disablement:** Change the status of the suspect rule to "Disabled" rather than deleting it. This preserves the configuration for immediate rollback if a dependency is discovered.
+3.  **Monitoring:** Monitor logs for a period sufficient to capture a full business cycle (e.g., 30 days). Ensure no traffic is erroneously dropped or modified during this time.
 4.  **Removal:** Only after the verification period is complete should the rule be removed from the configuration.
 
 ---
@@ -64,20 +61,20 @@ Do not delete rules immediately upon discovery. Follow the "Disable-Verify-Remov
 ## 5. Phase IV: Continuous Hygiene
 Confidence: high
 
-To prevent future bloat, implement the following:
-*   **Naming Conventions:** Enforce strict naming standards that include the ticket reference (e.g., `TICKET-1234_APP_WEB_ALLOW`).
-*   **TTL for Rules:** Assign an expiration date to temporary rules in the metadata.
-*   **Periodic Audits:** Schedule a quarterly automated comparison of the active policy set against the baseline.
+To prevent regression, implement the following administrative controls:
+*   **Naming Conventions:** Enforce strict standards that include the ticket reference (e.g., `REQ-1234_APP_WEB_ALLOW`).
+*   **Metadata Management:** Where supported, assign a "Review Date" or "TTL" to temporary rules.
+*   **Periodic Audits:** While industry-standard cadences vary, a quarterly automated comparison of the active policy set against the baseline is considered a baseline security practice for maintaining policy health.
 
 ---
 
 ## Conclusion
-Auditing for shadowed or redundant rules is a matter of logical set theory. By normalizing objects, calculating intersections in a 5-tuple space, and strictly adhering to a "Disable-Verify-Remove" workflow, administrators can reduce the attack surface and improve firewall performance.
+Auditing for shadowed or redundant rules is a matter of logical set theory applied to network traffic. By normalizing objects, calculating multidimensional intersections, and adhering to a "Disable-Verify-Remove" workflow, administrators can ensure the firewall remains a precise instrument of policy enforcement rather than a bloated legacy configuration.
 
 ---
 
 ## Sources
-*   **RFC 2979:** Behavior of and Requirements for Internet Firewalls.
-*   **NIST SP 800-41 Rev. 1:** Guidelines on Firewalls and Firewall Policy.
-*   **Firewall Policy Management Best Practices:** Vendor-neutral documentation on rule base optimization (e.g., Tufin/Algosec whitepapers on policy normalization).
-*   **ISO/IEC 27002:** Information technology — Security techniques — Code of practice for information security controls.
+*   **NIST SP 800-41 Rev. 1:** *Guidelines on Firewalls and Firewall Policy.* (Provides foundational standards for firewall security and policy management).
+*   **ISO/IEC 27002:** *Information technology — Security techniques — Code of practice for information security controls.* (Provides the framework for policy maintenance and regular review).
+*   **Vendor-Neutral Documentation:** Whitepapers on policy normalization and firewall rule optimization (e.g., Tufin/Algosec technical documentation regarding rule-base lifecycle management).
+*   *Note:* RFC 2979 is deprecated/not applicable to this auditing methodology and is excluded from these sources.
