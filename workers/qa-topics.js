@@ -77,14 +77,18 @@ const NOTEBOOK_X_CORE = [
 ];
 
 /** LOWER WEIGHT (weight 1): VoIP/PBX-specific questions. Kept per "no deletions" —
- * real, useful coverage, just not the owner's stated core priority. */
+ * real, useful coverage, just not the owner's stated core priority.
+ *
+ * REMOVED 2026-08-20 (owner decision, SESSION 02 PHASE 7 — see
+ * SESSION-02-STOP-THE-BLEEDING-REPORT.md): six entries that targeted
+ * kb-1com/kb-mirtapbx by platform ('1com', 'mirtapbx') generated real,
+ * dated capability-gap reports naming those two real third-party VoIP/PBX
+ * products — several of which were actually a Cloudflare Worker
+ * "too many subrequests" error, misreported as a Notebook-X content gap.
+ * The generic voip-sip entries below are untouched — they are not branded
+ * to a specific real product. History carries the removed entries in full;
+ * this is a working-tree removal, not a data loss. */
 const NOTEBOOK_X_VOIP_PBX = [
-  { title: 'Diagnosing an extension that will not register to a cloud PBX', platform: '1com', category: 'config', difficulty: 'intermediate', description: 'A phone shows "Not Registered" despite correct credentials, and was working yesterday. What is the diagnostic sequence — SIP config, firewall/NAT, portal status?', kbSlug: 'kb-1com' },
-  { title: 'Diagnosing one-way audio on a cloud PBX call', platform: '1com', category: 'config', difficulty: 'intermediate', description: 'The caller cannot hear the agent after a call connects, but the agent hears the caller fine. What RTP/NAT-traversal checks isolate the cause?', kbSlug: 'kb-1com' },
-  { title: 'Explaining call-queue distribution failure when agents show available', platform: '1com', category: 'queue', difficulty: 'advanced', description: 'Calls are entering a queue but no agent phone rings, though all agents show as available. What queue-strategy and SIP-trunk checks explain this?', kbSlug: 'kb-1com' },
-  { title: 'Diagnosing a SIP trunk that stopped re-registering after a config change', platform: 'mirtapbx', category: 'sip', difficulty: 'intermediate', description: 'After a config update, the main SIP trunk dropped and is not re-registering. What SIP credential, outbound-proxy, and firewall-port (5060/5061) checks apply?', kbSlug: 'kb-mirtapbx' },
-  { title: 'Explaining why a cluster config change is not propagating to a secondary node', platform: 'mirtapbx', category: 'cluster', difficulty: 'advanced', description: 'An extension config change made on the primary node is not reflected on the secondary. What cluster-sync/quorum checks isolate the cause?', kbSlug: 'kb-mirtapbx' },
-  { title: 'Diagnosing a WebRTC softphone that fails to connect from the browser', platform: 'mirtapbx', category: 'webrtc', difficulty: 'intermediate', description: 'A browser-based softphone shows "Connection failed". What WebRTC websocket / STUN-TURN / TLS-cert checks apply?', kbSlug: 'kb-mirtapbx' },
   { title: 'Explaining SIP trunking basics for a new deployment', platform: 'voip-sip', category: 'fundamentals', difficulty: 'beginner', description: 'For a team deploying SIP trunking for the first time, what are the core concepts (registration, codecs, NAT traversal) they need to understand upfront?', kbSlug: 'kb-voip-sip' },
   { title: 'Diagnosing poor call quality on an otherwise healthy SIP trunk', platform: 'voip-sip', category: 'quality', difficulty: 'intermediate', description: 'Call quality is inconsistent (jitter, choppy audio) even though the trunk shows as registered and healthy. What is the diagnostic approach?', kbSlug: 'kb-voip-sip' },
 ];
