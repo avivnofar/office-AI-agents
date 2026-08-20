@@ -890,7 +890,20 @@ export class AgentBase {
     });
 
     const gap = detectCapabilityGap({ project: 'notebook-x', quality, notebookAnswerFound });
-    await this.flagCapabilityGap({ project: 'notebook-x', gap, quality, query, responseText, kbSlug, caseId });
+    // FROZEN 2026-08-20 (owner decision, SESSION 02 PHASE 7 — see
+    // SESSION-02-STOP-THE-BLEEDING-REPORT.md, Phase 5). notebookx-client.js
+    // collapses a Notebook-X service error (e.g. a Cloudflare "too many
+    // subrequests" failure) into the same null as a genuine content gap, and
+    // this call was publishing that as a Hebrew capability-gap claim against
+    // real third-party products. Frozen at the source rather than at
+    // fileGapDigests() so no further Gemini spend or D1 write happens per
+    // interaction either — not just the daily commit. data-center's gap path
+    // (_askDataCenter(), below) is untouched; this scopes to notebook-x only,
+    // per explicit owner authorization. Not a kill switch: a hard disable,
+    // deliberately, since no new mechanism was authorized. `gap` is still
+    // computed above (pure, no side effect) so re-enabling this is a
+    // one-line uncomment, not a rebuild.
+    // await this.flagCapabilityGap({ project: 'notebook-x', gap, quality, query, responseText, kbSlug, caseId });
 
     // `source` ADDED 2026-08-10 — see the "cross-embodiment-comparison" fix
     // note on _askDataCenter() below for why. Gemini answered (or, when no
