@@ -788,6 +788,13 @@ section('11. The three-part gate, and the notice that reaches him');
   check('board identifiers are stripped from the ask a client reads',
     !/OB-|S-\d|REQ-/.test(noticeParts({ decision: 'Do we ship OB-060 now, per REQ-003?', fallback: 'x' }).ask));
   check('...but the item keeps its own id, because the office still needs it', full.id === 'S-002');
+  // Corrected 2026-08-23 after reading live Issue #47, which the first version
+  // of this produced: stripping mid-sentence left "sequenced against 's" and
+  // "`` is opened". A broken sentence is harder to read than the identifier.
+  check('...and NOTHING ELSE is stripped — a mangled sentence is worse than an identifier',
+    noticeParts({ decision: 'Ship?', recommend: 'Hold it, per REQ-004.', fallback: 'OB-060 stays NOT-READY.' })
+      .options.some((o) => /REQ-004/.test(o.text))
+    && noticeParts({ decision: 'Ship?', recommend: 'x', fallback: 'OB-060 stays NOT-READY.' }).noAnswer.includes('OB-060'));
 
   // THE ITEMS THAT FAIL — and this is the finding, not an edge case.
   // Measured against live notification #11 (Issue 46, 2026-08-23): six items,

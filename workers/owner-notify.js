@@ -289,12 +289,24 @@ export function noticeParts(item = {}) {
   const ask = stripOfficeIds(item.decision || item.title || '');
   const noAnswer = String(item.fallback || '').trim();
 
+  /*
+   * ── ONLY THE ASK IS STRIPPED. CORRECTED 2026-08-23, same day. ──────────
+   *
+   * The first version stripped identifiers from the options and the default
+   * too, and the live Issue it produced (#47) shows exactly why that was
+   * wrong: "sequenced against 's one finished, polished product" and
+   * "`` is opened for the live-data path". Removing an identifier mid-sentence
+   * does not make the sentence plainer, it makes it broken — and a broken
+   * sentence is harder to read than `OB-060`.
+   *
+   * A5 asks for no board identifiers in ONE SENTENCE: the ask. That sentence
+   * is short enough to survive the removal, and it is the one a person reads
+   * first. Everything below it is the office's own reasoning, quoted as the
+   * office wrote it.
+   */
   const options = [];
   if (item.recommend) {
-    options.push({
-      label: 'What the office recommends',
-      text: stripOfficeIds(item.recommend),
-    });
+    options.push({ label: 'What the office recommends', text: String(item.recommend).trim() });
   }
   if (ask) {
     options.push({
@@ -303,10 +315,7 @@ export function noticeParts(item = {}) {
     });
   }
   if (noAnswer) {
-    options.push({
-      label: 'Say nothing',
-      text: stripOfficeIds(noAnswer),
-    });
+    options.push({ label: 'Say nothing', text: noAnswer });
   }
 
   const missing = [];
@@ -392,10 +401,6 @@ export function buildIssueBody({ seq, previous, sequenceReason, kind, items = []
         lines.push('<details><summary>What the office did, in full</summary>');
         lines.push('');
         lines.push(it.did);
-        if (it.recommend) {
-          lines.push('');
-          lines.push(`**Why we recommend what we do:** ${it.recommend}`);
-        }
         lines.push('');
         lines.push('</details>');
         lines.push('');
