@@ -6130,11 +6130,23 @@ export default {
             // The Issue this notice points AT — the most recent owner-channel
             // Issue, which is the record the email is a notice about. The email
             // never carries the Issue's contents (A5): it is a notice.
-            const issues = await fetchOwnerChannelIssues(env, OWNER_NOTIFY_REPO);
-            const latest = (issues || []).filter((i) => i.state === 'open')
+            const newest = (list) => (list || []).filter((i) => i.state === 'open')
               .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0];
+            let issueRepo = OWNER_NOTIFY_REPO;
+            let latest = newest(await fetchOwnerChannelIssues(env, issueRepo));
+            if (!latest) {
+              // TRANSITION FALLBACK, and it is not only for the day item C
+              // landed. The notification repo moved to back-office on
+              // 2026-08-23 and the eleven Issues already sent stand in the
+              // PUBLIC repo, deliberately unmigrated. Until back-office has one
+              // of its own, the record this notice is about is still over
+              // there, and a notice with a dead link is worse than one that
+              // points at the older record honestly.
+              issueRepo = REPO_NAME;
+              latest = newest(await fetchOwnerChannelIssues(env, issueRepo));
+            }
             const issueUrl = latest
-              ? `https://github.com/${REPO_OWNER}/${OWNER_NOTIFY_REPO}/issues/${latest.number}`
+              ? `https://github.com/${REPO_OWNER}/${issueRepo}/issues/${latest.number}`
               : null;
 
             const skeletonItems = notifiable;
