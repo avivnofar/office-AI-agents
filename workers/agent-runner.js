@@ -56,7 +56,7 @@ import { StubAgent } from '../agents/agent-stub.js';
 
 import { runMeeting, MEETING_TYPES, writeActionItemsToBoard, actionItemsToBoardEnabled } from './meeting-engine.js';
 import { normalizeActionItems } from './meeting-decisions.js';
-import { callCFRouter } from './gemini-client.js';
+import { callCFRouter, callGemini } from './gemini-client.js';
 import { generateAssignedDailyBatch, persistQuestions } from './qa-engine.js';
 import { getClaudeBudgetStatus, recordClaudeSpend, routeTaskTypeCall, resolveTaskLane, getRoutingQuotaStatus, resolveImageRoles, MODEL_ROUTING } from './model-router.js';
 // The image lane (2026-08-10, plan 5.1) — the Designer's first means of doing
@@ -120,6 +120,10 @@ import {
 import { renderOwnerPage, buildOwnerMessage, buildOwnerState } from './owner-page.js';
 import {
   ownerChannelEnabled, notifyOwner, selectNotificationItems, recentFailures, OWNER_ISSUE_LABEL,
+  // SESSION 11 (2026-08-23): the three-part gate and the email notice. See
+  // owner-notify.js's "three-part notice" and "email notice" headers — the
+  // gate is a filter, and this Worker COMPOSES the email but never sends it.
+  gateNotificationItems, buildEmailNotice, buildHebrewNoticePrompt,
 } from './owner-notify.js';
 import { improvementLoopEnabled } from './improvement-loop.js';
 // The publishing gate (2026-08-16, OB-014, audit finding #17). Deliberately has
@@ -747,6 +751,127 @@ async function fetchOwnerChannelIssues(env, repoName) {
     console.warn(`[owner-channel] could not read back owner-channel Issues — ${err?.message || err}`);
     return [];
   }
+}
+
+/**
+ * Reads the COMMENT TEXT on owner-channel Issues (SESSION 11, ITEM D).
+ *
+ * ── WHAT WAS ACTUALLY MISSING ────────────────────────────────────────────
+ *
+ * `fetchOwnerChannelIssues()` above already knew the comment COUNT, and
+ * `classifyOwnerIssueReadback()` already used it to decide `hasReply`. So the
+ * office could tell that the owner had said something and could not tell WHAT.
+ * A reply reached it as a boolean.
+ *
+ * That is why the Issue body told him not to reply there: the office genuinely
+ * could not read it, so it sent him to a file it could. This function is the
+ * half that was missing, and it is one more call on a capability the office
+ * already has — the same API, the same token, the same fail-quiet shape.
+ *
+ * Read-only. `[]` on any failure, exactly like the listing it extends: a reply
+ * the office could not fetch must look like "not fetched", never like "not
+ * sent".
+ */
+async function fetchOwnerIssueComments(env, repoName, issueNumber) {
+  const tokenSecret = REPO_TO_TOKEN_SECRET[repoName];
+  if (!tokenSecret || !env?.[tokenSecret]) return [];
+  const url = `https://api.github.com/repos/${REPO_OWNER}/${repoName}/issues/${issueNumber}/comments?per_page=50`;
+  try {
+    const res = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${env[tokenSecret]}`,
+        'User-Agent': 'data-center-agent-sim',
+        Accept: 'application/vnd.github+json',
+      },
+    });
+    if (!res.ok) {
+      console.warn(`[owner-channel] could not read comments on Issue #${issueNumber} — HTTP ${res.status}`);
+      return [];
+    }
+    const data = await res.json();
+    return (Array.isArray(data) ? data : [])
+      // THE OFFICE'S OWN COMMENTS ARE NOT ANSWERS. Nothing writes them today,
+      // but a future session that adds an acknowledgement comment would
+      // otherwise have the office reading itself as the client.
+      .filter((c) => String(c?.user?.login || '').toLowerCase() === String(REPO_OWNER).toLowerCase())
+      .map((c) => ({
+        id: c.id,
+        author: c.user?.login || null,
+        createdAt: c.created_at,
+        body: String(c.body || '').trim(),
+      }))
+      .filter((c) => c.body);
+  } catch (err) {
+    console.warn(`[owner-channel] could not read comments on Issue #${issueNumber} — ${err?.message || err}`);
+    return [];
+  }
+}
+
+/**
+ * Commits an Issue reply into the channel record (ITEM D3).
+ *
+ * ── WHY THE REPLY IS STILL FILED IN GIT ──────────────────────────────────
+ *
+ * The instruction the office used to give — *"in the repo, not in this issue"* —
+ * was protecting something real: git is an ordered, permanent, attributable
+ * record, and an issue tracker is not. That was never worth what it cost. The
+ * office can do the filing itself, and asking the client to do a system's
+ * bookkeeping for it is the reason eleven notifications went unanswered.
+ *
+ * So both properties hold: he replies where he is reading, and the reply lands
+ * in `channel/from-owner-issues/` as a dated file with the Issue it came from,
+ * the comment id and the author. One file per comment, append-only, never
+ * edited — the same single-writer discipline every other channel file keeps.
+ *
+ * This writes into back-office, NOT into `channel/from-owner/`. That folder is
+ * the owner's own and the office never writes there (owner-channel.js's rule,
+ * unchanged). A reply the office transcribed is the OFFICE's record of what he
+ * said, and it must not be mistakable for a file he wrote himself.
+ */
+async function recordIssueReplies(env, repoName, issueReadback) {
+  const recorded = [];
+  for (const ir of issueReadback || []) {
+    if (!ir.hasReply || !ir.comments) continue;
+    const comments = await fetchOwnerIssueComments(env, repoName, ir.number);
+    for (const c of comments) {
+      const date = String(c.createdAt || '').slice(0, 10) || todayDateStr();
+      const path = `channel/from-owner-issues/${date}-issue-${ir.number}-comment-${c.id}.md`;
+      const content = [
+        `# Reply from the client — Issue #${ir.number}`,
+        '',
+        `- **Issue:** [#${ir.number}](https://github.com/${REPO_OWNER}/${repoName}/issues/${ir.number}) — ${ir.title}`,
+        `- **Author:** ${c.author}`,
+        `- **Written:** ${c.createdAt}`,
+        `- **Comment id:** ${c.id}`,
+        '',
+        '_Transcribed by the office from the Issue thread. His words, unedited._',
+        '_This is the office\'s record of what he said; it is NOT a file he wrote,_',
+        '_which is why it is not in `channel/from-owner/`._',
+        '',
+        '---',
+        '',
+        c.body,
+        '',
+      ].join('\n');
+
+      // IDEMPOTENT BY AN EXPLICIT READ, not by trusting the write to be a
+      // no-op. The same comment is seen on every daily cycle for as long as the
+      // Issue stays open; `commitFileToRepo()` has no skip-if-exists option and
+      // would re-PUT the same bytes every day, so the check is made here. A
+      // failed read is treated as ALREADY RECORDED — the record is append-only
+      // and a duplicate entry is a worse outcome than a delayed one.
+      const existing = await fetchBackOfficeFile(env, path);
+      if (existing?.text !== null && existing?.text !== undefined) {
+        recorded.push({ issue: ir.number, commentId: c.id, path, committed: false, already: true });
+        continue;
+      }
+      const res = await commitFileToRepo(env, repoName, path, content,
+        `channel: record client reply on issue #${ir.number}`)
+        .catch((err) => ({ committed: false, reason: `threw: ${err?.message || err}` }));
+      recorded.push({ issue: ir.number, commentId: c.id, path, committed: !!res?.committed, reason: res?.reason || null });
+    }
+  }
+  return recorded;
 }
 
 /**
@@ -1628,7 +1753,7 @@ async function processOwnerChannelBlock(env, opts = {}) {
   // `[Office #N]` Issue's reply state before composing this cycle's
   // notification, so an unanswered one rises instead of going quiet.
   const issueReadback = classifyOwnerIssueReadback(
-    await fetchOwnerChannelIssues(env, REPO_NAME), today
+    await fetchOwnerChannelIssues(env, OWNER_NOTIFY_REPO), today
   );
   out.issueReadback = issueReadback;
 
@@ -1646,7 +1771,11 @@ async function processOwnerChannelBlock(env, opts = {}) {
   });
 
   out.notified = await notifyOwner(env, {
-    postIssue: (e, issue) => fileGitHubIssue(e, REPO_NAME, issue),
+    // ITEM C (2026-08-23): the private repo. `fileGitHubIssue()` derives the
+    // permission key from the repo name itself (REPO_TO_PROJECT_KEY), so this
+    // is gated against `back-office` (push:true) with no extra argument — and
+    // a repo with push:false would be REDIRECTED here, not silently filed.
+    postIssue: (e, issue) => fileGitHubIssue(e, OWNER_NOTIFY_REPO, issue),
   }, { items, today, isHeartbeatDay, force: !!opts.bypassGate });
 
   if (out.notified && out.notified.sent === false && !out.notified.skipped) {
@@ -1659,6 +1788,20 @@ async function processOwnerChannelBlock(env, opts = {}) {
   // line is itself the read-back record the daily report/console history
   // can point to — the same "recorded, not merely logged and forgotten"
   // requirement this project already applies to read receipts and failures.
+  // ITEM D (2026-08-23): the reply is now READ, not merely counted, and it is
+  // committed into the channel record so git stays the permanent history —
+  // which is the property the old "reply in the repo, not here" instruction was
+  // protecting, kept without making the client do the filing.
+  out.issueReplies = await recordIssueReplies(env, OWNER_NOTIFY_REPO, issueReadback)
+    .catch((err) => {
+      out.errors.push(`Could not record client replies from Issue comments — ${err?.message || err}. A reply may have been read and not filed.`);
+      return [];
+    });
+  const newlyFiled = (out.issueReplies || []).filter((r) => r.committed);
+  if (newlyFiled.length) {
+    console.log(`[owner-channel] filed ${newlyFiled.length} client reply(ies) into the channel record: ${newlyFiled.map((r) => r.path).join(', ')}`);
+  }
+
   const repliedTo = issueReadback.filter((ir) => ir.hasReply);
   const nowEscalated = issueReadback.filter((ir) => !ir.hasReply && ir.escalation?.inNotification);
   if (repliedTo.length) {
@@ -2063,6 +2206,33 @@ async function runFrontPublish(env, { batchId, dryRun = false } = {}) {
 /** UTC calendar day, matching this repo's existing DATE('now') convention
  * (see gap-reports.js) — used as the guide_pipeline.date key so guide_draft
  * and guide_review agree on "today" within the same simulated day. */
+/* ────────────── Where an owner notification goes (2026-08-23) ───────────
+ *
+ * SESSION 11, ITEM C. Until today every `[Office #N]` Issue was filed into
+ * `office-AI-agents`, which is PUBLIC. Eleven of them stand open there right
+ * now, the oldest thirteen days, none answered — and each carries the office's
+ * working state, its open decisions and its client's name, in the open.
+ *
+ * They move to `back-office-AI-agents` (private) because that is where the
+ * channel they are notifications ABOUT already lives: `channel/to-owner/` and
+ * `channel/from-owner/` are both there, so the Issue and the record it points
+ * at stop being in two different repositories.
+ *
+ * THE ELEVEN PUBLIC ISSUES ARE NOT TOUCHED. Nothing here closes, edits or
+ * migrates them — they are the record of what was sent and when, and the office
+ * does not rewrite its own history to tidy a change of address. They stay open
+ * until the owner closes them himself.
+ *
+ * Named as a constant rather than inlined at the two call sites because the
+ * FILING target and the READ-BACK target must never disagree: filing into one
+ * repo and reading replies from another would make every notification look
+ * unanswered forever, which is the exact failure this channel already had.
+ */
+const OWNER_NOTIFY_REPO = BACKOFFICE_REPO_NAME;
+
+/** The address the one successful send in this project's history used. */
+const OWNER_EMAIL = 'avivnofar@gmail.com';
+
 function todayDateStr() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -5915,6 +6085,101 @@ export default {
               // incumbent this one replaced.
               recent_failures: await recentFailures(env),
               errors: snapshot?.errors || [],
+            };
+            break;
+          }
+          case 'owner_email_notice': {
+            // SESSION 11, ITEM A (2026-08-23). COMPOSES THE EMAIL. SENDS NOTHING.
+            //
+            // The office's one channel that ever reached the owner is email
+            // (agents/architect_agent.py send_approval_email(), 2026-07-05,
+            // Resend 2xx). Its caller — .github/workflows/archive-architect.yml
+            // — was disabled 2026-07-07 and never re-enabled. RESEND_API_KEY is
+            // a GitHub Actions repository secret and is NOT a Worker secret, so
+            // the Worker composes (it has the snapshot, the context and Gemini)
+            // and .github/workflows/owner-email.yml delivers (it has the key).
+            //
+            // Read-only against the office: no Issue, no D1 write, no KV write.
+            // ONE Gemini call, and a failure there degrades to the English
+            // skeleton rather than to silence.
+            const snapshot = await getOfficeSnapshot(env, { allowFetch: true });
+            const today = todayDateStr();
+            const aged = ageQuestions(snapshot?.questions?.questions || [], today);
+            const selected = selectNotificationItems({
+              submissions: snapshot?.submissions?.submissions || [],
+              questions: aged,
+              issueReadback: snapshot?.issueReadback || [],
+              refusedMessages: snapshot?.owner?.malformed || [],
+            });
+            // THE GATE (item E). An item that cannot state all three parts is a
+            // log entry, not a notification. `gated` is returned, never dropped
+            // silently — a channel that quietly discards items is the failure
+            // this whole file was built to not repeat.
+            const { notifiable, gated } = gateNotificationItems(selected);
+            const isHeartbeatDay = new Date(`${today}T00:00:00Z`).getUTCDay() === 0;
+
+            if (!notifiable.length && !isHeartbeatDay) {
+              result = {
+                send: false,
+                reason: 'nothing_notifiable_and_not_heartbeat_day',
+                selected: selected.length, gated,
+              };
+              break;
+            }
+
+            // The Issue this notice points AT — the most recent owner-channel
+            // Issue, which is the record the email is a notice about. The email
+            // never carries the Issue's contents (A5): it is a notice.
+            const issues = await fetchOwnerChannelIssues(env, OWNER_NOTIFY_REPO);
+            const latest = (issues || []).filter((i) => i.state === 'open')
+              .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))[0];
+            const issueUrl = latest
+              ? `https://github.com/${REPO_OWNER}/${OWNER_NOTIFY_REPO}/issues/${latest.number}`
+              : null;
+
+            const skeletonItems = notifiable;
+            // The sequence is READ off the Issue this notice points at, never
+            // allocated here — the email is a notice about a notification that
+            // already went, and allocating a number would make the email and
+            // the Issue disagree about which one it is.
+            const seqMatch = /\[Office #(\d+)\]/.exec(latest?.title || '');
+            const seq = seqMatch ? Number(seqMatch[1]) : null;
+            const draft = buildEmailNotice({ seq, items: skeletonItems, today, issueUrl, hebrew: null });
+
+            // A4: Hebrew is Gemini's job in this estate. Never Anthropic — that
+            // budget is the Architect's and is not spent on notification text.
+            let hebrew = null;
+            let hebrewError = null;
+            try {
+              const simConfig = env.SIM_CONFIG?.GEMINI || {};
+              const g = await callGemini({
+                apiKey: env.GEMINI_API_KEY,
+                model: simConfig.model || 'gemini-3.1-flash-lite',
+                endpoint: simConfig.api_endpoint || 'https://generativelanguage.googleapis.com/v1beta/models',
+                temperature: 0.4,
+                maxTokens: 1400,
+                prompt: buildHebrewNoticePrompt(draft.skeleton),
+                ai: env.AI,
+              });
+              hebrew = g?.text || null;
+              if (g?.source === 'cloudflare-fallback') hebrewError = 'gemini quota — cloudflare fallback composed it';
+            } catch (err) {
+              hebrewError = `gemini threw: ${err?.message || err}`;
+            }
+
+            const notice = buildEmailNotice({ seq, items: skeletonItems, today, issueUrl, hebrew });
+            result = {
+              send: true,
+              to: OWNER_EMAIL,
+              seq, today,
+              subject: notice.subject,
+              html: notice.html,
+              used_hebrew: notice.usedHebrew,
+              hebrew_error: hebrewError,
+              issue_url: issueUrl,
+              notifiable: notifiable.map((i) => i.id),
+              // The finding, carried in the read-back rather than only in a log.
+              gated_out: gated,
             };
             break;
           }
