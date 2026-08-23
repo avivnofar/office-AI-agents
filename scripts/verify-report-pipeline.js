@@ -1302,9 +1302,16 @@ check('[FAILS-OLD] the old query read `reports`, which carries no meeting row',
   !/FROM reports\s+WHERE type IN \('meeting'/.test(runnerSrc));
 check('[FAILS-OLD] and the false claim it published is gone from the source',
   !/does not persist meeting decisions or votes to a queryable store/.test(runnerSrc));
+// The INSERT's column list is no longer pinned VERBATIM (relaxed 2026-08-23,
+// Session 13 ITEM B, which added composed_by/finish_reason/output_tokens to it).
+// What this check is FOR is the table and the column, not the arity: the defect
+// it guards is a fact pack reading `reports` for meeting decisions when
+// meeting-engine.js writes them to `meetings`. Pinning every column made a
+// purely additive instrumentation change look like that defect returning, and a
+// check that fires on the wrong event trains a reader to skip it.
 check('[FAILS-OLD] the decisions now come from the table meeting-engine.js actually writes',
   /SELECT type, decisions, created_at FROM meetings/.test(runnerSrc)
-  && /INSERT INTO meetings \(id, type, attendees, transcript, decisions, created_at\)/.test(read('workers/meeting-engine.js')));
+  && /INSERT INTO meetings \([^)]*decisions[^)]*\)/.test(read('workers/meeting-engine.js')));
 check('[new] THREE states are distinguished, not two — the third is the one the office is in',
   /EVERY one recorded an empty decision block/.test(runnerSrc)
   && /no meeting has ever been recorded/.test(runnerSrc)

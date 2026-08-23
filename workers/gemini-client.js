@@ -25,7 +25,37 @@
  * Status: DRAFT (Phase 1 foundation).
  */
 
+import { NOT_REPORTED } from './provider-common.js';
+
 const CF_WORKERS_AI_MODEL = '@cf/meta/llama-3.1-8b-instruct-fp8';
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ * THE TWO FIELDS (SESSION 13, 2026-08-23, ITEM B)
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * All three functions below now return a finish reason and an output-token
+ * count alongside `{ text, source }`. They are ADDITIVE — every existing
+ * caller destructures `text` and `source` and is byte-unchanged — and no
+ * model, limit, prompt or route moves with them.
+ *
+ * The three providers reachable through this file report differently, and the
+ * difference is recorded rather than flattened:
+ *
+ *   GEMINI              `candidates[0].finishReason` (STOP / MAX_TOKENS /
+ *                       SAFETY / …) and `usageMetadata.candidatesTokenCount`.
+ *                       Both real, both were being discarded.
+ *   CLOUDFLARE WORKERS  **no finish reason of any kind.** `ai.run()` returns
+ *   AI                  `{ response }` and, on some models, a `usage` block.
+ *                       So `finishReason` is `NOT_REPORTED` — an explicit fact
+ *                       about the provider — and `outputTokens` is whatever
+ *                       `usage` carried, or null with
+ *                       `outputTokensReported: false` when it carried nothing.
+ *
+ * An absent field reads as normal. That is the failure this change exists to
+ * end, so nothing here is left absent. See provider-common.js's NOT_REPORTED
+ * block for why the three states are kept apart.
+ */
 
 /**
  * @param {object} opts
@@ -39,7 +69,9 @@ const CF_WORKERS_AI_MODEL = '@cf/meta/llama-3.1-8b-instruct-fp8';
  * @param {object} [opts.ai] - env.AI (Workers AI binding), used for the 429 fallback
  * @param {boolean} [opts.forceFallback] - skip Gemini entirely and go straight to the
  *   Cloudflare fallback (testing only — see /api/agents/test-gemini)
- * @returns {Promise<{text: string, source: 'gemini'|'cloudflare-fallback'}>}
+ * @returns {Promise<{text: string, source: 'gemini'|'cloudflare-fallback',
+ *   finishReason: string|null, outputTokens: number|null,
+ *   outputTokensReported: boolean, usage: object|null}>}
  */
 export async function callGemini({
   apiKey,
@@ -88,9 +120,28 @@ export async function callGemini({
   }
 
   const data = await res.json();
-  const parts = data?.candidates?.[0]?.content?.parts || [];
+  const candidate = data?.candidates?.[0];
+  const parts = candidate?.content?.parts || [];
   const text = parts.map((p) => p.text || '').join('').trim();
-  return { text, source: 'gemini' };
+  const usage = data?.usageMetadata || null;
+  return {
+    text,
+    source: 'gemini',
+    // Gemini DOES have this field, so a missing one is `null` — this response
+    // did not carry it — never NOT_REPORTED, which would claim the provider
+    // has no such concept. `MAX_TOKENS` here is the state that was previously
+    // indistinguishable from a model that simply had little to say.
+    finishReason: candidate?.finishReason ?? null,
+    outputTokens: usage?.candidatesTokenCount ?? null,
+    outputTokensReported: true,
+    usage: usage
+      ? {
+          inputTokens: usage.promptTokenCount ?? null,
+          outputTokens: usage.candidatesTokenCount ?? null,
+          totalTokens: usage.totalTokenCount ?? null,
+        }
+      : null,
+  };
 }
 
 /**
@@ -98,7 +149,21 @@ export async function callGemini({
  * exhausted), when Groq is unavailable for routine case work, or when
  * forceFallback is set. See config/token-economy.json
  * "cloudflare_fallback".
- * @returns {Promise<{text: string, source: 'cloudflare-fallback'}>}
+ * ── THE ONE CHAT PROVIDER WITH NO FINISH REASON ─────────────────────────
+ *
+ * `ai.run()` returns `{ response }` and nothing that says why generation
+ * stopped. That is a property of the binding, not of any given call, so this
+ * returns `finishReason: NOT_REPORTED` rather than `null`. The distinction is
+ * load-bearing: a null would file a permanent capability gap as a per-call
+ * anomaly, and every later reader would go hunting for the call that lost it.
+ *
+ * `usage` is model-dependent on Workers AI and frequently absent, so
+ * `outputTokensReported` says which happened instead of leaving a null to be
+ * read as zero.
+ *
+ * @returns {Promise<{text: string, source: 'cloudflare-fallback',
+ *   finishReason: 'not_reported', outputTokens: number|null,
+ *   outputTokensReported: boolean, usage: object|null}>}
  */
 export async function callCloudflareFallback({ ai, prompt, systemPrompt, temperature, maxTokens }) {
   if (!ai) {
@@ -119,7 +184,21 @@ export async function callCloudflareFallback({ ai, prompt, systemPrompt, tempera
   });
 
   const text = (data?.response || '').trim();
-  return { text, source: 'cloudflare-fallback' };
+  const usage = data?.usage || null;
+  return {
+    text,
+    source: 'cloudflare-fallback',
+    finishReason: NOT_REPORTED,
+    outputTokens: usage?.completion_tokens ?? null,
+    outputTokensReported: !!usage && usage.completion_tokens !== undefined,
+    usage: usage
+      ? {
+          inputTokens: usage.prompt_tokens ?? null,
+          outputTokens: usage.completion_tokens ?? null,
+          totalTokens: usage.total_tokens ?? null,
+        }
+      : null,
+  };
 }
 
 /**
@@ -130,7 +209,9 @@ export async function callCloudflareFallback({ ai, prompt, systemPrompt, tempera
  * @param {object} opts
  * @param {object} opts.ai - env.AI (Workers AI binding)
  * @param {string} opts.caseDescription
- * @returns {Promise<{category: string, source: 'cloudflare-router'}|null>}
+ * @returns {Promise<{category: string, source: 'cloudflare-router',
+ *   finishReason: 'not_reported', outputTokens: number|null,
+ *   outputTokensReported: boolean}|null>}
  *   null if the AI binding is missing or the call fails — callers should
  *   treat routing as best-effort and continue without it.
  */
@@ -152,9 +233,22 @@ export async function callCFRouter({ ai, caseDescription }) {
     });
 
     const category = (data?.response || '').trim().split('\n')[0].slice(0, 40);
-    return category ? { category, source: 'cloudflare-router' } : null;
+    const usage = data?.usage || null;
+    return category
+      ? {
+          category,
+          source: 'cloudflare-router',
+          finishReason: NOT_REPORTED,
+          outputTokens: usage?.completion_tokens ?? null,
+          outputTokensReported: !!usage && usage.completion_tokens !== undefined,
+        }
+      : null;
   } catch (err) {
     console.warn(`[cf-router] case classification failed: ${err.message}`);
     return null;
   }
 }
+
+/** Re-exported so a caller can compare against the sentinel without
+ *  importing provider-common.js directly. */
+export { NOT_REPORTED };

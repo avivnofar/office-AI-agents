@@ -105,6 +105,43 @@ export function parseRateLimitHeaders(res) {
 }
 
 /**
+ * ══════════════════════════════════════════════════════════════════════════
+ * THE TWO FIELDS, AND WHY `not_reported` IS NOT `null` (SESSION 13, 2026-08-23)
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * Every model client in this estate now hands back a finish reason and an
+ * output-token count. Before today, `groq-client.js` and `gemini-client.js`
+ * discarded both at the client, and the consequence was general rather than
+ * local: **"the model was cut off" and "the model ignored the instruction"
+ * were indistinguishable in the record**, everywhere the office calls a model.
+ * `agents/agent-base.js` `queryGroqRouted()` said so in a comment and worked
+ * around it structurally instead of fixing it.
+ *
+ * This estate has already paid for the missing field once. `routeTask()`
+ * returned an empty answer as a success for five days because `finishReason`
+ * existed on the Cerebras path for exactly that check and was never read
+ * (fixed 2026-08-10). The fix was never carried anywhere else.
+ *
+ * ── THREE STATES, NOT TWO ────────────────────────────────────────────────
+ *
+ * A field that is simply absent reads as normal, and that is the failure this
+ * whole change exists to end. So a missing value is never left to be inferred:
+ *
+ *   a real value        — the provider reported it, this is what it said
+ *   `null`              — the provider HAS this field and did not send it on
+ *                         THIS response. An anomaly worth seeing.
+ *   `NOT_REPORTED`      — the provider has no equivalent at all, ever. A fact
+ *                         about the provider, not about this call.
+ *
+ * Cloudflare Workers AI is the one chat provider in the registry with no
+ * finish reason of any kind, so it is the reason this constant exists rather
+ * than being a hypothetical third case. Recording it as `null` would file a
+ * permanent property of the provider as a per-call anomaly, and every future
+ * reader would go looking for the call that lost it.
+ */
+export const NOT_REPORTED = 'not_reported';
+
+/**
  * Normalizes an OpenAI-compatible chat completion body into this repo's
  * response envelope. Three of the four new providers (GitHub Models,
  * Cerebras, Mistral) are OpenAI-compatible, so they share this.

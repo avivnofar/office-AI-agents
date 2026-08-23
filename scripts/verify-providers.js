@@ -751,12 +751,30 @@ check('the three chat/embeddings clients are imported by NOTHING but the router,
   moduleLevelViolations.length === 0, moduleLevelViolations.join(', '));
 // Reported rather than merely permitted. A benign import is still a coupling, and
 // a silent allow-list is how the next one goes unnoticed.
-check('every non-calling import of a provider module is accounted for (2 expected: the provenance renderer and the catalog read-back)',
-  benignImports.length === 2, benignImports.join(' | '));
+// COUNT RAISED 2 -> 4, 2026-08-23 (Session 13, ITEM B). The two new entries are
+// groq-client.js and gemini-client.js importing provider-common.js, for the
+// shared response envelope and the NOT_REPORTED sentinel. Both are non-calling
+// by construction — provider-common.js makes no network call and holds no
+// provider state, which is the property that lets every verifier import the
+// clients under plain `node`. The count is deliberately kept EXACT rather than
+// relaxed to `>= 2`: a silent allow-list is how the next coupling goes
+// unnoticed, which is what the comment above already says.
+check('every non-calling import of a provider module is accounted for (4 expected: the provenance renderer, the catalog read-back, and the two chat clients now sharing the envelope)',
+  benignImports.length === 4, benignImports.join(' | '));
 check('...and one of them is the AD-030 catalog read-back, which makes no generation call',
   benignImports.some((s) => /gemini-image-client\.js \{ listImageCapableModels \}/.test(s)), benignImports.join(' | '));
-check('...and the other is provider-common.js, for the provenance renderer the bible requires and the mime sniffer',
+check('...and one is provider-common.js, for the provenance renderer the bible requires and the mime sniffer',
   benignImports.some((s) => /provider-common\.js \{[^}]*renderAssetProvenance/.test(s)), benignImports.join(' | '));
+// THE TWO FIELDS, asserted as an import rather than only as behaviour: the
+// whole defect was that groq-client.js and gemini-client.js each read a
+// provider body their own way and dropped what they did not use. Sharing the
+// normaliser and the sentinel is what stops the two envelopes drifting apart
+// again, and an edit that quietly went back to a local shape would pass every
+// behavioural check in this file and fail here.
+check('...and groq-client.js takes the SHARED OpenAI normaliser rather than re-reading the body itself',
+  benignImports.some((s) => /groq-client\.js -> provider-common\.js \{[^}]*normalizeOpenAiChat/.test(s)), benignImports.join(' | '));
+check('...and gemini-client.js takes the SHARED not-reported sentinel rather than inventing its own string',
+  benignImports.some((s) => /gemini-client\.js -> provider-common\.js \{[^}]*NOT_REPORTED/.test(s)), benignImports.join(' | '));
 
 check('the router itself DOES import all five clients (it is the single entry point)',
   ['cerebras-client.js', 'mistral-client.js', 'cohere-client.js', 'cf-image-client.js', 'gemini-image-client.js'].every((m) =>
@@ -778,6 +796,135 @@ check('model-router.js reaches the providers only via task-router.js, never by i
   /from '\.\/task-router\.js'/.test(readFileSync(new URL('../workers/model-router.js', import.meta.url), 'utf8'))
   && !/from '\.\/(cerebras|mistral|cohere|cf-image|gemini-image)-client\.js'/.test(
     readFileSync(new URL('../workers/model-router.js', import.meta.url), 'utf8')));
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * THE TWO FIELDS — BEHAVIOURAL, NOT ONLY STRUCTURAL (SESSION 13, 2026-08-23)
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * The import checks above prove the clients SHARE the envelope. They cannot
+ * prove the fields arrive populated, and "the field exists" was never the
+ * problem — Groq has always sent `finish_reason`, and Cerebras' was read for
+ * exactly one check and ignored everywhere else for five days.
+ *
+ * So these run the real client functions against a stubbed transport and
+ * assert the values. The tripwire is swapped out and RESTORED around each
+ * call, and nothing here appends to NETWORK_TRIPWIRE, so the end-to-end
+ * "zero network calls" assertion below stays honest.
+ */
+console.log('\n--- The two fields: finish reason and output tokens ---');
+
+const { callGroq } = await import('../workers/groq-client.js');
+const { callGemini, callCloudflareFallback, NOT_REPORTED } = await import('../workers/gemini-client.js');
+
+/** Runs fn with globalThis.fetch replaced by `stub`, restoring the tripwire. */
+async function withFetch(stub, fn) {
+  const tripwire = globalThis.fetch;
+  globalThis.fetch = stub;
+  try {
+    return await fn();
+  } finally {
+    globalThis.fetch = tripwire;
+  }
+}
+
+const okRes = (body) => ({
+  ok: true,
+  status: 200,
+  headers: { get: () => null },
+  json: async () => body,
+  text: async () => JSON.stringify(body),
+});
+
+const groqTruncated = await withFetch(
+  async () => okRes({
+    choices: [{ message: { content: 'half an ans' }, finish_reason: 'length' }],
+    usage: { prompt_tokens: 40, completion_tokens: 512, total_tokens: 552 },
+  }),
+  () => callGroq({ apiKey: 'stub', prompt: 'p', maxTokens: 512, agentId: 'verify' }),
+);
+check('GROQ — a max_tokens-truncated answer now reports finish_reason "length" instead of looking short',
+  groqTruncated?.finishReason === 'length', JSON.stringify(groqTruncated));
+check('GROQ — the output-token count is carried out as a named field',
+  groqTruncated?.outputTokens === 512, JSON.stringify(groqTruncated?.usage));
+check('GROQ — text and source are UNCHANGED, so every pre-existing caller is byte-identical',
+  groqTruncated?.text === 'half an ans' && groqTruncated?.source === 'groq');
+
+const geminiCut = await withFetch(
+  async () => okRes({
+    candidates: [{ content: { parts: [{ text: 'cut off here' }] }, finishReason: 'MAX_TOKENS' }],
+    usageMetadata: { promptTokenCount: 30, candidatesTokenCount: 2048, totalTokenCount: 2078 },
+  }),
+  () => callGemini({ apiKey: 'stub', model: 'm', endpoint: 'https://example.invalid', prompt: 'p' }),
+);
+check('GEMINI — MAX_TOKENS is now visible at the call site rather than inferred from a short string',
+  geminiCut?.finishReason === 'MAX_TOKENS', JSON.stringify(geminiCut));
+check('GEMINI — candidatesTokenCount is carried out as outputTokens',
+  geminiCut?.outputTokens === 2048, JSON.stringify(geminiCut?.usage));
+
+// PRESENT-BUT-MISSING is a real, distinct state and must not be flattened into
+// the sentinel: it says THIS response lost a field the provider does have,
+// which is an anomaly worth seeing. NOT_REPORTED says the provider never had
+// one, which is not.
+const geminiNoField = await withFetch(
+  async () => okRes({ candidates: [{ content: { parts: [{ text: 'fine' }] } }] }),
+  () => callGemini({ apiKey: 'stub', model: 'm', endpoint: 'https://example.invalid', prompt: 'p' }),
+);
+check('GEMINI — a response that omits finishReason yields null, NOT the not_reported sentinel',
+  geminiNoField?.finishReason === null && geminiNoField?.outputTokens === null,
+  JSON.stringify(geminiNoField));
+check('...and it still declares that the provider REPORTS the field, so null reads as an anomaly',
+  geminiNoField?.outputTokensReported === true);
+
+const cfWithUsage = await callCloudflareFallback({
+  ai: { run: async () => ({ response: 'answered', usage: { prompt_tokens: 10, completion_tokens: 7, total_tokens: 17 } }) },
+  prompt: 'p',
+  maxTokens: 64,
+});
+check('CLOUDFLARE WORKERS AI — has NO finish reason of any kind, so it reports the explicit not_reported sentinel',
+  cfWithUsage?.finishReason === NOT_REPORTED, JSON.stringify(cfWithUsage));
+check('...and the sentinel is a shared constant, not a per-client string literal',
+  NOT_REPORTED === 'not_reported');
+check('CLOUDFLARE WORKERS AI — output tokens are carried when the model returns a usage block',
+  cfWithUsage?.outputTokens === 7 && cfWithUsage?.outputTokensReported === true);
+
+// The Workers AI usage block is model-dependent and frequently absent. An
+// absent count must SAY it was absent — a bare null is indistinguishable from
+// "the model emitted nothing", which is a completely different fact.
+const cfNoUsage = await callCloudflareFallback({
+  ai: { run: async () => ({ response: 'answered' }) },
+  prompt: 'p',
+  maxTokens: 64,
+});
+check('CLOUDFLARE WORKERS AI — no usage block yields outputTokens null AND outputTokensReported false',
+  cfNoUsage?.outputTokens === null && cfNoUsage?.outputTokensReported === false,
+  JSON.stringify(cfNoUsage));
+
+// The router was the SECOND place the fields were lost: even after a client
+// carried them, the groq/cloudflare/gemini wrappers rebuilt the envelope from
+// `text` and `source` alone. Asserted as source, because calling routeTask()
+// here would need the flag, the quota tables and a live env.
+const routerSrcTwoFields = readFileSync(new URL('../workers/task-router.js', import.meta.url), 'utf8');
+check('ROUTER — the groq wrapper carries finishReason through instead of rebuilding a two-field envelope',
+  /callGroq\([\s\S]{0,700}?finishReason: r\.finishReason/.test(routerSrcTwoFields));
+check('ROUTER — the cloudflare-ai wrapper carries it too',
+  /callCloudflareFallback\([\s\S]{0,600}?finishReason: r\.finishReason/.test(routerSrcTwoFields));
+check('ROUTER — and the gemini wrapper',
+  /callGemini\([\s\S]{0,800}?finishReason: r\.finishReason/.test(routerSrcTwoFields));
+
+// PERSISTENCE. Carrying a field to a caller that drops it is the same defect
+// one layer out, which is exactly what happened to the meeting row: the only
+// provider it ever recorded was written inside a gate for something else.
+const loopSrcTwoFields = readFileSync(new URL('../workers/improvement-loop.js', import.meta.url), 'utf8');
+check('D1 — the office-event INSERT names finish_reason and output_tokens',
+  /INSERT INTO reports[\s\S]{0,300}finish_reason, output_tokens/.test(loopSrcTwoFields));
+const meetingSrcTwoFields = readFileSync(new URL('../workers/meeting-engine.js', import.meta.url), 'utf8');
+check('D1 — the meeting row names composed_by, and it is written OUTSIDE the fabricated-participation gate',
+  /INSERT INTO meetings[\s\S]{0,300}composed_by, finish_reason, output_tokens/.test(meetingSrcTwoFields)
+  && /persistMeeting\(env, \{[\s\S]{0,400}composedBy: modelResult\?\.source/.test(meetingSrcTwoFields));
+const agentBaseSrcTwoFields = readFileSync(new URL('../agents/agent-base.js', import.meta.url), 'utf8');
+check('AGENT — every model call records the two fields through ONE helper, not five copied assignments',
+  /_recordLastModelCall\(result\)/.test(agentBaseSrcTwoFields)
+  && !/this\.lastModelSource = (result|groqResult|cfResult)\.source/.test(agentBaseSrcTwoFields));
 
 /* ── Final network assertion ────────────────────────────────────────────── */
 console.log('\n--- Network tripwire ---');

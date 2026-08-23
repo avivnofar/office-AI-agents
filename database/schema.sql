@@ -183,13 +183,26 @@ CREATE TABLE IF NOT EXISTS weekly_analytics (
 -- (side-plots.json), promotions/PIP track (promotion-config.json), and
 -- year-tracker.json's running stats (agent-runner.js getYearState/persistYearState).
 
+-- `composed_by`, `finish_reason`, `output_tokens` added 2026-08-23 (Session 13,
+-- ITEM B). Until that date this row named no provider at all: the only place
+-- the meeting engine ever wrote one was inside
+-- `decisions.fabricated_participation`, built ONLY when the attendee gate
+-- fires — so the office recorded which model composed a meeting precisely when
+-- that model had hallucinated an attendee, and never otherwise. Written
+-- unconditionally now, from the same `modelResult` the transcript came from.
+-- See workers/meeting-engine.js persistMeeting(). NEEDS THE MANUAL MIGRATION
+-- at the bottom of this file — `meetings` already exists on live D1, so the
+-- CREATE TABLE IF NOT EXISTS here is a no-op against it.
 CREATE TABLE IF NOT EXISTS meetings (
   id TEXT PRIMARY KEY,
   type TEXT NOT NULL,
   attendees TEXT NOT NULL,
   transcript TEXT,
   decisions TEXT,
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  composed_by TEXT,
+  finish_reason TEXT,
+  output_tokens INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS side_plots (
@@ -416,6 +429,33 @@ CREATE TABLE IF NOT EXISTS pull_log (
 -- `quality`, and all 134 have `scorer_id IS NULL` — the exact population
 -- `scorerForRow()`'s date-and-project inference exists to read.
 --
+-- ─────────────────────────────────────────────────────────────────────────
+-- MANUAL MIGRATION — 2026-08-23, SESSION 13 ITEM B: the two fields.
+--
+-- RUN AND VERIFIED THE SAME DAY, BEFORE the deploy that writes them, for the
+-- same reason the `scorer_id` block below states: `improvement_loop_enabled`
+-- is ALREADY ON in production, so deploying the widened INSERT first would
+-- silently lose every capture row until the ALTER landed.
+--
+--   npx wrangler d1 execute data-center-db --remote --     --command "ALTER TABLE reports ADD COLUMN finish_reason TEXT"
+--   npx wrangler d1 execute data-center-db --remote --     --command "ALTER TABLE reports ADD COLUMN output_tokens INTEGER"
+--   npx wrangler d1 execute data-center-db --remote --     --command "ALTER TABLE meetings ADD COLUMN composed_by TEXT"
+--   npx wrangler d1 execute data-center-db --remote --     --command "ALTER TABLE meetings ADD COLUMN finish_reason TEXT"
+--   npx wrangler d1 execute data-center-db --remote --     --command "ALTER TABLE meetings ADD COLUMN output_tokens INTEGER"
+--
+-- WHY BOTH TABLES AT ONCE: the defect is one defect. `finish_reason` and the
+-- output-token count were discarded at the client (workers/groq-client.js,
+-- workers/gemini-client.js) and therefore missing from EVERY downstream
+-- record, not from one table. Anywhere in this office, "the model was cut off"
+-- and "the model ignored the instruction" were the same row.
+--
+-- WHY finish_reason IS NOT CONSTRAINED: every provider spells it differently
+-- (`stop` / `length` / `MAX_TOKENS` / `STOP` / the `not_reported` sentinel for
+-- a provider with no such concept). A CHECK constraint or a code-side
+-- whitelist would refuse rows the first time a provider added a value, losing
+-- exactly the anomaly the column exists to catch.
+-- ─────────────────────────────────────────────────────────────────────────
+
 -- THIS ONE MUST BE RUN BEFORE THE DEPLOY, unlike the four above, and the
 -- reason is that `improvement_loop_enabled` is ALREADY ON in production. The
 -- "either order is safe" argument below rests entirely on the flag being off;

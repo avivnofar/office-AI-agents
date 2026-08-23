@@ -281,6 +281,8 @@ export function buildOfficeEventRow({
   eventType,
   track,
   embodimentModel = null,
+  finishReason = null,
+  outputTokens = null,
   quality = null,
   scorerId = null,
   title = null,
@@ -335,6 +337,25 @@ export function buildOfficeEventRow({
       event_type: eventType,
       track,
       embodiment_model: embodimentModel || null,
+      // ── THE TWO FIELDS (SESSION 13, 2026-08-23, ITEM B) ────────────────
+      //
+      // `embodiment_model` said WHO answered. These say WHETHER THEY FINISHED
+      // and HOW MUCH THEY SAID, and without them no consumer of this table can
+      // tell a model that was cut off at its ceiling from one that ignored the
+      // instruction — the two look identical in every row written before today.
+      //
+      // NOT validated against a closed set, deliberately, unlike `event_type`
+      // and `track`. Every provider spells its finish reason differently
+      // (`stop` / `STOP` / `length` / `MAX_TOKENS` / the `not_reported`
+      // sentinel), and a whitelist here would refuse rows the first time a
+      // provider added a value — silently losing the anomaly this column exists
+      // to catch. The string is stored as the provider said it.
+      //
+      // A null in either column means the caller did not supply it, which for
+      // a `case_not_asked` row is the truth: nothing answered, so nothing
+      // finished and nothing was emitted.
+      finish_reason: finishReason || null,
+      output_tokens: typeof outputTokens === 'number' ? outputTokens : null,
       quality: quality ?? null,
       // Null whenever quality is null — an unscored row has no scorer, and
       // writing one would claim a measurement that does not exist.
@@ -349,8 +370,8 @@ export function buildOfficeEventRow({
 
 /** Kept identical to the ALTER-TABLE'd shape. See database/schema.sql. */
 export const OFFICE_EVENT_INSERT_SQL = `INSERT INTO reports
-  (id, agent_id, type, title, content, severity, project, event_type, embodiment_model, track, quality, scorer_id)
- VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+  (id, agent_id, type, title, content, severity, project, event_type, embodiment_model, track, quality, scorer_id, finish_reason, output_tokens)
+ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
 
 /**
  * Records one office event. NEVER THROWS and never returns anything a caller
@@ -380,7 +401,7 @@ export async function recordOfficeEvent(env, fields) {
     const r = built.row;
     const id = crypto.randomUUID();
     await env.DB.prepare(OFFICE_EVENT_INSERT_SQL)
-      .bind(id, r.agent_id, r.type, r.title, r.content, r.severity, r.project, r.event_type, r.embodiment_model, r.track, r.quality, r.scorer_id)
+      .bind(id, r.agent_id, r.type, r.title, r.content, r.severity, r.project, r.event_type, r.embodiment_model, r.track, r.quality, r.scorer_id, r.finish_reason, r.output_tokens)
       .run();
 
     // ── PROBATION ACTION COUNT (A3, 2026-08-10) ─────────────────────────────
@@ -405,7 +426,11 @@ export async function recordOfficeEvent(env, fields) {
       }
     }
 
-    return { recorded: true, id, eventType: r.event_type, track: r.track, embodimentModel: r.embodiment_model, quality: r.quality };
+    return {
+      recorded: true, id, eventType: r.event_type, track: r.track,
+      embodimentModel: r.embodiment_model, quality: r.quality,
+      finishReason: r.finish_reason, outputTokens: r.output_tokens,
+    };
   } catch (err) {
     // Deliberately swallowed. A capture failure must not take down a cron
     // tick or lose a client answer — the same posture the provider clients

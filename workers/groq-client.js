@@ -11,6 +11,8 @@
  * Status: DRAFT (Phase 1 foundation).
  */
 
+import { normalizeOpenAiChat, NOT_REPORTED } from './provider-common.js';
+
 const GROQ_ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
 
 /**
@@ -53,9 +55,25 @@ const GROQ_MODEL = 'llama-3.1-8b-instant';
  * @param {number} [opts.temperature]
  * @param {number} [opts.maxTokens] - kept short (default 512) for routine case work
  * @param {number|string} [opts.agentId] - for warning logs only
- * @returns {Promise<{text: string, source: 'groq'}|null>} null on missing
- *   key, 429 (quota exhausted), or any other failure — caller falls back
- *   to Cloudflare Workers AI.
+ * @returns {Promise<{text: string, source: 'groq', finishReason: string|null,
+ *   outputTokens: number|null, usage: object|null, rateLimit: object}|null>}
+ *   null on missing key, 429 (quota exhausted), or any other failure — caller
+ *   falls back to Cloudflare Workers AI.
+ *
+ * ── THE TWO FIELDS, ADDED 2026-08-23 (SESSION 13, ITEM B) ────────────────
+ *
+ * This function used to return `{ text, source }` and throw the rest of the
+ * body away. Groq is OpenAI-compatible and has always sent
+ * `choices[0].finish_reason` and `usage.completion_tokens`; nothing here read
+ * either. `agents/agent-base.js` `queryGroqRouted()` carries a comment saying
+ * so — *"neither groq-client.js nor gemini-client.js surfaces a finish reason,
+ * so a response cut off at the ceiling is indistinguishable from a short one
+ * at the call site"* — and the report pipeline built a structural sentinel to
+ * work around it. The field was there the whole time.
+ *
+ * PURELY ADDITIVE. Every existing caller destructures `text` and `source`; the
+ * envelope is a superset, so no caller's behaviour changes. Nothing about the
+ * model, the limits, the prompt or the routing moves with it.
  */
 export async function callGroq({ apiKey, prompt, systemPrompt, temperature = 0.8, maxTokens = 512, agentId }) {
   if (!apiKey) {
@@ -94,6 +112,23 @@ export async function callGroq({ apiKey, prompt, systemPrompt, temperature = 0.8
   }
 
   const data = await res.json();
-  const text = (data?.choices?.[0]?.message?.content || '').trim();
-  return { text, source: 'groq' };
+  // normalizeOpenAiChat() is the SAME normaliser cerebras-client.js and
+  // mistral-client.js already use. Reusing it rather than re-reading the body
+  // here is the point: the shape of what a chat client hands back must not
+  // differ per provider, which is the whole reason provider-common.js exists.
+  const norm = normalizeOpenAiChat({ data, res, source: 'groq' });
+  return {
+    ...norm,
+    // Promoted out of `usage` to a named field so a consumer that wants only
+    // "how much did the model actually say" does not have to know each
+    // provider's usage spelling. `null` here means Groq sent no usage block on
+    // this response — an anomaly, not a property of the provider, which is why
+    // it is null rather than NOT_REPORTED. See provider-common.js's block.
+    outputTokens: norm.usage?.outputTokens ?? null,
+    outputTokensReported: true,
+  };
 }
+
+/** Re-exported so a caller can compare against the sentinel without importing
+ *  provider-common.js directly. */
+export { NOT_REPORTED };

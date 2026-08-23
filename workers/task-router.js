@@ -178,7 +178,16 @@ export const PROVIDER_REGISTRY = {
     hasCredential: (env) => !!env?.GROQ_API_KEY,
     invoke: async (env, opts) => {
       const r = await callGroq({ ...opts, apiKey: env.GROQ_API_KEY });
-      return r ? envelope({ text: r.text, source: r.source }) : null;
+      // SESSION 13 (2026-08-23): the wrapper used to rebuild the envelope from
+      // `text` and `source` alone, so even after the client carried a finish
+      // reason the ROUTER still lost it here. Carried through now, same as
+      // cerebras/mistral, which return the envelope directly.
+      return r ? envelope({
+        text: r.text, source: r.source,
+        finishReason: r.finishReason ?? null,
+        usage: r.usage ?? null,
+        rateLimit: r.rateLimit ?? null,
+      }) : null;
     },
   },
   'cloudflare-ai': {
@@ -197,7 +206,15 @@ export const PROVIDER_REGISTRY = {
           temperature: opts.temperature,
           maxTokens: opts.maxTokens,
         });
-        return r ? envelope({ text: r.text, source: r.source }) : null;
+        // `finishReason` here is the NOT_REPORTED sentinel, never null —
+        // Workers AI has no finish reason at all, and routeTask()'s
+        // truncation check must be able to tell "not reported" from "the
+        // provider reported nothing this time". See gemini-client.js.
+        return r ? envelope({
+          text: r.text, source: r.source,
+          finishReason: r.finishReason ?? null,
+          usage: r.usage ?? null,
+        }) : null;
       } catch (err) {
         // callCloudflareFallback throws when the binding is missing; the
         // router never propagates a provider failure to a caller.
@@ -225,7 +242,11 @@ export const PROVIDER_REGISTRY = {
           maxTokens: opts.maxTokens,
           ai: env.AI,
         });
-        return r ? envelope({ text: r.text, source: r.source }) : null;
+        return r ? envelope({
+          text: r.text, source: r.source,
+          finishReason: r.finishReason ?? null,
+          usage: r.usage ?? null,
+        }) : null;
       } catch (err) {
         console.warn(`[routing] gemini call failed: ${err.message}`);
         return null;

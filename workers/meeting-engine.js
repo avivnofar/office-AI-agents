@@ -981,13 +981,55 @@ async function applyMeetingEffects(meetingType, attendeeSnapshots, decisions, en
 
 /* ───────────────────────────── Persistence ────────────────────────────── */
 
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ * WHO COMPOSED THIS MEETING — RECORDED UNCONDITIONALLY (SESSION 13, ITEM B)
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * This row carried NO provider at all until 2026-08-23. The one place the
+ * meeting engine ever wrote `composed_by` was inside
+ * `decisions.fabricated_participation`, which is only built **when the
+ * attendee gate fires** — so the office knew which model composed a meeting
+ * exactly when a model had hallucinated an attendee, and never otherwise.
+ * Every clean meeting was silent about its own author.
+ *
+ * That is why a prior session could only find eleven rows naming a provider
+ * and all eleven said `cloudflare-fallback`: those were not eleven meetings
+ * that fell back, they were **the eleven meetings that tripped an unrelated
+ * gate.** A sample selected by a defect is not a sample.
+ *
+ * Three columns, added by ALTER TABLE (see database/schema.sql's migration
+ * note — `CREATE TABLE IF NOT EXISTS` will not retrofit them):
+ *
+ *   `composed_by`    the provider that ACTUALLY served the call, after any
+ *                    degradation — never the one that was asked for. Same
+ *                    rule improvement-loop.js's `embodiment_model` states.
+ *   `finish_reason`  provider-reported, or the `not_reported` sentinel for a
+ *                    provider that has no such concept (Cloudflare Workers
+ *                    AI). Never absent — an absent field reads as normal.
+ *   `output_tokens`  provider-reported output length.
+ *
+ * INSTRUMENTATION ONLY. Nothing here changes what a meeting is asked, which
+ * model answers, what limits it runs under, or what the office does with the
+ * result. The meeting engine's behaviour is deliberately untouched this
+ * session; this only makes it observable.
+ *
+ * The write is still `.catch(() => {})`, unchanged: a lost measurement must
+ * never cost a meeting, the same rule repo-write.js states for its own
+ * recording call.
+ */
 async function persistMeeting(env, record) {
   if (!env.DB) return null;
   const id = crypto.randomUUID();
   await env.DB.prepare(
-    `INSERT INTO meetings (id, type, attendees, transcript, decisions, created_at)
-     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
-  ).bind(id, record.meetingType, JSON.stringify(record.attendees), record.transcript, JSON.stringify(record.decisions)).run().catch(() => {});
+    `INSERT INTO meetings (id, type, attendees, transcript, decisions, created_at, composed_by, finish_reason, output_tokens)
+     VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?)`
+  ).bind(
+    id, record.meetingType, JSON.stringify(record.attendees), record.transcript, JSON.stringify(record.decisions),
+    record.composedBy ?? null,
+    record.finishReason ?? null,
+    typeof record.outputTokens === 'number' ? record.outputTokens : null,
+  ).run().catch(() => {});
   return id;
 }
 
@@ -1378,7 +1420,14 @@ export async function runMeeting(meetingType, env, opts = {}) {
     }
   }
 
-  const dbId = await persistMeeting(env, { meetingType, attendees: attendeeIds, transcript, decisions });
+  const dbId = await persistMeeting(env, {
+    meetingType, attendees: attendeeIds, transcript, decisions,
+    // Read off the SAME `modelResult` the transcript was parsed from, so the
+    // row cannot name a provider other than the one whose words it stores.
+    composedBy: modelResult?.source ?? null,
+    finishReason: modelResult?.finishReason ?? null,
+    outputTokens: typeof modelResult?.outputTokens === 'number' ? modelResult.outputTokens : null,
+  });
 
   const markdown = renderMeetingReport(meetingType, attendeeSnapshots, transcript, decisions, opts);
   const commit = await commitMeetingReport(env, meetingType, markdown);

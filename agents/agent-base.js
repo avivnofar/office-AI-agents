@@ -76,6 +76,16 @@ export class AgentBase {
 
     this.session = null;
 
+    // What the LAST model call on this agent reported. `lastModelSource` is
+    // pre-existing; the other two arrived 2026-08-23 (Session 13, ITEM B) and
+    // are written by _recordLastModelCall() at every model call. Declared here
+    // rather than appearing on first assignment, so a reader of this object —
+    // and a debugger looking at an agent that has not called a model yet —
+    // sees three fields that are null, not three fields that do not exist.
+    this.lastModelSource = null;
+    this.lastFinishReason = null;
+    this.lastOutputTokens = null;
+
     // journal.md capture (OFFICE-POLICY.md, "the journal" — 2026-08-11).
     // Raw per-action fragments accumulate here as the agent works through a
     // case batch, then flushJournal() commits them in ONE writeJournalEntry
@@ -357,6 +367,32 @@ export class AgentBase {
     return this._buildPersonaSystemPrompt(prompt, systemPrompt);
   }
 
+  /**
+   * ── THE TWO FIELDS, RECORDED AT EVERY MODEL CALL (SESSION 13, 2026-08-23) ──
+   *
+   * `lastModelSource` has existed for months and answers *who spoke*. It never
+   * answered *whether they finished* or *how much they said*, so at every D1
+   * write downstream, **"the model was cut off" and "the model ignored the
+   * instruction" were the same row.**
+   *
+   * One helper rather than five assignments, because the failure this replaces
+   * was five copies of `this.lastModelSource = x.source` that a sixth call site
+   * could quietly fail to join. Every model call in this class now goes through
+   * here, so a new one that forgets is a new one that also forgets the source —
+   * which is loud, and already is.
+   *
+   * Reads defensively: an older client, a stub in a verifier or a provider added
+   * later that returns only `{ text, source }` yields `null` here rather than
+   * throwing. `null` and the `not_reported` sentinel are DIFFERENT and both are
+   * kept — see workers/provider-common.js's NOT_REPORTED block.
+   */
+  _recordLastModelCall(result) {
+    this.lastModelSource = result?.source ?? null;
+    this.lastFinishReason = result?.finishReason ?? null;
+    this.lastOutputTokens = typeof result?.outputTokens === 'number' ? result.outputTokens : null;
+    return result;
+  }
+
   /** Routine persona-flavor calls: Groq first, Cloudflare Workers AI fallback. NOT Gemini — see section comment. */
   async queryGroqRouted(prompt, systemPrompt, opts = {}) {
     // opts.assembledSystemPrompt: a prompt this caller ALREADY assembled via
@@ -373,17 +409,23 @@ export class AgentBase {
         temperature: 0.8,
         maxTokens: 1024,
       });
-      this.lastModelSource = result.source;
+      this._recordLastModelCall(result);
       return result.text;
     }
 
     // opts.maxTokens added 2026-08-08 for the report pipeline's review call,
     // which must emit a whole report and not a case-sized answer. It DEFAULTS
     // to the pre-existing 512, so every existing caller is byte-unchanged.
-    // The reason it had to be explicit: neither groq-client.js nor
+    // The reason it had to be explicit: ~~neither groq-client.js nor
     // gemini-client.js surfaces a finish reason, so a response cut off at the
     // ceiling is indistinguishable from a short one at the call site — the
-    // pipeline detects it structurally instead (report-pipeline.js sentinel).
+    // pipeline detects it structurally instead (report-pipeline.js sentinel).~~
+    // **STRUCK 2026-08-23 (SESSION 13, ITEM B).** Both clients now surface a
+    // finish reason and an output-token count, and this method records them on
+    // `lastFinishReason`/`lastOutputTokens` below. The report pipeline's
+    // structural sentinel is NOT removed — it is a second, independent check
+    // and this session changes no behaviour — but the field it was working
+    // around now exists, so a future fix can be verified instead of inferred.
     const outTokens = opts.maxTokens ?? 512;
     const groqResult = await callGroq({
       apiKey: this.env.GROQ_API_KEY,
@@ -394,7 +436,7 @@ export class AgentBase {
       agentId: this.id,
     });
     if (groqResult) {
-      this.lastModelSource = groqResult.source;
+      this._recordLastModelCall(groqResult);
       return groqResult.text;
     }
 
@@ -406,7 +448,7 @@ export class AgentBase {
       temperature: 0.8,
       maxTokens: outTokens,
     });
-    this.lastModelSource = cfResult.source;
+    this._recordLastModelCall(cfResult);
     return cfResult.text;
   }
 
@@ -432,7 +474,7 @@ export class AgentBase {
       systemPrompt: fullSystemPrompt,
       ai: this.env.AI,
     });
-    this.lastModelSource = result.source;
+    this._recordLastModelCall(result);
     if (result.source === 'cloudflare-fallback') {
       console.warn(`[agent-${this.id}] Gemini quota exhausted${opts.reportType ? ` (${opts.reportType})` : ''} — used cloudflare-fallback (@cf/meta/llama-3.1-8b-instruct-fp8)`);
     }
@@ -639,6 +681,23 @@ export class AgentBase {
       // a provider that did not make it — and the Lead QA's cross-embodiment
       // comparison (1.5) would then average a real provider against silence.
       embodimentModel: notAsked ? null : (result?.source || this.lastModelSource || null),
+      // ── THE TWO FIELDS (SESSION 13, 2026-08-23, ITEM B) ──────────────────
+      //
+      // Same rule as `embodimentModel` directly above, for the same reason: a
+      // `case_not_asked` row records an ask that never reached a provider, so
+      // there is no finish reason and no output to count. Writing this agent's
+      // LAST call's values here would attribute another call's outcome to one
+      // that never happened.
+      //
+      // On a real answer these come from the client that served it. They are
+      // read off the agent rather than off `result` because the ask path
+      // (_askDataCenter/_askNotebookX) goes through data-center-api and the
+      // Notebook-X backend, neither of which returns a provider finish reason
+      // — so for those two paths this is honestly null, and it is the
+      // persona-flavour calls (queryGroqRouted/queryGeminiDirect) that populate
+      // it. Stated rather than left for a reader to discover from empty columns.
+      finishReason: notAsked ? null : (result?.finishReason ?? this.lastFinishReason ?? null),
+      outputTokens: notAsked ? null : (typeof result?.outputTokens === 'number' ? result.outputTokens : this.lastOutputTokens),
       quality: typeof result?.quality === 'number' && !notAsked ? result.quality : null,
       // ADDED 2026-08-16 (OB-080). The number and the name of what produced it
       // are written together, and buildOfficeEventRow() REFUSES a scored row
