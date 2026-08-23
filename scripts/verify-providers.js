@@ -759,8 +759,10 @@ check('the three chat/embeddings clients are imported by NOTHING but the router,
 // clients under plain `node`. The count is deliberately kept EXACT rather than
 // relaxed to `>= 2`: a silent allow-list is how the next coupling goes
 // unnoticed, which is what the comment above already says.
-check('every non-calling import of a provider module is accounted for (4 expected: the provenance renderer, the catalog read-back, and the two chat clients now sharing the envelope)',
-  benignImports.length === 4, benignImports.join(' | '));
+check('every non-calling import of a provider module is accounted for (5 expected: the provenance renderer, the catalog read-back, the two chat clients sharing the envelope, and agent-base taking the sentinel)',
+  benignImports.length === 5, benignImports.join(' | '));
+check('...and agent-base.js is one of them, for the not-reported sentinel on the two ask paths',
+  benignImports.some((s) => /agent-base\.js -> provider-common\.js \{[^}]*NOT_REPORTED/.test(s)), benignImports.join(' | '));
 check('...and one of them is the AD-030 catalog read-back, which makes no generation call',
   benignImports.some((s) => /gemini-image-client\.js \{ listImageCapableModels \}/.test(s)), benignImports.join(' | '));
 check('...and one is provider-common.js, for the provenance renderer the bible requires and the mime sniffer',
@@ -922,6 +924,24 @@ check('D1 — the meeting row names composed_by, and it is written OUTSIDE the f
   /INSERT INTO meetings[\s\S]{0,300}composed_by, finish_reason, output_tokens/.test(meetingSrcTwoFields)
   && /persistMeeting\(env, \{[\s\S]{0,400}composedBy: modelResult\?\.source/.test(meetingSrcTwoFields));
 const agentBaseSrcTwoFields = readFileSync(new URL('../agents/agent-base.js', import.meta.url), 'utf8');
+// THE ASK PATH is the one place a provider response never arrives at all:
+// _askDataCenter() goes through data-center-api's /api/chat and
+// _askNotebookX() through Notebook-X's own backend, so no finish reason exists
+// to carry. B1's rule applies exactly there — an explicit "not reported" is a
+// fact, a missing field is an absence that reads as normal.
+check('ASK PATH — both asks state NOT_REPORTED rather than returning nothing',
+  (readFileSync(new URL('../agents/agent-base.js', import.meta.url), 'utf8')
+    .match(/finishReason: NOT_REPORTED, outputTokens: null, outputTokensReported: false/g) || []).length === 2);
+check('...and the sentinel is imported from provider-common.js, not spelled locally',
+  /import \{ NOT_REPORTED \} from '\.\.\/workers\/provider-common\.js'/.test(
+    readFileSync(new URL('../agents/agent-base.js', import.meta.url), 'utf8')));
+// The estimate must not leak into the measured column: recordClaudeSpend()
+// estimates ~4 chars/token on the data-center path for the BUDGET, and that
+// number must never reach `outputTokens`, where a reader expects provider
+// evidence. Asserted as `outputTokens: null` on the returned object above
+// rather than as the absence of `Math.ceil` in the file — the estimate itself
+// is legitimate and still there, it just does not travel into the row.
+
 check('AGENT — every model call records the two fields through ONE helper, not five copied assignments',
   /_recordLastModelCall\(result\)/.test(agentBaseSrcTwoFields)
   && !/this\.lastModelSource = (result|groqResult|cfResult)\.source/.test(agentBaseSrcTwoFields));

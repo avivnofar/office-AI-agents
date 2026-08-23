@@ -19,6 +19,9 @@ import { checkGeminiPacingSlot } from '../workers/gemini-pacer.js';
 import { detectCapabilityGap } from '../workers/gap-reports.js';
 import { lengthProxyScore, scoreWithScorer, SCORER_ID } from '../workers/quality-metric.js';
 import { recordOfficeEvent } from '../workers/improvement-loop.js';
+// The sentinel, not a local string. See workers/provider-common.js: three
+// states, and "the provider has no such field" must not be spelled two ways.
+import { NOT_REPORTED } from '../workers/provider-common.js';
 import {
   judgeSamplerEnabled, isSelectedForJudging, buildJudgePrompt, parseJudgeVerdict,
   recordJudgement, JUDGE_LANE, JUDGE_MAX_TOKENS,
@@ -689,13 +692,19 @@ export class AgentBase {
       // LAST call's values here would attribute another call's outcome to one
       // that never happened.
       //
-      // On a real answer these come from the client that served it. They are
-      // read off the agent rather than off `result` because the ask path
-      // (_askDataCenter/_askNotebookX) goes through data-center-api and the
-      // Notebook-X backend, neither of which returns a provider finish reason
-      // — so for those two paths this is honestly null, and it is the
-      // persona-flavour calls (queryGroqRouted/queryGeminiDirect) that populate
-      // it. Stated rather than left for a reader to discover from empty columns.
+      // On a real answer these come from the ask that produced it. Both ask
+      // paths go through a transport that hides the provider response —
+      // data-center-api's `/api/chat` and Notebook-X's own backend — so
+      // neither can report a finish reason, and both say so EXPLICITLY with
+      // the NOT_REPORTED sentinel rather than returning nothing. A column that
+      // is empty because nobody filled it and a column that is empty because
+      // the provider has no such field are different facts, and only one of
+      // them is worth investigating.
+      //
+      // The fallback to `this.lastFinishReason` therefore only fires for a
+      // caller that returns neither — a shape no current path produces, kept
+      // so a future ask path that forgets degrades to the agent's last real
+      // call rather than to silence.
       finishReason: notAsked ? null : (result?.finishReason ?? this.lastFinishReason ?? null),
       outputTokens: notAsked ? null : (typeof result?.outputTokens === 'number' ? result.outputTokens : this.lastOutputTokens),
       quality: typeof result?.quality === 'number' && !notAsked ? result.quality : null,
@@ -972,7 +981,23 @@ export class AgentBase {
     // `scorerId` ADDED 2026-08-16: the number and the identity of what produced
     // it travel together, because the whole reason two divisors survived four
     // weeks is that the stored rows did not say which one scored them.
-    return { ok: notebookAnswerFound, quality, scorerId: scored.scorerId, response: responseText, tool_used: 'notebook-x', source: 'gemini' };
+    // ── THE TWO FIELDS ON THE ASK PATH (SESSION 13, 2026-08-23, ITEM B) ──
+    //
+    // NOT_REPORTED, not null, and the distinction is the whole point of the
+    // sentinel. This answer comes from Notebook-X's own backend over its own
+    // HTTP API — the office never sees a provider response here, so there is
+    // no finish reason to lose and no output-token count to read. That is a
+    // permanent property of this path, not a value that went missing on this
+    // call, and a null would send every later reader hunting for the call that
+    // dropped it.
+    //
+    // `outputTokens` stays null with the reporting flag false: null-and-said-so
+    // is a fact; null alone reads as "the model emitted nothing".
+    return {
+      ok: notebookAnswerFound, quality, scorerId: scored.scorerId,
+      response: responseText, tool_used: 'notebook-x', source: 'gemini',
+      finishReason: NOT_REPORTED, outputTokens: null, outputTokensReported: false,
+    };
   }
 
   /**
@@ -1112,7 +1137,20 @@ export class AgentBase {
     // pre-2026-08-10 embodiment_model value is not reliable evidence of what
     // actually answered.
     // `scorerId` ADDED 2026-08-16 — see _askNotebookX()'s matching note.
-    return { ok, quality, scorerId: SCORER_ID, response: responseText, source: 'claude' };
+    // The two fields (Session 13, ITEM B) — same reasoning as
+    // _askNotebookX()'s matching note above, one transport further out.
+    // data-center-api's `/api/chat` returns rendered chat text, not an
+    // Anthropic Messages response, so `stop_reason` and the usage block exist
+    // on the far side of that Worker and never reach this one. Recorded as
+    // NOT_REPORTED so the row states the limit instead of looking empty. The
+    // `recordClaudeSpend()` call above already ESTIMATES tokens at ~4 chars
+    // each; that estimate is deliberately NOT written into `outputTokens`,
+    // which is reserved for what a provider actually reported — mixing a guess
+    // into a measured column is how an estimate gets read as evidence later.
+    return {
+      ok, quality, scorerId: SCORER_ID, response: responseText, source: 'claude',
+      finishReason: NOT_REPORTED, outputTokens: null, outputTokensReported: false,
+    };
   }
 
   /**
