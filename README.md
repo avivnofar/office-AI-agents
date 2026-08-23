@@ -102,7 +102,7 @@ no-automated-writes rule).
 
 | Model | Provider | Role | Cost |
 |-------|----------|------|------|
-| `llama-3.1-8b-instant` | **Groq** | Primary model for all routine per-question agent work | Free, ~14,400 req/day |
+| `openai/gpt-oss-20b` | **Groq** | Primary model for all routine per-question agent work. **An open-weights model HOSTED BY GROQ — not a call to OpenAI.** The `openai/` prefix is the model family's name; it uses the existing `GROQ_API_KEY` against Groq's own endpoint, and no OpenAI credential exists in this repo | Free tier. **Request/day ceiling: see `config/token-economy.json` — Groq's free-tier limits are per-model and the previous model's ~14,400 does not carry over** |
 | `llama-3.1-8b-instruct-fp8` | **Cloudflare Workers AI** | Question routing/classification + same-session fallback when Groq or Gemini is unavailable | Free, account-scoped |
 | **Gemini 3.1 Flash-Lite** | Google AI Studio | Report synthesis (monthly/quarterly/yearly meetings) **and** direct Notebook-X question-asking (paced ~1 call/20s from this automation — Gemini's free-tier quota is shared with Notebook-X's own traffic) | Free tier, ~1,500 req/day |
 | **Google AI Studio** (interactive) | Google | Reserved for human-in-the-loop creative-tool sessions (Agents 9/10 building design assets) — never called programmatically | n/a |
@@ -134,6 +134,21 @@ switch is `routing_enabled` in `SIM_KV`.
 (retired, flagged in-repo 2026-08-07) were both still published here after the
 code had moved on. A model ID in a README is a claim about production and goes
 stale silently — check it against the code, not against this file.*
+
+*And corrected **again on 2026-08-23**, which is the point rather than a
+footnote. `llama-3.1-8b-instant` — the 2026-08-10 correction above — was
+announced deprecated on 2026-06-17 and **shut down on 2026-08-16**, so every
+Groq call in the estate had been returning `404 model_not_found`. It was chosen
+on 2026-08-09 after a live catalogue check that it passed, because it was
+present in the catalogue AND already on a published deprecation list with a
+shutdown date set: **presence is not health, and a catalogue lookup cannot tell
+the two apart.** Not a credential problem — the catalogue listing made with the
+same key on the same day returned 13 models. Since 2026-08-23 the office runs a
+weekly check of every configured model identifier against its provider's live
+catalogue (`workers/model-catalog.js`, called from
+`.github/workflows/weekly-capability-audit.yml`), which closes the
+found-a-week-late case and, by its own admission, not the found-a-week-early
+one.*
 
 ---
 
@@ -293,7 +308,7 @@ whether an answer was actually good enough.
 | Worker | `data-center-agents` (`workers/agent-runner.js`) |
 | State storage | Cloudflare D1 (`data-center-db`) + KV (`SIM_KV`) + Durable Objects (`AGENT_STATE`) |
 | Service binding | `APP_API` → `data-center-api` |
-| Primary agent model | Groq `llama-3.1-8b-instant` |
+| Primary agent model | Groq `openai/gpt-oss-20b` (open-weights, hosted by Groq — not OpenAI) |
 | Routing + fallback | Cloudflare Workers AI |
 | Report synthesis + direct Notebook-X asks | Google Gemini 3.1 Flash-Lite |
 | Data Center AI Search | Claude Sonnet 4.6 — $4.50/month shared soft-stop (under the account's $5/month ceiling), dollar-tracked not call-counted |

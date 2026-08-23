@@ -343,9 +343,27 @@ in full before flipping `guides_enabled` on.
 
 ## Token economy (`config/token-economy.json`)
 
-- **Groq `llama-3.1-8b-instant`** — primary model for all routine per-case
-  agent work (`workers/groq-client.js callGroq()`). Free tier, ~14,400 req/day,
-  resets 00:00 UTC. ~~`llama3-8b-8192`~~ — **struck 2026-08-10.** Groq shut that
+- **Groq `openai/gpt-oss-20b`** — primary model for all routine per-case
+  agent work (`workers/groq-client.js callGroq()`). Free tier, resets 00:00 UTC.
+  **An open-weights model HOSTED BY GROQ, not a call to OpenAI** — the `openai/`
+  prefix is the model family's name; the call uses the existing `GROQ_API_KEY`
+  against Groq's own endpoint and no OpenAI credential exists in this repo.
+  ~~`llama-3.1-8b-instant`, ~14,400 req/day~~ — **struck 2026-08-23.** That
+  model was announced deprecated 2026-06-17 and **shut down 2026-08-16**; every
+  Groq call in the estate had been returning `404 model_not_found`. It had been
+  adopted on 2026-08-09 *after passing a live catalogue check*, because it was in
+  the catalogue and already on a published deprecation list with a shutdown date
+  set — **presence is not health, and a catalogue lookup cannot tell the two
+  apart.** Not a credential fault: the catalogue listing made with the same key
+  on the same day returned 13 models (AD-030 holds; no rotation proposed). The
+  ~14,400/day figure went with the model — Groq's free-tier limits are per-model
+  and that number does not carry over; see `config/token-economy.json` for what
+  replaced it. `gpt-oss-20b` is also a **reasoning** model, which its
+  predecessor was not — see `workers/groq-client.js` `MIN_OUTPUT_TOKENS`. **And
+  this time something checks:** `workers/model-catalog.js` asks the catalogue
+  question of every configured model identifier weekly, from
+  `.github/workflows/weekly-capability-audit.yml`. ~~`llama3-8b-8192`~~ —
+  **struck 2026-08-10.** Groq shut that
   model down on **2025-08-30**; every Groq call had been failing with HTTP 400
   `model_decommissioned` and silently degrading to Cloudflare Workers AI for
   months. The ID was corrected in `config/token-economy.json` and
