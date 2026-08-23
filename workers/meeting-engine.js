@@ -342,7 +342,39 @@ async function gatherClosingQaReview(env, attendeeIds) {
      GROUP BY agent_id`
   ).bind(since).all().catch(() => ({ results: [] }));
 
-  return { window: 'today', todaysWork, samples, quality, workflowMetrics: null };
+  /*
+   * ── THE EMPTY-DATA GUARD (SESSION 11, ITEM B, 2026-08-23) ──────────────
+   *
+   * The `quality` query above keys on `event_type = 'case_answer'`. Case work
+   * was RETIRED on 2026-08-23 (R-001, `cases_enabled` reads false in live
+   * SIM_KV), so `computeDailyQuestionVolume()` now returns 0 and no new
+   * `case_answer` row will ever be written again. Today's 33 rows were written
+   * before the switch flipped; from tomorrow this query returns nothing, every
+   * day, permanently.
+   *
+   * That matters more here than in any other gatherer, because of what this
+   * meeting's own prompt demands of it:
+   *
+   *   > "Produce conclusions specific enough to be written into an agent's
+   *   >  character file TONIGHT."
+   *
+   * Those conclusions are real writes — `context_amendments` go through
+   * `proposeChange()` into probation and from there into the campus character
+   * files that shape how every agent behaves. A meeting handed three empty
+   * arrays and told to be specific does not decline; it produces something.
+   * The failure mode is not an error, it is a confident conclusion about work
+   * that did not happen, filed against a persona, overnight.
+   *
+   * So emptiness is made a FACT IN THE DATA rather than left as an absence for
+   * a model to fill. `nothingToReview` is read by the prompt builder below,
+   * which then instructs the meeting to record that there was nothing to
+   * review and to return NO conclusions. The meeting still runs — whether the
+   * office should hold a review meeting on a day it produced nothing is a
+   * separate decision and is the owner's, not this guard's.
+   */
+  const nothingToReview = !todaysWork?.length && !samples?.length && !quality?.length;
+
+  return { window: 'today', todaysWork, samples, quality, workflowMetrics: null, nothingToReview };
 }
 
 async function gatherWeekly(env) {
@@ -569,7 +601,14 @@ const SUBSTANTIVE_AGENDA = `Then, IN THIS ORDER:
 const AGENDA_BUILDERS = {
   daily_standup: (data) => `Run the OPENING STANDUP — forward-looking, the start of the day. The Workflow (Agent 12) dispatches: he states what is going out to whom today, presents his metrics, and names what is stuck. HE ALSO ASSIGNS REVIEW WORK: any deliverable listed as IN FLIGHT in the context above with reviews still owed gets those reviews assigned TODAY, BY NAME, exactly as build work is assigned. Reviewing is work, not a courtesy someone performs when they notice; an admin with nothing to say abstains explicitly and it is recorded. Each other attendee gives a 1-2 sentence status.\nSession data:\n${JSON.stringify(data.sessionStats)}\nOpen incidents to address: ${JSON.stringify(data.openIncidents)}\n${data.workflowMetrics || ''}
 ${data.outputCensus || ''}`,
-  closing_qa_review: (data) => `Run the CLOSING QA REVIEW — backward-looking, the end of the day, on TODAY'S OUTPUT ONLY. This is not a standup and not a planning meeting: do not discuss tomorrow.\nWhat was produced today:\n${JSON.stringify(data.todaysWork)}\nSampled output:\n${JSON.stringify(data.samples)}\nQuality scores recorded today:\n${JSON.stringify(data.quality)}\nThe QA (6) reviews WORK QUALITY; the Team Lead (7) reviews the WORKER MODEL — persona consistency, behavioural drift, context gaps. Produce conclusions specific enough to be written into an agent's character file TONIGHT. The whole point of running this at the end of the day rather than at tomorrow's standup is that conclusions reach the files before the next day opens, so a vague conclusion defeats the entire arrangement.`,
+  // ITEM B (2026-08-23): the guard fires BEFORE the prompt is built. A meeting
+  // with nothing to review is told to say so and to return no conclusions —
+  // rather than being handed three empty arrays and an instruction to be
+  // specific, which is a request for invention. See gatherClosingQaReview().
+  closing_qa_review: (data) => (data.nothingToReview
+    ? `Run the CLOSING QA REVIEW. THERE IS NOTHING TO REVIEW TODAY: the office recorded no interactions, no sampled output and no quality scores in this window. This is a fact, not a gap in your information.
+Say so plainly, in one or two lines, and STOP. Do NOT infer what the agents were probably doing. Do NOT restate yesterday. Do NOT produce conclusions, context_amendments, action_items, mood_effects or state_changes — every one of those must be an EMPTY ARRAY. A conclusion written into an agent's character file tonight on the strength of no data is worse than no conclusion, because it is indistinguishable from one that was earned.`
+    : `Run the CLOSING QA REVIEW — backward-looking, the end of the day, on TODAY'S OUTPUT ONLY. This is not a standup and not a planning meeting: do not discuss tomorrow.\nWhat was produced today:\n${JSON.stringify(data.todaysWork)}\nSampled output:\n${JSON.stringify(data.samples)}\nQuality scores recorded today:\n${JSON.stringify(data.quality)}\nThe QA (6) reviews WORK QUALITY; the Team Lead (7) reviews the WORKER MODEL — persona consistency, behavioural drift, context gaps. Produce conclusions specific enough to be written into an agent's character file TONIGHT. The whole point of running this at the end of the day rather than at tomorrow's standup is that conclusions reach the files before the next day opens, so a vague conclusion defeats the entire arrangement.`),
   weekly: (data) => `Run the weekly meeting. Review last week's metrics:\n${JSON.stringify(data.latestWeek)}\nIncidents: ${JSON.stringify(data.incidents)}\nPending suggestions (decide approve/reject for at least the root and sudo ones): ${JSON.stringify(data.suggestions)}\n${data.workflowMetrics || ''}
 ${data.outputCensus || ''}\n\n${SUBSTANTIVE_AGENDA}`,
   monthly: (data) => `Run the monthly review. Trends over the last ${data.rangeWeeks} weeks:\n${JSON.stringify(data.history)}\nRecent meetings: ${JSON.stringify(data.pastMeetings)}\n${data.workflowMetrics || ''}
@@ -1261,6 +1300,44 @@ export async function runMeeting(meetingType, env, opts = {}) {
       refused_action_items: gate.removed,
       composed_by: modelResult?.source || null,
     };
+  }
+
+  /*
+   * ── ITEM B, THE ENFORCING HALF (2026-08-23) ────────────────────────────
+   *
+   * The prompt above ASKS a meeting with no data to return nothing. This
+   * REFUSES the write regardless of what it returned, because the prompt is
+   * the half a model can ignore and the write is the half that lands in an
+   * agent's character file overnight.
+   *
+   * Only the conclusion-shaped fields are cleared. The meeting still happened,
+   * its transcript is still persisted, and `nothing_to_review` is recorded ON
+   * THE MEETING so the record says "there was nothing to review" rather than
+   * showing an empty meeting and leaving a reader to guess whether the office
+   * was idle or the pipeline was broken.
+   */
+  if (data?.nothingToReview) {
+    const would = {
+      context_amendments: (decisions.context_amendments || []).length,
+      action_items: (decisions.action_items || []).length,
+      state_changes: (decisions.state_changes || []).length,
+    };
+    decisions.nothing_to_review = {
+      reason: 'no interactions, no sampled output and no quality scores in this window',
+      conclusions_refused: would,
+    };
+    decisions.summary = decisions.summary
+      || 'Nothing to review: the office recorded no work in this window. No conclusions were drawn.';
+    decisions.context_amendments = [];
+    decisions.action_items = [];
+    decisions.state_changes = [];
+    decisions.mood_effects = [];
+    decisions.irritation_effects = [];
+    if (would.context_amendments || would.action_items || would.state_changes) {
+      console.warn(`[meeting-engine] ${meetingType}: NOTHING TO REVIEW, but the meeting still returned `
+        + `${would.context_amendments} context amendment(s), ${would.action_items} action item(s) and `
+        + `${would.state_changes} state change(s). All refused — they would have been written from no data.`);
+    }
   }
 
   await applyMeetingEffects(meetingType, attendeeSnapshots, decisions, env);
