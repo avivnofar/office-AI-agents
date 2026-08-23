@@ -359,7 +359,12 @@ in full before flipping `guides_enabled` on.
   ~14,400/day figure went with the model — Groq's free-tier limits are per-model
   and that number does not carry over; see `config/token-economy.json` for what
   replaced it. `gpt-oss-20b` is also a **reasoning** model, which its
-  predecessor was not — see `workers/groq-client.js` `MIN_OUTPUT_TOKENS`. **And
+  predecessor was not, and **no `max_tokens` floor was added for it** — the
+  first live routed call at `max_tokens: 64` (the smallest budget in the repo)
+  returned real text with `finish_reason: "stop"` and 43 completion tokens, so
+  the empty-answer failure Cerebras' `gpt-oss-120b` has was tested for and did
+  not occur. See `workers/groq-client.js`'s header for the margin and the case
+  to watch. **And
   this time something checks:** `workers/model-catalog.js` asks the catalogue
   question of every configured model identifier weekly, from
   `.github/workflows/weekly-capability-audit.yml`. ~~`llama3-8b-8192`~~ —

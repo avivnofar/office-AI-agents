@@ -594,7 +594,24 @@ check('provider-common.js does not reference Anthropic either',
 /* ── Pre-existing provider numbers were not changed ─────────────────────── */
 console.log('\n--- Pre-existing limits unchanged (daily_limits stays the source of truth) ---');
 
-check('daily_limits.groq is still 14400', tokenEconomy.daily_limits?.groq === 14400);
+// ── 14400 -> 1000, 2026-08-23 ────────────────────────────────────────────
+// This assertion did its job: it went red the moment the number moved, which is
+// what a pinned pre-existing limit is for. It is re-pinned to the new value
+// rather than relaxed, because the property being protected is "nobody changes
+// this without saying why", not "this equals 14400".
+//
+// WHY THE NUMBER MOVED. Groq's free-tier request ceiling is PER MODEL, and this
+// one belonged to `llama-3.1-8b-instant`, which was shut down on 2026-08-16.
+// `openai/gpt-oss-20b` carries 1,000/day, MEASURED off the first live routed
+// call's `x-ratelimit-limit-requests: 1000` / `x-ratelimit-reset-requests:
+// 1m26.4s` — 86.4s is exactly 86400/1000, the refill interval of a per-DAY
+// bucket with one request spent, which is what proves the reading is daily.
+// See config/token-economy.json's `_daily_limits_groq_remeasured_2026_08_23`.
+check('daily_limits.groq is 1000 — the openai/gpt-oss-20b free-tier ceiling, MEASURED 2026-08-23 (was 14400, which belonged to the retired llama-3.1-8b-instant)',
+  tokenEconomy.daily_limits?.groq === 1000);
+check('...and the change is EXPLAINED in the config, not just made',
+  /_daily_limits_groq_remeasured_2026_08_23/.test(JSON.stringify(tokenEconomy))
+  && /_remeasured_2026_08_23/.test(JSON.stringify(tokenEconomy.providers?.groq || {})));
 check('daily_limits.cloudflare_ai is still 10000', tokenEconomy.daily_limits?.cloudflare_ai === 10000);
 check('daily_limits.gemini is still 1500', tokenEconomy.daily_limits?.gemini === 1500);
 check('providers.groq agrees with daily_limits.groq', providers.groq?.requests_per_day === tokenEconomy.daily_limits.groq);

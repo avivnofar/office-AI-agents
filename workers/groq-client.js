@@ -84,10 +84,29 @@ const GROQ_ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
  * question was worth asking; it was answered by making the call, not by citing
  * a page.
  *
- * IT IS ALSO A REASONING MODEL, which the model it replaces was not. See
- * MIN_OUTPUT_TOKENS below — the same property that made Cerebras' gpt-oss-120b
- * return empty at a small max_tokens applies here, and it is the one behaviour
- * change that rides with this ID.
+ * ── IT IS ALSO A REASONING MODEL, AND NO FLOOR WAS ADDED ────────────────
+ *
+ * `gpt-oss-20b` reasons; `llama-3.1-8b-instant` did not. That is the one
+ * behaviour change riding with this ID, and it is the same property that made
+ * Cerebras' `gpt-oss-120b` return an EMPTY answer at small budgets — see
+ * `workers/cerebras-client.js` `MIN_OUTPUT_TOKENS`, which exists for exactly
+ * that and raises `max_tokens` to a 512 floor.
+ *
+ * NO SUCH FLOOR IS ADDED HERE, and the reason is a measurement rather than a
+ * judgement. The first live routed call on the new model, at `max_tokens: 64` —
+ * the SMALLEST budget anywhere in this repo, `routing_test`'s default — returned
+ * the text `ok` with `finish_reason: "stop"` and `completion_tokens: 43`. It did
+ * not come back empty. Adding a floor to prevent a failure that was tested for
+ * and did not occur would be speculation shipped as a guardrail.
+ *
+ * WHAT THE MEASUREMENT ALSO SHOWS, recorded because the margin is the
+ * interesting half: 43 output tokens were spent to say one word, against a
+ * budget of 64. Most of that is reasoning. Every production caller passes 512 or
+ * more (`callGroq`'s own default is 512; `agent-base.js` 512, `meeting-engine.js`
+ * 1024, `judge-sampler.js` 700), so none of them is near this line. A NEW caller
+ * that passes a small budget is the case to watch, and the symptom to expect is
+ * `finishReason: "length"` with empty or truncated text — which both of those
+ * fields now surface, since Session 13.
  *
  * ── AND THIS TIME SOMETHING CHECKS ───────────────────────────────────────
  *

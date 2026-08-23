@@ -380,7 +380,11 @@ console.log('\n--- Token economy: allow-check before, degrade on deny, never thr
 const onEnv = (opts) => fakeEnv({ enabled: true, ...opts });
 
 check('groq has a KNOWN daily cap', hasKnownCap(tokenEconomy, 'groq') === true);
-check('groq cap agrees with token-economy daily_limits', dailyCapFor(tokenEconomy, 'groq') === 14400);
+// 14400 -> 1000 on 2026-08-23: the ceiling belonged to the MODEL, and the model
+// (llama-3.1-8b-instant) was shut down on 2026-08-16. Measured off live
+// rate-limit headers on openai/gpt-oss-20b — see verify-providers.js's block on
+// the same number, and token-economy.json's own note. Re-pinned, not relaxed.
+check('groq cap agrees with token-economy daily_limits', dailyCapFor(tokenEconomy, 'groq') === 1000);
 check('cerebras has NO daily cap — the provider publishes no real daily ceiling',
   dailyCapFor(tokenEconomy, 'cerebras') === null);
 check('mistral has NO daily cap either (no daily header exists to read)',
@@ -403,8 +407,23 @@ check('cohere has NO daily cap (dailyCapFor must not report the monthly number a
   dailyCapFor(tokenEconomy, 'cohere') === null, String(dailyCapFor(tokenEconomy, 'cohere')));
 check('cohere still counts as a KNOWN cap for the degrade-order tie-break',
   hasKnownCap(tokenEconomy, 'cohere') === true);
+// ── SIZED FROM THE CONFIG, NOT FROM A LITERAL (2026-08-23) ───────────────
+// These three assertions are about the MECHANISM — does a daily cap resolve to
+// period "day", is the soft stop 60% of it, does an allowed check report the
+// cap — and none of them is about the cap's VALUE. Written against a literal
+// 14400 they went red when the number legitimately moved (Groq's free-tier
+// ceiling is per MODEL, and llama-3.1-8b-instant was shut down 2026-08-16), and
+// the cheapest way to make them pass would have been to edit three numbers, at
+// which point the same trap is reset for next time.
+//
+// This is the same repair verify-report-pipeline.js §5b already made when
+// DIRECT_REVIEW_CONTEXT_TOKENS moved and every assertion sized against a literal
+// 8192 silently stopped testing anything. The VALUE is pinned in exactly one
+// place — verify-providers.js, where the measurement and its reasoning live —
+// and everything about the mechanism is sized from the config.
+const GROQ_DAILY_CAP = tokenEconomy.daily_limits.groq;
 check('a daily-capped provider resolves to period "day"',
-  capFor(tokenEconomy, 'groq').period === 'day' && capFor(tokenEconomy, 'groq').cap === 14400);
+  capFor(tokenEconomy, 'groq').period === 'day' && capFor(tokenEconomy, 'groq').cap === GROQ_DAILY_CAP);
 check('a provider with neither cap resolves to period null (paced, not counted)',
   capFor(tokenEconomy, 'cerebras').cap === null && capFor(tokenEconomy, 'cerebras').period === null);
 
@@ -435,17 +454,17 @@ const cohereNotDenied = await checkProviderAllowance(fakeEnv({ enabled: true, co
 check('a monthly provider reads its MONTH bucket, not the day bucket',
   cohereNotDenied.allowed === true && cohereNotDenied.callsToday === 0, JSON.stringify(cohereNotDenied));
 
-const softStop = Math.floor(14400 * routingConfig.soft_stop_fraction);
+const softStop = Math.floor(GROQ_DAILY_CAP * routingConfig.soft_stop_fraction);
 const exhausted = { [providerPeriodKey('groq', new Date())]: softStop };
 const denial = await checkProviderAllowance(onEnv({ counts: exhausted }), 'groq', { tokenEconomy, routingConfig });
 check('a provider at its soft-stop is DENIED', denial.allowed === false);
 check('...and the denial reason is exactly `overtime_required`', denial.reason === 'overtime_required', denial.reason);
-check('the soft stop is 60% of the known cap, not 100% (serves Gate 3)', denial.softStop === softStop && softStop < 14400);
+check('the soft stop is 60% of the known cap, not 100% (serves Gate 3)', denial.softStop === softStop && softStop < GROQ_DAILY_CAP);
 
 const allowed = await checkProviderAllowance(onEnv({ counts: {} }), 'groq', { tokenEconomy, routingConfig });
 check('a provider under its soft-stop is allowed', allowed.allowed === true && allowed.reason === null);
 check('an allowed check reports cap and callsToday for the quota dashboard',
-  allowed.cap === 14400 && allowed.callsToday === 0 && allowed.capUnknown === false);
+  allowed.cap === GROQ_DAILY_CAP && allowed.callsToday === 0 && allowed.capUnknown === false);
 
 const missingCred = await checkProviderAllowance({ SIM_KV: null, DB: null }, 'groq', { tokenEconomy, routingConfig });
 check('a provider with no credential is denied by name, not silently skipped',
