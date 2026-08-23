@@ -1696,32 +1696,70 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
    * being MEASURED into its slot. Position among equal priorities is load-bearing
    * in this function and is not stylistic ordering.
    */
-  if (snapshot?.owner?.classified) {
-    for (const s of ownerMessageSections(snapshot.owner.classified, { shape, candidates: ownerCandidates, malformed: snapshot.owner.malformed })) {
-      sections.push({ ...s, priority: PRIORITY.headline });
-    }
-  }
-
   /*
-   * ── AND HIS REPLIES, IMMEDIATELY AFTER (2026-08-23, Session 14 ITEM B) ──
+   * ── THE CLIENT'S OWN WORDS ARE NOT IN `sections` AT ALL ─────────────────
    *
-   * Second, not first, and the ordering is the same load-bearing mechanism the
-   * block above documents: `fitToBudget()` breaks ties among equal priorities by
-   * INDEX and drops the later one. A file the client WROTE outranks a comment
-   * the office TRANSCRIBED if only one of the two can survive a squeeze — his
-   * own handwriting is the stronger artefact. Both sit at headline priority, so
-   * in practice both survive; this decides only the case where they cannot.
+   * They used to be, at PRIORITY.headline, and the comment above explained at
+   * length that being pushed first was what kept them alive under a squeeze.
+   * That comment was right about the mechanism and wrong about the outcome, and
+   * a live read-back on 2026-08-23 is what settled it:
    *
-   * Pushed unconditionally when the snapshot has the key at all, INCLUDING when
-   * `replies` is empty — the count line renders at zero on purpose. "He has not
-   * replied" and "the reply directory could not be read" must not look alike,
-   * and the second lands in `errors` rather than here.
+   *     agent shape, standard rank, live snapshot, budget 660
+   *     dropped: [..., requirements-headline, owner-issue-replies]
+   *     trimmed: [owner-messages]
+   *
+   * The client's reply — *"deploy warehouse-office-AI-agents/tasks/office-site/
+   * ... i want to see the new one"* — was DROPPED from the prompt by the budget
+   * fitter, on the same day the whole point of the change was to make it
+   * visible. And `owner-messages`, his hand-written files, was being TRIMMED in
+   * both agent shapes already, which nobody had noticed: his instructions were
+   * being shortened to fit for as long as the shape has been over budget.
+   *
+   * ── SO THEY RIDE OUTSIDE THE BUDGET, LIKE THE POLICY ────────────────────
+   *
+   * This is not a new idea; it is the argument the policy block below already
+   * makes, applied to the other thing A11 names in the same breath:
+   *
+   *   > "Everyone sees the client requirements and this policy.
+   *   >  Nobody can obey what they cannot see."
+   *
+   * and, from the policy block: *a rule enforced only by a budget stops being
+   * enforced the moment the budget is raised.* An instruction the fitter is
+   * entitled to trim on a busy day is an instruction absent on exactly the day
+   * it matters. Position among equal priorities was never protection — it only
+   * decided WHICH of the client's sentences was dropped first.
+   *
+   * ── BOTH DIRECTIONS, AND THAT SYMMETRY IS DELIBERATE ────────────────────
+   *
+   * `channel/from-owner/` (files he wrote) and `channel/from-owner-issues/`
+   * (comments the office transcribed) both ride out here. Protecting only the
+   * transcriptions — which is all ITEM B strictly needed — would leave the
+   * office's own transcript harder to lose than the client's handwriting, which
+   * is a worse inconsistency than the one being fixed.
+   *
+   * ── WHAT THIS COSTS, MEASURED ───────────────────────────────────────────
+   *
+   * Roughly 250 tokens per agent prompt that the fitter no longer controls,
+   * reported separately as `ownerTokens` rather than folded into `tokens` — the
+   * same split `policyTokens` uses, for the same reason: `tokens` is what the
+   * fitter managed, `ownerTokens` is what the client's words cost. It is not
+   * free and it is not hidden.
+   *
+   * They are also no longer subject to the A11 rank filter, which is the
+   * correct outcome and was already the intent: both labels were in
+   * STANDARD_SECTIONS precisely so that every rank saw them. That list now
+   * records the decision rather than enforcing it, and `verify-owner-channel.js`
+   * §12 asserts the labels never appear in `sections` so the two cannot drift
+   * into disagreeing.
    */
-  if (snapshot?.ownerIssueReplies) {
-    for (const s of issueReplySections(snapshot.ownerIssueReplies.replies, { shape, malformed: snapshot.ownerIssueReplies.malformed })) {
-      sections.push({ ...s, priority: PRIORITY.headline });
-    }
-  }
+  const clientWordSections = [
+    ...(snapshot?.owner?.classified
+      ? ownerMessageSections(snapshot.owner.classified, { shape, candidates: ownerCandidates, malformed: snapshot.owner.malformed })
+      : []),
+    ...(snapshot?.ownerIssueReplies
+      ? issueReplySections(snapshot.ownerIssueReplies.replies, { shape, malformed: snapshot.ownerIssueReplies.malformed })
+      : []),
+  ];
 
   if (requirements) {
     const urgentCount = requirements.requirements.filter((r) => r.urgent).length;
@@ -2085,14 +2123,32 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
    */
   const mission = buildMissionBlock(shape === 'agent' ? 'brief' : 'full');
 
+  /*
+   * Rendered raw — never through fitToBudget(). See the block above the
+   * `clientWordSections` assignment for why, and for the live read-back that
+   * forced it. `renderSection()` still applies, so a section's own NO SILENT
+   * CAPS behaviour is unchanged; what is gone is the fitter's right to shorten
+   * or remove the client's sentences to make room for the office's own.
+   */
+  const clientWords = clientWordSections.map(renderSection).filter(Boolean).join('\n');
+
   return {
-    text: `${mission.text}\n\n${policy.text}\n\n${fitted.text}`,
+    // AFTER the policy and BEFORE the office's own work. The mission says what
+    // the office is for and the policy says what it may not do; both are
+    // standing rules. The client's words are the live instruction those rules
+    // are applied to, so they are read once the frame is set and before any of
+    // the office's own bookkeeping competes for attention.
+    text: [mission.text, policy.text, clientWords, fitted.text].filter(Boolean).join('\n\n'),
     degraded: errors.length > 0,
     reason: errors.length ? errors.join(' | ') : null,
     tokens: fitted.tokens,
     policyTokens: policy.tokens,
     missionTokens: mission.tokens,
-    totalTokens: fitted.tokens + policy.tokens + mission.tokens,
+    // Reported separately, never folded into `tokens`. `tokens` is what the
+    // fitter managed; this is what the client's own words cost, and a reader
+    // asking "why is this prompt bigger" is owed the split rather than a sum.
+    ownerTokens: estimateTokens(clientWords),
+    totalTokens: fitted.tokens + policy.tokens + mission.tokens + estimateTokens(clientWords),
     rankFiltered,
     withheld,
     dropped: fitted.dropped,

@@ -190,7 +190,7 @@ section('§3 precedence — the owner outranks the board');
   const classified = classifyOwnerMessages([msg], parseReadLog(''));
   const board = {
     ok: true,
-    tasks: Array.from({ length: 40 }, (_, i) => ({
+    tasks: Array.from({ length: 300 }, (_, i) => ({
       id: `OB-${String(i + 1).padStart(3, '0')}`, title: `task ${i} with a reasonably long title to consume budget`,
       state: 'READY', assignee: 'Agent 6 — The QA', agentId: 6, blockedBy: 'nothing',
     })),
@@ -1028,6 +1028,129 @@ section('§12 the client\'s Issue replies — filed, versioned, and (until today
     HIS_WORDS.every((w) => !String(oldBuilt.text || '').toLowerCase().includes(w)));
   check('[FAILS-OLD] ...and said nothing about it either: no count line, no error, no marker',
     !/from-owner-issues/i.test(String(oldBuilt.text || '')));
+
+  /* ── THE FITTER MAY NOT TOUCH THE CLIENT'S WORDS ─────────────────────
+   *
+   * ADDED AFTER A FAILED ACCEPTANCE RUN, which is the only reason it is here.
+   * The first live read-back of the fix — agent shape, standard rank, real
+   * snapshot, budget 660 — came back with
+   *
+   *     dropped: [..., requirements-headline, owner-issue-replies]
+   *     trimmed: [owner-messages]
+   *
+   * and ZERO of his words in the prompt. The section that carried the client's
+   * instruction was removed by `fitToBudget()` on the same day the change was
+   * made to render it, and his hand-written files were ALREADY being shortened
+   * to fit and had been for as long as the shape has been over budget.
+   *
+   * So the client's words now ride OUTSIDE the fitter, like the policy and the
+   * mission, for the reason office-context.js already gives about the policy: a
+   * rule enforced only by a budget stops being enforced the moment the budget
+   * moves. These checks are what stop that being undone quietly.
+   */
+  {
+    // A snapshot deliberately stuffed far past every budget in the file: 400
+    // board tasks and 300 requirements. The fitter WILL be forced to drop and trim heavily;
+    // the point is what it is not allowed to reach.
+    const big = {
+      fetched_at: Date.now(),
+      today: '2026-08-23',
+      board: {
+        ok: true,
+        counts: { total: 400, doing: 140, todo: 130, blocked: 130 },
+        malformed: [],
+        tasks: Array.from({ length: 400 }, (_, i) => ({
+          id: `OB-${100 + i}`, title: `a task with a deliberately long title to spend budget ${i}`,
+          state: 'TODO', owner: 'someone', urgency: null, blocked: i % 3 === 0,
+          blockedReason: 'a reason long enough to matter', dispatched: false, offered: false,
+        })),
+      },
+      requirements: {
+        ok: true, due: '2026-09-01', malformed: [],
+        requirements: Array.from({ length: 40 }, (_, i) => ({
+          id: `REQ-${i}`, title: `requirement ${i} with a long title`, status: 'open', urgent: i < 5,
+        })),
+      },
+      questions: null, lifecycle: null, policy: null,
+      owner: null,
+      ownerIssueReplies: { ok: true, replies: [parsed.reply], malformed: [] },
+      submissions: null,
+      errors: [],
+    };
+    const OWNER_LABELS = ['owner-messages', 'owner-messages-count', 'owner-issue-replies', 'owner-issue-replies-count'];
+    const SHAPES_UNDER_PRESSURE = [
+      ['agent/standard', 'agent', { agentId: 3, clearance: 'standard' }],
+      ['agent/admin', 'agent', { agentId: 6, clearance: 'sudo' }],
+      ['meeting', 'meeting', {}],
+    ];
+    // REPORTED, not assumed. Not every shape squeezes on the same fixture —
+    // the standard shape rank-filters the board detail away before the fitter
+    // ever sees it, and the meeting budget is large. Asserting "every shape
+    // squeezed" would have been a check that passes by accident of the fixture;
+    // asserting AT LEAST ONE does is what makes the checks below mean anything,
+    // and printing which is what stops the day the answer becomes none.
+    const squeezed = SHAPES_UNDER_PRESSURE.filter(([, shape, opts]) => {
+      const b = buildOfficeContext(big, shape, opts);
+      return b.dropped.length > 0 || b.trimmed.length > 0;
+    }).map(([name]) => name);
+    check(`SQUEEZE — at least one shape is genuinely over budget on this fixture (so the checks below are real): ${squeezed.join(', ') || 'NONE'}`,
+      squeezed.length > 0);
+
+    for (const [name, shape, opts] of SHAPES_UNDER_PRESSURE) {
+      const built = buildOfficeContext(big, shape, opts);
+      const text = String(built.text || '').toLowerCase();
+      check(`SQUEEZE — NONE of the client's sections is among what the fitter dropped or trimmed (${name})`,
+        OWNER_LABELS.every((l) => !built.dropped.includes(l) && !built.trimmed.includes(l)),
+        `dropped=${built.dropped.join(',')} trimmed=${built.trimmed.join(',')}`);
+      check(`SQUEEZE — ...and his words are still in the ${name} prompt, in full`,
+        HIS_WORDS.every((w) => text.includes(w)),
+        `missing: ${HIS_WORDS.filter((w) => !text.includes(w)).join(', ')}`);
+    }
+
+    // THE STRUCTURAL HALF, which is what actually holds. The behavioural checks
+    // above depend on a fixture; this one depends on the code. The client's
+    // sections are never handed to fitToBudget() at all, so no budget, no
+    // fixture and no future board size can reach them.
+    const ctxSource = fs.readFileSync(path.join(ROOT, 'workers', 'office-context.js'), 'utf8');
+    check('the client\'s sections are never pushed into the fitter\'s list',
+      !/sections\.push\(\{ \.\.\.s, priority: PRIORITY\.headline \}\)/.test(ctxSource),
+      'a push of owner sections into `sections` is back');
+    check('...they are collected into clientWordSections and rendered OUTSIDE fitToBudget()',
+      /const clientWordSections = \[/.test(ctxSource)
+      && /const clientWords = clientWordSections\.map\(renderSection\)/.test(ctxSource));
+    check('...and composed into the text alongside mission and policy, which also ride outside the budget',
+      /\[mission\.text, policy\.text, clientWords, fitted\.text\]/.test(ctxSource));
+    const built = buildOfficeContext(big, 'agent', { agentId: 3, clearance: 'standard' });
+    check('the client\'s words are priced SEPARATELY as ownerTokens, not folded into `tokens`',
+      typeof built.ownerTokens === 'number' && built.ownerTokens > 0
+      && built.totalTokens === built.tokens + built.policyTokens + built.missionTokens + built.ownerTokens);
+
+    // [FAILS-OLD] — the transcription of the mechanism that dropped him. If the
+    // client's sections were still ordinary members of `sections`, this is what
+    // would happen to them under the same squeeze.
+    const asOrdinaryHeadlineSection = (secs, budget) => {
+      const kept = secs.slice().sort((a, b) => a.priority - b.priority);
+      // stage 2 of fitToBudget(): drop the LAST index among the lowest priority
+      const dropped = [];
+      let total = kept.reduce((n, x) => n + Math.ceil((x.text || `${x.header}${(x.items || []).join('')}`).length / 4), 0);
+      while (total > budget && kept.length > 1) {
+        let worst = 0;
+        for (let i = 1; i < kept.length; i += 1) if (kept[i].priority >= kept[worst].priority) worst = i;
+        total -= Math.ceil((kept[worst].text || `${kept[worst].header}${(kept[worst].items || []).join('')}`).length / 4);
+        dropped.push(kept.splice(worst, 1)[0].label);
+      }
+      return dropped;
+    };
+    const asSections = [
+      { label: 'headline', priority: 0, text: 'x'.repeat(80) },
+      ...issueReplySections([parsed.reply], { shape: 'agent' }).map((x) => ({ ...x, priority: 0 })),
+      { label: 'requirements-headline', priority: 0, text: 'y'.repeat(400) },
+      { label: 'board-counts', priority: 1, text: 'z'.repeat(600) },
+    ];
+    check('[FAILS-OLD] as an ordinary headline section, the client\'s reply IS dropped under a squeeze',
+      asOrdinaryHeadlineSection(asSections, 120).includes('owner-issue-replies'),
+      asOrdinaryHeadlineSection(asSections, 120).join(','));
+  }
 
   // ── THE OFFICE STILL NEVER WRITES INTO HIS OWN FOLDER ─────────────────
   check('the two directories stay distinct constants — no prefix match that would swallow the next sibling',
