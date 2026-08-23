@@ -828,10 +828,13 @@ async function fetchOwnerIssueComments(env, repoName, issueNumber) {
  * unchanged). A reply the office transcribed is the OFFICE's record of what he
  * said, and it must not be mistakable for a file he wrote himself.
  */
-async function recordIssueReplies(env, issueRepo, recordRepo, issueReadback) {
+async function recordIssueReplies(env, recordRepo, issueReadback) {
   const recorded = [];
   for (const ir of issueReadback || []) {
     if (!ir.hasReply || !ir.comments) continue;
+    // PER-ITEM, never one global target — see readBackOwnerIssues() below for
+    // why the office reads two repositories and files into one.
+    const issueRepo = ir.repo || OWNER_NOTIFY_REPO;
     const comments = await fetchOwnerIssueComments(env, issueRepo, ir.number);
     for (const c of comments) {
       const date = String(c.createdAt || '').slice(0, 10) || todayDateStr();
@@ -862,16 +865,70 @@ async function recordIssueReplies(env, issueRepo, recordRepo, issueReadback) {
       // and a duplicate entry is a worse outcome than a delayed one.
       const existing = await fetchBackOfficeFile(env, path);
       if (existing?.text !== null && existing?.text !== undefined) {
-        recorded.push({ issue: ir.number, commentId: c.id, path, committed: false, already: true });
+        recorded.push({ issue: ir.number, repo: issueRepo, commentId: c.id, path, committed: false, already: true });
         continue;
       }
       const res = await commitFileToRepo(env, recordRepo, path, content,
         `channel: record client reply on issue #${ir.number}`)
         .catch((err) => ({ committed: false, reason: `threw: ${err?.message || err}` }));
-      recorded.push({ issue: ir.number, commentId: c.id, path, committed: !!res?.committed, reason: res?.reason || null });
+      recorded.push({ issue: ir.number, repo: issueRepo, commentId: c.id, path, committed: !!res?.committed, reason: res?.reason || null });
     }
   }
   return recorded;
+}
+
+/*
+ * ─── WHICH REPOSITORIES A REPLY IS READ FROM (SESSION 12, 2026-08-23) ────
+ *
+ * The office FILES into one repository and READS BACK from two, and the two
+ * lists are deliberately different lengths.
+ *
+ * `OWNER_NOTIFY_REPO` moved to back-office today (see its own block below).
+ * Twelve `[Office #N]` Issues stand open in the PUBLIC repo, unmigrated on
+ * purpose, and **one of them carries the owner's first reply in this channel's
+ * history** — his comment on Issue #47, written 2026-08-23T12:39:44Z, roughly
+ * two hours before this retarget was deployed.
+ *
+ * Reading back only from the new target would have made that reply
+ * unreachable: back-office holds zero owner-channel Issues, so the read-back
+ * would be empty, `recordIssueReplies()` would iterate nothing, and the one
+ * message the client has ever sent through this channel would be dropped
+ * silently and permanently. Nothing else in this codebase reads Issue comments.
+ *
+ * That is the SAME failure the constant's own header warns about — "filing
+ * into one repo and reading replies from another would make every notification
+ * look unanswered forever" — arriving from the other direction, and it is why
+ * the move needed this second line rather than the single identifier the
+ * previous session's note predicted. That note was written before the client
+ * had ever replied to anything.
+ *
+ * `owner_email_notice`'s TRANSITION FALLBACK already carries the same decision
+ * for the same reason; this is that decision applied to the path that reads
+ * replies rather than the one that links to them.
+ *
+ * The public entry is a TRANSITION, not a permanent second channel. When the
+ * owner closes the twelve public Issues, this list drops back to one and
+ * nothing else changes.
+ */
+const OWNER_ISSUE_READ_REPOS = [BACKOFFICE_REPO_NAME, REPO_NAME];
+
+/**
+ * Classifies every owner-channel Issue across `OWNER_ISSUE_READ_REPOS`, each
+ * entry tagged with the repository it came from.
+ *
+ * The `repo` tag is what makes the union safe: Issue numbers are per-repository
+ * and will collide across the two, so no downstream reader may look one up by
+ * number alone. `recordIssueReplies()` reads it; `selectNotificationItems()`
+ * ignores it, which is correct — an unanswered Issue escalates on its age, not
+ * on its address.
+ */
+async function readBackOwnerIssues(env, today) {
+  const out = [];
+  for (const repo of OWNER_ISSUE_READ_REPOS) {
+    const classified = classifyOwnerIssueReadback(await fetchOwnerChannelIssues(env, repo), today);
+    for (const entry of classified) out.push({ ...entry, repo });
+  }
+  return out;
 }
 
 /**
@@ -1752,9 +1809,11 @@ async function processOwnerChannelBlock(env, opts = {}) {
   // Issues too, not only questions and submissions. Read back every
   // `[Office #N]` Issue's reply state before composing this cycle's
   // notification, so an unanswered one rises instead of going quiet.
-  const issueReadback = classifyOwnerIssueReadback(
-    await fetchOwnerChannelIssues(env, OWNER_NOTIFY_REPO), today
-  );
+  // SESSION 12 (2026-08-23): BOTH repositories — the new private target and
+  // the twelve unmigrated public Issues, one of which carries the client's
+  // first reply. See readBackOwnerIssues() for why reading only the new one
+  // would have dropped it.
+  const issueReadback = await readBackOwnerIssues(env, today);
   out.issueReadback = issueReadback;
 
   const items = selectNotificationItems({
@@ -1792,7 +1851,7 @@ async function processOwnerChannelBlock(env, opts = {}) {
   // committed into the channel record so git stays the permanent history —
   // which is the property the old "reply in the repo, not here" instruction was
   // protecting, kept without making the client do the filing.
-  out.issueReplies = await recordIssueReplies(env, OWNER_NOTIFY_REPO, OWNER_REPLY_RECORD_REPO, issueReadback)
+  out.issueReplies = await recordIssueReplies(env, OWNER_REPLY_RECORD_REPO, issueReadback)
     .catch((err) => {
       out.errors.push(`Could not record client replies from Issue comments — ${err?.message || err}. A reply may have been read and not filed.`);
       return [];
@@ -2228,35 +2287,39 @@ async function runFrontPublish(env, { batchId, dryRun = false } = {}) {
  * repo and reading replies from another would make every notification look
  * unanswered forever, which is the exact failure this channel already had.
  */
-// ── REVERTED THE SAME DAY, 2026-08-23. STOP 4. ─────────────────────────
+// ── REVERTED, THEN LANDED. Both on 2026-08-23. ──────────────────
 //
-// The retarget above was deployed and TESTED against the live API, and the
-// test is why this line reads `REPO_NAME` again:
+// SESSION 11 deployed this retarget, tested it against the live API, and put
+// it back:
 //
 //   {"type":"owner_channel_block"} -> notification #12 -> HTTP 403
 //   "OWNER NOTIFICATION #12 FAILED — HTTP 403. The office has NOT reached
 //    the client."
 //
-// `BACKOFFICE_REPO_TOKEN` carries Contents:write on back-office — every
+// `BACKOFFICE_REPO_TOKEN` carried Contents:write on back-office — every
 // channel file, every daily summary and every campus write goes through it
-// and works — but it does NOT carry **Issues:write**. A fine-grained PAT
-// grants those separately, and nothing before this had ever asked it to open
+// and works — but it did NOT carry **Issues:write**. A fine-grained PAT
+// grants those separately, and nothing before that had ever asked it to open
 // an Issue there, so the gap had never been reachable.
 //
-// Creating or re-scoping a credential is the owner's, not a session's. THE
-// EXACT ACTION, so it does not have to be re-derived: on the fine-grained
-// PAT behind `BACKOFFICE_REPO_TOKEN`, add **Repository permissions ->
-// Issues: Read and write** for `avivnofar/back-office-AI-agents`, then set
-// this line back to `BACKOFFICE_REPO_NAME`. No code change is needed beyond
-// that one identifier.
+// SESSION 12 (2026-08-23): the owner added **Issues: Read and write** to that
+// PAT. Verified live BEFORE this line was touched, with two calls carrying the
+// same secret the Worker carries — not by reading the code and not by trusting
+// the grant:
 //
-// It is reverted rather than left failing because a channel that 403s on
-// every notification is strictly worse than one filing into the public repo:
-// the eleven unanswered Issues are at least READ-ABLE. The 403 was recorded
-// in `owner_notifications` and surfaced as a loud error, exactly as designed
-// — the mechanism reported its own failure rather than going quiet, which is
-// the one thing this channel was built to guarantee.
-const OWNER_NOTIFY_REPO = REPO_NAME;
+//   GET  /repos/avivnofar/back-office-AI-agents/issues        -> HTTP 200 []
+//   POST /repos/avivnofar/back-office-AI-agents/issues  {}    -> HTTP 422
+//        "Invalid request. \"title\" wasn't supplied."
+//
+// The 422 is the proof, not the 200: a fine-grained PAT without Issues:write
+// is refused with 403 at the permission check, BEFORE the body is validated.
+// A validation error means the write was permitted and only the payload was
+// wrong. That is why the probe posts an empty body — it establishes the
+// permission without opening an Issue.
+//
+// THE ELEVEN PUBLIC ISSUES STILL STAND, open and unmigrated, per the block
+// above. Closing them is the owner's.
+const OWNER_NOTIFY_REPO = BACKOFFICE_REPO_NAME;
 
 // WHERE A CLIENT REPLY IS FILED. Deliberately NOT the same constant: this is
 // a Contents write, which the token CAN do, and his words belong in the
