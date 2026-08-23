@@ -175,9 +175,30 @@ const tinySnapshot = {
   errors: [],
 };
 const built = officeContext.buildOfficeContext(tinySnapshot, 'agent', { agentId: 3, clearance: 'standard' });
+/*
+ * WAS `totalTokens === tokens + policyTokens` until 2026-08-23, when the
+ * mission ordering became a THIRD block riding outside the budget beside the
+ * policy (office-context.js MISSION_ORDER). The check's intent is unchanged and
+ * is the reason it is widened rather than deleted: every out-of-budget block
+ * must be reported as its own number, and `tokens` must still mean only what
+ * the fitter managed. A third block folded silently into either number would be
+ * exactly the thing this line was written to catch.
+ */
 check('the policy is reported as a SEPARATE token cost, not folded into the office-context number',
-  typeof built.policyTokens === 'number' && built.policyTokens > 0 && built.totalTokens === built.tokens + built.policyTokens);
+  typeof built.policyTokens === 'number' && built.policyTokens > 0
+  && typeof built.missionTokens === 'number' && built.missionTokens > 0
+  && built.totalTokens === built.tokens + built.policyTokens + built.missionTokens);
 check('A1 reaches a standard agent', /A1 RED LINE/.test(built.text));
+check('the mission ordering reaches a standard agent, and names all three ranks',
+  /SOFTWARE DEVELOPMENT company/.test(built.text)
+  && /FIRST — software development/.test(built.text)
+  && /SECOND — design and customer experience/.test(built.text)
+  && /THIRD, explicitly low/.test(built.text));
+check('THIRD is actionable, not decorative — it says do not start it unasked',
+  /DO NOT START THIRD-PRIORITY WORK UNLESS YOU WERE ASKED FOR IT/.test(built.text));
+check('the mission is read BEFORE the policy (what to pick up, then what not to do)',
+  built.text.indexOf('WHAT THIS OFFICE IS') >= 0
+  && built.text.indexOf('WHAT THIS OFFICE IS') < built.text.indexOf('A1 RED LINE'));
 
 // The degraded path: no board, no requirements. Before 2026-08-10 this returned
 // text:null and the rules went with it.
@@ -187,6 +208,9 @@ check('with the whole snapshot unreadable the policy STILL renders (the office\'
   typeof degraded.text === 'string' && /A1 RED LINE/.test(degraded.text));
 check('...and the snapshot failure is still reported as degraded',
   degraded.degraded === true && /github unreachable/.test(degraded.reason));
+check('...and the mission ordering survives the same worst day, for the same reason',
+  /SOFTWARE DEVELOPMENT company/.test(degraded.text)
+  && /DO NOT START THIRD-PRIORITY WORK UNLESS YOU WERE ASKED FOR IT/.test(degraded.text));
 
 /* ═══════════ §4 A11 rank filtering ══════════════════════════════════════ */
 section('§4 A11 — information by rank');

@@ -180,8 +180,25 @@ check('[FAILS-OLD] proof the assertion above genuinely fails against the pre-cha
 // to do with the projects wiring it exists to pin.
 const oldAgentContext = officeContext.buildOfficeContext(snapshot, 'agent', { agentId: 12, clearance: 'sudo' });
 const newAgentContext = officeContext.buildOfficeContext(snapshot, 'agent', { agentId: 12, clearance: 'sudo', projects: PROJECTS });
+/*
+ * THE SENTINEL MOVED 2026-08-23, AND THE ASSERTION DID NOT.
+ *
+ * This read `!/Notebook-X/.test(oldAgentContext.text)` — using the product's
+ * NAME as a proxy for "the projects section is absent". That proxy stopped
+ * being unique the day the mission ordering landed (office-context.js
+ * MISSION_ORDER), because THIRD priority names the two client products on
+ * purpose: an instruction not to open audit work unasked is not actionable if
+ * it will not say which products it means.
+ *
+ * So the negative half now keys on the projects section's own rendering —
+ * `- Notebook-X (`, the `- ${p.name} (${p.role})` item shape — which is what
+ * the check was always about. The positive half is unchanged. A proxy that has
+ * quietly become ambiguous is worth more than a check that fails: it is a check
+ * that would have passed for the wrong reason if the change had gone the other
+ * way.
+ */
 check('[FAILS-OLD] the per-agent context names the projects too (site 2 of the survey)',
-  /Notebook-X/.test(newAgentContext.text) && !/Notebook-X/.test(oldAgentContext.text));
+  /- Notebook-X \(/.test(newAgentContext.text) && !/- Notebook-X \(/.test(oldAgentContext.text));
 
 // A11's other half, pinned in the same place so the two cannot drift: the
 // projects list is admin detail, and a STANDARD agent does not get it even when

@@ -189,6 +189,76 @@ export const CACHE_TTL_MS = 30 * 60 * 1000;
  * fuller version goes where it costs nothing — which is also where the
  * client-requirements status most belongs.
  */
+/**
+ * ── WHAT THE OFFICE IS FOR, IN ORDER (owner decision, 2026-08-23) ────────
+ *
+ * Until today the office's purpose reached no prompt anywhere. An agent was
+ * told its persona, its mood, the board, the requirements and the policy — and
+ * nothing at all about what kind of company it works for or which of the three
+ * kinds of work in front of it matters most. That is not a documentation gap;
+ * a priority nobody is told is a priority nobody can act on, and this project
+ * has a name for a decision that never reaches the machine.
+ *
+ * The owner re-ordered it on 2026-08-23, in the same breath as retiring the
+ * case work (`RETIRED-CAPABILITIES.md` R-001, and `casesEnabled()` in
+ * agent-runner.js). The two are one decision: third place is where the case
+ * work went, and an office told only "stop the cases" would have been left
+ * with an empty calendar and no stated reason for what remains.
+ *
+ * ── WHY THIS RIDES OUTSIDE THE BUDGET, WITH THE POLICY ───────────────────
+ *
+ * Every other section here competes for `BUDGETS.agent*` and may be trimmed on
+ * a busy day. This one may not, for the reason buildPolicyBlock() gives about
+ * A1: an ordering that disappears when the board is long is an ordering that
+ * volume overrides, and volume is exactly the condition it exists to govern.
+ * It renders on the degraded path too — an office that cannot read its own
+ * board still knows what it is for.
+ *
+ * ── WORDED AS INSTRUCTIONS, NOT AS A MISSION STATEMENT ───────────────────
+ *
+ * Same rule office-policy.js follows: every line is something the reader can
+ * act on at the moment it is about to pick up a piece of work. THIRD carries
+ * an explicit do-not-start, because the whole point of naming it third is to
+ * give an agent a reason not to open that work — a low priority that only says
+ * "low" gets done anyway by whoever has a free tick.
+ *
+ * NOT transcribed from OFFICE-POLICY.md. That file is the owner's and has no
+ * rule on this; when he adds one, this constant becomes a transcription and
+ * gets pinned by scripts/verify-office-policy.js the way POLICY_DIGEST is.
+ * Until then this is the source, and it says so.
+ */
+export const MISSION_ORDER = Object.freeze({
+  decided: '2026-08-23',
+  brief: [
+    'WHAT THIS OFFICE IS, AND WHAT COMES FIRST (owner, 2026-08-23):',
+    'This is a SOFTWARE DEVELOPMENT company. Building working software is the first call on your time.',
+    'FIRST — software development. Specs, builds, fixes, review, and shipping them.',
+    'SECOND — design and customer experience: interfaces, front-end, UX-driven work, visual assets.',
+    'THIRD, explicitly low — audits of the client\'s own products (case work, gap surfacing, audits of Notebook-X and data-center). DO NOT START THIRD-PRIORITY WORK UNLESS YOU WERE ASKED FOR IT. If you have a free hour, it goes to first or second.',
+    'Deciding between two pieces of work: the one nearer FIRST wins. Between two at the same rank, the one the owner or the board asked for wins.',
+  ],
+  full: [
+    'WHAT THIS OFFICE IS, AND WHAT COMES FIRST (owner decision, 2026-08-23):',
+    'This is a SOFTWARE DEVELOPMENT company before it is anything else. Everything below ranks against that.',
+    'FIRST — software development. Writing specs, building, fixing, reviewing and shipping working software. This is the office\'s trade; it is what a free hour goes to by default.',
+    'SECOND — design and customer experience. Interfaces, front-end, UX-driven work, visual assets. Second is not optional and not decoration — it is what makes the first deliverable usable.',
+    'THIRD, and explicitly low priority — audits of the client\'s own products: the case work and gap surfacing, and audits of Notebook-X and data-center. It is named third so that you have a stated reason NOT to spend time there. DO NOT START THIRD-PRIORITY WORK UNLESS YOU WERE ASKED FOR IT; if you believe a piece of it is urgent, raise it rather than begin it.',
+    'HOW TO USE THIS when two pieces of work compete: the one nearer FIRST wins. Between two at the same rank, the one the owner or the board explicitly asked for wins. A third-rank task never displaces a first- or second-rank one, however small it looks.',
+    'The case work reached third place on 2026-08-23 and was retired the same day (RETIRED-CAPABILITIES.md R-001) — completed successfully, not failed. Do not restart it on your own initiative.',
+  ],
+});
+
+/**
+ * Renders MISSION_ORDER. `brief` for a single agent (paid on every model call),
+ * `full` for meetings and reports, matching buildPolicyBlock()'s shapes exactly
+ * so the two blocks that ride outside the budget behave the same way.
+ */
+export function buildMissionBlock(shape = 'brief') {
+  const lines = shape === 'full' ? MISSION_ORDER.full : MISSION_ORDER.brief;
+  const text = lines.join('\n');
+  return { text, tokens: estimateTokens(text), shape: shape === 'full' ? 'full' : 'brief' };
+}
+
 export const BUDGETS = Object.freeze({
   meeting: 4600,
   /**
@@ -1486,6 +1556,10 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
      * changed is that the failure no longer takes the rules down with it.
      */
     const policyOnly = buildPolicyBlock(shape === 'agent' ? 'brief' : 'full', { parsed: snapshot?.policy || null });
+    // The mission ordering survives a failed board read for the same reason the
+    // policy does: it is a constraint, and a constraint a network blip removes
+    // was never one. See MISSION_ORDER's header.
+    const missionOnly = buildMissionBlock(shape === 'agent' ? 'brief' : 'full');
     /*
      * ── AND THE OWNER'S MESSAGES SURVIVE HERE TOO (2026-08-10) ────────────
      *
@@ -1504,12 +1578,15 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
       ? ownerMessageSections(snapshot.owner.classified, { shape, candidates: ownerCandidates, malformed: snapshot.owner.malformed }).map(renderSection).filter(Boolean).join('\n')
       : '';
     return {
-      text: ownerOnly ? `${policyOnly.text}\n\n${ownerOnly}` : policyOnly.text,
+      text: ownerOnly
+        ? `${missionOnly.text}\n\n${policyOnly.text}\n\n${ownerOnly}`
+        : `${missionOnly.text}\n\n${policyOnly.text}`,
       degraded: true,
       reason: errors.length ? errors.join(' | ') : 'no office snapshot available',
       tokens: 0,
       policyTokens: policyOnly.tokens,
-      totalTokens: policyOnly.tokens,
+      missionTokens: missionOnly.tokens,
+      totalTokens: policyOnly.tokens + missionOnly.tokens,
       rankFiltered: shape === 'agent' && !isAdminClearance(opts.clearance),
       withheld: [],
       dropped: [],
@@ -1896,14 +1973,24 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
    * call at all).
    */
   const policy = buildPolicyBlock(shape === 'agent' ? 'brief' : 'full', { parsed: snapshot?.policy || null });
+  /*
+   * FIRST, ahead of even the policy, and that ordering is the argument.
+   * The policy tells an agent what it may not do; this tells it what to pick
+   * up. A reader that has already spent its attention on five prohibitions
+   * before being told what the office is for has been told the constraints of
+   * a job it has not been given. Both ride outside the budget; neither is
+   * trimmed; the mission is simply read first.
+   */
+  const mission = buildMissionBlock(shape === 'agent' ? 'brief' : 'full');
 
   return {
-    text: `${policy.text}\n\n${fitted.text}`,
+    text: `${mission.text}\n\n${policy.text}\n\n${fitted.text}`,
     degraded: errors.length > 0,
     reason: errors.length ? errors.join(' | ') : null,
     tokens: fitted.tokens,
     policyTokens: policy.tokens,
-    totalTokens: fitted.tokens + policy.tokens,
+    missionTokens: mission.tokens,
+    totalTokens: fitted.tokens + policy.tokens + mission.tokens,
     rankFiltered,
     withheld,
     dropped: fitted.dropped,
