@@ -65,6 +65,48 @@
 export const OWNER_DIR = 'channel/from-owner';
 
 /**
+ * ── THE SECOND OWNER-SIDE DIRECTORY (2026-08-23, Session 14 ITEM B) ──────
+ *
+ * `channel/from-owner-issues/` holds the client's replies TRANSCRIBED OUT OF
+ * GITHUB ISSUE THREADS by `agent-runner.js` `recordIssueReplies()` — one file
+ * per comment, dated, carrying the Issue number, the author and the comment id.
+ *
+ * ── WHY IT IS A SIBLING AND NOT PART OF `from-owner/` ────────────────────
+ *
+ * `recordIssueReplies()` says it in its own words, and nothing here overrides
+ * it: *"This writes into back-office, NOT into `channel/from-owner/`. That
+ * folder is the owner's own and the office never writes there. A reply the
+ * office transcribed is the OFFICE's record of what he said, and it must not be
+ * mistakable for a file he wrote himself."* The separation is a provenance
+ * claim, and it is right. It stays.
+ *
+ * ── WHAT WAS WRONG ANYWAY ────────────────────────────────────────────────
+ *
+ * `fetchOfficeSnapshot()` listed `OWNER_DIR` and only `OWNER_DIR`. No lister,
+ * parser or prompt builder anywhere in the estate read this sibling. So on
+ * 2026-08-23 the owner replied to Issue #47 — the first reply the office has
+ * ever received from him, after eleven unanswered notifications — and the
+ * office READ it, RECORDED it and COMMITTED it to git, and then it reached
+ * exactly zero agent prompts.
+ *
+ * That is a FOURTH channel state, and it is worse than the three this module
+ * already distinguishes. Unread, read-and-not-acted, and acted are all states
+ * the office can SEE. This one is: filed, versioned, attributable, and
+ * invisible. Every receipt said the message had arrived.
+ *
+ * ── AND WHY IT IS A SECOND CONSTANT, NOT A PREFIX MATCH ──────────────────
+ *
+ * A prefix match on `channel/from-owner*` would have picked this up and would
+ * also pick up the next sibling anyone creates, silently, with no decision made
+ * about what it contains or how it should be parsed. These are two DIFFERENT
+ * FILE FORMATS — one has owner-written front matter, the other has an
+ * office-written transcription header — and they must be parsed by different
+ * parsers and rendered as different sections. Naming the directory is what
+ * forces that choice to be made rather than defaulted.
+ */
+export const OWNER_ISSUE_REPLIES_DIR = 'channel/from-owner-issues';
+
+/**
  * The read record. In the OFFICE's directory, not the owner's, and that
  * placement is the contract rather than a filing convenience: a receipt is a
  * statement the office makes about itself, and putting it in `from-owner/`
@@ -719,6 +761,191 @@ export function ownerMessageSections(classified, { shape = 'agent', candidates =
         : m.kind.toUpperCase();
       return `- [${kindShown}] ${m.id} (${m.date}) — ${m.title} — ${state}${addressee}\n`
         + `  ${bodyForShape(m, shape).replace(/\n/g, '\n  ')}`;
+    }),
+  });
+
+  return sections;
+}
+
+/* ───────────── Owner → office: replies transcribed from Issues ─────────── */
+
+/**
+ * Parses one file out of `channel/from-owner-issues/`.
+ *
+ * ── A DIFFERENT FORMAT, PARSED BY A DIFFERENT PARSER, DELIBERATELY ───────
+ *
+ * `parseOwnerMessage()` above refuses a file with no front-matter block, and
+ * that refusal is correct for a file THE OWNER wrote: `kind` is load-bearing and
+ * must not be guessed. It would be nonsense here. These files are written by
+ * `agent-runner.js` `recordIssueReplies()` in a fixed shape the office controls
+ * end to end — a `- **Field:** value` header block, a provenance note, a `---`
+ * rule, then the client's words verbatim. There is no front matter because the
+ * owner never wrote one; he typed into a comment box.
+ *
+ * So the two never share a parser. Reusing `parseOwnerMessage()` here would have
+ * refused every reply for lacking a header the client had no way to supply,
+ * which is exactly the failure the 2026-08-23 `DEFAULT_OWNER_KIND` change was
+ * made to stop repeating.
+ *
+ * ── EVERY FIELD IS OPTIONAL EXCEPT THE BODY ──────────────────────────────
+ *
+ * This parser is DELIBERATELY permissive where `parseOwnerMessage()` is strict,
+ * and the asymmetry is the point rather than an inconsistency. A refusal there
+ * protects against acting on a guess about what the OWNER meant. Here the only
+ * thing that could be lost is the office's own bookkeeping — an Issue number, a
+ * comment id — and losing the client's words over a missing bookkeeping line
+ * would be the office refusing to read him because its own transcription was
+ * imperfect. The body is what matters; everything else degrades to `null` and
+ * says so where it renders.
+ *
+ * @returns {{ok: true, reply: object} | {ok: false, reason: string}}
+ */
+export function parseIssueReply(text, filename, sha = null) {
+  const raw = String(text || '');
+  if (!raw.trim()) return { ok: false, reason: `${filename}: file is empty` };
+
+  const field = (label) => {
+    const m = new RegExp(`^-\\s+\\*\\*${label}:\\*\\*\\s*(.+)$`, 'mi').exec(raw);
+    return m ? m[1].trim() : null;
+  };
+
+  // The body is everything after the FIRST horizontal rule on its own line.
+  // Anchored on the rule rather than on a line count, because the header block
+  // gains fields over time and a count would silently start eating the message.
+  const split = raw.split(/\r?\n---\r?\n/);
+  const body = (split.length > 1 ? split.slice(1).join('\n---\n') : raw).trim();
+  if (!body) return { ok: false, reason: `${filename}: no body after the '---' rule` };
+
+  const issueRaw = field('Issue');
+  const issueNumber = issueRaw ? ((/#(\d+)/.exec(issueRaw) || [])[1] || null) : null;
+  // The Issue TITLE is what says which notification he was answering.
+  const issueTitle = issueRaw ? (issueRaw.split('—').slice(1).join('—').trim() || null) : null;
+  const written = field('Written');
+  const date = (written || String(filename).slice(0, 10) || '').slice(0, 10) || null;
+
+  return {
+    ok: true,
+    reply: {
+      id: String(filename).replace(/\.md$/i, ''),
+      path: `${OWNER_ISSUE_REPLIES_DIR}/${filename}`,
+      sha,
+      issueNumber,
+      issueTitle,
+      author: field('Author'),
+      written,
+      date,
+      commentId: field('Comment id'),
+      body,
+    },
+  };
+}
+
+/**
+ * The body as a given shape sees it.
+ *
+ * Deliberately NOT `bodyForShape()`'s first-paragraph abridgement. That exists
+ * because an owner MESSAGE file is a structured document with a title and
+ * numbered items, where the opening paragraph genuinely carries the instruction.
+ * An Issue comment is typically two sentences with no structure at all, and
+ * taking its first paragraph can drop the operative half — the 2026-08-23
+ * reply's second clause is *"and if you can't, tell me what you need"*, which is
+ * precisely the part that tells the office what to do when it is stuck.
+ *
+ * So the whole comment rides in every shape, with a character cap as the only
+ * limit, and the cap SAYS SO when it bites. These are short by construction; if
+ * one is ever long enough to reach the cap, being told is better than a silent
+ * trim of the client's words.
+ */
+function issueReplyBodyForShape(reply, shape) {
+  const body = String(reply.body || '').trim();
+  const CAP = shape === 'agent' ? 1200 : 4000;
+  if (body.length <= CAP) return body;
+  return `${body.slice(0, CAP)}\n[TRUNCATED at ${CAP} characters — this is NOT all of what the client wrote. Full text: back-office ${reply.path}]`;
+}
+
+/**
+ * The office-context sections for the client's Issue replies.
+ *
+ * ── A SEPARATE SECTION, NOT A MERGE INTO `owner-messages` ────────────────
+ *
+ * These could have been folded into `classifyOwnerMessages()` and rendered as
+ * one undifferentiated list of "things the client said". They are not, and the
+ * reason is the same provenance claim that keeps the two directories apart: one
+ * is a file the client wrote, the other is the OFFICE's transcription of a
+ * comment he left. An agent reading a merged list could not tell which it was
+ * holding, and the office would be presenting its own transcript as the client's
+ * handwriting.
+ *
+ * ── WHAT THIS SECTION DOES NOT CLAIM ─────────────────────────────────────
+ *
+ * NO read/acted state. `READ-LOG.md` keys on a message id and a content SHA from
+ * `channel/from-owner/`, and an Issue reply has neither in that vocabulary, so
+ * there is no honest way to say one of these has been acted on yet. Every reply
+ * therefore renders as OUTSTANDING until something exists that can say
+ * otherwise. That is the conservative direction, and it is stated here rather
+ * than left looking like an oversight: an answered reply that still reads as
+ * outstanding costs an agent one re-read; an unanswered one that reads as closed
+ * is the failure this whole item exists to fix, committed a second time.
+ *
+ * Renders at headline priority in EVERY shape and for every rank, for the same
+ * A11 reason `ownerMessageSections()` gives: *nobody can obey what they cannot
+ * see*, and this is the client saying what he wants.
+ *
+ * @returns {Array} sections in `office-context.js`'s shape
+ */
+export function issueReplySections(replies, { shape = 'agent', malformed = [] } = {}) {
+  const sections = [];
+  const list = Array.isArray(replies) ? replies : [];
+  const refused = (Array.isArray(malformed) ? malformed : []).filter(Boolean);
+
+  if (refused.length) {
+    sections.push({
+      label: 'owner-issue-replies-unreadable',
+      priority: 0,
+      header: `⚠️ THE CLIENT REPLIED ${refused.length} TIME(S) AND THE OFFICE CANNOT READ ITS OWN TRANSCRIPT — his words are NOT below.`,
+      items: [
+        ...refused.map((r) => `- ${r}`),
+        '- THIS ONE IS THE OFFICE\'S TO FIX. Unlike `channel/from-owner/`, these files are written by'
+          + ' `agent-runner.js` recordIssueReplies() — so a malformed one is a defect in our own writer,'
+          + ' not in the client\'s formatting, and no rule reserves it to him.',
+      ],
+    });
+  }
+
+  // Renders at ZERO, exactly as the owner-message count does. "He has not
+  // replied" and "the reply directory could not be read" are different facts and
+  // must not look alike; the second lands in office-context.js's errors section.
+  sections.push({
+    label: 'owner-issue-replies-count',
+    priority: 0,
+    text: list.length === 0
+      ? `CLIENT REPLIES ON GITHUB ISSUES (back-office ${OWNER_ISSUE_REPLIES_DIR}/): none on record.${refused.length ? ` ${refused.length} were REFUSED and are named above — this is NOT an empty channel.` : ''}`
+      : `CLIENT REPLIES ON GITHUB ISSUES (back-office ${OWNER_ISSUE_REPLIES_DIR}/): ${list.length} on record.`
+        + ' These are the office\'s TRANSCRIPTIONS of what he wrote in an Issue thread — his words, but NOT files he wrote himself.'
+        + ' They carry NO read/acted state, so treat every one as OUTSTANDING until the work it asks for is done.',
+  });
+
+  if (!list.length) return sections;
+
+  // Newest first. A client reply is the most recent thing he has said, and if a
+  // budget squeeze ever trims this list the oldest is the right one to lose.
+  const ordered = list.slice().sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+
+  sections.push({
+    label: 'owner-issue-replies',
+    priority: 0,
+    header: 'THE CLIENT HAS REPLIED — this OUTRANKS the delegation board, exactly as a message in his own folder does.'
+      + ' He answered where he was reading, which is the whole reason the office started filing his replies itself.'
+      + ' Do what it says before you pick up board work.',
+    items: ordered.map((r) => {
+      const where = r.issueNumber
+        ? `Issue #${r.issueNumber}${r.issueTitle ? ` — ${r.issueTitle}` : ''}`
+        : 'ISSUE NUMBER NOT RECORDED BY THE OFFICE\'S OWN TRANSCRIBER';
+      const who = r.author ? `by ${r.author}` : 'AUTHOR NOT RECORDED';
+      return '- [CLIENT REPLY — transcribed by the office from a GitHub Issue thread, NOT a file he wrote] '
+        + `${r.date || 'DATE NOT RECORDED'} — ${where} — ${who}`
+        + ' — NO READ/ACTED STATE EXISTS FOR THESE; TREAT AS OUTSTANDING\n'
+        + `  ${issueReplyBodyForShape(r, shape).replace(/\n/g, '\n  ')}`;
     }),
   });
 

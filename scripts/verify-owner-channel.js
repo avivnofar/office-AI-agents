@@ -29,6 +29,8 @@ import {
   AGE_LADDER, daysBetween, escalationFor,
   parseSubmissions, submissionSections, ageQuestions,
   classifyOwnerIssueReadback, messageAddressesAgent,
+  // SESSION 14 (2026-08-23), ITEM B: the client's Issue replies.
+  OWNER_ISSUE_REPLIES_DIR, parseIssueReply, issueReplySections,
 } from '../workers/owner-channel.js';
 import {
   ownerChannelEnabled, notifyOwner, selectNotificationItems,
@@ -865,6 +867,182 @@ section('11. The three-part gate, and the notice that reaches him');
     !/<script>/.test(buildEmailNotice({ seq: 1, items: [], today: 'x', issueUrl: null, hebrew: '<script>alert(1)</script>' }).html));
 }
 
+/* ════════════════════════════════════════════════════════════════════════
+ * §12  THE CLIENT'S ISSUE REPLIES — the fourth channel state
+ * ════════════════════════════════════════════════════════════════════════
+ *
+ * On 2026-08-23 the owner replied to Issue #47 — the first reply this office
+ * has ever received from him, after eleven unanswered notifications. It was
+ * read, recorded and committed to git at
+ * `channel/from-owner-issues/2026-08-23-issue-47-comment-5386042924.md`.
+ *
+ * And `fetchOfficeSnapshot()` listed `channel/from-owner/` and nothing else, so
+ * the sibling directory was read by no lister, parser or prompt builder in the
+ * estate. The instruction reached ZERO agent prompts.
+ *
+ * That is a FOURTH state and it is worse than the three §1–§2 already
+ * distinguish: unread, read-and-ignored and acted are all states the office can
+ * SEE. This one is filed, versioned, attributable — and invisible, with every
+ * receipt saying the message had arrived.
+ *
+ * The acceptance test for the fix is not that a function exists. It is that the
+ * client's own words come back out of the assembled context, so this section
+ * ends by searching a rendered prompt for them.
+ */
+section('§12 the client\'s Issue replies — filed, versioned, and (until today) invisible');
+{
+  // The real file, byte for byte, as recordIssueReplies() writes it.
+  const REAL = [
+    '# Reply from the client — Issue #47',
+    '',
+    '- **Issue:** [#47](https://github.com/avivnofar/office-AI-agents/issues/47) — [Office #12] 1 awaiting your decision (2026-08-23)',
+    '- **Author:** avivnofar',
+    '- **Written:** 2026-08-23T12:39:44Z',
+    '- **Comment id:** 5386042924',
+    '',
+    '_Transcribed by the office from the Issue thread. His words, unedited._',
+    '_This is the office\'s record of what he said; it is NOT a file he wrote,_',
+    '_which is why it is not in `channel/from-owner/`._',
+    '',
+    '---',
+    '',
+    'deploy warehouse-office-AI-agents/tasks/office-site/ and try to finish it. the /owner site is not being used anyway and i want to see the new one. try to finish the website, and if you can\'t, tell me what you need',
+    '',
+  ].join('\n');
+
+  const parsed = parseIssueReply(REAL, '2026-08-23-issue-47-comment-5386042924.md', 'sha1');
+  check('the real 2026-08-23 reply parses', parsed.ok, parsed.reason);
+  check('...with the Issue NUMBER, so a reader can go back to the thread', parsed.reply?.issueNumber === '47');
+  check('...the Issue TITLE, which says WHICH notification he was answering',
+    /Office #12/.test(parsed.reply?.issueTitle || ''));
+  check('...the author', parsed.reply?.author === 'avivnofar');
+  check('...and a date normalised to YYYY-MM-DD from the `Written` timestamp',
+    parsed.reply?.date === '2026-08-23');
+  check('the BODY is his words and nothing else — no header, no provenance note',
+    parsed.reply?.body.startsWith('deploy warehouse-office-AI-agents')
+    && !/Transcribed by the office/.test(parsed.reply?.body || ''));
+
+  // ── PERMISSIVE WHERE parseOwnerMessage() IS STRICT, ON PURPOSE ─────────
+  // A refusal in the owner's own folder protects against acting on a guess
+  // about what HE meant. Here the only thing at risk is the office's own
+  // bookkeeping, and refusing his words because our transcriber dropped a field
+  // would be the office declining to read the client over its own defect.
+  const noFields = parseIssueReply('# x\n\n---\n\nsome words he wrote\n', 'x.md');
+  check('a reply missing every header field still yields the BODY',
+    noFields.ok && noFields.reply.body === 'some words he wrote');
+  check('...with the missing bookkeeping reported as null, never invented',
+    noFields.reply.issueNumber === null && noFields.reply.author === null);
+  check('...and the rendered line SAYS the number was not recorded, rather than omitting it',
+    /ISSUE NUMBER NOT RECORDED/.test(
+      issueReplySections([noFields.reply], { shape: 'agent' }).map((x) => (x.items || [x.text]).join('\n')).join('\n')));
+  check('an empty file is REFUSED, not rendered as a blank instruction',
+    parseIssueReply('', 'x.md').ok === false);
+  check('a file with a header and no body is refused too',
+    parseIssueReply('# x\n\n- **Author:** a\n\n---\n\n', 'x.md').ok === false);
+
+  // ── THE DISTINCTION IS PRESERVED DOWNSTREAM (B3) ───────────────────────
+  const secs = issueReplySections([parsed.reply], { shape: 'agent' });
+  const rendered = secs.map((x) => (x.items ? `${x.header}\n${x.items.join('\n')}` : x.text)).join('\n');
+  check('the section labels are DISTINCT from the owner-message ones — the two never merge',
+    secs.every((x) => /^owner-issue-replies/.test(x.label)), secs.map((x) => x.label).join(', '));
+  check('the rendered text says these are the OFFICE\'S TRANSCRIPTIONS, not files he wrote',
+    /TRANSCRIPTIONS/.test(rendered) && /NOT files he wrote/.test(rendered));
+  check('...and every entry repeats it, so a trimmed list cannot lose the provenance',
+    /NOT a file he wrote/.test(rendered));
+  check('a reply OUTRANKS the delegation board, exactly as a message in his own folder does',
+    /OUTRANKS the delegation board/.test(rendered));
+  check('every reply reads as OUTSTANDING — no read/acted state is claimed for these',
+    /NO READ\/ACTED STATE/.test(rendered));
+
+  // ── THE ZERO CASE, WHICH IS WHERE THE ORIGINAL DEFECT LIVED ────────────
+  const empty = issueReplySections([], { shape: 'agent' });
+  check('with no replies the COUNT LINE still renders — silence is stated, not implied',
+    empty.length === 1 && /none on record/.test(empty[0].text));
+  const refusedOnly = issueReplySections([], { shape: 'agent', malformed: ['x.md: file is empty'] });
+  check('a refused reply is NOT reported as an empty channel',
+    /this is NOT an empty channel/.test(refusedOnly.map((x) => x.text || '').join(' ')));
+  check('...and the refusal says it is the OFFICE\'S defect, since the office writes these files',
+    /THIS ONE IS THE OFFICE'S TO FIX/.test(
+      refusedOnly.map((x) => (x.items || []).join(' ')).join(' ')));
+
+  // ── EVERY RANK SEES IT, IN FULL (A11) ─────────────────────────────────
+  check('both labels are in STANDARD_SECTIONS, so a standard agent sees the client\'s reply',
+    STANDARD_SECTIONS.includes('owner-issue-replies-count')
+    && STANDARD_SECTIONS.includes('owner-issue-replies'));
+
+  // ── THE ACCEPTANCE TEST (B4): HIS WORDS, OUT OF AN ASSEMBLED PROMPT ────
+  //
+  // Searched for in the six shapes the renderer actually produces, by the words
+  // he typed rather than by a label this file controls. A check written against
+  // our own header would pass on a prompt containing no instruction at all.
+  const HIS_WORDS = ['deploy warehouse', 'finish the website', 'i want to see the new one'];
+  const snapshot = {
+    fetched_at: Date.now(),
+    today: '2026-08-23',
+    board: null,
+    requirements: null,
+    questions: null,
+    lifecycle: null,
+    policy: null,
+    owner: null,
+    ownerIssueReplies: { ok: true, replies: [parsed.reply], malformed: [] },
+    submissions: null,
+    // A board read that FAILED — deliberately the degraded path, because that
+    // is the one where a client instruction is most likely to be dropped and
+    // where `degraded: true` would read as "our work is incomplete" rather than
+    // "he answered you and you were not shown it".
+    errors: ['board parse failed: deliberately broken for this check'],
+  };
+  const SHAPES = [
+    ['agent (standard rank)', { shape: 'agent', opts: { agentId: 3, clearance: 'standard' } }],
+    ['agent (admin rank)', { shape: 'agent', opts: { agentId: 6, clearance: 'sudo' } }],
+    ['meeting', { shape: 'meeting', opts: {} }],
+    ['report', { shape: 'report', opts: {} }],
+  ];
+  for (const [name, { shape, opts }] of SHAPES) {
+    const built = buildOfficeContext(snapshot, shape, opts);
+    const text = String(built.text || '').toLowerCase();
+    const found = HIS_WORDS.filter((w) => text.includes(w));
+    check(`ACCEPTANCE — the client's own words reach the ${name} prompt (${found.length}/3)`,
+      found.length === HIS_WORDS.length, `missing: ${HIS_WORDS.filter((w) => !text.includes(w)).join(', ')}`);
+  }
+
+  // And the same four shapes on a HEALTHY snapshot, not only the degraded one.
+  const healthy = { ...snapshot, errors: [] };
+  for (const [name, { shape, opts }] of SHAPES) {
+    const built = buildOfficeContext(healthy, shape, opts);
+    const text = String(built.text || '').toLowerCase();
+    check(`ACCEPTANCE — ...and the ${name} prompt on a healthy snapshot too`,
+      HIS_WORDS.every((w) => text.includes(w)),
+      `missing: ${HIS_WORDS.filter((w) => !text.includes(w)).join(', ')}`);
+  }
+
+  // ── [FAILS-OLD] the defect this closes, transcribed ───────────────────
+  // The old snapshot had no `ownerIssueReplies` key at all. Proving the fix
+  // means proving the OLD shape produced a prompt with none of his words in it
+  // — otherwise "it works now" is a claim about a thing that was never broken.
+  const oldShape = { ...snapshot };
+  delete oldShape.ownerIssueReplies;
+  const oldBuilt = buildOfficeContext(oldShape, 'agent', { agentId: 3, clearance: 'standard' });
+  check('[FAILS-OLD] the pre-change snapshot shape carries NONE of his words — the instruction was invisible',
+    HIS_WORDS.every((w) => !String(oldBuilt.text || '').toLowerCase().includes(w)));
+  check('[FAILS-OLD] ...and said nothing about it either: no count line, no error, no marker',
+    !/from-owner-issues/i.test(String(oldBuilt.text || '')));
+
+  // ── THE OFFICE STILL NEVER WRITES INTO HIS OWN FOLDER ─────────────────
+  check('the two directories stay distinct constants — no prefix match that would swallow the next sibling',
+    OWNER_ISSUE_REPLIES_DIR === 'channel/from-owner-issues' && OWNER_DIR === 'channel/from-owner'
+    && OWNER_ISSUE_REPLIES_DIR !== OWNER_DIR);
+  const ctxSrc = fs.readFileSync(path.join(ROOT, 'workers', 'office-context.js'), 'utf8');
+  check('office-context.js lists BOTH directories, each by its own constant',
+    /fetchBackOfficeDir\(env, OWNER_DIR\)/.test(ctxSrc)
+    && /fetchBackOfficeDir\(env, OWNER_ISSUE_REPLIES_DIR\)/.test(ctxSrc));
+  check('...and a 404 on the reply directory is HEALTHY (it does not exist until he first replies)',
+    /HTTP 404/.test(ctxSrc.slice(ctxSrc.indexOf('let ownerIssueReplies'), ctxSrc.indexOf('let ownerIssueReplies') + 900)));
+  check('...while any OTHER failure says the client\'s replies are missing from the context',
+    /THE CLIENT'S REPLIES ARE NOT IN THIS CONTEXT/.test(ctxSrc));
+}
+
 console.log(`  ${pass} passed, ${fail} failed`);
 if (fail) {
   console.log('\n  FAILURES:');
@@ -881,7 +1059,16 @@ console.log(`
   NOT PROVEN:    that a GitHub Issue actually reaches the owner's phone. That
                  is a property of his notification settings, not of this code.
                  The heartbeat is what makes its absence detectable.
+  ALSO PROVEN:   (2026-08-23) the client's replies, transcribed out of Issue
+                 threads, reach every prompt shape and every rank IN HIS OWN
+                 WORDS — searched for by what he typed, not by a label this
+                 file controls — and the pre-change snapshot shape is shown to
+                 carry none of them.
   STILL OPEN:    if the Worker stops running, no heartbeat is sent and nothing
                  here notices — OFFICE-POLICY A16's class of failure. Boarded.
+  ALSO OPEN:     an Issue reply carries NO read/acted state, so the office
+                 cannot yet say it answered one. Every reply reads as
+                 OUTSTANDING forever. Conservative on purpose, and not a
+                 substitute for the record READ-LOG.md keeps for his own files.
 ${'═'.repeat(72)}`);
 process.exit(fail ? 1 : 0);

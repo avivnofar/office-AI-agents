@@ -74,8 +74,12 @@ import { buildPolicyBlock, parsePolicy, POLICY_PATH } from './office-policy.js';
  * still exercise the real code.
  */
 import {
-  OWNER_DIR, READ_LOG_PATH, SUBMISSIONS_PATH,
+  OWNER_DIR, OWNER_ISSUE_REPLIES_DIR, READ_LOG_PATH, SUBMISSIONS_PATH,
   parseOwnerMessage, parseReadLog, classifyOwnerMessages, ownerMessageSections,
+  // The client's replies, transcribed out of GitHub Issue threads (2026-08-23).
+  // A SECOND directory with a SECOND parser and a SECOND section, never merged
+  // with the owner's own files — see owner-channel.js OWNER_ISSUE_REPLIES_DIR.
+  parseIssueReply, issueReplySections,
   parseSubmissions, submissionSections, ageQuestions,
 } from './owner-channel.js';
 
@@ -483,6 +487,20 @@ export const STANDARD_SECTIONS = Object.freeze([
    */
   'owner-messages-count',
   'owner-messages',
+  /*
+   * ── AND HIS ISSUE REPLIES REACH EVERY RANK TOO (2026-08-23) ────────────
+   *
+   * Same A11 carve-out, same reasoning, one file over. A reply the client typed
+   * into an Issue thread is the client saying what he wants — it differs from
+   * the block above only in WHERE he wrote it and in who transcribed it, and
+   * neither of those is a reason for a rank rule to decide who has to obey him.
+   *
+   * Unlike `owner-messages`, the body is NOT abridged for the `agent` shape.
+   * See owner-channel.js issueReplyBodyForShape(): an Issue comment has no
+   * structure, so a first-paragraph trim can drop the operative half.
+   */
+  'owner-issue-replies-count',
+  'owner-issue-replies',
   'own-tasks',
   'own-review',
   'board-counts',
@@ -1119,7 +1137,7 @@ export async function fetchOfficeSnapshot(env, { today = new Date().toISOString(
   }
 
   const errors = [];
-  const [boardFile, reqFile, questionsFile, lifecycleFile, policyFile, submissionsFile, ownerDir, readLogFile] = await Promise.all([
+  const [boardFile, reqFile, questionsFile, lifecycleFile, policyFile, submissionsFile, ownerDir, readLogFile, issueReplyDir] = await Promise.all([
     fetchBackOfficeFile(env, BOARD_PATH),
     fetchBackOfficeFile(env, REQUIREMENTS_PATH),
     fetchBackOfficeFile(env, QUESTIONS_PATH),
@@ -1128,6 +1146,18 @@ export async function fetchOfficeSnapshot(env, { today = new Date().toISOString(
     fetchBackOfficeFile(env, SUBMISSIONS_PATH),
     fetchBackOfficeDir(env, OWNER_DIR),
     fetchBackOfficeFile(env, READ_LOG_PATH),
+    // ── THE SECOND OWNER-SIDE DIRECTORY (2026-08-23, Session 14 ITEM B) ──
+    //
+    // Until this line existed the snapshot listed OWNER_DIR and only OWNER_DIR,
+    // so `channel/from-owner-issues/` — a SIBLING, written by the office's own
+    // recordIssueReplies() — was read by no lister, parser or prompt builder
+    // anywhere. The client's first-ever reply was read, recorded and committed
+    // to git on 2026-08-23 and reached zero agent prompts.
+    //
+    // It rides the SAME Promise.all rather than a follow-up fetch: this function
+    // already costs eight round trips and a ninth in parallel costs no extra
+    // wall-clock, while a sequential fetch would.
+    fetchBackOfficeDir(env, OWNER_ISSUE_REPLIES_DIR),
   ]);
 
   let board = null;
@@ -1344,7 +1374,47 @@ export async function fetchOfficeSnapshot(env, { today = new Date().toISOString(
     else errors.push(`submissions parse failed: ${parsed.reason}`);
   }
 
-  return { fetched_at: Date.now(), today, board, requirements, questions, lifecycle, policy, owner, submissions, errors };
+  /*
+   * ── THE CLIENT'S ISSUE REPLIES (added 2026-08-23, Session 14 ITEM B) ────
+   *
+   * A 404 here is HEALTHY and must stay quiet: `channel/from-owner-issues/` is
+   * created by the office's own `recordIssueReplies()` the first time the client
+   * answers an Issue, so before that day it legitimately does not exist. Any
+   * OTHER failure is loud, for the reason this whole item exists — a directory
+   * the office cannot read looks exactly like a client who has not replied.
+   *
+   * NO CAP on the number read, deliberately, and it is a different judgement
+   * from MAX_OWNER_MESSAGES above rather than an oversight. These files are
+   * short (one comment each), the office writes them itself so their size is
+   * known, and there are 1 of them today. If that stops being true the right
+   * answer is a cap that SAYS it bit, copied from the owner-message branch
+   * above — not a silent slice added here later.
+   */
+  let ownerIssueReplies = null;
+  if (issueReplyDir.reason) {
+    if (!/HTTP 404/.test(issueReplyDir.reason)) {
+      errors.push(`${issueReplyDir.reason} — ${OWNER_ISSUE_REPLIES_DIR}/ could not be listed, so THE CLIENT'S REPLIES ARE NOT IN THIS CONTEXT. A directory the office cannot read looks exactly like a client who has not replied.`);
+    } else {
+      ownerIssueReplies = { ok: true, replies: [], malformed: [] };
+    }
+  } else {
+    const replyFiles = (issueReplyDir.entries || [])
+      .filter((e) => e.type === 'file' && /\.md$/i.test(e.name) && !/^README\.md$/i.test(e.name));
+    const fetchedReplies = await Promise.all(
+      replyFiles.map((f) => fetchBackOfficeFile(env, `${OWNER_ISSUE_REPLIES_DIR}/${f.name}`))
+    );
+    const replies = [];
+    const replyMalformed = [];
+    replyFiles.forEach((f, i) => {
+      if (fetchedReplies[i].reason) { errors.push(fetchedReplies[i].reason); return; }
+      const parsed = parseIssueReply(fetchedReplies[i].text, f.name, f.sha);
+      if (parsed.ok) replies.push(parsed.reply);
+      else replyMalformed.push(parsed.reason);
+    });
+    ownerIssueReplies = { ok: true, replies, malformed: replyMalformed };
+  }
+
+  return { fetched_at: Date.now(), today, board, requirements, questions, lifecycle, policy, owner, ownerIssueReplies, submissions, errors };
 }
 
 /* ──────────────────────────────── Rendering ───────────────────────────── */
@@ -1577,10 +1647,21 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
     const ownerOnly = snapshot?.owner?.classified
       ? ownerMessageSections(snapshot.owner.classified, { shape, candidates: ownerCandidates, malformed: snapshot.owner.malformed }).map(renderSection).filter(Boolean).join('\n')
       : '';
+    /*
+     * ── AND HIS REPLIES SURVIVE THE DEGRADED PATH TOO (2026-08-23) ───────
+     *
+     * Exactly the argument the two blocks above make, applied to the third
+     * thing an agent must never lose to a network blip. Left out of here, a
+     * failed BOARD read would silently drop the client's reply — and it would
+     * do it in the one code path where `degraded: true` already reads as "the
+     * office's own work is incomplete" rather than "the client answered you and
+     * you were not shown it".
+     */
+    const issueRepliesOnly = snapshot?.ownerIssueReplies?.replies?.length || snapshot?.ownerIssueReplies?.malformed?.length
+      ? issueReplySections(snapshot.ownerIssueReplies.replies, { shape, malformed: snapshot.ownerIssueReplies.malformed }).map(renderSection).filter(Boolean).join('\n')
+      : '';
     return {
-      text: ownerOnly
-        ? `${missionOnly.text}\n\n${policyOnly.text}\n\n${ownerOnly}`
-        : `${missionOnly.text}\n\n${policyOnly.text}`,
+      text: [missionOnly.text, policyOnly.text, ownerOnly, issueRepliesOnly].filter(Boolean).join('\n\n'),
       degraded: true,
       reason: errors.length ? errors.join(' | ') : 'no office snapshot available',
       tokens: 0,
@@ -1617,6 +1698,27 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
    */
   if (snapshot?.owner?.classified) {
     for (const s of ownerMessageSections(snapshot.owner.classified, { shape, candidates: ownerCandidates, malformed: snapshot.owner.malformed })) {
+      sections.push({ ...s, priority: PRIORITY.headline });
+    }
+  }
+
+  /*
+   * ── AND HIS REPLIES, IMMEDIATELY AFTER (2026-08-23, Session 14 ITEM B) ──
+   *
+   * Second, not first, and the ordering is the same load-bearing mechanism the
+   * block above documents: `fitToBudget()` breaks ties among equal priorities by
+   * INDEX and drops the later one. A file the client WROTE outranks a comment
+   * the office TRANSCRIBED if only one of the two can survive a squeeze — his
+   * own handwriting is the stronger artefact. Both sit at headline priority, so
+   * in practice both survive; this decides only the case where they cannot.
+   *
+   * Pushed unconditionally when the snapshot has the key at all, INCLUDING when
+   * `replies` is empty — the count line renders at zero on purpose. "He has not
+   * replied" and "the reply directory could not be read" must not look alike,
+   * and the second lands in `errors` rather than here.
+   */
+  if (snapshot?.ownerIssueReplies) {
+    for (const s of issueReplySections(snapshot.ownerIssueReplies.replies, { shape, malformed: snapshot.ownerIssueReplies.malformed })) {
       sections.push({ ...s, priority: PRIORITY.headline });
     }
   }
