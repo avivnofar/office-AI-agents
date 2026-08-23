@@ -828,18 +828,18 @@ async function fetchOwnerIssueComments(env, repoName, issueNumber) {
  * unchanged). A reply the office transcribed is the OFFICE's record of what he
  * said, and it must not be mistakable for a file he wrote himself.
  */
-async function recordIssueReplies(env, repoName, issueReadback) {
+async function recordIssueReplies(env, issueRepo, recordRepo, issueReadback) {
   const recorded = [];
   for (const ir of issueReadback || []) {
     if (!ir.hasReply || !ir.comments) continue;
-    const comments = await fetchOwnerIssueComments(env, repoName, ir.number);
+    const comments = await fetchOwnerIssueComments(env, issueRepo, ir.number);
     for (const c of comments) {
       const date = String(c.createdAt || '').slice(0, 10) || todayDateStr();
       const path = `channel/from-owner-issues/${date}-issue-${ir.number}-comment-${c.id}.md`;
       const content = [
         `# Reply from the client — Issue #${ir.number}`,
         '',
-        `- **Issue:** [#${ir.number}](https://github.com/${REPO_OWNER}/${repoName}/issues/${ir.number}) — ${ir.title}`,
+        `- **Issue:** [#${ir.number}](https://github.com/${REPO_OWNER}/${issueRepo}/issues/${ir.number}) — ${ir.title}`,
         `- **Author:** ${c.author}`,
         `- **Written:** ${c.createdAt}`,
         `- **Comment id:** ${c.id}`,
@@ -865,7 +865,7 @@ async function recordIssueReplies(env, repoName, issueReadback) {
         recorded.push({ issue: ir.number, commentId: c.id, path, committed: false, already: true });
         continue;
       }
-      const res = await commitFileToRepo(env, repoName, path, content,
+      const res = await commitFileToRepo(env, recordRepo, path, content,
         `channel: record client reply on issue #${ir.number}`)
         .catch((err) => ({ committed: false, reason: `threw: ${err?.message || err}` }));
       recorded.push({ issue: ir.number, commentId: c.id, path, committed: !!res?.committed, reason: res?.reason || null });
@@ -1792,7 +1792,7 @@ async function processOwnerChannelBlock(env, opts = {}) {
   // committed into the channel record so git stays the permanent history —
   // which is the property the old "reply in the repo, not here" instruction was
   // protecting, kept without making the client do the filing.
-  out.issueReplies = await recordIssueReplies(env, OWNER_NOTIFY_REPO, issueReadback)
+  out.issueReplies = await recordIssueReplies(env, OWNER_NOTIFY_REPO, OWNER_REPLY_RECORD_REPO, issueReadback)
     .catch((err) => {
       out.errors.push(`Could not record client replies from Issue comments — ${err?.message || err}. A reply may have been read and not filed.`);
       return [];
@@ -2228,7 +2228,42 @@ async function runFrontPublish(env, { batchId, dryRun = false } = {}) {
  * repo and reading replies from another would make every notification look
  * unanswered forever, which is the exact failure this channel already had.
  */
-const OWNER_NOTIFY_REPO = BACKOFFICE_REPO_NAME;
+// ── REVERTED THE SAME DAY, 2026-08-23. STOP 4. ─────────────────────────
+//
+// The retarget above was deployed and TESTED against the live API, and the
+// test is why this line reads `REPO_NAME` again:
+//
+//   {"type":"owner_channel_block"} -> notification #12 -> HTTP 403
+//   "OWNER NOTIFICATION #12 FAILED — HTTP 403. The office has NOT reached
+//    the client."
+//
+// `BACKOFFICE_REPO_TOKEN` carries Contents:write on back-office — every
+// channel file, every daily summary and every campus write goes through it
+// and works — but it does NOT carry **Issues:write**. A fine-grained PAT
+// grants those separately, and nothing before this had ever asked it to open
+// an Issue there, so the gap had never been reachable.
+//
+// Creating or re-scoping a credential is the owner's, not a session's. THE
+// EXACT ACTION, so it does not have to be re-derived: on the fine-grained
+// PAT behind `BACKOFFICE_REPO_TOKEN`, add **Repository permissions ->
+// Issues: Read and write** for `avivnofar/back-office-AI-agents`, then set
+// this line back to `BACKOFFICE_REPO_NAME`. No code change is needed beyond
+// that one identifier.
+//
+// It is reverted rather than left failing because a channel that 403s on
+// every notification is strictly worse than one filing into the public repo:
+// the eleven unanswered Issues are at least READ-ABLE. The 403 was recorded
+// in `owner_notifications` and surfaced as a loud error, exactly as designed
+// — the mechanism reported its own failure rather than going quiet, which is
+// the one thing this channel was built to guarantee.
+const OWNER_NOTIFY_REPO = REPO_NAME;
+
+// WHERE A CLIENT REPLY IS FILED. Deliberately NOT the same constant: this is
+// a Contents write, which the token CAN do, and his words belong in the
+// private repo beside the rest of the channel — not in the public one just
+// because that is where the Issue happens to live today. When the Issues move
+// (above), this line does not change.
+const OWNER_REPLY_RECORD_REPO = BACKOFFICE_REPO_NAME;
 
 /** The address the one successful send in this project's history used. */
 const OWNER_EMAIL = 'avivnofar@gmail.com';
