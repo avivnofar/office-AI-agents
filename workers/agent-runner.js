@@ -1616,6 +1616,13 @@ async function processOwnerChannelBlock(env, opts = {}) {
     submissions: snapshot.submissions?.submissions || [],
     questions: ageQuestions(snapshot.questions?.questions || [], today),
     issueReadback,
+    // 2026-08-23. A refused owner message used to reach only agent prompts,
+    // where nobody could act on it (the folder is his, not theirs) and nobody
+    // did — for six days, on the first real deliverable he ever assigned. It
+    // now rides in the notification that actually reaches him, and because it
+    // is an ITEM, a weekday with a refusal in it sends an Issue instead of
+    // skipping as "nothing to report".
+    refusedMessages: snapshot.owner?.malformed || [],
   });
 
   out.notified = await notifyOwner(env, {
@@ -5855,6 +5862,9 @@ export default {
               would_notify: selectNotificationItems({
                 submissions: snapshot?.submissions?.submissions || [],
                 questions: aged,
+                // Same input the block itself passes, so this read-back cannot
+                // report a quieter notification than the one that would be sent.
+                refusedMessages: snapshot?.owner?.malformed || [],
               }).map((i) => `${i.id} — ${i.title}`),
               // THE LOUD HALF. A failed notification stays visible here until it
               // clears, because a channel that only reports its successes is the

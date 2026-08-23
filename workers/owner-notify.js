@@ -374,9 +374,58 @@ export async function notifyOwner(env, deps, { items = [], today, isHeartbeatDay
  * same "only once it climbs the ladder" rule as a question, for the same
  * reason: a fresh Issue is expected to sit for a day or two, and repeating
  * it immediately would be noise, not escalation.
+ *
+ * ── `refusedMessages` (2026-08-23) — AND WHY IT DOES NOT WAIT FOR A RUNG ──
+ *
+ * `office-context.js`'s `snapshot.owner.malformed`: files the owner put in
+ * `channel/from-owner/` that `parseOwnerMessage()` could not read. Until today
+ * a refusal was surfaced only INSIDE agent prompts, where it sat visible for
+ * six days and no agent acted on it — correctly, because no agent has any
+ * action available for it: `channel/from-owner/README.md` reserves changes in
+ * that folder to the owner. The office was talking to the wrong person.
+ *
+ * These go in the notification IMMEDIATELY, with no age ladder, and that is the
+ * one place this function departs from the rule above. A fresh question is the
+ * office's own problem and carries a fallback that keeps work moving. A refused
+ * message has no fallback that can exist — the office does not know what it
+ * says. Waiting three days to mention that the client's own words are
+ * unreadable would be the graveyard A8 names, at the one point in the channel
+ * where the office cannot work around the silence.
  */
-export function selectNotificationItems({ submissions = [], questions = [], issueReadback = [] } = {}) {
+export function selectNotificationItems({
+  submissions = [], questions = [], issueReadback = [], refusedMessages = [],
+} = {}) {
   const items = [];
+
+  // FIRST in the list, deliberately. Everything else here is work the office
+  // did and is showing him; this is work he asked for that never started.
+  for (const refusal of refusedMessages) {
+    const reason = String(refusal || '').trim();
+    if (!reason) continue;
+    // `parseOwnerMessage()` and `fetchBackOfficeFile()` both compose their
+    // reasons as `<filename>: <why>`. Split on the FIRST colon only; the why
+    // half contains colons of its own.
+    const sep = reason.indexOf(':');
+    const filename = sep === -1 ? reason : reason.slice(0, sep).trim();
+    const why = sep === -1 ? reason : reason.slice(sep + 1).trim();
+    items.push({
+      id: `from-owner/${filename}`,
+      title: 'A MESSAGE YOU WROTE COULD NOT BE READ BY THE OFFICE',
+      age: 'REFUSED AT INTAKE — no age ladder: the office cannot work around a message it cannot read',
+      did: 'Nothing on it. The office has never seen what this file says — it was refused at the door,'
+        + ' so its contents reached no agent, no meeting and no report.',
+      recommend: 'Re-file it in a form the office accepts. It will not rename or move your file itself:'
+        + ' the office never writes into `channel/from-owner/`, and editing the client\'s own words to suit'
+        + ' our parser is not a thing it is allowed to do.',
+      decision: `Why it was refused — ${why}.`
+        + ' ACCEPTED FORM: a single `.md` file at the TOP LEVEL of `channel/from-owner/` (never in a'
+        + ' subdirectory — nothing inside one is ever listed), named `YYYY-MM-DD-short-slug.md` OR'
+        + ' `DD-MM-YYYY-short-slug.md` (both work; the slug is lower-case letters, digits and hyphens).'
+        + ' A front-matter header is OPTIONAL — a file without one is read as `kind: instruction`.',
+      fallback: 'None is possible. The message stays unread and this line repeats in every notification'
+        + ' until the file is readable. There is no assumption the office can safely make about what you asked for.',
+    });
+  }
 
   for (const s of submissions) {
     if (!s.open) continue;
