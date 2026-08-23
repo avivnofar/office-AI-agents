@@ -533,7 +533,7 @@ async function getSimulationState(env) {
  */
 async function updateSimulationState(env, patch) {
   const current = await getSimulationState(env);
-  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled', 'improvement_loop_enabled', 'architect_liaison_enabled', 'office_context_enabled', 'action_items_to_board_enabled', 'report_pipeline_enabled', 'owner_channel_enabled', 'learning_loop_enabled', 'judge_sampler_enabled'];
+  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled', 'improvement_loop_enabled', 'architect_liaison_enabled', 'office_context_enabled', 'action_items_to_board_enabled', 'report_pipeline_enabled', 'owner_channel_enabled', 'learning_loop_enabled', 'judge_sampler_enabled', 'cases_enabled'];
   const next = { ...current };
   const rejected = [];
   for (const key of Object.keys(patch)) {
@@ -546,6 +546,26 @@ async function updateSimulationState(env, patch) {
   }
   if (env.SIM_KV) await env.SIM_KV.put(SIM_STATE_KEY, JSON.stringify(next));
   return rejected.length ? { ...next, _rejected_keys: rejected } : next;
+}
+
+/**
+ * Case work — the Q&A engine, both target products.
+ *
+ * RETIRED by owner decision 2026-08-23; the record is
+ * `back-office-AI-agents/docs/decisions/RETIRED-CAPABILITIES.md` R-001.
+ * Retirement, not deletion: every topic, persona, prompt, table and historical
+ * report stays exactly where it is and simply stops being invoked.
+ *
+ * DEFAULTS ON, unlike every other switch in this file. `guides_enabled` ships
+ * off because deploying a brand-new feature must not start it; this one guards
+ * a capability that has been running since 2026-07-19, and a default-off switch
+ * would retire it at deploy time rather than at the owner's word. Off has to be
+ * a decision someone made out loud, and it has to be readable back from KV —
+ * so this reads `!== false`, not the `=== true` the other switches use.
+ */
+async function casesEnabled(env) {
+  const sim = await getSimulationState(env);
+  return sim.cases_enabled !== false;
 }
 
 /* ───────────────────────────── Year tracker ────────────────────────────── */
@@ -4410,7 +4430,11 @@ async function checkProductVersionBumps(env, yearState, nextDay) {
  * Notebook-X bursts, not this number.
  */
 async function computeDailyQuestionVolume(env, sim) {
-  const BASE_DAILY_QUESTIONS = simulationConfig.cases_per_day_total || 200;
+  // `|| 200` until 2026-08-23, which made an explicitly-configured 0 mean 200 —
+  // a config value that failed in the dangerous direction, silently, at exactly
+  // the place someone reaching for a volume control would reach. `??` leaves an
+  // absent key meaning 200 (unchanged) and lets a configured 0 mean zero.
+  const BASE_DAILY_QUESTIONS = simulationConfig.cases_per_day_total ?? 200;
   const multiplier = sim.inspection_mode ? (simulationConfig.WORK_DAY?.inspection_mode_multiplier || 1) : 1;
 
   const budget = await getClaudeBudgetStatus(env);
@@ -4478,7 +4502,11 @@ export async function runWorkDayCycle(env) {
   const schedule = getDaySchedule(dayOfWeek);
   const isOffDay = schedule === dailyScheduleConfig.saturday_schedule;
 
-  const maxTotalQuestions = isOffDay ? 0 : await computeDailyQuestionVolume(env, sim);
+  // R-001 (2026-08-23): cases retired. Same gate as runScheduledBlockInner()'s;
+  // this path must never disagree with the live one about whether cases run.
+  const maxTotalQuestions = (isOffDay || !(await casesEnabled(env)))
+    ? 0
+    : await computeDailyQuestionVolume(env, sim);
 
   const cases = isOffDay
     ? []
@@ -4927,7 +4955,12 @@ async function runScheduledBlockInner(env, israelTime, dayOfWeek, ctx) {
     const yearState = await getYearState(env);
     const nextDay = (yearState.current_day || 0) + 1;
 
-    const maxTotalQuestions = isOffDay ? 0 : await computeDailyQuestionVolume(env, sim);
+    // R-001 (2026-08-23): cases retired. Zero here is the whole gate —
+    // generateAssignedDailyBatch() returns [] on a zero total (qa-engine.js
+    // :171, verified by reading), so no downstream consumer needs a second.
+    const maxTotalQuestions = (isOffDay || !(await casesEnabled(env)))
+      ? 0
+      : await computeDailyQuestionVolume(env, sim);
 
     // Keep the D1 agents identity rows in lockstep with agents-config.json
     // (one 11-row batch per day — see syncAgentsTable()).
@@ -5831,6 +5864,17 @@ export default {
             // scheduled guide_draft/guide_review/guide_verify blocks are
             // logged no-ops.
             result = await updateSimulationState(env, { guides_enabled: !!body.enabled });
+            break;
+          case 'cases_toggle':
+            // Case work (the Q&A engine) kill switch — see casesEnabled().
+            // Body: { enabled: true|false }. While off, no questions are
+            // generated for either product; every case_batch block admits an
+            // empty batch, and the judge sampler, improvement loop and gap
+            // digests idle behind it. UNLIKE every other toggle here, absent
+            // means ON — retiring the capability takes an explicit false.
+            // A '_rejected_keys' field in the response means 'cases_enabled'
+            // fell off the allow-list in updateSimulationState().
+            result = await updateSimulationState(env, { cases_enabled: !!body.enabled });
             break;
           case 'owner_channel_toggle':
             // The owner channel's kill switch (workers/owner-notify.js
