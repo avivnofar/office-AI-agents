@@ -1,0 +1,115 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# THE OFFICE EMAILS ITS CLIENT — SESSION 11, ITEM A (2026-08-23)
+#
+# ── WHY THIS FILE EXISTS ────────────────────────────────────────────────────
+#
+# The office has filed eleven `[Office #N]` notifications as GitHub Issues. The
+# oldest has been open thirteen days. NONE has ever been answered, and each one
+# ended by telling the owner not to reply there.
+#
+# Email is the only channel that has ever demonstrably reached him:
+# `agents/architect_agent.py`'s `send_approval_email()` POSTed to Resend on
+# 2026-07-05T19:32:13 and got a 2xx. Nothing about the capability was missing.
+# What was missing was a caller — `.github/workflows/archive-architect.yml`,
+# which was DISABLED on 2026-07-07 and never re-enabled. (The scheduling-jitter
+# defect usually blamed for this was real, and was FIXED on 2026-07-08, the day
+# after the disable. It has not been the reason since.)
+#
+# ── WHY THE SEND IS HERE AND NOT IN THE WORKER ──────────────────────────────
+#
+# `RESEND_API_KEY` is a GitHub Actions repository secret, set 2026-07-05 —
+# eighteen minutes before the one successful send. It is NOT a Worker secret,
+# and creating one is the owner's to do, not a session's.
+#
+# So the work is split along the credentials that already exist: the WORKER
+# COMPOSES (it holds the channel snapshot, the office context and Gemini) and
+# THIS WORKFLOW DELIVERS. That is the same shape `weekly-capability-audit.yml`
+# already uses — Actions calls the Worker's admin trigger and acts on the answer
+# — and the same reason `external-check.yml` gives for living outside the Worker.
+#
+# ── HOW IT FAILS ────────────────────────────────────────────────────────────
+#
+# LOUDLY. `set -euo pipefail`, and a non-2xx from either the Worker or Resend
+# turns the run RED. It files no Issue about its own failure: an office that
+# cannot reach its client must not answer by generating more of the thing the
+# client is already not reading. A red run in a repo the owner watches is the
+# signal, and it is the same choice `external-check.yml` made and documented.
+#
+# ── SENDER DELIVERABILITY, STATED RATHER THAN DISCOVERED ────────────────────
+#
+# `onboarding@resend.dev` is Resend's SHARED unverified-domain sender. It is
+# what the one working send used, so it is what this uses — but it carries low
+# sender reputation and the 2026-07-05 email may well have landed in spam
+# (never confirmed; nobody had dashboard access). If mail does not arrive, CHECK
+# SPAM FIRST — a verified sending domain is the fix, and it is an owner action.
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Owner email notice
+
+on:
+  schedule:
+    # 12:30 UTC daily. The Worker's own `owner_channel` block runs at 14:00
+    # Israel time (11:00 UTC), so by now today's Issue exists and this notice
+    # can point at it. Actions cron drifts on low-traffic repos by 1-4 hours —
+    # which does not matter here, because unlike the gate that broke the
+    # Architect's email, NOTHING IN THIS JOB CHECKS THE CLOCK.
+    - cron: '30 12 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ask the Worker for today's notice
+        id: compose
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -euo pipefail
+          HTTP=$(curl -sS -o notice.json -w '%{http_code}' \
+            -X POST https://data-center-agents.avivnofar.workers.dev/api/agents/trigger \
+            -H "X-Admin-Token: ${ADMIN_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            -d '{"type":"owner_email_notice"}')
+          if [ "$HTTP" != "200" ]; then
+            echo "Worker returned HTTP $HTTP — the office could not compose its notice."
+            cat notice.json || true
+            exit 1
+          fi
+          SEND=$(jq -r '.result.send // false' notice.json)
+          echo "send=$SEND" >> "$GITHUB_OUTPUT"
+          echo "Compose result: send=$SEND, hebrew=$(jq -r '.result.used_hebrew // "n/a"' notice.json), gated_out=$(jq -r '.result.gated_out | length' notice.json)"
+          jq -r '.result.gated_out[]? | "  held back: \(.id) — missing \(.missing | join(", "))"' notice.json || true
+
+      - name: Send it
+        if: steps.compose.outputs.send == 'true'
+        env:
+          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+        run: |
+          set -euo pipefail
+          jq -n \
+            --arg from 'Office AI Agents <onboarding@resend.dev>' \
+            --arg to "$(jq -r '.result.to' notice.json)" \
+            --arg subject "$(jq -r '.result.subject' notice.json)" \
+            --arg html "$(jq -r '.result.html' notice.json)" \
+            '{from:$from, to:$to, subject:$subject, html:$html}' > payload.json
+          HTTP=$(curl -sS -o resend.json -w '%{http_code}' \
+            -X POST https://api.resend.com/emails \
+            -H "Authorization: Bearer ${RESEND_API_KEY}" \
+            -H 'Content-Type: application/json' \
+            --data @payload.json)
+          if [ "$HTTP" != "200" ]; then
+            echo "Resend returned HTTP $HTTP — the notice was NOT delivered."
+            cat resend.json || true
+            exit 1
+          fi
+          echo "Resend accepted the message: $(jq -r '.id // "no id returned"' resend.json)"
+
+      - name: Nothing to send
+        if: steps.compose.outputs.send != 'true'
+        run: |
+          echo "The office has nothing that needs the client today, and today is not the weekly heartbeat."
+          jq -r '.result.reason // "no reason given"' notice.json
