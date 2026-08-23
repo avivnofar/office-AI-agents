@@ -6760,12 +6760,69 @@ export default {
                     malformed: snapshot.questions.malformed ?? [],
                   }
                 : null,
+              /*
+               * ── THE CLIENT'S ISSUE REPLIES (2026-08-23, ITEM B) ───────
+               *
+               * Reported here for the reason this endpoint states about every
+               * other source, and with more force: *a new source invisible to
+               * the one endpoint that exists to see sources is §7.2 arriving
+               * with the feature meant to be watched.*
+               *
+               * That is not hypothetical here. `channel/from-owner-issues/`
+               * was written by the office, committed to git, and read by
+               * nothing — and the probe that exists to say which sources reach
+               * the office could not have shown it, because it did not know
+               * the directory existed either.
+               *
+               * ABSENT and EMPTY are kept apart, as everywhere else: `null`
+               * means the directory could not be listed and the client's
+               * replies are NOT in this context; `replies: 0` means he has not
+               * replied, which is a real measurement.
+               */
+              ownerIssueReplies: snapshot?.ownerIssueReplies
+                ? {
+                    replies: snapshot.ownerIssueReplies.replies.length,
+                    entries: snapshot.ownerIssueReplies.replies.map((r) => `${r.date} issue #${r.issueNumber || '?'} by ${r.author || '?'} — ${String(r.body || '').slice(0, 120)}`),
+                    malformed: snapshot.ownerIssueReplies.malformed ?? [],
+                    _note: 'These carry NO read/acted state and render as OUTSTANDING in every prompt. See owner-channel.js issueReplySections().',
+                  }
+                : null,
               // The two board fields added 2026-08-10. `dispatched` is what
               // OB-036 was about: the transition existed on the board and no
               // consumer could see it.
               dispatched: snapshot?.board ? snapshot.board.tasks.filter((t) => t.dispatched).map((t) => t.id) : null,
               offered: snapshot?.board ? snapshot.board.tasks.filter((t) => t.offered).map((t) => t.id) : null,
               reportShape: { degraded: built.degraded, reason: built.reason, tokens: built.tokens, dropped: built.dropped },
+              /*
+               * ── THE ASSEMBLED PROMPT ITSELF (2026-08-23, ITEM B) ──────
+               *
+               * Opt-in with `{"textFor": "agent"|"meeting"|"report"}` — off by
+               * default because this is thousands of tokens and every other
+               * caller of this probe wants the counts.
+               *
+               * WHY IT EXISTS AT ALL. Every field above is a MEASUREMENT OF
+               * THE ASSEMBLY — token counts, dropped labels, source presence —
+               * and not one of them can answer "does the client's instruction
+               * actually appear in what an agent is shown". Those are different
+               * questions, and this endpoint could report a healthy count for a
+               * source whose text never reached a prompt. That is exactly the
+               * failure ITEM B exists to close, and closing it while leaving
+               * the only way to observe it out of reach would be closing it on
+               * paper.
+               *
+               * Makes NO model call. It renders the same function every agent
+               * prompt renders, with the same live snapshot.
+               */
+              assembledText: body.textFor
+                ? (() => {
+                    const shape = ['agent', 'meeting', 'report'].includes(body.textFor) ? body.textFor : 'agent';
+                    const opts = shape === 'agent'
+                      ? { agentId: body.agentId ?? 3, clearance: body.clearance || 'standard', projects: officeProjects.projects }
+                      : { projects: officeProjects.projects };
+                    const b = buildOfficeContext(snapshot, shape, opts);
+                    return { shape, clearance: opts.clearance || null, degraded: b.degraded, tokens: b.tokens, text: b.text };
+                  })()
+                : null,
               meetingShape: (() => {
                 const m = buildOfficeContext(snapshot, 'meeting', { projects: officeProjects.projects });
                 return { tokens: m.tokens, budget: OFFICE_BUDGETS.meeting, dropped: m.dropped, trimmed: m.trimmed };
