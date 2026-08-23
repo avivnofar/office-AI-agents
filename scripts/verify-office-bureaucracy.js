@@ -468,6 +468,14 @@ const ALLOW_LIST_TO_TRIGGER = {
   // agent-runner.js documents in prose above that array: adding a toggle case
   // is not enough, and the omission is invisible (HTTP 200, state unchanged).
   judge_sampler_enabled: 'judge_sampler_toggle',
+  // Added 2026-08-23 with the cases retirement (R-001). This map caught it too,
+  // on the same run that added the switch — three for three now. Worth saying
+  // out loud that this one is DIFFERENT from every other entry above: the
+  // switches here default OFF and `cases_enabled` defaults ON, so the route
+  // being present matters more, not less. An absent route on a default-off
+  // switch means a feature that never starts; an absent route on this one means
+  // a capability that cannot be stopped.
+  cases_enabled: 'cases_toggle',
 };
 const allowListMatch = /const allowedKeys = \[([^\]]+)\]/.exec(arSrc0);
 const allowListKeys = allowListMatch
