@@ -104,6 +104,44 @@ export const OWNER_KINDS = Object.freeze([
 ]);
 
 /**
+ * The kind a message with NO front-matter block is read as (2026-08-23).
+ *
+ * ── WHY THE REFUSAL WAS REPLACED, AND WHY ONLY FOR THIS CASE ────────────
+ *
+ * The original reasoning — `kind` is load-bearing, so a message that cannot
+ * state it must be refused rather than guessed — is sound, and the OUTCOME was
+ * wrong. Both of the only two messages the owner has ever hand-written into
+ * `channel/from-owner/` were refused for having no header, and one of them was
+ * the first real deliverable ever assigned to this office. **A message the
+ * office cannot classify must be classified conservatively, not discarded.**
+ *
+ * `instruction` is the conservative choice, and "conservative" here means
+ * exactly one thing: it is the only kind in the vocabulary with no automated
+ * consequence anywhere in this codebase.
+ *
+ *   emergency  sorts to the head of `classifyOwnerMessages()` and asserts the
+ *              office has STOPPED and is waiting — an alert path, and the one
+ *              kind a default must never reach for.
+ *   approval   is A4's exit: the act that moves a deliverable past CEO-approved
+ *              to shipped. Defaulting to it would let a message nobody could
+ *              read ship work.
+ *   decision   claims to be the ruling on an admin objection or a referred vote.
+ *   reply      threads onto a prior message through `re:`, which an unheaded
+ *              file cannot supply, so it would thread onto nothing.
+ *   instruction  reaches every rank in full and is READ. Nothing branches on it.
+ *
+ * ── AND WHY THE DEFAULT IS RECORDED RATHER THAN JUST APPLIED ────────────
+ *
+ * A defaulted kind and a stated kind are different facts, and the whole
+ * argument for refusing was that collapsing them is dangerous. So they are not
+ * collapsed: `message.kindDefaulted` is `true` whenever this value was supplied
+ * by the parser rather than written by the owner, and every surface that shows
+ * the kind says so. Anything downstream that reads a defaulted kind as an
+ * asserted one is a bug, and the flag is what makes that bug findable.
+ */
+export const DEFAULT_OWNER_KIND = 'instruction';
+
+/**
  * `status:` — what the OFFICE has done about the message. The owner writes
  * `open` (or omits it, which means the same) and never touches it again.
  *
@@ -114,8 +152,70 @@ export const OWNER_KINDS = Object.freeze([
  */
 export const OWNER_STATUSES = Object.freeze(['open', 'acted', 'closed']);
 
-/** The filename shape: date first, so a plain `ls` sorts chronologically. */
-const OWNER_FILE_RE = /^(\d{4}-\d{2}-\d{2})-([a-z0-9][a-z0-9-]*)\.md$/;
+/**
+ * The filename shape: date first, so a plain `ls` sorts chronologically.
+ *
+ * ── TWO SHAPES ARE ACCEPTED AT THE DOOR, ONE IS STORED (2026-08-23) ──────
+ *
+ * `YYYY-MM-DD-<slug>.md` was the only accepted form until this date, and it
+ * refused the first real client-shaped deliverable the owner ever assigned:
+ * `17-08-2026-build-contract-reader-tool.md`, delivered 2026-08-17, sat unread
+ * for six days because it is written day-month-year — which is the standard
+ * date format in Israel and the one the owner uses and will keep using.
+ *
+ * **The office does not get to refuse the client's own handwriting.** So both
+ * shapes are accepted, and the disambiguation rule is fixed rather than
+ * improvised:
+ *
+ *   first component is 4 digits   ->  YYYY-MM-DD
+ *   last component is 4 digits    ->  DD-MM-YYYY
+ *   both would read               ->  DD-MM-YYYY, the owner's convention wins
+ *   neither                       ->  refused, exactly as before
+ *
+ * The DD-MM-YYYY pattern is therefore tried FIRST — that ordering IS the
+ * third rule, not an accident of how the code fell out.
+ *
+ * **Only what is accepted changed. What is STORED did not.** Every name is
+ * normalised to `YYYY-MM-DD` before it becomes `message.date`/`message.id`, so
+ * directory ordering, `readKey()`, reply threading and every read record
+ * written before today keep meaning exactly what they meant.
+ *
+ * Range checking (is `99` a month?) is deliberately NOT added here: the
+ * previous regex did not do it either, and tightening what the channel refuses
+ * in the same change that loosens it would make a regression impossible to
+ * attribute. An out-of-range component normalises and reads as a nonsense date,
+ * which is visible, rather than making the client's message disappear.
+ */
+const OWNER_FILE_ISO_RE = /^(\d{4})-(\d{2})-(\d{2})-([a-z0-9][a-z0-9-]*)\.md$/;
+const OWNER_FILE_DMY_RE = /^(\d{2})-(\d{2})-(\d{4})-([a-z0-9][a-z0-9-]*)\.md$/;
+
+/**
+ * Reads an owner message filename into a normalised `YYYY-MM-DD` date and a
+ * slug. Exported so `scripts/verify-owner-channel.js` can assert the
+ * disambiguation rule directly rather than inferring it from a parsed message.
+ *
+ * @returns {{ok: true, date: string, slug: string, written: string}
+ *          | {ok: false}}
+ */
+export function parseOwnerFilename(filename) {
+  const name = String(filename || '').trim();
+
+  // DD-MM-YYYY FIRST. Where both shapes could read a name the owner's
+  // convention wins, and trying it first is how that rule is enforced.
+  const dmy = OWNER_FILE_DMY_RE.exec(name);
+  if (dmy) {
+    const [, dd, mm, yyyy, slug] = dmy;
+    return { ok: true, date: `${yyyy}-${mm}-${dd}`, slug, written: 'DD-MM-YYYY' };
+  }
+
+  const iso = OWNER_FILE_ISO_RE.exec(name);
+  if (iso) {
+    const [, yyyy, mm, dd, slug] = iso;
+    return { ok: true, date: `${yyyy}-${mm}-${dd}`, slug, written: 'YYYY-MM-DD' };
+  }
+
+  return { ok: false };
+}
 
 /** One `key: value` line from the YAML-ish front matter block. */
 function frontField(front, key) {
@@ -139,31 +239,49 @@ function frontField(front, key) {
  * @returns {{ok: true, message: object} | {ok: false, reason: string}}
  */
 export function parseOwnerMessage(text, filename, sha = null) {
-  const nameMatch = OWNER_FILE_RE.exec(String(filename || '').trim());
-  if (!nameMatch) {
+  const nameMatch = parseOwnerFilename(filename);
+  if (!nameMatch.ok) {
     return {
       ok: false,
-      reason: `${filename}: filename is not YYYY-MM-DD-<slug>.md — the date prefix is what orders the directory and the slug is what threads a reply to it`,
+      reason: `${filename}: filename is not YYYY-MM-DD-<slug>.md or DD-MM-YYYY-<slug>.md — the date prefix is what orders the directory and the slug is what threads a reply to it. The slug must be lower-case letters, digits and hyphens only, and the file must end .md`,
     };
   }
-  const [, fileDate, slug] = nameMatch;
+  const { date: fileDate, slug } = nameMatch;
 
   const src = String(text || '');
   const fm = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(src);
-  if (!fm) {
-    return {
-      ok: false,
-      reason: `${filename}: no front-matter block — a message with no header cannot state its kind, and kind is load-bearing (an emergency and an instruction get completely different handling)`,
-    };
-  }
-  const [, front, bodyRaw] = fm;
 
-  const kind = (frontField(front, 'kind') || '').toLowerCase();
-  if (!OWNER_KINDS.includes(kind)) {
-    return {
-      ok: false,
-      reason: `${filename}: kind "${kind || 'absent'}" is not one of ${OWNER_KINDS.join(' | ')} — refused rather than defaulted, because the default would decide how urgently the office treats the client's own words`,
-    };
+  /*
+   * ── NO FRONT MATTER IS NO LONGER FATAL (2026-08-23) ─────────────────────
+   *
+   * It used to be. It refused both of the owner's only two hand-written
+   * messages, including the contract-analyst task — see DEFAULT_OWNER_KIND for
+   * the full reasoning and for why `instruction` is the conservative landing
+   * place rather than an arbitrary one.
+   *
+   * The whole file becomes the body, and `kindDefaulted` records that the kind
+   * below is the parser's and not the owner's.
+   *
+   * **A message that DOES have a front-matter block is handled exactly as
+   * before** — an absent or unrecognised `kind` inside a header the owner
+   * actually wrote is still refused, because there he did state something and
+   * the office reading past it would be overriding him rather than covering for
+   * a habit he never had.
+   */
+  const hasFrontMatter = !!fm;
+  const front = hasFrontMatter ? fm[1] : '';
+  const bodyRaw = hasFrontMatter ? fm[2] : src;
+
+  let kind = DEFAULT_OWNER_KIND;
+  const kindDefaulted = !hasFrontMatter;
+  if (hasFrontMatter) {
+    kind = (frontField(front, 'kind') || '').toLowerCase();
+    if (!OWNER_KINDS.includes(kind)) {
+      return {
+        ok: false,
+        reason: `${filename}: kind "${kind || 'absent'}" is not one of ${OWNER_KINDS.join(' | ')} — refused rather than defaulted, because the default would decide how urgently the office treats the client's own words`,
+      };
+    }
   }
 
   // `status:` absent means `open`. That is the ONLY defaulted field in this
@@ -202,6 +320,9 @@ export function parseOwnerMessage(text, filename, sha = null) {
       date: frontField(front, 'date') || fileDate,
       slug,
       kind,
+      // TRUE means the office chose this kind, not the owner. Never collapse
+      // the two — see DEFAULT_OWNER_KIND.
+      kindDefaulted,
       status: statusRaw,
       re: frontField(front, 're') || 'new',
       // `to:` (2026-08-11, Phase 3) — OPTIONAL, unvalidated free text (an
@@ -589,7 +710,14 @@ export function ownerMessageSections(classified, { shape = 'agent', candidates =
         ? `READ ${m.readAt} AND NOT YET ACTED ON`
         : 'NOT YET READ BY THE OFFICE';
       const addressee = m.to ? ` — ADDRESSED TO: ${m.to}` : ' — general, for everyone';
-      return `- [${m.kind.toUpperCase()}] ${m.id} (${m.date}) — ${m.title} — ${state}${addressee}\n`
+      // A DEFAULTED kind is marked here and nowhere else is it allowed to look
+      // stated. The owner wrote no header on this message; `instruction` is the
+      // office's conservative reading of it, and an agent acting on the kind
+      // rather than on the words is acting on our guess.
+      const kindShown = m.kindDefaulted
+        ? `${m.kind.toUpperCase()} — KIND NOT STATED BY THE OWNER, DEFAULTED BY THE OFFICE`
+        : m.kind.toUpperCase();
+      return `- [${kindShown}] ${m.id} (${m.date}) — ${m.title} — ${state}${addressee}\n`
         + `  ${bodyForShape(m, shape).replace(/\n/g, '\n  ')}`;
     }),
   });

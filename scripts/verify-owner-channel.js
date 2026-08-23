@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 
 import {
   OWNER_DIR, READ_LOG_PATH, SUBMISSIONS_PATH, OWNER_KINDS,
+  DEFAULT_OWNER_KIND, parseOwnerFilename,
   parseOwnerMessage, parseReadLog, renderReadLog, readKey,
   classifyOwnerMessages, ownerMessageSections,
   AGE_LADDER, daysBetween, escalationFor,
@@ -70,8 +71,49 @@ section('§1 owner messages — refused, not guessed');
   const badName = parseOwnerMessage(MSG(), 'ship-the-site.md', 'x');
   check('REFUSED — a filename with no date prefix', !badName.ok);
 
+  /* ── the owner's own date format, accepted 2026-08-23 ──────────────────
+   * `17-08-2026-build-contract-reader-tool.md` — the first real client-shaped
+   * deliverable ever assigned — was refused for six days for being written
+   * day-month-year, which is the standard format in Israel. Both shapes are
+   * accepted at the door; only ONE is stored. */
+  const dmy = parseOwnerMessage(MSG(), '17-08-2026-ship-the-site.md', 'x');
+  check('a DD-MM-YYYY filename is ACCEPTED — the owner writes dates that way', dmy.ok, dmy.reason);
+  check('…and its id is NORMALISED to YYYY-MM-DD, so ordering and reply threading are unchanged',
+    dmy.ok && dmy.message.id === '2026-08-17-ship-the-site', dmy.ok ? dmy.message.id : dmy.reason);
+  // `date:` in a header still wins over the filename — unchanged. With no
+  // header (the real contract-analyst case) the normalised filename date is
+  // what lands, which is the half that has to be right.
+  const dmyNoHeader = parseOwnerMessage('# Ship it\n\nDo it.', '17-08-2026-ship-the-site.md', 'x');
+  check('…and with no header, message.date is the NORMALISED filename date',
+    dmyNoHeader.ok && dmyNoHeader.message.date === '2026-08-17',
+    dmyNoHeader.ok ? dmyNoHeader.message.date : dmyNoHeader.reason);
+  check('parseOwnerFilename: a first component of 4 digits reads as YYYY-MM-DD',
+    parseOwnerFilename('2026-08-17-x.md').written === 'YYYY-MM-DD');
+  check('…a last component of 4 digits reads as DD-MM-YYYY',
+    parseOwnerFilename('17-08-2026-x.md').written === 'DD-MM-YYYY');
+  check("…and where BOTH could read (05-08-2026), the owner's convention wins",
+    parseOwnerFilename('05-08-2026-x.md').written === 'DD-MM-YYYY'
+    && parseOwnerFilename('05-08-2026-x.md').date === '2026-08-05');
+  check('…and a name in neither shape is still REFUSED', parseOwnerFilename('ship-it.md').ok === false);
+
+  /* ── no front matter is classified conservatively, not discarded ───────
+   * It used to be fatal. That refused BOTH of the only two messages the owner
+   * has ever hand-written into the folder, the contract-analyst task included. */
   const noFront = parseOwnerMessage('# Just a heading\n\nbody', '2026-08-10-x.md', 'x');
-  check('REFUSED — no front matter (a message that cannot state its kind)', !noFront.ok);
+  check('ACCEPTED — no front matter, classified conservatively rather than discarded', noFront.ok, noFront.reason);
+  check(`…as kind "${DEFAULT_OWNER_KIND}" — the one kind with no automated consequence anywhere`,
+    noFront.ok && noFront.message.kind === DEFAULT_OWNER_KIND);
+  check('…and the default is RECORDED as defaulted, never passed off as stated',
+    noFront.ok && noFront.message.kindDefaulted === true);
+  check('…and the default is never `emergency` or `approval` (an alert path and a ship path)',
+    DEFAULT_OWNER_KIND !== 'emergency' && DEFAULT_OWNER_KIND !== 'approval');
+  check('a message that DOES carry a header is unchanged — kindDefaulted is false',
+    good.ok && good.message.kindDefaulted === false);
+  const renderedDefault = ownerMessageSections(
+    classifyOwnerMessages([noFront.message], { byKey: new Map() }), { shape: 'meeting' }
+  ).map((x) => JSON.stringify(x)).join('\n');
+  check('…and every surface that shows a defaulted kind SAYS it was defaulted',
+    /KIND NOT STATED BY THE OWNER/.test(renderedDefault));
 
   const badKind = parseOwnerMessage(MSG({ kind: 'delivery' }), '2026-08-10-x.md', 'x');
   check('REFUSED — an unrecognised kind is NOT defaulted', !badKind.ok);

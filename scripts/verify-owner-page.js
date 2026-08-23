@@ -127,8 +127,21 @@ console.log('\n--- 3. The parser is NOT relaxed. Every refusal still refuses. --
 
 check('a bad FILENAME is still refused',
   parseOwnerMessage('---\nfrom: owner\nkind: instruction\n---\n\n# t\n\nb', 'not-a-date.md').ok === false);
-check('MISSING front matter is still refused',
-  parseOwnerMessage('# t\n\nbody with no header', `${DATE}-x.md`).ok === false);
+// CHANGED 2026-08-23: missing front matter is no longer refused — it is read
+// conservatively as `kind: instruction` with `kindDefaulted: true`. What the
+// PAGE does is unchanged: it always writes a header, so nothing it composes
+// ever takes that path. Both halves are asserted, so a page that silently
+// stopped writing a header would still be caught here.
+check('MISSING front matter is now accepted, and flagged as a DEFAULTED kind',
+  (() => {
+    const r = parseOwnerMessage('# t\n\nbody with no header', `${DATE}-x.md`);
+    return r.ok === true && r.message.kindDefaulted === true;
+  })());
+check('...and the page NEVER relies on that — what it composes states its own kind',
+  (() => {
+    const b = buildOwnerMessage({ subject: 'ship it', body: 'do it', kind: 'instruction', date: DATE });
+    return b.ok && parseOwnerMessage(b.text, b.filename).message.kindDefaulted === false;
+  })());
 check('an UNRECOGNISED kind is still refused, not defaulted',
   parseOwnerMessage(`---\nfrom: owner\ndate: ${DATE}\nkind: memo\nre: new\nstatus: open\n---\n\n# t\n\nb`, `${DATE}-x.md`).ok === false);
 check('an EMPTY body is still refused',
