@@ -33,6 +33,8 @@ import {
 import {
   ownerChannelEnabled, notifyOwner, selectNotificationItems,
   buildIssueBody, buildIssueTitle, OWNER_ISSUE_LABEL, OWNER_NOTIFY_TABLE_SQL,
+  // SESSION 11 (2026-08-23): the three-part gate and the email notice.
+  noticeParts, gateNotificationItems, buildEmailNotice, buildHebrewNoticePrompt,
 } from '../workers/owner-notify.js';
 import {
   buildOfficeContext, STANDARD_SECTIONS, parseOpenQuestions, BUDGETS,
@@ -486,13 +488,15 @@ section('§6 notification — both ends learn');
   // Failure path.
   const failDeps = { postIssue: async () => ({ created: false, status: 503 }) };
   const before = rowsWritten.length;
-  const failed = await notifyOwner(envOn, failDeps, { items: [{ id: 'S-002', title: 'y' }], today: '2026-08-10' });
+  // UPDATED 2026-08-23 (SESSION 11, ITEM E): these items must now state all
+  // three parts, or the gate holds them back and there is no send to fail on.
+  const failed = await notifyOwner(envOn, failDeps, { items: [{ id: 'S-002', title: 'y', decision: 'Ship it or hold it?', recommend: 'Ship it.', fallback: 'It is held.' }], today: '2026-08-10' });
   check('a FAILED send is returned as failed, not swallowed', failed.sent === false && !failed.skipped);
   const recorded = rowsWritten.slice(before).find((r) => /INSERT INTO owner_notifications/.test(r.sql));
   check('…and is RECORDED with ok=0 (a ledger of successes only cannot answer "what did we fail to send")',
     !!recorded && recorded.args.includes(0));
 
-  const threw = await notifyOwner(envOn, { postIssue: async () => { throw new Error('network down'); } }, { items: [{ id: 'S-3', title: 'z' }], today: '2026-08-10' });
+  const threw = await notifyOwner(envOn, { postIssue: async () => { throw new Error('network down'); } }, { items: [{ id: 'S-3', title: 'z', decision: 'Which way?', recommend: 'This way.', fallback: 'Nothing moves.' }], today: '2026-08-10' });
   check('a THROWN send is caught and recorded as a failure, never as a success', threw.sent === false && /network down/.test(threw.reason));
 
   // Sequence rendering.
@@ -502,7 +506,17 @@ section('§6 notification — both ends learn');
   check('an UNKNOWABLE sequence is announced loudly, never invented', /SEQUENCE NUMBER COULD NOT BE ESTABLISHED/.test(noSeq));
   check('…and the title says so too', /#\?/.test(buildIssueTitle({ seq: null, kind: 'heartbeat', items: [], today: '2026-08-10' })));
 
-  check('the reply route is the REPO, not an issue comment (one channel, one history)', /In the repo, not in this issue/.test(withPrev));
+  // REWRITTEN 2026-08-23 (SESSION 11, ITEM D). This check used to assert the
+  // OPPOSITE — that the body said "In the repo, not in this issue". That was a
+  // faithful test of a real contract, and the contract was the reason eleven
+  // notifications went unanswered: it told the one person the office needs to
+  // hear from to stop reading and go edit markdown in a private repo. The
+  // property it protected (git is the permanent record) is kept by the office
+  // doing its own filing — see recordIssueReplies() in agent-runner.js.
+  check('the reply route is THE ISSUE ITSELF — he answers where he is reading', /Just reply to this issue/.test(withPrev));
+  check('...and the old "not in this issue" instruction is GONE, not merely demoted', !/In the repo, not in this issue/.test(withPrev));
+  check('...and the office promises to file the reply itself, so git stays the record', /from-owner-issues/.test(withPrev));
+  check('...and the repo route survives as a SECONDARY option, not deleted', /rather write it into the repo yourself/.test(withPrev));
   check('…and it tells him an instruction outranks the board', /outranks everything on the office/.test(withPrev));
 
   // What gets selected.
@@ -756,6 +770,94 @@ section('§9 the contracts — a format is load-bearing only if it is written do
 
 /* ════════════════════════════════ summary ══════════════════════════════ */
 console.log(`\n${'═'.repeat(72)}`);
+/* ─── §11 — THE THREE-PART GATE AND THE EMAIL NOTICE (SESSION 11) ───────── */
+section('11. The three-part gate, and the notice that reaches him');
+
+{
+  const full = { id: 'S-002', title: 'a thing', decision: 'Deploy it or hold it?',
+    recommend: 'Hold it until its data is live.', fallback: 'It is held and OB-060 stays NOT-READY.' };
+
+  const p = noticeParts(full);
+  check('an item that states all three parts PASSES', p.ok === true);
+  check('...the ask is one sentence, taken from the decision', p.ask === 'Deploy it or hold it?');
+  check('...it offers at least two options', p.options.length >= 2);
+  check('...and one of them is always "say nothing", carrying the default',
+    p.options.some((o) => /Say nothing/.test(o.label)));
+
+  // The identifiers are stripped from what a person reads, and NOT from the record.
+  check('board identifiers are stripped from the ask a client reads',
+    !/OB-|S-\d|REQ-/.test(noticeParts({ decision: 'Do we ship OB-060 now, per REQ-003?', fallback: 'x' }).ask));
+  check('...but the item keeps its own id, because the office still needs it', full.id === 'S-002');
+
+  // THE ITEMS THAT FAIL — and this is the finding, not an edge case.
+  // Measured against live notification #11 (Issue 46, 2026-08-23): six items,
+  // one passed. The five that failed were `Issue #36`..`#40` — the office
+  // telling the client it had already told him, with no options and no default.
+  const readback = { id: 'Issue #40', title: '[Office #5] 1 awaiting your decision',
+    did: 'This is a previous notification of ours that has had no reply.',
+    decision: 'Same as it originally asked — repeated here because it is now overdue.',
+    fallback: null, recommend: null };
+  const rp = noticeParts(readback);
+  check('AN ISSUE-READBACK ITEM FAILS THE GATE — it states no default and no option',
+    rp.ok === false && rp.missing.includes('what happens with no answer'));
+
+  const { notifiable, gated } = gateNotificationItems([full, readback]);
+  check('the gate SPLITS rather than deletes — the held item is returned with its reason',
+    notifiable.length === 1 && gated.length === 1 && gated[0].id === 'Issue #40');
+  check('...and a passing item carries its parts forward, so the Issue and the email agree',
+    !!notifiable[0].parts && notifiable[0].parts.ok);
+}
+
+{
+  // The gate is a FILTER on what becomes an Issue, not advice in a prompt.
+  const posted = [];
+  const deps = { postIssue: async (e, issue) => { posted.push(issue); return { created: true, status: 201, number: 99 }; } };
+  const envOn = { DB: null, SIM_KV: { get: async () => ({ owner_channel_enabled: true }) } };
+
+  const res = await notifyOwner(envOn, deps, {
+    items: [{ id: 'X-1', title: 'no options here', did: 'we did a thing' }],
+    today: '2026-08-11', isHeartbeatDay: false,
+  });
+  check('AN UNGATED ITEM DOES NOT BECOME AN ISSUE — it is a log entry',
+    res.skipped === true && posted.length === 0 && res.reason === 'nothing_notifiable_and_not_heartbeat_day');
+  check('...and what was held back is reported, never silently dropped',
+    Array.isArray(res.gated) && res.gated.length === 1 && res.gated[0].id === 'X-1');
+}
+
+{
+  // The Issue body now leads with the three parts and folds the detail away.
+  const item = { id: 'S-002', title: 'the site', decision: 'Deploy as-is or hold?',
+    recommend: 'Hold it.', fallback: 'It is held.', did: 'Built and deployed the message loop.' };
+  const { notifiable } = gateNotificationItems([item]);
+  const body = buildIssueBody({ seq: 12, kind: 'submission', items: notifiable, today: '2026-08-23' });
+  check('the Issue leads with what is being asked', /\*\*What is being asked:\*\* Deploy as-is or hold\?/.test(body));
+  check('...then the options', /\*\*Your options:\*\*/.test(body));
+  check('...then what happens with no answer', /\*\*If you do not answer:\*\* It is held\./.test(body));
+  check('...and the long "what we did" is folded away, not deleted', /<details><summary>What the office did, in full<\/summary>/.test(body)
+    && /Built and deployed the message loop\./.test(body));
+
+  // The email carries the SAME three parts and nothing else.
+  const notice = buildEmailNotice({ seq: 12, items: notifiable, today: '2026-08-23',
+    issueUrl: 'https://github.com/avivnofar/back-office-AI-agents/issues/1', hebrew: null });
+  check('the email skeleton carries the ask, the options and the default', /ASKED: Deploy as-is or hold\?/.test(notice.skeleton)
+    && /OPTION —/.test(notice.skeleton) && /IF YOU DO NOT ANSWER: It is held\./.test(notice.skeleton));
+  check('THE EMAIL DOES NOT CARRY THE ISSUE\u2019S CONTENTS — it is a notice, not a document',
+    !/Built and deployed the message loop/.test(notice.skeleton));
+  check('...it links to the Issue instead', /issues\/1/.test(notice.html));
+  check('...it is right-to-left, the shell the one working send used', /dir="rtl"/.test(notice.html));
+  check('A GEMINI FAILURE DEGRADES TO ENGLISH, NEVER TO SILENCE',
+    notice.usedHebrew === false && /Hebrew composition failed/.test(notice.html) && notice.html.length > 200);
+
+  const heb = buildEmailNotice({ seq: 12, items: notifiable, today: '2026-08-23', issueUrl: null, hebrew: 'שאלה: לפרוס או להמתין?' });
+  check('...and composed Hebrew is used when it is there, with no warning banner',
+    heb.usedHebrew === true && /לפרוס/.test(heb.html) && !/Hebrew composition failed/.test(heb.html));
+  check('the Hebrew prompt forbids inventing an option the office did not state',
+    /NEVER invent an option/.test(buildHebrewNoticePrompt('x')));
+  check('...and forbids internal identifiers reaching him', /Do NOT include internal identifiers/.test(buildHebrewNoticePrompt('x')));
+  check('...and HTML is escaped, so a stray angle bracket cannot break the mail',
+    !/<script>/.test(buildEmailNotice({ seq: 1, items: [], today: 'x', issueUrl: null, hebrew: '<script>alert(1)</script>' }).html));
+}
+
 console.log(`  ${pass} passed, ${fail} failed`);
 if (fail) {
   console.log('\n  FAILURES:');

@@ -217,6 +217,122 @@ export async function recentFailures(env, { limit = 5 } = {}) {
  * `heartbeat` renders the same envelope with an explicitly empty payload, and
  * the wording is chosen so an empty week cannot be mistaken for a broken one.
  */
+/* ─────────────────── The three-part notice (2026-08-23) ─────────────────
+ *
+ * SESSION 11. The office had a channel that reached nobody. Six owner-channel
+ * Issues stood open, the oldest thirteen days, none answered — and the reason
+ * was legible in the Issues themselves: several hundred words of English, dense
+ * with `S-002`/`OB-060`/`REQ-003` identifiers that mean nothing to a client,
+ * ending with an instruction NOT to reply where he was reading and to go edit a
+ * file in a repository he cannot see from his phone.
+ *
+ * The owner's remedy, in his words: a notification carries exactly three things.
+ *
+ *   1. WHAT IS BEING ASKED  — one sentence, plain language, no board ids.
+ *   2. THE OPTIONS          — two or three, each with its consequence.
+ *   3. IF THERE IS NO ANSWER— the office's default, and by when.
+ *
+ * ── THE GATE, AND WHY IT IS CODE AND NOT A PROMPT INSTRUCTION ────────────
+ *
+ * `noticeParts()` is a FILTER, not a formatter. An item that cannot state all
+ * three parts is not a notification — it is a log entry, and it does not become
+ * an Issue or an email. That is enforced here, in a pure function a verifier can
+ * call, precisely because the alternative (asking a model to "only include items
+ * that state their options") is unenforceable: the model that decides what is
+ * missing is the same one that would rather fill the gap with a plausible
+ * sentence. A gate a model can talk its way past is not a gate.
+ *
+ * ── WHAT COUNTS AS AN OPTION ─────────────────────────────────────────────
+ *
+ * Every item that reaches a person has AT LEAST two real options, and the
+ * second is always the same one: say nothing and let the office's default
+ * stand. That is why `fallback` is required rather than nice-to-have — an item
+ * with no stated default is one where the office does not know what it will do
+ * if he is silent, and sending that to a person asks him to guess the cost of
+ * not answering. `recommend`, where the office has one, is a third.
+ *
+ * So the minimum passing shape is: an ask, a default, and one alternative to
+ * that default. An item carrying only "here is a thing that happened" fails,
+ * and failing is the correct outcome — it belongs in the daily report.
+ */
+
+/** Board/office identifiers a client has never agreed to learn. */
+const ID_PATTERN = /\b(?:OB|S|REQ|C|AD|KFM|R|OQ)-\d+\b/g;
+
+/**
+ * Strips office identifiers from a sentence meant for the client.
+ *
+ * A5 is explicit that the ASK carries no board identifiers. They are not
+ * removed from the record — `item.id` still rides in the Issue body and in the
+ * D1 receipt, because the office needs them to know what it asked about. They
+ * are removed from the one sentence a person reads.
+ */
+export function stripOfficeIds(text) {
+  if (!text) return '';
+  return String(text)
+    .replace(ID_PATTERN, '')
+    .replace(/\(\s*\)|\[\s*\]/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([.,;:])/g, '$1')
+    .replace(/^[\s—–-]+/, '')
+    .trim();
+}
+
+/**
+ * The three parts, or the reason there is no notification here.
+ *
+ * Returns `{ ok, ask, options, noAnswer, missing }`. `missing` names the parts
+ * that could not be stated — it is the thing worth logging, because a channel
+ * that quietly drops items is the failure this whole file exists to not repeat.
+ */
+export function noticeParts(item = {}) {
+  const ask = stripOfficeIds(item.decision || item.title || '');
+  const noAnswer = String(item.fallback || '').trim();
+
+  const options = [];
+  if (item.recommend) {
+    options.push({
+      label: 'What the office recommends',
+      text: stripOfficeIds(item.recommend),
+    });
+  }
+  if (ask) {
+    options.push({
+      label: 'Decide it differently',
+      text: 'Tell the office what to do instead. It stops and follows the instruction.',
+    });
+  }
+  if (noAnswer) {
+    options.push({
+      label: 'Say nothing',
+      text: stripOfficeIds(noAnswer),
+    });
+  }
+
+  const missing = [];
+  if (!ask) missing.push('ask');
+  if (!noAnswer) missing.push('what happens with no answer');
+  if (options.length < 2) missing.push('options');
+
+  return { ok: missing.length === 0, ask, options, noAnswer, missing };
+}
+
+/**
+ * Splits selected items into the ones that are notifications and the ones that
+ * are log entries. Nothing is deleted; `gated` is returned so the caller can
+ * record what did not go and why.
+ */
+export function gateNotificationItems(items = []) {
+  const notifiable = [];
+  const gated = [];
+  for (const item of items) {
+    const parts = noticeParts(item);
+    if (parts.ok) notifiable.push({ ...item, parts });
+    else gated.push({ id: item.id, title: item.title, missing: parts.missing });
+  }
+  return { notifiable, gated };
+}
+
 export function buildIssueBody({ seq, previous, sequenceReason, kind, items = [], today }) {
   const lines = [];
 
@@ -256,14 +372,34 @@ export function buildIssueBody({ seq, previous, sequenceReason, kind, items = []
     lines.push('## What needs you');
     lines.push('');
     for (const it of items) {
+      // ITEM E (2026-08-23): the SAME three-part shape the email carries, so
+      // the two never say different things about the same item. The detail —
+      // what the office did, and why it recommends what it does — stays here
+      // and is folded away, because this Issue is the record and the email is
+      // only the notice.
+      const p = it.parts || noticeParts(it);
       lines.push(`### ${it.id} — ${it.title}`);
       if (it.age) lines.push(`*${it.age}*`);
       lines.push('');
-      if (it.did) lines.push(`- **What we did:** ${it.did}`);
-      if (it.recommend) lines.push(`- **What we recommend:** ${it.recommend}`);
-      if (it.decision) lines.push(`- **Decision needed:** ${it.decision}`);
-      if (it.fallback) lines.push(`- **If no answer comes:** ${it.fallback}`);
+      lines.push(`**What is being asked:** ${p.ask}`);
       lines.push('');
+      lines.push('**Your options:**');
+      for (const o of p.options) lines.push(`- **${o.label}** — ${o.text}`);
+      lines.push('');
+      lines.push(`**If you do not answer:** ${p.noAnswer}`);
+      lines.push('');
+      if (it.did) {
+        lines.push('<details><summary>What the office did, in full</summary>');
+        lines.push('');
+        lines.push(it.did);
+        if (it.recommend) {
+          lines.push('');
+          lines.push(`**Why we recommend what we do:** ${it.recommend}`);
+        }
+        lines.push('');
+        lines.push('</details>');
+        lines.push('');
+      }
     }
   }
 
@@ -271,9 +407,29 @@ export function buildIssueBody({ seq, previous, sequenceReason, kind, items = []
   lines.push('');
   lines.push('### How to reply');
   lines.push('');
-  lines.push('**In the repo, not in this issue.** One channel, one history — git already gives the office'
-    + ' an ordered, permanent record of who said what and when, and a second thread in an issue tracker'
-    + ' would split it.');
+  // ── REWRITTEN 2026-08-23 (SESSION 11, ITEM D) ─────────────────────────
+  //
+  // This block used to open with "**In the repo, not in this issue.**" and
+  // close with "the office reads the repo, not the tracker." Both sentences
+  // were TRUE when written and both were a mistake: they told the one person
+  // the office needs to hear from to stop reading, open a second application,
+  // find a private repository and edit markdown — and eleven notifications
+  // went unanswered.
+  //
+  // The property that instruction was protecting is real and is KEPT: git stays
+  // the permanent, ordered, attributable record. What changed is who does the
+  // filing. `recordIssueReplies()` in agent-runner.js reads the comments on
+  // this Issue and commits each one into `channel/from-owner-issues/` in
+  // back-office. He replies where he is already reading; the office does its
+  // own bookkeeping.
+  lines.push('**Just reply to this issue.** Write your answer as a comment below — that is the whole'
+    + ' of it. The office reads the comments here, and it files your reply into its own permanent'
+    + ' record (`channel/from-owner-issues/` in back-office) so nothing is lost by answering here.');
+  lines.push('');
+  lines.push('_Closing the issue also counts as an answer, but a comment is better — a closed issue'
+    + ' tells the office you saw it and not what you decided._');
+  lines.push('');
+  lines.push('<details><summary>If you would rather write it into the repo yourself</summary>');
   lines.push('');
   lines.push('- **To decide a submission:** edit `channel/to-owner/SUBMISSIONS.md`, fill the entry\'s'
     + ' `Decision:` field and add your date. The office marks the heading; it never deletes the entry.');
@@ -282,10 +438,128 @@ export function buildIssueBody({ seq, previous, sequenceReason, kind, items = []
     + ' `YYYY-MM-DD-short-slug.md`. The contract — including the four words `kind:` accepts — is in'
     + ' `channel/from-owner/README.md`. **An instruction there outranks everything on the office\'s board.**');
   lines.push('');
-  lines.push('_Filed automatically by the office. Closing this issue changes nothing —'
-    + ' the office reads the repo, not the tracker._');
+  lines.push('</details>');
+  lines.push('');
+  lines.push('_Filed automatically by the office._');
 
   return lines.join('\n');
+}
+
+/* ──────────────────── The email notice (2026-08-23) ─────────────────────
+ *
+ * SESSION 11, ITEM A. The office's one channel that has ever actually reached
+ * the owner is email — `agents/architect_agent.py`'s `send_approval_email()`
+ * sent him one on 2026-07-05T19:32:13 and Resend returned 2xx. Nothing about
+ * the capability is missing. What was missing was a caller: the workflow that
+ * ran it (`.github/workflows/archive-architect.yml`) was disabled on
+ * 2026-07-07 and never re-enabled.
+ *
+ * ── THE EMAIL IS A NOTICE, NOT A DOCUMENT ────────────────────────────────
+ *
+ * This is the whole difference between it and `buildIssueBody()`. The Issue is
+ * the record: it carries what the office did, the reasoning, the identifiers,
+ * the links. The email carries three sentences per item and a link, and it
+ * carries them in Hebrew, because the client reads Hebrew and the office has
+ * been writing to him in English for two weeks.
+ *
+ * Today's notification (#11, Issue 46) ran to roughly 6,000 characters. The one
+ * item in it that genuinely needed him — S-002 — could be stated in three
+ * sentences, and the other five were the office telling him it had already told
+ * him something. Length is not the reason nothing was answered, but it is the
+ * reason nothing was READ, and unread and unanswered look identical from here.
+ *
+ * ── WHY THIS FUNCTION SENDS NOTHING ──────────────────────────────────────
+ *
+ * `RESEND_API_KEY` is a GitHub Actions repository secret (set 2026-07-05, the
+ * same hour as the successful send). It is NOT a Worker secret, and creating
+ * one is not this session's to do. So the split is: the Worker COMPOSES — it
+ * has the channel snapshot, the office context and Gemini — and GitHub Actions
+ * DELIVERS, because that is where the credential already lives and where the
+ * one send that ever worked ran from.
+ *
+ * That split is not a workaround. It is the same shape
+ * `.github/workflows/weekly-capability-audit.yml` already uses (Actions calls
+ * the Worker's admin trigger, Actions acts on the answer) and the same reason
+ * `external-check.yml` gives for living outside the Worker.
+ */
+
+/** The plain-Hebrew skeleton handed to Gemini. English in, Hebrew out. */
+export function buildEmailSkeleton({ seq, items = [], today, issueUrl }) {
+  const lines = [];
+  lines.push(`Notification #${seq ?? '?'} — ${today}`);
+  lines.push('');
+  if (!items.length) {
+    lines.push('NOTHING NEEDS A DECISION. This is the weekly note the office sends even when'
+      + ' there is nothing to report, so that a silent week and a broken channel do not look alike.');
+  } else {
+    items.forEach((it, n) => {
+      const p = it.parts;
+      lines.push(`ITEM ${n + 1}`);
+      lines.push(`  ASKED: ${p.ask}`);
+      p.options.forEach((o) => lines.push(`  OPTION — ${o.label}: ${o.text}`));
+      lines.push(`  IF YOU DO NOT ANSWER: ${p.noAnswer}`);
+      lines.push('');
+    });
+  }
+  if (issueUrl) lines.push(`FULL DETAIL: ${issueUrl}`);
+  return lines.join('\n');
+}
+
+/**
+ * The prompt. Constrained hard, because the failure mode here is a model that
+ * helpfully restores everything this function exists to remove.
+ */
+export function buildHebrewNoticePrompt(skeleton) {
+  return [
+    'You are writing a short notice in HEBREW to the owner of a small AI office. He is the client.',
+    'He reads Hebrew. He reads it on a phone. He has not answered eleven English notifications.',
+    '',
+    'Rewrite the structured notice below as plain, natural Hebrew. Rules, all binding:',
+    '- HEBREW ONLY. No English sentences. Keep URLs, file paths and code identifiers as-is.',
+    '- Per item: one sentence for what is being asked, one short line per option with its',
+    '  consequence, and one sentence for what happens if he does not answer.',
+    '- NEVER invent an option, a consequence or a deadline that is not in the input.',
+    '- Do NOT add a greeting, a sign-off, an apology, or any sentence about the office trying hard.',
+    '- Do NOT include internal identifiers (OB-, S-, REQ-, C-, AD-, KFM-).',
+    '- Output plain text with simple line breaks. No markdown, no HTML, no bullets characters.',
+    '',
+    '--- NOTICE ---',
+    skeleton,
+  ].join('\n');
+}
+
+/**
+ * Wraps composed Hebrew in the RTL shell `send_approval_email()` used — the one
+ * that demonstrably rendered in his mail client.
+ *
+ * `hebrew` may be null: if Gemini fails, the English skeleton is sent instead.
+ * A notice that arrives in the wrong language beats one that does not arrive,
+ * and the fallback is visible in the mail rather than only in a log.
+ */
+export function buildEmailNotice({ seq, items = [], today, issueUrl, hebrew }) {
+  const skeleton = buildEmailSkeleton({ seq, items, today, issueUrl });
+  const body = (hebrew && String(hebrew).trim()) || skeleton;
+  const usedFallback = !(hebrew && String(hebrew).trim());
+
+  const subject = items.length
+    ? `המשרד ממתין להחלטה שלך — ${items.length} פריטים (#${seq ?? '?'})`
+    : `המשרד: אין מה שדורש אותך השבוע (#${seq ?? '?'})`;
+
+  const esc = (s) => String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const html = `<div dir="rtl" style="font-family:Arial,Helvetica,sans-serif;max-width:600px;font-size:15px;line-height:1.7;">
+  <h2 style="color:#4F46E5;margin:0 0 4px;">הודעה מהמשרד #${esc(seq ?? '?')}</h2>
+  <div style="color:#888;font-size:12px;margin-bottom:16px;">${esc(today)}</div>
+  ${usedFallback ? '<div dir="ltr" style="background:#FEF3C7;padding:8px;font-size:12px;margin-bottom:12px;">Hebrew composition failed — the notice below is the office\'s raw English skeleton. The content is complete; only the language is wrong.</div>' : ''}
+  <div style="white-space:pre-wrap;">${esc(body)}</div>
+  ${issueUrl ? `<p style="margin-top:20px;"><a href="${esc(issueUrl)}" style="color:#4F46E5;">לפרטים המלאים ולתשובה — פתח את ההודעה כאן</a></p>` : ''}
+  <p style="font-size:12px;color:#888;margin-top:20px;">
+    אפשר לענות ישירות בתגובה על ההודעה בקישור למעלה. המשרד קורא את התגובות ורושם אותן ביומן הקבוע שלו.
+  </p>
+</div>`;
+
+  return { subject, html, text: body, usedHebrew: !usedFallback, skeleton };
 }
 
 export function buildIssueTitle({ seq, kind, items, today }) {
@@ -312,7 +586,8 @@ export function buildIssueTitle({ seq, kind, items, today }) {
  * @param {object}   deps            { postIssue(env, {title, body, labels}) }
  * @param {object}   input           { items, today, isHeartbeatDay, force }
  */
-export async function notifyOwner(env, deps, { items = [], today, isHeartbeatDay = false, force = false } = {}) {
+export async function notifyOwner(env, deps, { items: selected = [], today, isHeartbeatDay = false, force = false } = {}) {
+  let items = selected;
   if (!force && !(await ownerChannelEnabled(env))) {
     return { sent: false, skipped: true, reason: 'owner_channel_disabled' };
   }
@@ -321,8 +596,35 @@ export async function notifyOwner(env, deps, { items = [], today, isHeartbeatDay
   // the module that is not a failure. The heartbeat is what makes this silence
   // safe — without it, "we had nothing to say" would be indistinguishable from
   // "we could not send", which is the exact property that disqualified email.
+  // ── THE GATE (ITEM E3, 2026-08-23) — A FILTER, NOT A PROMPT INSTRUCTION ──
+  //
+  // An item that cannot state all three parts is not a notification. It is a
+  // log entry, and it does not become an Issue.
+  //
+  // Measured against the live channel the day this landed: notification #11
+  // carried SIX items and exactly ONE stated all three. The other five were
+  // `Issue #36`..`#40` — the office notifying the client that it had already
+  // notified him, with no options and no stated default, once per day, for
+  // thirteen days. That is the volume he has been receiving, and it is why a
+  // gate is code here rather than a sentence in a prompt: the items that fail
+  // are generated by the office's own escalation ladder, and a ladder cannot
+  // be asked to be more selective about itself.
+  //
+  // `gated` is RETURNED, never dropped in silence — this file's whole subject
+  // is channels that lose things without either end noticing.
+  const { notifiable, gated } = gateNotificationItems(items);
+  if (gated.length) {
+    console.warn(`[owner-notify] ${gated.length} item(s) held back from the notification — they cannot state all three parts: `
+      + gated.map((g) => `${g.id} (missing ${g.missing.join(', ')})`).join('; ')
+      + '. They are in the daily report, not in front of the client.');
+  }
+  items = notifiable;
+
   if (!items.length && !isHeartbeatDay) {
-    return { sent: false, skipped: true, reason: 'nothing_to_report_and_not_heartbeat_day' };
+    return {
+      sent: false, skipped: true, gated,
+      reason: 'nothing_notifiable_and_not_heartbeat_day',
+    };
   }
 
   const kind = items.length ? 'submission' : 'heartbeat';
@@ -351,7 +653,7 @@ export async function notifyOwner(env, deps, { items = [], today, isHeartbeatDay
       + 'The office believes it has NOT reached him. This is recorded in owner_notifications and is not a silent failure.');
   }
 
-  return { sent: ok, skipped: false, seq, kind, title, status: res?.status, reason: ok ? null : (res?.reason || `HTTP ${res?.status}`) };
+  return { sent: ok, skipped: false, seq, kind, title, gated, status: res?.status, reason: ok ? null : (res?.reason || `HTTP ${res?.status}`) };
 }
 
 /**
