@@ -30,6 +30,7 @@ import {
   routeTask,
   resolveLane,
   routingEnabled,
+  routerModelTargets,
   assignEmbodiment,
   renderEmbodimentMap,
   // `checkProviderAllowance` was imported here for the retired wrapper below
@@ -436,6 +437,11 @@ export function resolveImageRoles() {
 
 export {
   routingEnabled,
+  // The five router-side model identifiers, for the weekly catalogue-retirement
+  // check (2026-08-23, workers/model-catalog.js). Re-exported here for the same
+  // reason everything else in this block is: agent-runner.js takes routing
+  // through model-router.js, not through task-router.js directly.
+  routerModelTargets,
   assignEmbodiment,
   renderEmbodimentMap,
   recordProviderCall,

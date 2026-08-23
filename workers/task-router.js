@@ -1358,3 +1358,38 @@ export async function routeTask({
     role: resolved.role,
   };
 }
+
+/* ────────────────── The configured model identifiers (2026-08-23) ─────────── */
+
+/**
+ * Every model identifier the ROUTER's providers are configured to send, as
+ * catalogue-check targets for `workers/model-catalog.js`.
+ *
+ * ── WHY IT IS HERE AND NOT IN THE CHECKER ────────────────────────────────
+ *
+ * `scripts/verify-providers.js` enforces that `cerebras-client.js`,
+ * `mistral-client.js` and `cohere-client.js` are imported by NOTHING but this
+ * file, by any symbol — the containment rule that keeps a provider call from
+ * bypassing the kill switch and the quota check. So the checker cannot read
+ * their `DEFAULT_MODEL`s itself, and this module, which already holds all five
+ * clients, hands them over.
+ *
+ * That constraint produced the right design anyway: the identifiers travel from
+ * the ONE place each is defined. A retirement checker holding its own copy of a
+ * model ID verifies its copy, not the config, and would have stayed green
+ * through every one of the five retirements this estate has already had.
+ *
+ * NOT a routing path and not a call — a plain read of five descriptor objects.
+ * Anthropic is absent from `PROVIDER_REGISTRY` and therefore absent here, which
+ * is the containment rule holding; the Guides pipeline's `claude-sonnet-5` is
+ * added by `agent-runner.js` from `claude-client.js`, its own definition site.
+ */
+export function routerModelTargets() {
+  return [
+    { provider: 'cerebras', model: CEREBRAS_PROVIDER.defaultModel, configuredIn: ['workers/cerebras-client.js DEFAULT_MODEL', 'config/token-economy.json providers.cerebras._model_note'] },
+    { provider: 'mistral', model: MISTRAL_PROVIDER.defaultModel, configuredIn: ['workers/mistral-client.js DEFAULT_MODEL'] },
+    { provider: 'cohere', model: COHERE_PROVIDER.defaultModel, configuredIn: ['workers/cohere-client.js DEFAULT_MODEL'] },
+    { provider: 'cloudflare-images', model: CF_IMAGE_PROVIDER.defaultModel, configuredIn: ['workers/cf-image-client.js DEFAULT_MODEL', 'config/token-economy.json providers.cloudflare_images.default_model'] },
+    { provider: 'gemini-images', model: GEMINI_IMAGE_PROVIDER.defaultModel, configuredIn: ['workers/gemini-image-client.js DEFAULT_MODEL', 'config/token-economy.json providers.gemini_images.default_model'] },
+  ].filter((t) => !!t.model);
+}

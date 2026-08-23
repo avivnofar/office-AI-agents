@@ -617,7 +617,13 @@ check('primary_case_model no longer names the decommissioned llama3-8b-8192',
 // is what actually gets sent. They disagreed for no one's benefit before, and a
 // verifier that reads only the config would have stayed green through it.
 {
-  const codeModel = (groqSrc.match(/^const GROQ_MODEL = '([^']+)'/m) || [])[1];
+  // `export const` since 2026-08-23 (Session 14, ITEM C — the weekly catalogue
+  // check reads the identifier from its definition site rather than carrying a
+  // copy). The `export ` is OPTIONAL in this pattern rather than required: this
+  // check is about the VALUE agreeing with the config, and an anchor that also
+  // pinned the declaration keyword turned a legitimate export into a red line
+  // that read as a model drift.
+  const codeModel = (groqSrc.match(/^(?:export )?const GROQ_MODEL = '([^']+)'/m) || [])[1];
   const configModel = String(tokenEconomy.primary_case_model || '').replace(/^groq\//, '');
   check(`groq-client.js GROQ_MODEL ("${codeModel}") matches token-economy primary_case_model ("${configModel}")`,
     Boolean(codeModel) && codeModel === configModel);

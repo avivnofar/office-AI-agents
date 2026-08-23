@@ -27,7 +27,13 @@
 
 import { NOT_REPORTED } from './provider-common.js';
 
-const CF_WORKERS_AI_MODEL = '@cf/meta/llama-3.1-8b-instruct-fp8';
+// EXPORTED 2026-08-23 (Session 14, ITEM C) so the weekly retirement check names
+// the identifier from THE ONE PLACE IT IS DEFINED. Workers AI publishes no
+// catalogue the `AI` binding can list from inside a Worker, so this one comes
+// back `not_checkable` WITH the command that does answer it — reported rather
+// than omitted, because a checker that silently skips what it cannot see
+// reports the same "0 problems" it would report if everything were fine.
+export const CF_WORKERS_AI_MODEL = '@cf/meta/llama-3.1-8b-instruct-fp8';
 
 /**
  * ══════════════════════════════════════════════════════════════════════════

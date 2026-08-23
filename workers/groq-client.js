@@ -45,7 +45,11 @@ const GROQ_ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
  * out from under it (gemini-3.5-flash, gemini-2.5-flash, cerebras
  * llama-3.3-70b, and now this one).
  */
-const GROQ_MODEL = 'llama-3.1-8b-instant';
+// EXPORTED 2026-08-23 (Session 14, ITEM C) so that `workers/model-catalog.js`'s
+// weekly retirement check reads the identifier from THE ONE PLACE IT IS
+// DEFINED rather than carrying a sixth copy of it. A checker comparing its own
+// copy against a provider is checking nothing.
+export const GROQ_MODEL = 'llama-3.1-8b-instant';
 
 /**
  * @param {object} opts

@@ -56,9 +56,9 @@ import { StubAgent } from '../agents/agent-stub.js';
 
 import { runMeeting, MEETING_TYPES, writeActionItemsToBoard, actionItemsToBoardEnabled } from './meeting-engine.js';
 import { normalizeActionItems } from './meeting-decisions.js';
-import { callCFRouter, callGemini } from './gemini-client.js';
+import { callCFRouter, callGemini, CF_WORKERS_AI_MODEL } from './gemini-client.js';
 import { generateAssignedDailyBatch, persistQuestions } from './qa-engine.js';
-import { getClaudeBudgetStatus, recordClaudeSpend, routeTaskTypeCall, resolveTaskLane, getRoutingQuotaStatus, resolveImageRoles, MODEL_ROUTING } from './model-router.js';
+import { getClaudeBudgetStatus, recordClaudeSpend, routeTaskTypeCall, resolveTaskLane, getRoutingQuotaStatus, resolveImageRoles, routerModelTargets, MODEL_ROUTING } from './model-router.js';
 // The image lane (2026-08-10, plan 5.1) — the Designer's first means of doing
 // the work the bible has described her doing since 2026-08-05. listImageCapableModels()
 // is a LIVE CATALOG read-back and is imported for the `image_catalog` trigger:
@@ -154,7 +154,15 @@ import {
   TICK_TAIL_RESERVE, TICK_TAIL_RESERVE_NO_CASES, FINALIZE_RESERVE, recordAdmissions,
 } from './subrequest-budget.js';
 import { checkGeminiPacingSlot } from './gemini-pacer.js';
-import { callClaudeMessages } from './claude-client.js';
+import { callClaudeMessages, CLAUDE_MODEL } from './claude-client.js';
+// ── THE WEEKLY MODEL-RETIREMENT CHECK (2026-08-23, Session 14 ITEM C) ──────
+// Five model identifiers have been retired out from under this project and
+// nothing has ever checked for the sixth. `GROQ_MODEL` and `CLAUDE_MODEL` are
+// imported FROM THEIR DEFINITION SITES, and the router's five come through
+// routerModelTargets() for the same reason — a checker that holds its own copy
+// of a model ID checks its copy, not the config.
+import { checkModelCatalogs, renderCatalogSummary, NOT_CHECKABLE_PROVIDERS } from './model-catalog.js';
+import { GROQ_MODEL } from './groq-client.js';
 import {
   selectGuideTopic, buildDraftPrompt, isSplitRecommendation, pickWriterAgentId,
   insertGuidePipelineRow, updateGuidePipelineRow, getTodayDraftRow,
@@ -828,6 +836,52 @@ async function fetchOwnerIssueComments(env, repoName, issueNumber) {
  * unchanged). A reply the office transcribed is the OFFICE's record of what he
  * said, and it must not be mistakable for a file he wrote himself.
  */
+/**
+ * Every model identifier this estate has configured, as catalogue-check targets.
+ *
+ * ── THE ONE PLACE THE LIST IS ASSEMBLED, AND NOWHERE THE IDs ARE WRITTEN ──
+ *
+ * Not one identifier is spelled in this function. Each is imported from the
+ * module that defines it — `GROQ_MODEL`, `CLAUDE_MODEL`, `CF_WORKERS_AI_MODEL`,
+ * the Gemini chat model out of `config/simulation-config.json`, and the router's
+ * five through `routerModelTargets()`. That is the whole point: a retirement
+ * checker holding its own copy of a model ID verifies its copy, and would have
+ * stayed green through all five retirements this project has already had.
+ *
+ * `configuredIn` names every OTHER place the same identifier is written, so a
+ * red result tells whoever reads it which files have to move together. That
+ * list IS hand-maintained and will drift; it is documentation attached to the
+ * finding, never the thing being checked.
+ */
+function configuredModelTargets(env) {
+  const geminiChatModel = (env?.SIM_CONFIG?.GEMINI?.model) || simulationConfig?.GEMINI?.model || null;
+  return [
+    {
+      provider: 'groq',
+      model: GROQ_MODEL,
+      configuredIn: ['workers/groq-client.js GROQ_MODEL', 'config/token-economy.json primary_case_model'],
+    },
+    {
+      provider: 'gemini',
+      model: geminiChatModel,
+      configuredIn: ['config/simulation-config.json GEMINI.model', 'config/token-economy.json report_model', 'config/agents-config.json (per-agent ai_tools.model)', 'agents/agent-base.js _askNotebookX() literal fallback'],
+    },
+    {
+      provider: 'anthropic',
+      model: CLAUDE_MODEL,
+      configuredIn: ['workers/claude-client.js CLAUDE_MODEL', 'config/token-economy.json app_search_model (documentation only)'],
+    },
+    {
+      // Reported as `not_checkable`, deliberately, rather than left out. See
+      // model-catalog.js NOT_CHECKABLE_PROVIDERS.
+      provider: 'cloudflare-ai',
+      model: CF_WORKERS_AI_MODEL,
+      configuredIn: ['workers/gemini-client.js CF_WORKERS_AI_MODEL', 'config/token-economy.json routing_model'],
+    },
+    ...routerModelTargets(),
+  ].filter((t) => !!t.model);
+}
+
 async function recordIssueReplies(env, recordRepo, issueReadback) {
   const recorded = [];
   for (const ir of issueReadback || []) {
@@ -6951,6 +7005,53 @@ export default {
                 result: { ...result.result, base64: `[${result.result.bytes} bytes elided — use {"type":"design_asset"} to write it to a repo]` },
               };
             }
+            break;
+          }
+          /*
+           * ── THE MODEL-RETIREMENT CHECK (2026-08-23, Session 14 ITEM C) ────
+           *
+           * `image_catalog` above asks AD-030 check 1 of the two IMAGE models.
+           * This asks it of EVERY configured model identifier in the estate, on
+           * a weekly schedule, because the five retirements this project has
+           * survived were each found by something breaking rather than by
+           * anything looking.
+           *
+           * NOT gated behind a kill switch and not admin-tier-restricted beyond
+           * the admin token every trigger already needs: it makes no generation
+           * call, spends no budget, and reads one listing endpoint per provider.
+           * A check that can be switched off is a check that will be found off.
+           *
+           * `probeModels` is the RED PROOF, and it is a first-class part of the
+           * endpoint rather than a test hook bolted on. Pass
+           * `[{"provider":"groq","model":"not-a-real-model"}]` and the run goes
+           * red on a value that was deliberately injected — which is how anyone
+           * confirms the check still works without waiting for a real
+           * retirement. Probe entries are marked `probe:true` everywhere they
+           * are rendered so a probe can never be mistaken for a config finding.
+           * The estate has a documented case of a health check that was green
+           * partly because failure was being recorded as activity; a checker
+           * nobody has watched fail is not known to work.
+           */
+          case 'model_catalog': {
+            const probes = Array.isArray(body.probeModels) ? body.probeModels : [];
+            const targets = [
+              ...configuredModelTargets(env),
+              ...probes
+                .filter((p) => p && p.provider && p.model)
+                .map((p) => ({ provider: String(p.provider), model: String(p.model), probe: true, configuredIn: ['NOT CONFIGURED ANYWHERE — injected by this call to prove the check can go red'] })),
+            ];
+            const report = await checkModelCatalogs({ targets, env });
+            result = {
+              ...report,
+              // The catalogues themselves are large and are the least useful
+              // part of the answer; the SIZE is what tells you the listing was
+              // real. Full lists stay available per provider for a manual read.
+              providers: Object.fromEntries(Object.entries(report.providers).map(([k, v]) => [k, { ...v, catalog: v.catalog ? `[${v.catalog.length} ids elided — pass {"verbose":true} to see them]` : null }])),
+              summary: renderCatalogSummary(report),
+              notCheckable: NOT_CHECKABLE_PROVIDERS,
+              probesInjected: probes.length,
+            };
+            if (body.verbose) result.providers = report.providers;
             break;
           }
           case 'image_catalog': {
