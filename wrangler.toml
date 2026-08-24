@@ -50,6 +50,47 @@ service = "data-center-api"
 [version_metadata]
 binding = "CF_VERSION_METADATA"
 
+# Workers Logs - OWNED HERE, NOT BY THE DASHBOARD.
+#
+# Added 2026-08-24. The owner enabled Workers Logs for this Worker through the
+# Cloudflare dashboard earlier the same day. That setting is owned by THIS
+# FILE: a deploy from a config with no [observability] block turns it back off
+# silently, with no error and no warning in the deploy output. Logs would have
+# stopped and nothing would have said so until someone went looking - which is
+# this estate's most-documented failure shape, and the same one the
+# [version_metadata] block above exists to answer.
+#
+# Putting it in the config is the whole point. A dashboard toggle is exactly
+# what the next deploy destroys; a committed block is what survives one.
+#
+# head_sampling_rate = 1 means KEEP EVERYTHING, and that is deliberate rather
+# than lazy. The cron below fires 21 times a day; the Workers Free plan allows
+# 200,000 log events a day. Sampling below 1 would discard evidence to save
+# headroom this Worker has no way to consume, and the events discarded would
+# be exactly the rare ones worth having - a scheduled block that threw, a
+# swallowed D1 read, a stale bundle answering. Raise the sample only if the
+# daily event count ever approaches the allowance, which at this volume it
+# will not.
+#
+# invocation_logs = true keeps the per-invocation record (start, outcome,
+# duration) and not only what the code chose to print. A tick that died before
+# reaching any console.warn leaves no application log at all; the invocation
+# log is the only thing that records it happened. That is precisely the shape
+# of logScheduledError(), whose swallowed catch means the error AND the record
+# of the error both vanish.
+#
+# RETENTION IS THREE DAYS on this plan, on a rolling window. The logs are
+# pulled into back-office-AI-agents daily for exactly that reason - see that
+# repo's .github/workflows/pull-worker-logs.yml. This block makes the logs
+# exist; that workflow is what makes them outlive the window.
+[observability]
+enabled = true
+
+[observability.logs]
+enabled = true
+invocation_logs = true
+head_sampling_rate = 1
+
 # Workers AI — case routing/classification (callCFRouter()) and the
 # fallback when Groq is unavailable or Gemini returns 429 (quota exhausted).
 # Account-scoped binding, no extra credentials needed. See
