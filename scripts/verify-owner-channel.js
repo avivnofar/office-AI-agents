@@ -31,6 +31,8 @@ import {
   classifyOwnerIssueReadback, messageAddressesAgent,
   // SESSION 14 (2026-08-23), ITEM B: the client's Issue replies.
   OWNER_ISSUE_REPLIES_DIR, parseIssueReply, issueReplySections,
+  // SESSION 15 (2026-08-24), ITEM D: a reply stops the repeat.
+  classifyOwnerReply, itemIdsInText, RERAISE_AFTER_DAYS,
 } from '../workers/owner-channel.js';
 import {
   ownerChannelEnabled, notifyOwner, selectNotificationItems,
@@ -1165,6 +1167,90 @@ section('§12 the client\'s Issue replies — filed, versioned, and (until today
   check('...while any OTHER failure says the client\'s replies are missing from the context',
     /THE CLIENT'S REPLIES ARE NOT IN THIS CONTEXT/.test(ctxSrc));
 }
+
+/* ── A REPLY STOPS THE REPEAT (2026-08-24) ──────────────────────────────── */
+section('A reply stops the repeat — the live S-002 / Issue #47 case');
+
+/*
+ * NOT a constructed example. These three values are the live state of
+ * 2026-08-24, read this session:
+ *
+ *   - S-002 is the ONLY open submission in `channel/to-owner/SUBMISSIONS.md`.
+ *     Its heading ends `— APPROVED, then RESCINDED`, deliberately not one of
+ *     the four markers `parseSubmissions()` recognises, so `marker === null`
+ *     and it parses as OPEN. That is why it kept being selected.
+ *   - Issue #47 in the PUBLIC repo carries it, under a `### S-002 — ...`
+ *     heading, which is what makes the attribution readable.
+ *   - The owner commented on #47 on 2026-08-23T12:39:44Z. That reply was read,
+ *     recorded and committed — and the item was sent to him again the next day.
+ */
+const ISSUE_47_BODY = [
+  '## What needs you',
+  '',
+  '### S-002 — The internal site: `/owner` is live; deploying the fuller `office-site` needs one decision that is yours — APPROVED, then RESCINDED',
+  '*OVERDUE — 13 day(s) unanswered*',
+].join('\n');
+const REPLY_AT = '2026-08-23T12:39:44Z';
+
+check('the Issue body is where the item id is readable — the heading survives stripOfficeIds()',
+  itemIdsInText(ISSUE_47_BODY).join(',') === 'S-002', itemIdsInText(ISSUE_47_BODY).join(','));
+check('an id boundary is required — `S-2` must not match inside `S-20`',
+  itemIdsInText('S-020 and S-002').join(',') === 'S-002,S-020');
+check('board ids are not owner-decision items and are not picked up',
+  itemIdsInText('OB-060 and REQ-003').length === 0);
+
+const activity = [{ itemId: 'S-002', at: REPLY_AT, source: 'your comment on Issue #47' }];
+const dayAfter = classifyOwnerReply('S-002', activity, '2026-08-24');
+check('[FAILS-OLD] the client’s comment is seen as activity on S-002',
+  dayAfter.replied === true && dayAfter.days === 1);
+check('...and it is NOT re-raised the next day', dayAfter.reRaise === false);
+
+const openS002 = {
+  id: 'S-002', open: true, title: 'The internal site', escalation: { rung: 'OVERDUE', days: 13 },
+  did: 'x', recommend: 'y', decision: 'z', fallback: 'w',
+};
+const beforeSel = selectNotificationItems({ submissions: [openS002] });
+const afterSel = selectNotificationItems({ submissions: [openS002], ownerReplies: { 'S-002': dayAfter } });
+check('[FAILS-OLD] S-002 WAS selected under the old predicate — the repeat is measured, not assumed',
+  beforeSel.some((i) => i.id === 'S-002'));
+check('[FAILS-OLD] D5: S-002 is NOT selected once his reply is known',
+  !afterSel.some((i) => i.id === 'S-002'), JSON.stringify(afterSel.map((i) => i.id)));
+
+// D3 — once, and not permanently invisible.
+const atRung = classifyOwnerReply('S-002', activity, '2026-08-30');
+const pastRung = classifyOwnerReply('S-002', activity, '2026-08-31');
+check(`D3: it comes back exactly once, on day ${RERAISE_AFTER_DAYS}`, atRung.reRaise === true);
+check('D3: and is quiet again the day after — once, not daily', pastRung.replied === true && pastRung.reRaise === false);
+const reRaised = selectNotificationItems({ submissions: [openS002], ownerReplies: { 'S-002': atRung } });
+check('D3: the single re-raise really reaches the notification',
+  reRaised.some((i) => i.id === 'S-002' && i.reRaised === true));
+check('D3: and it says what is MISSING — the `Decision:` field is still empty',
+  /Decision:` field in `SUBMISSIONS.md` is still empty/.test(reRaised.find((i) => i.id === 'S-002')?.age || ''));
+check('D4: the office states the field is empty and never rules on whether his reply answered',
+  /If your reply was the decision, say so/.test(reRaised.find((i) => i.id === 'S-002')?.age || ''));
+
+// The safe direction: a failure must never read as "he answered everything".
+check('an unreadable activity date does NOT silence an item — it keeps being asked',
+  (() => {
+    const r = classifyOwnerReply('S-002', [{ itemId: 'S-002', at: 'not-a-date', source: 'x' }], '2026-08-24');
+    return r.replied === false && r.dateUnreadable === true
+      && selectNotificationItems({ submissions: [openS002], ownerReplies: { 'S-002': r } }).some((i) => i.id === 'S-002');
+  })());
+check('an empty reply map suppresses nothing — every pre-existing caller is unaffected',
+  JSON.stringify(selectNotificationItems({ submissions: [openS002], ownerReplies: {} }))
+  === JSON.stringify(beforeSel));
+check('one item’s reply never silences another’s',
+  selectNotificationItems({
+    submissions: [openS002, { ...openS002, id: 'S-003' }],
+    ownerReplies: { 'S-002': dayAfter },
+  }).map((i) => i.id).join(',') === 'S-003');
+check('a question is gated by the same predicate, not a second copy of it',
+  selectNotificationItems({
+    questions: [{ id: 'Q-001', open: true, question: 'q', escalation: { rung: 'OVERDUE', days: 9, inNotification: true } }],
+    ownerReplies: { 'Q-001': classifyOwnerReply('Q-001', [{ itemId: 'Q-001', at: REPLY_AT, source: 's' }], '2026-08-24') },
+  }).length === 0);
+check('owner-notify.js STILL imports nothing — the classification is passed in, not imported',
+  !/^import\s/m.test(fs.readFileSync(path.join(ROOT, 'workers', 'owner-notify.js'), 'utf8')));
 
 console.log(`  ${pass} passed, ${fail} failed`);
 if (fail) {

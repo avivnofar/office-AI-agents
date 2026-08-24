@@ -110,7 +110,7 @@ import {
 // the visual page over it are the office's work and are on the board.
 import {
   READ_LOG_PATH, readKey, parseReadLog, renderReadLog, recordOwnerRead, ageQuestions,
-  parseOwnerMessage, classifyOwnerIssueReadback,
+  parseOwnerMessage, classifyOwnerIssueReadback, classifyOwnerReply, itemIdsInText, RERAISE_AFTER_DAYS,
 } from './owner-channel.js';
 // The owner's PAGE (2026-08-10, REQ-003) — the presentation layer over the
 // channel, which is the office's work. The FOLDER CONTRACT is not: an office that
@@ -754,6 +754,11 @@ async function fetchOwnerChannelIssues(env, repoName) {
     const data = await res.json();
     return (Array.isArray(data) ? data : []).map((it) => ({
       number: it.number, title: it.title, createdAt: it.created_at, state: it.state, comments: it.comments,
+      // 2026-08-24. The BODY is where each item is named — `buildIssueBody()`
+      // renders one `### S-002 — ...` heading per item, and `stripOfficeIds()`
+      // only strips the one ask sentence, never the heading. Without this the
+      // office knows he commented and cannot tell WHICH item he commented on.
+      body: String(it.body || ''),
     }));
   } catch (err) {
     console.warn(`[owner-channel] could not read back owner-channel Issues — ${err?.message || err}`);
@@ -882,14 +887,21 @@ function configuredModelTargets(env) {
   ].filter((t) => !!t.model);
 }
 
-async function recordIssueReplies(env, recordRepo, issueReadback) {
+async function recordIssueReplies(env, recordRepo, issueReadback, commentsByIssue = null) {
   const recorded = [];
   for (const ir of issueReadback || []) {
     if (!ir.hasReply || !ir.comments) continue;
     // PER-ITEM, never one global target — see readBackOwnerIssues() below for
     // why the office reads two repositories and files into one.
     const issueRepo = ir.repo || OWNER_NOTIFY_REPO;
-    const comments = await fetchOwnerIssueComments(env, issueRepo, ir.number);
+    // 2026-08-24: the same comments are now needed BEFORE selection, to decide
+    // whether he has already answered an item. Fetching them twice in one
+    // invocation would double this path's subrequests for no new information,
+    // so the caller fetches once and hands the map down. `null` keeps the
+    // original behaviour for any caller that does not.
+    const comments = commentsByIssue
+      ? (commentsByIssue.get(`${issueRepo}#${ir.number}`) || [])
+      : await fetchOwnerIssueComments(env, issueRepo, ir.number);
     for (const c of comments) {
       const date = String(c.createdAt || '').slice(0, 10) || todayDateStr();
       const path = `channel/from-owner-issues/${date}-issue-${ir.number}-comment-${c.id}.md`;
@@ -983,6 +995,83 @@ async function readBackOwnerIssues(env, today) {
     for (const entry of classified) out.push({ ...entry, repo });
   }
   return out;
+}
+
+/**
+ * Every owner comment on every owner-channel Issue that has one, fetched ONCE.
+ *
+ * Keyed `<repo>#<number>` because Issue numbers are per-repository and the
+ * office reads two — the same reason `readBackOwnerIssues()` tags each entry
+ * with its repo. `fetchOwnerIssueComments()` already filters to the owner's own
+ * login, so nothing here has to decide whose words these are.
+ */
+async function readOwnerIssueComments(env, issueReadback) {
+  const byIssue = new Map();
+  for (const ir of issueReadback || []) {
+    if (!ir.hasReply || !ir.comments) continue;
+    const repo = ir.repo || OWNER_NOTIFY_REPO;
+    byIssue.set(`${repo}#${ir.number}`, await fetchOwnerIssueComments(env, repo, ir.number));
+  }
+  return byIssue;
+}
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ * WHAT THE OWNER HAS ACTUALLY DONE ABOUT EACH ITEM (2026-08-24)
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * The office notified daily on every submission with no decision marker, and
+ * that was the only question it asked. He answered Issue #47 on 2026-08-23 —
+ * in the place the Issue tells him to answer — and the office read the reply,
+ * recorded it, committed it to `channel/from-owner-issues/`, and sent him the
+ * same item again the next morning, because a comment does not fill a
+ * `Decision:` field.
+ *
+ * This is the missing join. It is a NEW PREDICATE OVER EXISTING READERS: no
+ * new API, no new secret, no new table. Two sources, both already read:
+ *
+ *   1. a comment HE wrote on an Issue, attributed to every item that Issue
+ *      named. The body carries `### S-002 — ...` per item, so the attribution
+ *      is read off the artifact rather than guessed.
+ *   2. a file he wrote into `channel/from-owner/` naming an item id.
+ *
+ * The third source — the `Decision:` field itself — is not here because
+ * `parseSubmissions()` already handles it: a marked entry is not open, and a
+ * non-open entry never reaches the selector at all.
+ *
+ * CANNOT THROW, and an unreadable source yields NO entry rather than a false
+ * one. Getting this wrong in the silencing direction would make the office go
+ * quiet on something he never answered, which is worse than the repetition
+ * being fixed — so every failure here fails toward still notifying him.
+ */
+function buildOwnerReplies(issueReadback, commentsByIssue, ownerMessages, today) {
+  const activity = [];
+
+  for (const ir of issueReadback || []) {
+    const ids = itemIdsInText(ir?.body || '');
+    if (!ids.length) continue;
+    const repo = ir.repo || OWNER_NOTIFY_REPO;
+    for (const c of commentsByIssue?.get(`${repo}#${ir.number}`) || []) {
+      if (!c?.createdAt) continue;
+      for (const id of ids) {
+        activity.push({ itemId: id, at: c.createdAt, source: `your comment on Issue #${ir.number}` });
+      }
+    }
+  }
+
+  for (const m of ownerMessages || []) {
+    const ids = itemIdsInText(`${m?.title || ''}\n${m?.body || ''}`);
+    if (!ids.length || !m?.date) continue;
+    for (const id of ids) {
+      activity.push({ itemId: id, at: m.date, source: `your file \`${m.filename || m.id}\`` });
+    }
+  }
+
+  const replies = {};
+  for (const id of new Set(activity.map((a) => a.itemId))) {
+    replies[id] = classifyOwnerReply(id, activity, today);
+  }
+  return { replies, activity };
 }
 
 /**
@@ -1870,10 +1959,38 @@ async function processOwnerChannelBlock(env, opts = {}) {
   const issueReadback = await readBackOwnerIssues(env, today);
   out.issueReadback = issueReadback;
 
+  // A REPLY STOPS THE REPEAT (2026-08-24). Read his comments ONCE — the
+  // record-keeping below reuses this same map rather than fetching again.
+  const issueComments = await readOwnerIssueComments(env, issueReadback)
+    .catch((err) => {
+      // Fail toward NOTIFYING. An unreadable comment list must never be read as
+      // "he answered everything" — that would silence the channel on the
+      // strength of a failure.
+      out.errors.push(`Could not read client comments on the owner-channel Issues — ${err?.message || err}.`
+        + ' Items he has already answered may be repeated in this notification.');
+      return new Map();
+    });
+  const { replies: ownerReplies, activity: ownerActivity } = buildOwnerReplies(
+    issueReadback, issueComments, snapshot.owner?.messages || [], today,
+  );
+  out.ownerReplies = ownerReplies;
+  out.ownerActivity = ownerActivity;
+  const suppressed = Object.entries(ownerReplies).filter(([, r]) => r.replied && !r.reRaise);
+  if (suppressed.length) {
+    console.log(`[owner-channel] ${suppressed.length} item(s) NOT repeated — the client answered them: `
+      + suppressed.map(([id, r]) => `${id} (${r.source}, ${r.days}d ago)`).join(', '));
+  }
+  const reRaised = Object.entries(ownerReplies).filter(([, r]) => r.reRaise);
+  if (reRaised.length) {
+    console.log(`[owner-channel] ${reRaised.length} item(s) raised ONCE more at ${RERAISE_AFTER_DAYS} days `
+      + `with the Decision field still empty: ${reRaised.map(([id]) => id).join(', ')}. They will not be raised again.`);
+  }
+
   const items = selectNotificationItems({
     submissions: snapshot.submissions?.submissions || [],
     questions: ageQuestions(snapshot.questions?.questions || [], today),
     issueReadback,
+    ownerReplies,
     // 2026-08-23. A refused owner message used to reach only agent prompts,
     // where nobody could act on it (the folder is his, not theirs) and nobody
     // did — for six days, on the first real deliverable he ever assigned. It
@@ -1905,7 +2022,7 @@ async function processOwnerChannelBlock(env, opts = {}) {
   // committed into the channel record so git stays the permanent history —
   // which is the property the old "reply in the repo, not here" instruction was
   // protecting, kept without making the client do the filing.
-  out.issueReplies = await recordIssueReplies(env, OWNER_REPLY_RECORD_REPO, issueReadback)
+  out.issueReplies = await recordIssueReplies(env, OWNER_REPLY_RECORD_REPO, issueReadback, issueComments)
     .catch((err) => {
       out.errors.push(`Could not record client replies from Issue comments — ${err?.message || err}. A reply may have been read and not filed.`);
       return [];
@@ -6213,6 +6330,15 @@ export default {
             const snapshot = await getOfficeSnapshot(env, { allowFetch: true });
             const today = todayDateStr();
             const aged = ageQuestions(snapshot?.questions?.questions || [], today);
+            // Read-only, same two readers the daily block uses. A failure here
+            // yields an EMPTY reply map, which suppresses nothing — the probe
+            // then over-reports rather than under-reports, and over-reporting
+            // is the direction that cannot hide a message from the client.
+            const statusReadback = await readBackOwnerIssues(env, today).catch(() => []);
+            const statusComments = await readOwnerIssueComments(env, statusReadback).catch(() => new Map());
+            const { replies: statusOwnerReplies } = buildOwnerReplies(
+              statusReadback, statusComments, snapshot?.owner?.messages || [], today,
+            );
             result = {
               owner_channel_enabled: await ownerChannelEnabled(env),
               office_context_enabled: await officeContextEnabled(env),
@@ -6231,7 +6357,19 @@ export default {
                 // Same input the block itself passes, so this read-back cannot
                 // report a quieter notification than the one that would be sent.
                 refusedMessages: snapshot?.owner?.malformed || [],
-              }).map((i) => `${i.id} — ${i.title}`),
+                // ...NOR A NOISIER ONE (2026-08-24). The block suppresses an
+                // item the client has already answered; a probe that did not
+                // would report a repeat the office is not going to send, which
+                // is the same defect as the quieter direction, mirrored.
+                ownerReplies: statusOwnerReplies,
+              }).map((i) => `${i.id} — ${i.title}${(statusOwnerReplies[i.id]?.reRaise ? ' [RE-RAISED ONCE — he replied, the Decision field is still empty]' : '')}`),
+              // What he has answered, and is therefore NOT being repeated at
+              // him. Shown rather than merely acted on: "why is this item not
+              // in the notification" is the first question this probe should
+              // be able to answer about its own new silence.
+              answered_not_repeated: Object.entries(statusOwnerReplies)
+                .filter(([, r]) => r.replied && !r.reRaise)
+                .map(([id, r]) => `${id} — ${r.source}, ${r.days}d ago`),
               // THE LOUD HALF. A failed notification stays visible here until it
               // clears, because a channel that only reports its successes is the
               // incumbent this one replaced.
@@ -6257,11 +6395,22 @@ export default {
             const snapshot = await getOfficeSnapshot(env, { allowFetch: true });
             const today = todayDateStr();
             const aged = ageQuestions(snapshot?.questions?.questions || [], today);
+            // The email is a NOTICE ABOUT the same notification, so it must
+            // carry the same items — including the ones the client has already
+            // answered and is no longer being repeated at (2026-08-24).
+            const emailReadback = snapshot?.issueReadback?.length
+              ? snapshot.issueReadback
+              : await readBackOwnerIssues(env, today).catch(() => []);
+            const emailComments = await readOwnerIssueComments(env, emailReadback).catch(() => new Map());
+            const { replies: emailOwnerReplies } = buildOwnerReplies(
+              emailReadback, emailComments, snapshot?.owner?.messages || [], today,
+            );
             const selected = selectNotificationItems({
               submissions: snapshot?.submissions?.submissions || [],
               questions: aged,
-              issueReadback: snapshot?.issueReadback || [],
+              issueReadback: emailReadback,
               refusedMessages: snapshot?.owner?.malformed || [],
+              ownerReplies: emailOwnerReplies,
             });
             // THE GATE (item E). An item that cannot state all three parts is a
             // log entry, not a notification. `gated` is returned, never dropped

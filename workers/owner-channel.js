@@ -1028,6 +1028,121 @@ export function escalationFor(entryDate, today) {
 }
 
 /**
+ * ══════════════════════════════════════════════════════════════════════════
+ * A REPLY STOPS THE REPEAT (2026-08-24)
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * ── WHAT WAS BROKEN ───────────────────────────────────────────────────────
+ *
+ * The office notified daily on every submission whose entry carried no
+ * decision marker, and "carried no marker" was the ONLY question it asked.
+ * The owner replied to Issue #47 on 2026-08-23 — a real answer, in the place
+ * the Issue itself tells him to answer: *"Just reply to this issue."* The
+ * office read it, recorded it, and committed it to
+ * `channel/from-owner-issues/`. Then it sent him the same item again the next
+ * day, because a comment does not fill a `Decision:` field.
+ *
+ * Eleven notifications, one reply, and the reply changed nothing. A channel
+ * that repeats itself after being answered teaches the person on the other end
+ * that answering does not work, which is the one failure this channel cannot
+ * survive.
+ *
+ * ── THE NEW PREDICATE ─────────────────────────────────────────────────────
+ *
+ * Not "has this been decided" but **"has the owner done anything about this
+ * since the office last raised it."** Three kinds of owner activity count, and
+ * the office ALREADY READS ALL THREE — this is a new question asked of
+ * existing readers, not a new reader:
+ *
+ *   1. the `Decision:` field filled / the heading marked  (`parseSubmissions`)
+ *   2. a comment HE wrote on the item's Issue  (`fetchOwnerIssueComments`,
+ *      which already filters to his own login and already returns dates)
+ *   3. a file he wrote into `channel/from-owner/` naming the item
+ *      (`parseOwnerMessage`)
+ *
+ * ── WHY IT STILL COMES BACK, ONCE (D3) ────────────────────────────────────
+ *
+ * A replied item must not become permanently invisible: he may have replied
+ * with something that was not a decision, and the entry's `Decision:` field is
+ * still empty, so the office still cannot record what he chose.
+ *
+ * So it is raised exactly ONCE more, on the day it crosses
+ * `RERAISE_AFTER_DAYS`, and never again. The re-raise says what is MISSING —
+ * the field is empty — and says nothing about whether his reply answered the
+ * question. **The office does not judge his reply.** It cannot, and a machine
+ * ruling on whether a person's sentence counted as an answer is a worse defect
+ * than the repetition this fixes.
+ *
+ * Deliberately STATELESS: the single re-raise is a function of the reply's date
+ * and today's, so no new table, column or flag has to stay true for it. The
+ * cost is that a missed tick on exactly that day (~2.4% tick-miss rate) skips
+ * the re-raise rather than deferring it. That is the safe direction — the
+ * failure is one fewer message to a person who has already answered, and the
+ * entry stays open, stays in the repo, and stays on the meeting agenda.
+ */
+export const RERAISE_AFTER_DAYS = 7;
+
+/**
+ * The office item ids a piece of text names.
+ *
+ * Used against an Issue BODY, which renders each item under its own
+ * `### S-002 — ...` heading, and against a file the owner wrote. `S`/`Q` only:
+ * a board `OB-NNN` is the office's own work and is not a thing he is being
+ * asked to decide here.
+ *
+ * The boundaries matter — without them `S-2` matches inside `S-20`, and one
+ * item's reply would silence another's.
+ */
+export function itemIdsInText(text) {
+  const ids = new Set();
+  for (const m of String(text || '').matchAll(/(^|[^A-Za-z0-9-])([SQ]-\d{3})(?![A-Za-z0-9-])/g)) {
+    ids.add(m[2]);
+  }
+  return [...ids].sort();
+}
+
+/**
+ * Has the owner acted on THIS item, and is today the one day it may be raised
+ * again anyway?
+ *
+ * @param {string} itemId                    e.g. `S-002`
+ * @param {Array<{itemId:string,at:string,source:string}>} ownerActivity
+ * @param {string} today                     YYYY-MM-DD
+ * @returns {{replied:boolean, at:string|null, source:string|null,
+ *            days:number|null, reRaise:boolean, dateUnreadable:boolean}}
+ */
+export function classifyOwnerReply(itemId, ownerActivity = [], today) {
+  const mine = (ownerActivity || [])
+    .filter((a) => a && a.at && String(a.itemId) === String(itemId));
+  if (!mine.length) {
+    return { replied: false, at: null, source: null, days: null, reRaise: false, dateUnreadable: false };
+  }
+
+  // Latest wins. ISO-8601 and YYYY-MM-DD both sort correctly as strings, and
+  // both are what the two sources actually produce.
+  mine.sort((x, y) => String(x.at).localeCompare(String(y.at)));
+  const latest = mine[mine.length - 1];
+  const days = daysBetween(String(latest.at).slice(0, 10), today);
+
+  // AN UNREADABLE DATE DOES NOT SILENCE AN ITEM. The office cannot establish
+  // that he acted after it last asked, so it keeps asking — the same direction
+  // the age ladder takes an unreadable date, and the safe one for a channel
+  // whose characteristic failure is going quiet.
+  if (days === null) {
+    return { replied: false, at: latest.at, source: latest.source || null, days: null, reRaise: false, dateUnreadable: true };
+  }
+
+  return {
+    replied: true,
+    at: latest.at,
+    source: latest.source || null,
+    days,
+    reRaise: days === RERAISE_AFTER_DAYS,
+    dateUnreadable: false,
+  };
+}
+
+/**
  * A submission's required fields.
  *
  * OFFICE-POLICY A8: *"The owner receives finished work, not questions. The

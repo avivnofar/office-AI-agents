@@ -701,8 +701,50 @@ export async function notifyOwner(env, deps, { items: selected = [], today, isHe
  */
 export function selectNotificationItems({
   submissions = [], questions = [], issueReadback = [], refusedMessages = [],
+  /*
+   * ── A REPLY STOPS THE REPEAT (2026-08-24) ────────────────────────────
+   *
+   * The predicate here was "the entry carries no decision marker", and that
+   * was the ONLY question asked. The owner answered Issue #47 on 2026-08-23,
+   * in the place the Issue itself tells him to answer. The office read the
+   * reply, recorded it, committed it — and sent him the same item again the
+   * next day, because a comment does not fill a `Decision:` field. Eleven
+   * notifications, one reply, and the reply changed nothing.
+   *
+   * It is now "no marker AND he has not acted on it since". `ownerReplies` is
+   * `{ [itemId]: { replied, reRaise, at, source, days } }`, already classified
+   * by `owner-channel.js` `classifyOwnerReply()` from the three readers the
+   * office already had: the `Decision:` field, a comment HE wrote on the
+   * item's Issue, and a file he wrote into the channel naming it.
+   *
+   * PASSED IN, not imported. This module imports nothing so
+   * `scripts/verify-owner-channel.js` can load and CALL it, and §the verifier
+   * asserts that — so the classification is done by the caller and the
+   * decision is made here.
+   *
+   * Absent (the default) suppresses nothing, so every pre-existing caller and
+   * every existing test behaves exactly as it did.
+   */
+  ownerReplies = {},
 } = {}) {
   const items = [];
+
+  const replyFor = (id) => (ownerReplies && ownerReplies[id]) || { replied: false, reRaise: false };
+
+  /*
+   * D3 — a replied item does not become permanently invisible. It is raised
+   * exactly ONCE more and then goes quiet for good.
+   *
+   * This sentence says what is MISSING and says NOTHING about whether his
+   * reply answered the question. The office does not judge that, here or
+   * anywhere: a machine ruling on whether a person's sentence counted as an
+   * answer is a worse defect than the repetition this replaces.
+   */
+  const reRaiseNote = (r, where) => `YOU REPLIED on ${String(r.at).slice(0, 10)} (${r.source || 'in the channel'})`
+    + ` — ${r.days} day(s) ago, and the office stopped repeating this. It is raised ONCE more, and it is not`
+    + ` asking you to repeat yourself: the entry's \`Decision:\` field in ${where} is still empty, so the`
+    + ` office has no record of what you decided and cannot mark the entry. If your reply was the decision,`
+    + ` say so and it will be marked. Either way this item will not be raised again.`;
 
   // FIRST in the list, deliberately. Everything else here is work the office
   // did and is showing him; this is work he asked for that never started.
@@ -736,10 +778,16 @@ export function selectNotificationItems({
 
   for (const s of submissions) {
     if (!s.open) continue;
+    const reply = replyFor(s.id);
+    // He acted on it. Silence — except for the one re-raise.
+    if (reply.replied && !reply.reRaise) continue;
     items.push({
       id: s.id,
       title: s.title,
-      age: s.escalation ? `${s.escalation.rung}${s.escalation.days === null ? ' — submission date unreadable' : ` — ${s.escalation.days} day(s) unanswered`}` : null,
+      repliedAt: reply.replied ? reply.at : null,
+      reRaised: !!reply.reRaise,
+      age: reply.reRaise ? reRaiseNote(reply, '`SUBMISSIONS.md`')
+        : s.escalation ? `${s.escalation.rung}${s.escalation.days === null ? ' — submission date unreadable' : ` — ${s.escalation.days} day(s) unanswered`}` : null,
       did: s.did,
       recommend: s.recommend,
       decision: s.decision,
@@ -749,10 +797,15 @@ export function selectNotificationItems({
 
   for (const q of questions) {
     if (!q.open || !q.escalation?.inNotification) continue;
+    const reply = replyFor(q.id);
+    if (reply.replied && !reply.reRaise) continue;
     items.push({
       id: q.id,
       title: q.question,
-      age: `${q.escalation.rung}${q.escalation.days === null ? ' — date unreadable' : ` — ${q.escalation.days} day(s) unanswered`}`,
+      repliedAt: reply.replied ? reply.at : null,
+      reRaised: !!reply.reRaise,
+      age: reply.reRaise ? reRaiseNote(reply, '`OPEN-QUESTIONS.md`')
+        : `${q.escalation.rung}${q.escalation.days === null ? ' — date unreadable' : ` — ${q.escalation.days} day(s) unanswered`}`,
       did: null,
       recommend: null,
       decision: q.need ? `${q.need} — blocking: ${q.blocking || 'unstated'}` : (q.blocking || null),
