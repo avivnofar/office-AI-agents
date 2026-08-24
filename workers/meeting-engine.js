@@ -46,7 +46,7 @@ import { callGemini, callCloudflareFallback } from './gemini-client.js';
 import { callGroq } from './groq-client.js';
 import { commitFileToRepo, BACKOFFICE_REPO_NAME } from './repo-write.js';
 import { getOfficeContext, getOfficeSnapshot } from './office-context.js';
-import { enforceAttendeeGate } from './meeting-attendance.js';
+import { enforceAttendeeGate, GATED_EFFECT_FIELDS } from './meeting-attendance.js';
 import {
   addOfficeDays, normalizeActionItems, renderBoardTask,
   computeWorkflowMetrics, renderWorkflowMetrics,
@@ -1071,7 +1071,9 @@ function renderMeetingReport(meetingType, attendeeSnapshots, transcript, decisio
 > speaking lines attributed to agent(s) **${fab.agent_ids.join(', ')}**, who did not
 > attend. ${fab.refused_action_items?.length
       ? `${fab.refused_action_items.length} action item(s) assigned to them were **refused** and are recorded below rather than acted on.`
-      : 'No action items were assigned to them.'}
+      : 'No action items were assigned to them.'}${fab.refused_effects?.length
+      ? ` ${fab.refused_effects.length} mood/state/config/context effect(s) for them were **refused** and are recorded below rather than applied.`
+      : ''}
 > Composed by \`${fab.composed_by || 'unknown provider'}\`. Detected automatically at composition time.
 
 `
@@ -1079,6 +1081,15 @@ function renderMeetingReport(meetingType, attendeeSnapshots, transcript, decisio
   const refusedList = fab?.refused_action_items?.length
     ? `\n## Refused Action Items (fabricated participation)\n\n${fab.refused_action_items
       .map((it) => `- Agent ${it?.agent_id}: ${it?.task || it?.description || JSON.stringify(it)} — **refused**, this agent did not attend`)
+      .join('\n')}\n`
+    : '';
+
+  // The refusals that used to be applications. Rendered beside the action-item
+  // refusals because they are the same fact about the same meeting, and a
+  // reader shown only half a correction reads it as the whole of one.
+  const refusedEffectsList = fab?.refused_effects?.length
+    ? `\n## Refused Effects (fabricated participation)\n\n${fab.refused_effects
+      .map((r) => `- \`${r?.field}\` for agent(s) ${(r?.refused_for || []).join(', ')}: ${JSON.stringify(r?.entry)} — **refused**, not applied`)
       .join('\n')}\n`
     : '';
 
@@ -1092,7 +1103,7 @@ ${attendeeList}
 ## Transcript
 
 ${transcript}
-${refusedList}
+${refusedList}${refusedEffectsList}
 
 ## Summary
 
@@ -1332,14 +1343,35 @@ export async function runMeeting(meetingType, env, opts = {}) {
     console.warn(
       `[meeting-engine] FABRICATED PARTICIPATION (${meetingType}): agent(s) ${gate.fabricated.join(', ')} `
       + `have speaking lines but are not attendees (${attendeeIds.join(', ')}). `
-      + `${gate.removed.length} action item(s) refused.`,
+      + `${gate.removed.length} action item(s) and ${gate.removedEffects.length} effect(s) refused.`,
     );
     // Refused items are dropped from what the office ACTS on, and carried on
     // the record so the refusal is visible rather than a silent shrink.
     decisions.action_items = gate.kept;
+    /*
+     * -- THE FIVE QUIET FIELDS (2026-08-24) ------------------------------
+     *
+     * This loop is the whole of the fix. `action_items` above has been
+     * filtered since 2026-08-15; the five fields below were handed to
+     * applyMeetingEffects() unfiltered, and it resolves any agent id it is
+     * given via `snapshotsById.get(id) || await loadAgentSnapshot(id, env)`
+     * -- so an agent who was never in the room was simply loaded from
+     * storage and written to. Four applications reached production
+     * (2026-08-19, -21, -23 and -24), including a context_amendments
+     * proposal against Agent 13's character file off a review they did not
+     * attend. The gate caught the loud path and missed the quiet one.
+     *
+     * Same predicate, same gate call, five more fields. What a meeting
+     * COMPOSES is unchanged -- the model may keep inventing attendees; this
+     * is the office declining to act on the invention.
+     */
+    for (const field of GATED_EFFECT_FIELDS) {
+      if (gate.keptEffects[field]) decisions[field] = gate.keptEffects[field];
+    }
     decisions.fabricated_participation = {
       agent_ids: gate.fabricated,
       refused_action_items: gate.removed,
+      refused_effects: gate.removedEffects,
       composed_by: modelResult?.source || null,
     };
   }

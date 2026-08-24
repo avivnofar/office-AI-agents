@@ -9,7 +9,7 @@
  * No network, no D1, no KV. Run: node scripts/verify-attendee-gate.js
  */
 import { readFileSync } from 'node:fs';
-import { transcriptSpeakerIds, enforceAttendeeGate, checkAttribution, attributedAgentIds } from '../workers/meeting-attendance.js';
+import { transcriptSpeakerIds, enforceAttendeeGate, checkAttribution, attributedAgentIds, GATED_EFFECT_FIELDS } from '../workers/meeting-attendance.js';
 
 // The REAL roster, read as data. meeting-attendance.js imports nothing so it
 // can be executed by this verifier rather than regexed; the roster is the
@@ -159,6 +159,133 @@ check('…and no longer carries its own `filter((id) => !attendees.has(id))` cop
   !/attendees\.has\(id\)/.test(gateSrc));
 check('the module still imports nothing, so every gate above is EXECUTED by this file, not regexed',
   !/^import\s/m.test(gateSrc));
+
+/* ── §9  THE FIVE QUIET FIELDS, against the real meeting row ────────────── */
+section('§9  The five unguarded effect fields (2026-08-24) — live meeting 5ee1f725');
+
+/*
+ * Not a constructed example. `decisions` below is copied verbatim from D1:
+ *
+ *   SELECT decisions FROM meetings
+ *    WHERE id = '5ee1f725-4bc4-4be8-8b69-606c39f54957';
+ *
+ * A closing_qa_review held 2026-08-24 12:31:27 UTC. Attendees [6,7,12].
+ * Agent 13 was given speaking lines and was not there. The stored row's own
+ * `fabricated_participation` proves the gate SAW this at composition time and
+ * refused the action item — and the same row carries a mood delta, a state
+ * change and a character-file amendment for Agent 13 that were all applied.
+ *
+ * Four such applications reached production (2026-08-19, -21, -23, -24). This
+ * section is the reason a fifth does not.
+ */
+const liveDecisions = {
+  summary: 'Closing QA Review',
+  mood_effects: [
+    { agent_id: 6, delta: 10, reason: 'productive team interaction' },
+    { agent_id: 13, delta: 10, reason: 'positive feedback' },
+    { agent_id: 7, delta: 5, reason: 'happy team interaction' },
+  ],
+  irritation_effects: [],
+  state_changes: [
+    { agent_id: 6, field: 'isHappy', value: true, reason: 'good team interaction' },
+    { agent_id: 13, field: 'isComplacent', value: false, reason: 'positive feedback' },
+  ],
+  action_items: [],
+  context_amendments: [
+    { agent_id: 13, aspect: 'communication skills', content: 'When flagging findings, be sure to suggest specific actions to prevent future code divergence', proposed_by: 6 },
+  ],
+  config_overrides: [],
+  suggestion_decisions: [],
+  refusals: [],
+};
+const liveTranscript = [
+  '**Agent 6 — The QA**: Reviewing the closing quality picture for today.',
+  '**Agent 7 — The Team Lead**: Worker model looks steady.',
+  '**Agent 12 — The Workflow**: Board is drained.',
+  '**Agent 13 — The Cyber Expert**: I flagged the divergence before it hit live.',
+].join('\n');
+
+const live = enforceAttendeeGate(liveTranscript, liveDecisions, [6, 7, 12], ROSTER);
+
+check('the live row’s fabricated set is exactly [13], as the stored row itself recorded',
+  live.fabricated.join(',') === '13', live.fabricated.join(','));
+check('[FAILS-OLD] exactly three effects are refused — mood, state and the character amendment',
+  live.removedEffects.length === 3, String(live.removedEffects.length));
+check('[FAILS-OLD] the mood_effects +10 for Agent 13 is refused',
+  live.removedEffects.some((r) => r.field === 'mood_effects' && r.refused_for.includes(13)));
+check('[FAILS-OLD] the state_changes {isComplacent:false} for Agent 13 is refused',
+  live.removedEffects.some((r) => r.field === 'state_changes' && r.refused_for.includes(13)));
+check('[FAILS-OLD] the context_amendments proposal against Agent 13’s character file is refused',
+  live.removedEffects.some((r) => r.field === 'context_amendments' && r.refused_for.includes(13)));
+
+// THE WIDTH CHECK. A gate that refuses an attending agent is a worse defect
+// than the one being fixed: it would silently drop real meeting outcomes.
+const liveKeptIds = GATED_EFFECT_FIELDS.flatMap((f) => live.keptEffects[f].map((e) => Number(e.agent_id)));
+check('GATE WIDTH: no attending agent (6, 7, 12) had anything refused',
+  live.removedEffects.every((r) => !r.refused_for.some((id) => [6, 7, 12].includes(id))));
+check('both attending mood effects (6 and 7) pass unchanged',
+  live.keptEffects.mood_effects.length === 2
+  && live.keptEffects.mood_effects.every((e) => [6, 7].includes(e.agent_id)));
+check('the attending state change (6) passes unchanged',
+  live.keptEffects.state_changes.length === 1 && live.keptEffects.state_changes[0].agent_id === 6);
+check('Agent 13 appears nowhere in what is kept',
+  !liveKeptIds.includes(13) && liveKeptIds.every((id) => [6, 7, 12].includes(id)), liveKeptIds.join(','));
+
+// A3 — a blocked effect is RECORDED, not dropped. Silently discarding it is
+// the same defect inverted, and A15 requires the correction to be visible.
+check('every refusal carries its field, the ids it was refused for, and the whole entry',
+  live.removedEffects.every((r) => typeof r.field === 'string'
+    && Array.isArray(r.refused_for) && r.refused_for.length
+    && r.entry && typeof r.entry === 'object'));
+check('the refused entries are the real ones, not summaries — the amendment text survives intact',
+  live.removedEffects.find((r) => r.field === 'context_amendments')
+    ?.entry.content.startsWith('When flagging findings'));
+
+/* The second hop must still work for effects, exactly as it does for action
+ * items: the discriminator is SPEECH. An effect naming an agent who never
+ * spoke is not fabrication and must pass. */
+const secondHopEffects = enforceAttendeeGate(
+  '**Agent 5 — The IT Chief**: Morning.',
+  { mood_effects: [{ agent_id: 9, delta: 5 }], state_changes: [], irritation_effects: [], config_overrides: [], context_amendments: [] },
+  [5, 7],
+  ROSTER,
+);
+check('an effect for a non-attendee who never spoke is NOT refused — the second hop survives',
+  secondHopEffects.removedEffects.length === 0 && secondHopEffects.keptEffects.mood_effects.length === 1);
+
+// A context amendment names TWO agents. A proposal attributed to a fabricated
+// proposer is fabricated however real its target is.
+const fabProposer = enforceAttendeeGate(
+  '**Agent 6 — The QA**: fine.\n**Agent 8 — The Lead QA**: I propose an amendment for Agent 4.',
+  { context_amendments: [{ agent_id: 4, aspect: 'tone', content: 'x', proposed_by: 8 }] },
+  [6, 7],
+  ROSTER,
+);
+check('an amendment PROPOSED BY a fabricated speaker is refused, though its target is fine',
+  fabProposer.removedEffects.length === 1
+  && fabProposer.removedEffects[0].refused_for.join(',') === '8');
+
+check('degenerate decisions do not throw or invent an effect refusal',
+  (() => {
+    try {
+      const r = enforceAttendeeGate('x', null, [1], ROSTER);
+      const r2 = enforceAttendeeGate('x', { mood_effects: 'not an array' }, [1], ROSTER);
+      return r.removedEffects.length === 0 && r2.removedEffects.length === 0
+        && GATED_EFFECT_FIELDS.every((f) => Array.isArray(r.keptEffects[f]));
+    } catch { return false; }
+  })());
+
+/* The call site is the half that acts. Source-checked because meeting-engine.js
+ * imports config JSON and cannot be loaded by plain node (this file's header). */
+const engineSrc = readFileSync(new URL('../workers/meeting-engine.js', import.meta.url), 'utf8');
+check('[FAILS-OLD] meeting-engine.js assigns the gate’s kept effects back onto decisions',
+  /for \(const field of GATED_EFFECT_FIELDS\)[\s\S]{0,200}?decisions\[field\] = gate\.keptEffects\[field\]/.test(engineSrc));
+check('[FAILS-OLD] refused effects are carried on the record beside refused_action_items',
+  /refused_action_items: gate\.removed,[\s\S]{0,120}?refused_effects: gate\.removedEffects,/.test(engineSrc));
+check('the refused effects are rendered into the meeting report, not only stored',
+  /refusedEffectsList/.test(engineSrc) && /## Refused Effects \(fabricated participation\)/.test(engineSrc));
+check('applyMeetingEffects() was NOT given a second, parallel attendance check',
+  !/applyMeetingEffects[\s\S]*?fabricatedSet/.test(engineSrc));
 
 console.log(`\n  ${pass} passed, ${fail} failed  (${pass + fail} checks)`);
 console.log(`  network calls attempted: ${NETWORK.length}`);

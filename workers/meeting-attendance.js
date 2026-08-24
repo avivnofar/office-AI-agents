@@ -161,6 +161,52 @@ export function transcriptSpeakerIds(transcript, roster = []) {
  *
  * @returns {{fabricated: number[], removed: object[], kept: object[]}}
  */
+/**
+ * ── THE FIVE QUIET FIELDS (2026-08-24) ────────────────────────────────────
+ *
+ * Until this date the gate below partitioned `action_items` and NOTHING ELSE.
+ * A meeting that invented an attendee had that agent's action item refused —
+ * loudly, on the record — while the same meeting's `mood_effects`,
+ * `irritation_effects`, `state_changes`, `config_overrides` and
+ * `context_amendments` for the same invented agent were handed straight to
+ * `applyMeetingEffects()`, which loads any agent id it is given whether or not
+ * that agent was in the room. Four such applications reached production
+ * between 2026-08-19 and 2026-08-24, one of them a `context_amendments`
+ * proposal against a character file. The gate caught the loud path and missed
+ * the quiet one.
+ *
+ * These are the decision fields that assert an agent acted, or that something
+ * was done TO an agent, and therefore have to answer the SAME attribution
+ * question an action item answers. `action_items` is deliberately absent: it
+ * is partitioned into the pre-existing `removed`/`kept` pair, whose shape
+ * meeting-engine.js's report renderer and 35 published corrections consume.
+ *
+ * Every entry in every one of these carries `agent_id` — that is the
+ * composer's own schema, declared in meeting-engine.js's prompt.
+ */
+export const GATED_EFFECT_FIELDS = [
+  'mood_effects',
+  'irritation_effects',
+  'state_changes',
+  'config_overrides',
+  'context_amendments',
+];
+
+/**
+ * The agent ids ONE decision entry claims participation for.
+ *
+ * A `context_amendments` entry names two agents and asserts something about
+ * both: `agent_id`, whose active context it would edit, and `proposed_by`, who
+ * is claimed to have argued for the edit in the room. A proposal attributed to
+ * an agent who was never there is fabricated however real its target is, so
+ * both ids face the same test. Every other field names one agent.
+ */
+function claimedAgentIds(field, entry) {
+  const ids = [Number(entry?.agent_id)];
+  if (field === 'context_amendments') ids.push(Number(entry?.proposed_by));
+  return ids.filter(Number.isInteger);
+}
+
 export function enforceAttendeeGate(transcript, decisions, attendeeIds, roster = []) {
   // One mechanism, not a second copy of it. `fabricated` merges checkAttribution's
   // two populations here — for a transcript the remedy is identical (the line was
@@ -171,9 +217,34 @@ export function enforceAttendeeGate(transcript, decisions, attendeeIds, roster =
   const fabricated = [...a.unknown, ...a.nonParticipants].sort((x, y) => x - y);
   const items = Array.isArray(decisions?.action_items) ? decisions.action_items : [];
   const fabricatedSet = new Set(fabricated);
+
+  // ONE predicate, asked in six places instead of one. `fabricatedSet.has()` is
+  // the same membership test the action-item partition below has always used —
+  // this is not a second, parallel gate with its own idea of who was present.
+  //
+  // The discriminator stays SPEECH, exactly as documented above: an effect for
+  // an agent who neither attended nor was given speaking lines is NOT refused,
+  // because that is MEETING-PROTOCOL.md's legitimate second hop and not
+  // fabrication. Only an agent the transcript put words into is refused.
+  const removedEffects = [];
+  const keptEffects = {};
+  for (const field of GATED_EFFECT_FIELDS) {
+    const entries = Array.isArray(decisions?.[field]) ? decisions[field] : [];
+    keptEffects[field] = [];
+    for (const entry of entries) {
+      const refusedFor = claimedAgentIds(field, entry).filter((id) => fabricatedSet.has(id));
+      // Carried on the record, never silently dropped — A15, and the same rule
+      // `removed` follows. A quietly discarded effect is this defect inverted.
+      if (refusedFor.length) removedEffects.push({ field, refused_for: refusedFor, entry });
+      else keptEffects[field].push(entry);
+    }
+  }
+
   return {
     fabricated,
     removed: items.filter((it) => fabricatedSet.has(Number(it?.agent_id))),
     kept: items.filter((it) => !fabricatedSet.has(Number(it?.agent_id))),
+    removedEffects,
+    keptEffects,
   };
 }
