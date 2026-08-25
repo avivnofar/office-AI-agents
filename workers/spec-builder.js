@@ -212,10 +212,25 @@ export function buildSpec(answers = {}) {
   const lines = [];
   lines.push(`# ${title}`);
   lines.push('');
+  /*
+   * `In answer to` (2026-08-25, Session 22, Item B). The identifier of the
+   * pending item this spec was written from, so the office can connect the two.
+   *
+   * IT GOES IN THE HEADER BLOCK, NOT THE TITLE, and that is load-bearing. The
+   * title becomes the filename slug via `specFilename()`/`slugify()`, which cuts
+   * at 48 characters — an identifier there would be at the mercy of the cut. In
+   * the header it survives into `channelBody` (which strips the `# ` line and
+   * nothing else) and therefore into the file `buildOwnerMessage()` writes, in
+   * the shape `parseOwnerMessage()` already reads.
+   *
+   * Optional, and absent when the builder was opened cold. An `In answer to`
+   * line naming nothing would be worse than no line.
+   */
   const header = [
     headerLine('Assigned by', 'the owner'),
     headerLine('Date', date),
     headerLine('Task type', taskType),
+    headerLine('In answer to', answers.item_id),
   ].filter(Boolean);
   lines.push(header.join('  \n'));
   lines.push('');
@@ -289,6 +304,133 @@ export function buildSpec(answers = {}) {
   const channelBody = markdown.replace(/^#\s+.*\n+/, '');
 
   return { ok: true, markdown, channelBody, title };
+}
+
+/* ───────────────── Carrying a pending item into the form ────────────────── */
+
+/**
+ * WHAT A PENDING ITEM CAN HONESTLY FILL IN, AND WHAT IT MUST NOT.
+ *
+ * Written 2026-08-25 (Session 22, Item B). The card already offers *"Write a
+ * full spec instead"*, it opened the builder EMPTY, and the owner then retyped
+ * what the card had just told him — while the item itself knows several of
+ * these fields.
+ *
+ * ── THE RULE, WHICH IS THE WHOLE OF THIS FUNCTION ────────────────────────
+ *
+ * **A field is filled only from something the item actually says. Everything
+ * else is left blank, and the reason is recorded.**
+ *
+ * The field this matters most for is `out_of_scope`, and the file header
+ * already says why: it is the field that stopped a build from adding an
+ * interface when an engine was asked for. A GUESSED SCOPE BOUNDARY IS WORSE
+ * THAN AN EMPTY ONE — an empty required field stops the form and asks him; a
+ * plausible wrong one gets built. So nothing here infers a boundary, and
+ * nothing here infers `io`, `constraints` or `done` either.
+ *
+ * `where` is the near miss worth naming. A board task's `Metric:` line
+ * routinely contains a repo path — *delivered = `campus/agents/13-…/findings/
+ * permission-flow.md`* — and lifting it would be right often enough to be
+ * dangerous. That path is where the DELIVERABLE lands, which is not the same
+ * claim as where the work lives, and reading it out of the middle of a sentence
+ * is inference. So `where` is filled only from a field LABELLED as a location,
+ * and the entry is shown in full beside the form so he can copy what he wants.
+ *
+ * ── NO MODEL, SAME AS EVERYTHING ELSE IN THIS FILE ───────────────────────
+ *
+ * A template fill over the item's own words. Nothing here summarises or
+ * rewrites; every filled value is a substring of what the office wrote.
+ *
+ * @param {object} detail `buildItemDetail()`'s response
+ * @returns {{item_id, title, values: object, filled: Array, blank: Array, note: string|null}}
+ */
+export const PREFILL_LOCATION_LABELS = Object.freeze(['Where', 'Where it lives', 'Path', 'Location', 'Lives in']);
+
+export function prefillFromItem(detail) {
+  const fields = detail?.entry?.fields || [];
+  const byLabel = (label) => {
+    const want = String(label).toLowerCase();
+    const hit = fields.find((f) => String(f.label).toLowerCase() === want);
+    return hit && String(hit.value).trim() ? String(hit.value).trim() : null;
+  };
+
+  const values = {};
+  const filled = [];
+  const blank = [];
+  const fill = (key, value, from) => {
+    if (!value) return false;
+    values[key] = value;
+    filled.push({ key, from });
+    return true;
+  };
+
+  // TITLE — the item's own, as the office wrote it. Not the card's `ask`,
+  // which has had identifiers substituted out of it for reading.
+  fill('title', detail?.title || null, `the item's title in ${detail?.source?.file || 'its source file'}`);
+
+  // WHAT TO BUILD — the item's own description. Each source spells it
+  // differently; none of them is invented here, and where a source has no
+  // description field the box stays empty.
+  const what = byLabel('Task') || byLabel('What I need') || byLabel('Decision needed') || byLabel('What we did');
+  if (!fill('what', what, `the item's own description text`)) {
+    blank.push({ key: 'what', why: 'the item records no description of its own — nothing was invented for it' });
+  }
+
+  // WHERE IT LIVES — only from a field that is actually a location. See above.
+  let where = null;
+  let whereFrom = null;
+  for (const label of PREFILL_LOCATION_LABELS) {
+    const v = byLabel(label);
+    if (v) { where = v; whereFrom = `the item's "${label}" field`; break; }
+  }
+  if (!fill('where', where, whereFrom)) {
+    blank.push({
+      key: 'where',
+      why: 'the item does not state where this lives. A path lifted out of a Metric sentence is where the'
+        + ' deliverable lands, not where the work lives — so this is blank rather than guessed.',
+    });
+  }
+
+  // OPEN DECISIONS — the blocker, and any question the item records. Quoted,
+  // never characterised: what is put in this box is what the office wrote.
+  const decisions = [];
+  const blocker = detail?.blocker || {};
+  if (blocker.stated) decisions.push(`Blocked by: ${blocker.stated}`);
+  for (const r of blocker.resolved || []) {
+    decisions.push(`${r.item_id} — ${r.title}${r.state ? ` (State: ${r.state})` : ''}`
+      + `${r.elsewhere ? `, recorded in ${r.file} rather than on the board` : ''}.`);
+  }
+  for (const u of blocker.unresolved || []) decisions.push(u.reason + '.');
+  const question = byLabel('Open question') || byLabel('Blocking');
+  if (question) decisions.push(`Open question: ${question}`);
+  if (!fill('open_decisions', decisions.length ? decisions.join('\n') : null,
+    'the item\'s blocker and any question it records')) {
+    blank.push({ key: 'open_decisions', why: 'the item records no blocker and no open question' });
+  }
+
+  /*
+   * The three required fields nothing may fill. Named individually rather than
+   * left to silence: a blank required box with no explanation reads like the
+   * form failed to load, and the owner would then wonder whether the item said
+   * something the builder dropped.
+   */
+  for (const [key, why] of [
+    ['out_of_scope', 'nothing may guess a scope boundary — it is the field that stops a build from adding what nobody asked for, and a plausible wrong one gets built'],
+    ['io', 'the item states no input or output shape'],
+    ['constraints', 'the item states no constraints'],
+    ['done', 'the item\'s Metric line describes what the OFFICE would deliver; what "done" means for what you are asking for is yours to state'],
+  ]) blank.push({ key, why });
+
+  return {
+    item_id: detail?.item_id || null,
+    title: detail?.title || null,
+    source_file: detail?.source?.file || null,
+    values,
+    filled,
+    blank,
+    // Carried, not re-composed — the same rule item-detail.js keeps.
+    answer_note: detail?.answer_note || null,
+  };
 }
 
 /** A filename for the download button. Mirrors the owner-channel slug rules so
@@ -402,6 +544,14 @@ button:disabled{opacity:.5;cursor:not-allowed}
 #status{margin-top:10px;font-size:.9rem;min-height:1.4em}
 .hide{display:none}
 code{background:var(--bg);padding:1px 5px;border-radius:4px;font-size:.86em}
+/* Session 22 (2026-08-25) — the item this spec was opened from. */
+.from-item{font-size:.78rem;color:var(--ok);margin:0 0 4px;font-weight:600}
+.from-item.edited{color:var(--ink-2);font-weight:400}
+.blank-why{font-size:.8rem;color:var(--warn);margin:0 0 6px}
+#carried pre{margin:8px 0 0;padding:12px;overflow-x:auto;background:var(--bg);
+  border:1px solid var(--line);border-radius:7px;
+  font:12px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre}
+#carried summary{cursor:pointer;font-size:.88rem;color:var(--ink-2)}
 </style>
 </head>
 <body>
@@ -410,6 +560,8 @@ code{background:var(--bg);padding:1px 5px;border-radius:4px;font-size:.86em}
   <h1>Spec builder</h1>
   <p class="sub">Seven fields. No model touches your words — the same answers always produce the same spec.</p>
 </header>
+
+<div class="card hide" id="carried"></div>
 
 <div class="card">
   <div class="field">
@@ -505,8 +657,138 @@ code{background:var(--bg);padding:1px 5px;border-radius:4px;font-size:.86em}
     });
     a.task_type = document.getElementById('f-type').value;
     a.date = new Date().toISOString().slice(0, 10);
+    /* The pending item this spec was opened from, so the office can connect
+       the two. Absent when the builder was opened cold. */
+    if (ITEM) a.item_id = ITEM.item_id;
     return a;
   }
+
+  /* ---------------------------------------------------------------------
+     CARRYING A PENDING ITEM IN  (2026-08-25, Session 22, Item B)
+
+     The card's "Write a full spec instead" used to open this page empty, and
+     the owner retyped what the card had just told him. It now arrives as
+     "#item=<card id>", and the page asks the office for that item.
+
+     NOTHING IS DERIVED HERE. spec_prefill is computed by this module's own
+     prefillFromItem() on the server, so there is one implementation of what
+     may honestly be carried across — the same argument the round trip to
+     /admin/api/spec/build makes about the spec format itself.
+
+     NOTHING IS LOCKED. Every pre-filled box is an ordinary editable textarea;
+     the only difference is a line above it saying where the text came from,
+     and that line changes the moment he types.
+     --------------------------------------------------------------------- */
+  var ITEM = null;
+
+  function label(key, text, cls) {
+    var box = document.getElementById('f-' + key);
+    if (!box) return;
+    var p = document.createElement('p');
+    p.className = cls;
+    p.textContent = text;
+    box.parentNode.insertBefore(p, box);
+    return p;
+  }
+
+  function applyPrefill(d) {
+    var pre = d.spec_prefill || {};
+    ITEM = pre;
+
+    var host = document.getElementById('carried');
+    host.classList.remove('hide');
+    var h = document.createElement('h2');
+    h.textContent = 'Written from ' + (pre.item_id || 'an item') + ' — ' + (pre.title || '');
+    host.appendChild(h);
+    var sub = document.createElement('p');
+    sub.className = 'hint';
+    sub.textContent = 'The fields below were filled from this item where it says something, and left blank where it '
+      + 'does not. Every one of them is yours to change.';
+    host.appendChild(sub);
+
+    /* The whole entry, so nothing he might want is only in another tab. */
+    if (d.entry && d.entry.verbatim) {
+      var det = document.createElement('details');
+      var sum = document.createElement('summary');
+      sum.textContent = 'What the office wrote, in full (' + (pre.source_file || 'its source file') + ')';
+      var body = document.createElement('pre');
+      body.textContent = d.entry.verbatim;
+      det.appendChild(sum);
+      det.appendChild(body);
+      host.appendChild(det);
+    }
+
+    /* The honest note, in the words the card already uses. */
+    if (pre.answer_note) {
+      var note = document.createElement('div');
+      note.className = 'note';
+      note.textContent = pre.answer_note;
+      host.appendChild(note);
+    }
+
+    var titleBox = document.getElementById('f-title');
+    (pre.filled || []).forEach(function (f) {
+      var box = f.key === 'title' ? titleBox : document.getElementById('f-' + f.key);
+      if (!box || !pre.values[f.key]) return;
+      box.value = pre.values[f.key];
+      var line = f.key === 'title'
+        ? (function () {
+            var p = document.createElement('p');
+            p.className = 'from-item';
+            titleBox.parentNode.insertBefore(p, titleBox);
+            return p;
+          }())
+        : label(f.key, '', 'from-item');
+      if (!line) return;
+      line.textContent = 'Filled from ' + f.from + '. Edit it freely.';
+      box.addEventListener('input', function () {
+        line.textContent = 'You changed this. It no longer matches ' + (pre.item_id || 'the item') + '.';
+        line.className = 'from-item edited';
+      }, { once: true });
+    });
+
+    (pre.blank || []).forEach(function (b) {
+      label(b.key, 'Left blank on purpose: ' + b.why, 'blank-why');
+    });
+  }
+
+  function carryItem() {
+    var m = /^#item=(.+)$/.exec(location.hash || '');
+    if (!m) return;
+    var id = decodeURIComponent(m[1]);
+    var headers = {};
+    try {
+      var t = sessionStorage.getItem('office-admin-token') || sessionStorage.getItem('office.token') || '';
+      if (t) headers['X-Admin-Token'] = t;
+    } catch (e) {}
+    fetch(BASE + '/admin/api/item?id=' + encodeURIComponent(id), { headers: headers, cache: 'no-store' })
+      .then(function (r) { return r.json().then(function (j) { return { s: r.status, j: j }; }); })
+      .then(function (res) {
+        /* A failed carry is SAID, not swallowed. A form that silently opened
+           empty would be indistinguishable from the behaviour this replaces. */
+        if (!res.j || res.j.ok !== true) {
+          var host = document.getElementById('carried');
+          host.classList.remove('hide');
+          var p = document.createElement('p');
+          p.className = 'note warn';
+          p.textContent = 'Could not carry ' + id + ' into this form (HTTP ' + res.s + '): '
+            + ((res.j && res.j.reason) || 'no reason given') + '. The form below is empty and everything in it is yours to type.';
+          host.appendChild(p);
+          return;
+        }
+        applyPrefill(res.j);
+      })
+      .catch(function (e) {
+        var host = document.getElementById('carried');
+        host.classList.remove('hide');
+        var p = document.createElement('p');
+        p.className = 'note warn';
+        p.textContent = 'Could not reach the office to carry ' + id + ' in: ' + e.message
+          + '. The form below is empty and everything in it is yours to type.';
+        host.appendChild(p);
+      });
+  }
+  carryItem();
 
   document.getElementById('gen').addEventListener('click', function () {
     genstatus.classList.remove('hide');

@@ -1501,13 +1501,21 @@ function clientScript(mode, signedInViaAccess) {
     '    node.textContent = text;',
     '  }',
     '',
-    '  /* The office\'s Respond button used to seed a localStorage note. It now',
-    '     opens the real spec builder with the item\'s title carried across. */',
+    /* The office's Respond button used to seed a localStorage note. It then
+       opened the real spec builder with the item's title in the URL fragment —
+       and the builder read no fragment at all, so it opened EMPTY and the owner
+       retyped what this card had just told him.
+
+       It now passes the item's IDENTITY, and the builder asks the office for
+       that item and fills what the item honestly states. The id rather than the
+       text, because the text is what the builder would then have to
+       re-derive — and one derivation, server-side, in the module that owns the
+       seven fields, is the whole point. */
     '  function openSpecFor(item) {',
     '    var frame = byId("spec-frame");',
     '    var btn = document.querySelector(\'.tab-btn[data-tab="spec"]\');',
     '    if (btn) btn.click();',
-    '    if (frame) frame.src = "/admin/spec#" + encodeURIComponent(item.ask || item.title || "");',
+    '    if (frame) frame.src = "/admin/spec#item=" + encodeURIComponent(item.id);',
     '  }',
     '',
     '  /* ---------- office data: what runs, and what it produced ---------- */',

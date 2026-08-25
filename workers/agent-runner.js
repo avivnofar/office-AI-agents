@@ -137,7 +137,7 @@ import {
 // the same answers always produce the same bytes, and
 // scripts/verify-spec-builder.js asserts both — including that the module's
 // source contains no fetch and no provider client.
-import { buildSpec, specFilename, renderSpecPage } from './spec-builder.js';
+import { buildSpec, specFilename, renderSpecPage, prefillFromItem } from './spec-builder.js';
 import {
   ADMIN_SESSION_PATH,
   isAdminPagePath, adminPageAuthorized, adminCredential, adminUnauthorizedResponse,
@@ -6850,6 +6850,22 @@ export default {
           }
           detail = buildItemDetail({ ref, card, files, extraFiles, origin: originResult, lookups });
         }
+
+        /*
+         * WHAT THE SPEC BUILDER CAN HONESTLY PRE-FILL FROM THIS ITEM
+         * (2026-08-25, Session 22, Item B).
+         *
+         * Derived HERE, server-side, by `spec-builder.js`'s own function — the
+         * module that owns the seven fields. The builder page then fills a form
+         * from it rather than deriving anything itself, so there is ONE
+         * implementation of "what may be carried across", which is the argument
+         * `/api/spec/build` already makes about the spec format.
+         *
+         * It rides on this response rather than getting an endpoint of its own
+         * because it is a function of exactly this material and nothing else: a
+         * second endpoint would be a second read of the same three files.
+         */
+        detail.spec_prefill = prefillFromItem(detail);
 
         return json(detail, 200, origin);
       }

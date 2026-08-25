@@ -29,7 +29,7 @@ import { dirname, join } from 'node:path';
 
 import {
   OPEN_DECISIONS_INSTRUCTION, TASK_TYPES, SPEC_FIELDS, CONDITIONAL_QUESTIONS,
-  buildSpec, specFilename, renderSpecPage,
+  buildSpec, specFilename, renderSpecPage, prefillFromItem, PREFILL_LOCATION_LABELS,
 } from '../workers/spec-builder.js';
 import { PAGE_KINDS } from '../workers/owner-page.js';
 import { parseOwnerMessage } from '../workers/owner-channel.js';
@@ -145,15 +145,33 @@ const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
  */
 const generatorSrc = code.slice(0, code.indexOf('export function renderSpecPage'));
 check('the GENERATOR makes no network call', !/\bfetch\s*\(/.test(generatorSrc));
-check('...and the only fetches in the whole module are the page\'s two, to this Worker\'s own endpoints',
-  (code.match(/\bfetch\s*\(/g) || []).length === 2
-  /* Both moved under `/admin/` on 2026-08-25 (Session 21): the Access
+check('...and the only fetches in the whole module are the page\'s three, to this Worker\'s own endpoints',
+  (code.match(/\bfetch\s*\(/g) || []).length === 3
+  /* The first two moved under `/admin/` on 2026-08-25 (Session 21): the Access
      application binds that PATH, and a call from outside it reaches the Worker
      with no assertion on it — which is why a signed-in owner was still being
-     asked for a token. Same two handlers, same Worker, reached by a rewrite. */
+     asked for a token. Same handlers, same Worker, reached by a rewrite. */
   && /fetch\(BASE \+ '\/admin\/api\/spec\/build'/.test(code)
-  && /fetch\(BASE \+ '\/admin\/api\/agents\/owner-message'/.test(code),
-  'a third fetch appearing here is a new outbound call and must be justified, not absorbed');
+  && /fetch\(BASE \+ '\/admin\/api\/agents\/owner-message'/.test(code)
+  /* The THIRD, added 2026-08-25 (Session 22, Item B), and it is justified here
+     rather than absorbed. `#item=<card id>` in the fragment means this page was
+     opened from a pending card, and it asks the office for that item so the
+     form can be filled from what the item actually says. Same Worker, same
+     `/admin` prefix, same credential; nothing is derived in the browser — the
+     server returns `spec_prefill`, computed by this module's own
+     `prefillFromItem()`. */
+  && /fetch\(BASE \+ '\/admin\/api\/item\?id='/.test(code),
+  'a fourth fetch appearing here is a new outbound call and must be justified, not absorbed');
+
+/*
+ * AND THE GENERATOR STILL DOES NOT DERIVE ANYTHING FROM A MODEL.
+ * `prefillFromItem()` is above `renderSpecPage()`, so the "generator makes no
+ * network call" check already covers it — this asserts the other half: every
+ * value it produces is the item's own text, never a composition.
+ */
+check('prefillFromItem is inside the network-free generator half',
+  generatorSrc.includes('export function prefillFromItem'),
+  'the derivation must sit under the same no-fetch, no-model rule as buildSpec()');
 check('the module imports nothing at all',
   !/^\s*import\s/m.test(code), 'the pure-module rule — plain node must be able to load it');
 check('no provider client is referenced',
@@ -317,6 +335,160 @@ check('the build endpoint writes nothing',
     return !/commitFileToRepo|env\.DB|SIM_KV|fetchOfficeSnapshot/.test(body);
   })(),
   'it is a text transform; it must touch no store');
+
+/* ═══ 9. CARRYING A PENDING ITEM IN (2026-08-25, Session 22, Item B) ═════ */
+
+/**
+ * The failure this replaces: the card offered "Write a full spec instead", the
+ * builder opened EMPTY, and the owner retyped what the card had just told him.
+ *
+ * The check that matters is not "some fields are filled". It is that the fields
+ * nothing may honestly derive stay BLANK — above all `out_of_scope`, which the
+ * module header names as the field that stopped a build from adding an
+ * interface when an engine was asked for. A guessed boundary gets built.
+ */
+
+/** One item, in the shape `/api/admin/item` actually returns. */
+const DETAIL = {
+  ok: true,
+  id: 'board-ob-003',
+  item_id: 'OB-003',
+  kind: 'board',
+  title: 'Permission-flow analysis: trace every write path end to end',
+  source: { repo: 'back-office-AI-agents', file: 'campus/shared/board/BOARD.md', found: true, reason: null },
+  entry: {
+    verbatim: '### OB-003 — Permission-flow analysis…',
+    match: 'open',
+    fields: [
+      { label: 'Assignee', value: 'Agent 13 — The Cyber Expert' },
+      { label: 'State', value: 'BLOCKED' },
+      { label: 'Metric', value: '4 office-days · delivered = campus/agents/13-the-cyber-expert/findings/permission-flow.md' },
+      { label: 'Blocked by', value: '**OB-001.** Flow analysis before the call audit repeats the call audit inside it.' },
+      { label: 'Task', value: 'For each of the three write destinations, trace from the calling function to the credential.' },
+    ],
+    field_count: 5,
+  },
+  blocker: {
+    stated: '**OB-001.** Flow analysis before the call audit repeats the call audit inside it.',
+    names_no_item: false,
+    resolved: [{
+      item_id: 'OB-001', kind: 'board', file: 'campus/shared/board/BOARD-ARCHIVE.md',
+      title: 'Determine, for every gate, whether it is on the calling path',
+      state: 'DONE', match: 'open', elsewhere: true, verbatim: '### OB-001 …', fields: [],
+    }],
+    unresolved: [],
+  },
+  default: { stated: false, label: null, text: null, words: 'there is no stated default here.' },
+  answer_note: 'the office does not record it as a decision against this board item and nothing here will mark the item answered.',
+};
+
+const pre = prefillFromItem(DETAIL);
+
+check('the title is carried from the item', pre.values.title === DETAIL.title);
+check('"what to build" is the item\'s own description text',
+  pre.values.what === 'For each of the three write destinations, trace from the calling function to the credential.',
+  'it must be the Task: field verbatim, not a composition');
+check('every filled value is text the office actually wrote',
+  Object.entries(pre.values).every(([k, v]) => k === 'open_decisions'
+    || DETAIL.title === v || JSON.stringify(DETAIL.entry.fields).includes(v)),
+  'a value that is not in the item is a value somebody invented');
+
+/* THE INVERTED CHECK, and it is the one that would bite. */
+const BLANK_KEYS = pre.blank.map((b) => b.key);
+check('OUT OF SCOPE IS LEFT BLANK',
+  pre.values.out_of_scope === undefined && BLANK_KEYS.includes('out_of_scope'),
+  'a guessed scope boundary is worse than an empty one — the empty one stops the form and asks him');
+check('input/output, constraints and done are left blank too',
+  ['io', 'constraints', 'done'].every((k) => pre.values[k] === undefined && BLANK_KEYS.includes(k)));
+check('every blank field says WHY it is blank',
+  pre.blank.every((b) => typeof b.why === 'string' && b.why.length > 20),
+  'a blank required box with no explanation reads like the form failed to load');
+
+/*
+ * `where` is the near miss. A board task's Metric line contains a real repo
+ * path and lifting it would be right often enough to be dangerous — it is where
+ * the DELIVERABLE lands, not where the work lives.
+ */
+check('WHERE IT LIVES is not lifted out of the Metric sentence',
+  pre.values.where === undefined && BLANK_KEYS.includes('where'),
+  'that path is where the deliverable lands, which is a different claim');
+check('...and it says so rather than going silently empty',
+  /deliverable lands, not where the work lives/.test(pre.blank.find((b) => b.key === 'where').why));
+check('where IS filled when the item states a location outright', (() => {
+  const stated = JSON.parse(JSON.stringify(DETAIL));
+  stated.entry.fields.push({ label: 'Where', value: 'warehouse-office-AI-agents/tasks/permission-flow/' });
+  return prefillFromItem(stated).values.where === 'warehouse-office-AI-agents/tasks/permission-flow/';
+})(), 'stated is not guessed — a labelled location field is the item saying it');
+check('the location labels are declared, not scattered', PREFILL_LOCATION_LABELS.includes('Where'));
+
+check('open decisions carry the blocker', /OB-001/.test(pre.values.open_decisions));
+check('...including that the blocker is DONE and filed off the board',
+  /State: DONE/.test(pre.values.open_decisions) && /BOARD-ARCHIVE\.md/.test(pre.values.open_decisions),
+  'this is the sentence that tells him the block is stale');
+check('an item with no blocker leaves open decisions blank rather than filling it with nothing', (() => {
+  const bare = JSON.parse(JSON.stringify(DETAIL));
+  bare.blocker = { stated: null, names_no_item: false, resolved: [], unresolved: [] };
+  bare.entry.fields = bare.entry.fields.filter((f) => f.label !== 'Blocked by');
+  const p3 = prefillFromItem(bare);
+  return p3.values.open_decisions === undefined && p3.blank.some((b) => b.key === 'open_decisions');
+})());
+
+check('the honest note is carried, not re-composed', pre.answer_note === DETAIL.answer_note);
+check('an item with no description leaves "what to build" blank', (() => {
+  const noTask = JSON.parse(JSON.stringify(DETAIL));
+  noTask.entry.fields = noTask.entry.fields.filter((f) => f.label !== 'Task');
+  const p4 = prefillFromItem(noTask);
+  return p4.values.what === undefined && p4.blank.some((b) => b.key === 'what');
+})());
+
+/* B5 — the produced spec references the item id, in a shape the office reads. */
+const withItem = buildSpec({ ...ANSWERS, item_id: 'OB-003' });
+check('the spec names the item it was written from',
+  withItem.ok && /\*\*In answer to:\*\* OB-003/.test(withItem.markdown));
+check('...in the HEADER, so the filename slug cannot truncate it away',
+  withItem.markdown.indexOf('In answer to') < withItem.markdown.indexOf('## What to build'));
+check('...and it survives into what is actually SENT',
+  withItem.channelBody.includes('**In answer to:** OB-003'));
+check('a spec built without an item carries no empty In-answer-to line',
+  !buildSpec(ANSWERS).markdown.includes('In answer to'),
+  'a line naming nothing is worse than no line');
+
+const carried = `---
+from: owner
+date: 2026-08-25
+kind: instruction
+re: new
+status: open
+---
+
+# ${withItem.title}
+
+${withItem.channelBody}
+`;
+const carriedParsed = parseOwnerMessage(carried, '2026-08-25-invoice-due-date-checker.md', null);
+check('THE OFFICE\'S OWN PARSER ACCEPTS A SPEC CARRYING AN ITEM ID',
+  carriedParsed.ok, carriedParsed.reason || '');
+check('...and the item id is in the body the office reads',
+  carriedParsed.ok && /OB-003/.test(carriedParsed.message.body));
+
+/* B4 / B2 — the page wiring, checked at the call site rather than described. */
+const SITE = readFileSync(join(repo, 'workers', 'office-site-page.js'), 'utf8');
+check('the card passes the item IDENTITY, not its text',
+  /\/admin\/spec#item=" \+ encodeURIComponent\(item\.id\)/.test(SITE),
+  'the builder would otherwise have to re-derive what the card already knew');
+check('the page reads that fragment and asks the office for the item',
+  /\^#item=\(\.\+\)\$/.test(html) && /admin\/api\/item\?id=/.test(html),
+  'the previous version put the title in the fragment and the page read no fragment at all');
+check('NOTHING IS LOCKED: no disabled or readonly is applied to a pre-filled box',
+  !/box\.disabled|box\.readOnly|setAttribute\('readonly', *'readonly'\)/
+    .test(html.slice(html.indexOf('function applyPrefill'), html.indexOf('function carryItem'))),
+  'B4 — every pre-filled field stays editable');
+check('a pre-filled box says where its text came from, and stops saying it once edited',
+  /Filled from/.test(html) && /You changed this/.test(html));
+check('a failed carry is SAID rather than silently opening an empty form',
+  /Could not carry/.test(html) && /everything in it is yours to type/.test(html),
+  'a silent empty form is indistinguishable from the behaviour this replaces');
+check('the honest note still renders on the builder', /pre\.answer_note/.test(html));
 
 /* ═══════════════════════════════ Result ════════════════════════════════ */
 
