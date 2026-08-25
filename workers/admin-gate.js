@@ -134,6 +134,31 @@ const ADMIN_API_ROUTES = new Map([
   ['agents/owner-state', '/api/agents/owner-state'],
   ['agents/owner-message', '/api/agents/owner-message'],
   ['spec/build', '/api/spec/build'],
+  /*
+   * ── `item` (2026-08-25, Session 22, Item A) ────────────────────────────
+   *
+   * ONE pending item, whole, for the expand control on its card.
+   *
+   * **THE ITEM'S IDENTITY TRAVELS IN THE QUERY STRING, NOT IN THE PATH.** That
+   * is not a style choice and it is worth the line of explanation, because the
+   * obvious spelling is `/admin/api/item/<id>` and it is the one this map
+   * cannot have.
+   *
+   * The rule above this block is that the alias is a MAP and never `'/api/' +
+   * rest`, because a prefix that rewrites anything after it into `/api/` is a
+   * path-traversal surface wearing a helpful face. An item id is per-item and
+   * changes as the board does, so a path segment carrying it cannot be an exact
+   * key — it could only be matched by a pattern, and a pattern here is the
+   * generalisation the rule forbids. A query string keeps the route EXACT:
+   * `canonicalAdminApiPath()` rewrites `url.pathname` and never touches
+   * `url.search`, so `?id=…` reaches the handler untouched and no attacker-
+   * shaped string ever influences which path is served.
+   *
+   * The id is then validated against a fixed per-source pattern in
+   * `item-detail.js` `parseItemRef()`, and the file it selects is a CONSTANT in
+   * `ITEM_SOURCES` — the path is never built from the id.
+   */
+  ['item', '/api/admin/item'],
 ]);
 
 /**

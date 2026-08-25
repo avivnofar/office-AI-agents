@@ -82,7 +82,7 @@ import { resolveIssueTarget } from './permission-guard.js';
 // read-back ONLY (2026-08-10): the meeting and per-agent shapes are the two that
 // actually bind, and a probe that reports only the generous `report` shape cannot
 // tell you that the meeting shape is at 98% and trimming the board out of view.
-import { getOfficeContext, getOfficeSnapshot, fetchOfficeSnapshot, officeContextEnabled, buildOfficeContext, fetchBackOfficeFile, fetchBackOfficeDir, BUDGETS as OFFICE_BUDGETS, CACHE_KEY as OFFICE_SNAPSHOT_CACHE_KEY } from './office-context.js';
+import { getOfficeContext, getOfficeSnapshot, fetchOfficeSnapshot, officeContextEnabled, buildOfficeContext, fetchBackOfficeFile, fetchBackOfficeDir, fetchBackOfficeCommits, BUDGETS as OFFICE_BUDGETS, CACHE_KEY as OFFICE_SNAPSHOT_CACHE_KEY } from './office-context.js';
 // The admin tier's scheduled draw from real queues (2026-08-17). Pure — every
 // fetch, model call and write for it is in processAdminDeskBlock() below.
 import {
@@ -123,7 +123,15 @@ import { renderOwnerPage, buildOwnerMessage, buildOwnerState } from './owner-pag
 // scripts/verify-site-data.js can poison them and prove the public one drops
 // what nobody whitelisted. buildPublicData()'s SIGNATURE is the security
 // argument: there is no parameter through which a snapshot could reach it.
-import { buildPublicData, buildAdminData } from './site-data.js';
+import { buildPublicData, buildAdminData, buildPendingItems } from './site-data.js';
+// One pending item, whole (2026-08-25, Session 22, Item A). Pure and
+// network-free: every function here takes what it needs as an argument, so the
+// three GETs and the git probes below are the ONLY reads, they are all in this
+// file, and scripts/verify-item-detail.js can drive the search with a fake
+// probe under a fetch tripwire.
+import {
+  parseItemRef, buildItemDetail, findFirstAppearance, ITEM_SOURCES, MAX_ORIGIN_PROBES,
+} from './item-detail.js';
 // The spec builder (2026-08-24, Session 16 Item C). Pure, and deliberately so:
 // NO MODEL is involved anywhere in this path. buildSpec() is a template fill,
 // the same answers always produce the same bytes, and
@@ -6671,6 +6679,124 @@ export default {
             ? 'Access is configured on the Worker. If assertion_presented is false on office.avivnofar.com, the Access application still has no policy attached — that is a dashboard change, not a code one.'
             : 'Access is NOT configured on this Worker: the credential is inert and the admin token is the only way in. Fill ACCESS_TEAM_DOMAIN and ACCESS_AUD in wrangler.toml and redeploy.',
         }, 200, origin);
+      }
+      /*
+       * -- /api/admin/item — ONE PENDING ITEM, WHOLE ------------------------
+       *
+       * Added 2026-08-25 (Session 22, Item A). Reached from the browser as
+       * `/admin/api/item?id=…` — inside the path Cloudflare Access binds, so
+       * the owner's Google sign-in is on the request; the alias map in
+       * `admin-gate.js` rewrites it here BEFORE the gates, and the id rides in
+       * the query string precisely so no attacker-shaped string can influence
+       * which path gets served. Authenticated by AUTHENTICATED_PREFIXES above
+       * (`/api/admin` covers this), with no check inside the handler — a
+       * handler-local check is the one a refactor moves.
+       *
+       * ── IT RETURNS ONE ENTRY. IT NEVER SHIPS THE BOARD. ─────────────────
+       *
+       * `BOARD.md` was 272 KB on 2026-08-25 and is already fetched whole on
+       * every context build; handing it to a browser twenty times a page load
+       * would move that cost somewhere far worse. The three source files are
+       * read HERE, sliced HERE, and what crosses the wire is the one entry
+       * asked for plus the entries its blocker names.
+       *
+       * ── THE COST, STATED ────────────────────────────────────────────────
+       *
+       * Three file GETs, up to five commit-list GETs, and up to
+       * MAX_ORIGIN_PROBES file reads at a ref: 17 subrequests worst case
+       * against Cloudflare's ceiling of 50, in an invocation that does nothing
+       * else. It runs when a card is opened, never on page load — nineteen
+       * items' detail on every load is the 272 KB problem in a new place.
+       *
+       * ── EVERY READ IS REPORTED, INCLUDING THE ONES THAT FAILED ──────────
+       *
+       * `lookups` carries one line per read attempted. An expansion that cannot
+       * find its source must say WHICH lookup failed; the failure mode this
+       * forecloses is a panel that opens empty and reads like "there was
+       * nothing more to show".
+       */
+      if (request.method === 'GET' && url.pathname === '/api/admin/item') {
+        const ref = parseItemRef(url.searchParams.get('id'));
+        if (!ref.ok) return json({ ok: false, error: 'unknown_item', reason: ref.reason }, 400, origin);
+
+        const lookups = [];
+        const files = {};
+        const kinds = Object.keys(ITEM_SOURCES);
+        const fetched = await Promise.all(
+          kinds.map((k) => fetchBackOfficeFile(env, ITEM_SOURCES[k].path)
+            .catch((err) => ({ text: null, reason: `${ITEM_SOURCES[k].path}: fetch threw — ${err?.message || err}` }))),
+        );
+        kinds.forEach((k, i) => {
+          const got = fetched[i];
+          files[k] = typeof got?.text === 'string' ? got.text : null;
+          lookups.push({
+            what: `read ${ITEM_SOURCES[k].path}`,
+            ok: typeof got?.text === 'string',
+            reason: got?.reason || null,
+            bytes: typeof got?.text === 'string' ? got.text.length : null,
+          });
+        });
+
+        /*
+         * The card as the page already has it, so the expansion can carry the
+         * card's own honest sentences rather than composing second copies of
+         * them. Read from the CACHED snapshot — a KV get, not a subrequest —
+         * because nothing here depends on it being fresh: the entry itself is
+         * being read live above, and the only things taken from the card are
+         * `answer_note` and `answer_stops_the_asking`, which are properties of
+         * the item's KIND and do not go stale.
+         */
+        let card = null;
+        try {
+          const cached = await getOfficeSnapshot(env);
+          card = (buildPendingItems(cached, { noticeParts }) || []).find((i) => i.id === ref.id) || null;
+        } catch (err) {
+          lookups.push({ what: 'read the cached pending list for this item\'s own wording', ok: false, reason: err?.message || String(err) });
+        }
+
+        /*
+         * WHEN IT FIRST APPEARED, FROM GIT — not from a date written inside the
+         * entry. A2's instruction, and the reason is specific to this estate: a
+         * task here is dated by whatever wrote it. The search is a binary
+         * search over the commits that touched the source file; the probe is
+         * injected so `item-detail.js` stays network-free and its verifier can
+         * drive the same search with a fake.
+         */
+        let originResult = null;
+        const commitList = await fetchBackOfficeCommits(env, ref.source.path)
+          .catch((err) => ({ commits: [], complete: false, pages: 0, reason: `commit listing threw — ${err?.message || err}` }));
+        lookups.push({
+          what: `list the commits that touched ${ref.source.path}`,
+          ok: commitList.commits.length > 0,
+          reason: commitList.reason,
+          count: commitList.commits.length,
+          complete: commitList.complete,
+        });
+
+        if (commitList.commits.length) {
+          const needle = `### ${ref.itemId} — `;
+          let probeReads = 0;
+          originResult = await findFirstAppearance(commitList.commits, async (sha) => {
+            probeReads += 1;
+            const got = await fetchBackOfficeFile(env, ref.source.path, { ref: sha })
+              .catch((err) => ({ text: null, reason: `read at ${String(sha).slice(0, 7)} threw — ${err?.message || err}` }));
+            if (typeof got?.text !== 'string') return { ok: false, reason: got?.reason || 'the file could not be read at that commit' };
+            return { ok: true, present: got.text.includes(needle) };
+          }, { max: MAX_ORIGIN_PROBES, complete: commitList.complete });
+          lookups.push({
+            what: 'binary-search the file history for the commit that added this entry',
+            ok: !!originResult.ok,
+            reason: originResult.reason,
+            file_reads: probeReads,
+          });
+        } else {
+          originResult = {
+            ok: false, precision: 'none', probes: 0,
+            reason: commitList.reason || 'git listed no commits touching this file, so there is no first appearance to report',
+          };
+        }
+
+        return json(buildItemDetail({ ref, card, files, origin: originResult, lookups }), 200, origin);
       }
       /*
        * -- /api/admin — THE FULL PICTURE, BEHIND THE PREFIX GATE -----------

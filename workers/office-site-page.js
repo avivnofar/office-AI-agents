@@ -858,6 +858,54 @@ const OFFICE_CSS_ADDITIONS = `
 .auto-table td.auto-time { font-family: var(--font-mono); color: var(--text); white-space: nowrap; }
 .auto-table td.auto-none { color: var(--text-faint); }
 .auto-scroll { overflow-x: auto; }
+
+/* ---------------------------------------------------------------------------
+   SESSION 22 (2026-08-25) — the expansion: one item, whole.
+
+   Same rule as every block above it: the office's own custom properties, no new
+   variable, no name :root does not carry. #ff8f8f is the error colour the file
+   already uses.
+
+   THE VERBATIM BLOCK SCROLLS RATHER THAN WRAPS. A board entry is markdown the
+   office wrote, and re-flowing it changes where its lines break — which is a
+   change to what the owner is reading. It is presented as written and given a
+   scrollbar; white-space:pre-wrap would have been prettier and slightly untrue.
+   --------------------------------------------------------------------------- */
+.item-open {
+  margin-top: var(--space-3); font-family: inherit; font-size: 0.8rem; font-weight: 600;
+  color: var(--text-dim); background: transparent;
+  border: 1px solid var(--border-strong); border-radius: var(--radius);
+  padding: 0.35rem 0.8rem; cursor: pointer;
+}
+.item-open:hover, .item-open:focus-visible { color: var(--text); border-color: var(--accent); outline: none; }
+.item-detail {
+  margin-top: var(--space-3); padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.item-detail h5 {
+  margin: var(--space-3) 0 var(--space-1); font-family: var(--font-mono);
+  font-size: 0.72rem; letter-spacing: 0.03em; text-transform: uppercase;
+  color: var(--text-faint); font-weight: 400;
+}
+.item-detail h5:first-child { margin-top: 0; }
+.item-verbatim {
+  margin: 0; padding: var(--space-3); overflow-x: auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+  font-family: var(--font-mono); font-size: 0.78rem; line-height: 1.6;
+  color: var(--text-dim); white-space: pre;
+}
+.item-blocker {
+  margin-top: var(--space-2); padding: var(--space-2) var(--space-3);
+  border-left: 2px solid var(--accent-dim); background: var(--bg-raised);
+}
+.item-blocker-head { margin: 0 0 var(--space-1); font-size: 0.9rem; color: var(--text); }
+.item-blocker-id { font-family: var(--font-mono); color: var(--accent); }
+.item-line { margin: var(--space-1) 0 0; font-size: 0.85rem; color: var(--text-dim); }
+.item-line code { font-family: var(--font-mono); color: var(--text); }
+.item-lookups { margin: var(--space-2) 0 0; padding-left: var(--space-3); font-size: 0.8rem; color: var(--text-faint); }
+.item-lookups li { margin-bottom: 2px; }
+.item-lookups .item-failed { color: #ff8f8f; }
+.item-problem { margin: var(--space-2) 0 0; font-size: 0.85rem; color: #ff8f8f; }
 `;
 
 /** The client script. Adapted from the office's `app.js`: the element
@@ -1160,6 +1208,7 @@ function clientScript(mode, signedInViaAccess) {
     '    }',
     '',
     '    var article = el("article", { class: "pending-item" }, card);',
+    '    article.appendChild(expandControl(item));',
     '    article.appendChild(answerBox(item, article));',
     '',
     '    var respond = el("button", { type: "button", class: "respond-btn" });',
@@ -1167,6 +1216,166 @@ function clientScript(mode, signedInViaAccess) {
     '    respond.addEventListener("click", function () { openSpecFor(item); });',
     '    article.appendChild(respond);',
     '    return article;',
+    '  }',
+    '',
+    /* ---------- the expansion: one item, whole ----------
+     *
+     * FETCH ON OPEN, NEVER ON PAGE LOAD. Twenty items' full source material on
+     * every load is the 272 KB board problem moved somewhere worse, and the
+     * detail endpoint makes up to seventeen GitHub requests per item. So each
+     * card opens on its own, once, and the answer is kept on the button's own
+     * closure so a second open is free.
+     *
+     * WHAT IT SHOWS IS WHAT THE OFFICE WROTE. The entry is inserted with
+     * textContent into a `pre`; nothing here summarises, re-wraps or explains
+     * it, and no model is anywhere in this path.
+     */
+    '  function expandControl(item) {',
+    '    var wrap = el("div", {});',
+    '    var btn = el("button", { type: "button", class: "item-open" });',
+    '    var panel = el("div", { class: "item-detail" });',
+    '    panel.hidden = true;',
+    '    var loaded = null;',
+    '    var loading = false;',
+    '    btn.textContent = "Open this item";',
+    '',
+    '    btn.addEventListener("click", function () {',
+    '      if (loaded) {',
+    '        panel.hidden = !panel.hidden;',
+    '        btn.textContent = panel.hidden ? "Open this item" : "Close";',
+    '        return;',
+    '      }',
+    '      if (loading) return;',
+    '      loading = true;',
+    '      panel.hidden = false;',
+    '      btn.textContent = "Opening…";',
+    '      clear(panel);',
+    '      panel.appendChild(el("p", { class: "item-line", text: "Reading the office\'s own file…" }));',
+    '      fetch("/admin/api/item?id=" + encodeURIComponent(item.id), { headers: adminHeaders(), cache: "no-store" })',
+    '        .then(function (res) { return res.json().then(function (b) { return { status: res.status, body: b }; }); })',
+    '        .then(function (r) {',
+    '          loading = false;',
+    '          clear(panel);',
+    /* A failed lookup is REPORTED, never rendered as an empty panel. An
+       expansion that opens blank reads as "there was nothing more to show",
+       which is the opposite of what a failed read means. */
+    '          if (!r.body || r.body.ok !== true) {',
+    '            panel.appendChild(el("p", { class: "item-problem",',
+    '              text: "The office could not open this item (HTTP " + r.status + "): "',
+    '                + ((r.body && r.body.reason) || "no reason given") }));',
+    '            btn.textContent = "Try again";',
+    '            return;',
+    '          }',
+    '          loaded = r.body;',
+    '          renderItemDetail(panel, r.body);',
+    '          btn.textContent = "Close";',
+    '        })',
+    '        .catch(function (err) {',
+    '          loading = false;',
+    '          clear(panel);',
+    '          panel.appendChild(el("p", { class: "item-problem", text: "Could not reach the office: " + err.message }));',
+    '          btn.textContent = "Try again";',
+    '        });',
+    '    });',
+    '',
+    '    wrap.appendChild(btn);',
+    '    wrap.appendChild(panel);',
+    '    return wrap;',
+    '  }',
+    '',
+    '  function renderItemDetail(panel, d) {',
+    '    var src = d.source || {};',
+    '',
+    '    /* The whole entry, as the office wrote it. */',
+    '    panel.appendChild(el("h5", { text: "The entry, as the office wrote it" }));',
+    '    if (d.entry && d.entry.verbatim) {',
+    '      panel.appendChild(el("pre", { class: "item-verbatim", text: d.entry.verbatim }));',
+    '    } else {',
+    '      panel.appendChild(el("p", { class: "item-problem",',
+    '        text: "The entry could not be read out of " + (src.file || "its file") + ": " + (src.reason || "no reason recorded") + "." }));',
+    '    }',
+    '',
+    '    /* The blocker, named. A card saying \"blocked by another item\" is',
+    '       useless without which item and what that item says. */',
+    '    var b = d.blocker || {};',
+    '    if (b.stated || (b.resolved && b.resolved.length) || (b.unresolved && b.unresolved.length)) {',
+    '      panel.appendChild(el("h5", { text: "What is blocking it" }));',
+    '      if (b.stated) panel.appendChild(el("p", { class: "item-line", text: b.stated }));',
+    '      if (b.names_no_item) {',
+    '        panel.appendChild(el("p", { class: "item-line",',
+    '          text: "The board names no other item here — what is written above is the whole of what it says this is waiting on." }));',
+    '      }',
+    '      (b.resolved || []).forEach(function (r) {',
+    '        var box = el("div", { class: "item-blocker" });',
+    '        var head = el("p", { class: "item-blocker-head" });',
+    '        head.appendChild(el("span", { class: "item-blocker-id", text: r.item_id }));',
+    '        head.appendChild(el("span", { text: " — " + (r.title || "(no title)") + (r.state ? "  ·  " + r.state : "") }));',
+    '        box.appendChild(head);',
+    '        box.appendChild(el("pre", { class: "item-verbatim", text: r.verbatim }));',
+    '        panel.appendChild(box);',
+    '      });',
+    '      (b.unresolved || []).forEach(function (u) {',
+    '        panel.appendChild(el("p", { class: "item-problem", text: "Named as a blocker but not found: " + u.reason }));',
+    '      });',
+    '    }',
+    '',
+    '    /* Where it came from, and when it entered the record — from git. */',
+    '    panel.appendChild(el("h5", { text: "Where it came from" }));',
+    '    var where = el("p", { class: "item-line" });',
+    '    where.appendChild(el("span", { text: (src.what || "a file") + " — " }));',
+    '    where.appendChild(el("code", { text: (src.repo || "") + "/" + (src.file || "") }));',
+    '    panel.appendChild(where);',
+    '    panel.appendChild(originLine(d.origin || {}));',
+    '',
+    '    /* Whether it has a stated default — in the card\'s own words when it',
+    '       has none. Never re-worded here: a second sentence drifts. */',
+    '    panel.appendChild(el("h5", { text: "If you say nothing" }));',
+    '    var def = d.default || {};',
+    '    if (def.stated) {',
+    '      panel.appendChild(el("p", { class: "item-line", text: def.label + ": " + def.text }));',
+    '    } else {',
+    '      panel.appendChild(el("p", { class: "pending-missing", text: "The office recorded no default for this one — " + def.words }));',
+    '    }',
+    '    if (d.answer_note) panel.appendChild(el("p", { class: "item-line", text: d.answer_note }));',
+    '',
+    '    /* Every read this answer needed, including the ones that failed. */',
+    '    panel.appendChild(el("h5", { text: "What was read to answer this" }));',
+    '    var list = el("ul", { class: "item-lookups" });',
+    '    (d.lookups || []).forEach(function (l) {',
+    '      var bits = l.what;',
+    '      if (l.bytes != null) bits += " (" + l.bytes + " characters)";',
+    '      if (l.count != null) bits += " (" + l.count + " commits" + (l.complete === false ? ", capped" : "") + ")";',
+    '      if (l.file_reads != null) bits += " (" + l.file_reads + " file reads)";',
+    '      if (!l.ok) bits += " — FAILED: " + (l.reason || "no reason given");',
+    '      else if (l.reason) bits += " — " + l.reason;',
+    '      list.appendChild(el("li", { class: l.ok ? "" : "item-failed", text: bits }));',
+    '    });',
+    '    panel.appendChild(list);',
+    '  }',
+    '',
+    /* The office has never dated one of its own records from git before. The
+       precision is carried in words rather than collapsed into a date, because
+       "first appeared on the 10th" and "first appeared on or before the 10th"
+       are different claims and only one of them is usually true. */
+    '  function originLine(o) {',
+    '    if (o.ok && o.precision === "exact" && o.commit) {',
+    '      return el("p", { class: "item-line",',
+    '        text: "It entered the record on " + String(o.commit.date || "").slice(0, 10)',
+    '          + " — commit " + String(o.commit.sha || "").slice(0, 7) + ", \\"" + (o.commit.message || "") + "\\"."',
+    '          + " That date is from git, not from anything written inside the entry." });',
+    '    }',
+    '    if (o.ok && o.precision === "at-or-before" && o.commit) {',
+    '      return el("p", { class: "item-line",',
+    '        text: "It was already in the file on " + String(o.commit.date || "").slice(0, 10)',
+    '          + " (commit " + String(o.commit.sha || "").slice(0, 7) + "). " + (o.reason || "") });',
+    '    }',
+    '    if (o.ok && o.precision === "window" && o.window) {',
+    '      return el("p", { class: "item-line",',
+    '        text: "It first appeared between " + String(o.window.oldest && o.window.oldest.date || "").slice(0, 10)',
+    '          + " and " + String(o.window.newest && o.window.newest.date || "").slice(0, 10)',
+    '          + ". " + (o.reason || "") });',
+    '    }',
+    '    return el("p", { class: "item-line", text: "The office could not date this from git: " + (o.reason || "no reason recorded") + "." });',
     '  }',
     '',
     '  /* ---------- the answer, in place ---------- */',

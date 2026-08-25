@@ -1050,8 +1050,20 @@ export function parseRequirements(markdown) {
  * A second copy of these ten lines in agent-runner.js would be a second place
  * the auth header, the base64/UTF-8 decode and the failure shape could drift.
  */
-export async function fetchBackOfficeFile(env, filePath) {
-  const url = `https://api.github.com/repos/${BACKOFFICE_REPO_OWNER}/${BACKOFFICE_REPO_NAME}/contents/${filePath}`;
+/**
+ * @param {object} env
+ * @param {string} filePath
+ * @param {object} [opts]
+ * @param {string} [opts.ref] a commit SHA to read the file AT, rather than at
+ *   the default branch. Added 2026-08-25 (Session 22, Item A) for the
+ *   first-appearance search behind `/admin/api/item`: dating an entry from git
+ *   means reading the file as it was, and the Contents API does that with a
+ *   `?ref=`. Absent — every pre-existing caller — is byte-for-byte the request
+ *   this function has always made.
+ */
+export async function fetchBackOfficeFile(env, filePath, { ref = null } = {}) {
+  const url = `https://api.github.com/repos/${BACKOFFICE_REPO_OWNER}/${BACKOFFICE_REPO_NAME}/contents/${filePath}`
+    + (ref ? `?ref=${encodeURIComponent(ref)}` : '');
   const res = await fetch(url, {
     headers: {
       'User-Agent': 'data-center-agent-sim',
@@ -1108,6 +1120,88 @@ export async function fetchBackOfficeDir(env, dirPath) {
   const body = await res.json().catch(() => null);
   if (!Array.isArray(body)) return { entries: null, reason: `${dirPath}/: Contents API did not return a directory listing` };
   return { entries: body, reason: null };
+}
+
+/**
+ * How many commits one first-appearance search may list.
+ *
+ * Five pages of 100. The search that consumes this is a binary search, so the
+ * listing bounds how far back an entry can be dated EXACTLY; past it the answer
+ * degrades to "on or before the oldest commit listed", which
+ * `findFirstAppearance()` reports in those words rather than presenting the
+ * bound as the answer.
+ */
+const MAX_COMMIT_PAGES = 5;
+const COMMITS_PER_PAGE = 100;
+
+/**
+ * The commits that touched one back-office path, newest first.
+ *
+ * Added 2026-08-25 (Session 22, Item A). The office has never asked git a
+ * question before — every read here has been "what does this file say now" —
+ * and this one exists because A2 requires an item's origin date to come from
+ * git rather than from a date written inside the item. In this estate a task is
+ * dated by whatever wrote it: `renderBoardTask()` stamps `Notes:` with the
+ * meeting's date, and a hand-edited task carries whatever the editor typed. Git
+ * is the only witness that was not written by the thing being asked about.
+ *
+ * `complete` is the honest half of the return value. It is true only when the
+ * whole path history fits inside the page cap, and false says the listing was
+ * truncated — which changes what a caller may claim, not merely how much it
+ * has. Absence read as fact is this project's dominant failure shape and a
+ * silently short commit list is exactly that shape.
+ *
+ * @returns {{commits: Array<{sha,date,message,author}>, complete: boolean, pages: number, reason: string|null}}
+ */
+export async function fetchBackOfficeCommits(env, filePath, { maxPages = MAX_COMMIT_PAGES } = {}) {
+  const commits = [];
+  let complete = true;
+  let pages = 0;
+
+  for (let page = 1; page <= maxPages; page += 1) {
+    const url = `https://api.github.com/repos/${BACKOFFICE_REPO_OWNER}/${BACKOFFICE_REPO_NAME}/commits`
+      + `?path=${encodeURIComponent(filePath)}&per_page=${COMMITS_PER_PAGE}&page=${page}`;
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'data-center-agent-sim',
+        Accept: 'application/vnd.github+json',
+        Authorization: `Bearer ${env.BACKOFFICE_REPO_TOKEN}`,
+      },
+    }).catch((err) => ({ ok: false, status: 0, _err: err?.message }));
+
+    if (!res?.ok) {
+      return {
+        commits,
+        complete: false,
+        pages,
+        reason: `GET commits for ${filePath} (page ${page}) failed: HTTP ${res?.status ?? 'network error'}`,
+      };
+    }
+    const body = await res.json().catch(() => null);
+    if (!Array.isArray(body)) {
+      return { commits, complete: false, pages, reason: `commits for ${filePath}: the API did not return a list` };
+    }
+    pages += 1;
+    for (const c of body) {
+      commits.push({
+        sha: c.sha,
+        date: c.commit?.author?.date || c.commit?.committer?.date || null,
+        message: String(c.commit?.message || '').split('\n')[0],
+        author: c.commit?.author?.name || null,
+      });
+    }
+    if (body.length < COMMITS_PER_PAGE) return { commits, complete: true, pages, reason: null };
+    // A full page means there may be more. If this was the last page allowed,
+    // say so rather than letting the caller read a cap as a history.
+    if (page === maxPages) complete = false;
+  }
+
+  return {
+    commits,
+    complete,
+    pages,
+    reason: complete ? null : `more than ${maxPages * COMMITS_PER_PAGE} commits touch ${filePath}; only the newest were listed`,
+  };
 }
 
 /**
