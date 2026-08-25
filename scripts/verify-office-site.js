@@ -258,6 +258,69 @@ for (const [what, needle] of OLD_BEHAVIOURS) {
   check(`no longer: ${what}`, !PUBLIC.includes(needle) && !ADMIN.includes(needle));
 }
 
+/* ═══════ 8. THE ANSWER BOX, AND THE OFFICE-DATA TAB (Session 18) ═══════ */
+
+console.log('\n--- 8. the room takes an answer, and says what that does ---');
+
+check('the admin page has an answer box on the pending card',
+  ADM.js.includes('answer-send') && ADM.js.includes('function answerBox('));
+check('the answer goes to the endpoint that ALREADY WORKS — no new channel',
+  ADM.js.includes('"/api/agents/owner-message"'));
+/*
+ * Behaviour, not vocabulary. The client script's own comments NAME
+ * `channel/from-owner/` — that is the script explaining where its POST ends up,
+ * and this file already draws that distinction for the stylesheet. What must be
+ * true is that every URL the page actually calls is one of this Worker's own
+ * /api/ paths.
+ */
+const fetchTargets = [...ADM.js.matchAll(/fetch\(\s*("[^"]*"|[A-Z_]+)/g)].map((m) => m[1]);
+check('it invents no second write path — every call the page makes is a Worker /api/ path',
+  fetchTargets.length > 0
+  && fetchTargets.every((t) => t === 'ENDPOINT' || /^"\/api\//.test(t))
+  && !ADM.js.includes('api.github.com') && !ADM.js.includes('commitFile'),
+  `targets: ${fetchTargets.join(', ')}`);
+check('the answer carries the item id so the office\'s reply reader can attribute it',
+  /This is my answer on item/.test(ADM.js) && /item\.item_id/.test(ADM.js));
+check('the subject leads with the id, because the filename slug is cut at 48 characters',
+  /item\.item_id \+ " — " \+ ask/.test(ADM.js));
+check('the card renders the ask, the options and the office\'s default',
+  ADM.js.includes('notice.options') && ADM.js.includes('If you say nothing: ')
+  && ADM.js.includes('item.by_when'));
+check('the card renders the PLAIN provenance, not the board line with its identifier',
+  ADM.js.includes('item.source_plain') && !ADM.js.includes('text: item.source }'));
+check('the headline is the stripped ask, not the raw title',
+  /var headline = item\.ask \|\| item\.title/.test(ADM.js));
+check('what the office FAILED to state is shown rather than hidden',
+  ADM.js.includes('notice.missing') && /did not record/.test(ADM.js));
+check('a refusal is shown in the parser\'s own words, not summarised',
+  /r\.body && r\.body\.reason/.test(ADM.js) && /The office refused it/.test(ADM.js));
+check('the page states, on the card, whether an answer stops the office asking',
+  /answer_stops_the_asking/.test(ADM.js) && /raises it once more after seven days/.test(ADM.js));
+check('AND IT DOES NOT CLAIM the card disappears — this list reads the ledger',
+  /stays on this page until the office marks its own ledger entry/.test(ADM.js),
+  'the page must not promise a state change it does not perform');
+
+check('the office-data tab exists and renders from the payload',
+  ADMIN.includes('data-tab="office-data"') && ADM.js.includes('function renderOfficeData('));
+check('the office-data tab reads the automation block the endpoint supplies',
+  ADM.js.includes('data.automation'));
+check('none of it is in the public bundle',
+  !PUBLIC.includes('data-tab="office-data"') && !PUB.js.includes('renderOfficeData')
+  && !PUB.js.includes('owner-message') && !PUB.js.includes('answerBox')
+  && !PUB.js.includes('automation'));
+check('the public bundle still cannot POST anything anywhere',
+  !/method:\s*"POST"/.test(PUB.js));
+
+/* B6: the office's palette, and no invented variable. The bug this catches
+ * was invisible to code review and was found by loading the page — added CSS
+ * named --ink/--card/--rule, which :root does not define, so every one fell
+ * through to a light-theme fallback. */
+const declared = new Set((module_.match(/--[a-z0-9-]+(?=\s*:)/g) || []));
+const used = new Set((module_.match(/var\((--[a-z0-9-]+)/g) || []).map((m) => m.slice(4)));
+const undeclared = [...used].filter((v) => !declared.has(v));
+check('every CSS variable the page USES is one the office\'s palette DECLARES',
+  undeclared.length === 0, undeclared.join(', '));
+
 /* ═════════════════════════════ RESULT ══════════════════════════════════ */
 
 console.log(`\n=== ${pass} passed, ${fails.length} failed ===`);

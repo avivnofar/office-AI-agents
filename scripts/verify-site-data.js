@@ -31,6 +31,12 @@
  * through is exactly as protective as no module at all.
  */
 
+// Session 18 (Item B): the office's own reply reader and its own notice
+// composer, imported so section 5b tests the REAL functions rather than a
+// description of them.
+import { itemIdsInText } from '../workers/owner-channel.js';
+import { noticeParts } from '../workers/owner-notify.js';
+import { answerStopsTheAsking, escalationSentence, firstSentence, buildAutomation } from '../workers/site-data.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -336,6 +342,107 @@ check(
   'buildActivity with no input returns an empty array',
   buildActivity().length === 0,
 );
+
+/* ═══ 5b. THE ANSWERABLE CARD (2026-08-25, Session 18 Item B) ════════════ */
+
+/*
+ * The failure this section exists to catch is precise, and it has happened
+ * four times to this owner in a month: a channel that LOOKS like it delivers
+ * and breaks one step further down. Three properties, and none of them is a
+ * rendering detail.
+ *
+ *   1. The visible ask carries NO board identifier. He has never agreed to
+ *      learn what OB-060 is.
+ *   2. The item id is still CARRIED, out of sight, because the office's own
+ *      reply reader attributes an answer to an item by finding that id in the
+ *      file he writes. Strip it everywhere and the answer silences nothing.
+ *   3. The page says which items an answer actually silences — and the test
+ *      of that is `itemIdsInText()`, the real function, not a claim.
+ */
+const composed = buildAdminData({
+  agents: poisonedAgents, counts: poisonedCounts, snapshot,
+  generatedAt: '2026-08-24T12:00:00.000Z', versionId: 'test-version',
+  noticeParts,
+});
+const q010 = composed.pending_items.find((i) => i.id === 'question-q-010');
+const s002 = composed.pending_items.find((i) => i.id === 'submission-s-002');
+const ob060 = composed.pending_items.find((i) => i.id === 'board-ob-060');
+
+check('every pending item carries the office\'s three-part notice when the composer is passed',
+  composed.pending_items.every((i) => i.notice && Array.isArray(i.notice.options)));
+check('WITHOUT the composer, notice is null and data_gaps SAYS SO — no second shape is invented here',
+  buildAdminData({ snapshot }).pending_items.every((i) => i.notice === null)
+  && buildAdminData({ snapshot }).data_gaps.some((g) => /THREE-PART SHAPE IS MISSING/.test(g)));
+
+const VISIBLE = ['ask', 'source_plain'];
+const idInVisible = composed.pending_items.filter(
+  (i) => VISIBLE.some((k) => /\b(?:OB|S|REQ|C|AD|KFM|R|OQ)-\d+\b/.test(String(i[k] || ''))));
+check('NO board identifier appears in any visible field of any card',
+  idInVisible.length === 0, idInVisible.map((i) => i.id).join(', '));
+check('the identifier is still carried for the record, out of the visible text',
+  ob060.item_id === 'OB-060' && q010.item_id === 'Q-010' && s002.item_id === 'S-002');
+
+check('an answer on a QUESTION is one the office\'s own reader will attribute',
+  q010.answer_stops_the_asking === true
+  && itemIdsInText('This is my answer on item ' + q010.item_id + '.').includes('Q-010'));
+check('an answer on a SUBMISSION is one the office\'s own reader will attribute',
+  s002.answer_stops_the_asking === true
+  && itemIdsInText('This is my answer on item ' + s002.item_id + '.').includes('S-002'));
+check('A BOARD TASK IS MARKED AS NOT SILENCED — the reader does not match OB-, and the card says so',
+  ob060.answer_stops_the_asking === false
+  && itemIdsInText('This is my answer on item ' + ob060.item_id + '.').length === 0
+  && /does not record it as a decision/.test(ob060.answer_note || ''),
+  'claiming an answer silences a board item would reproduce the failure this page exists to end');
+
+/*
+ * The two must agree, or the page lies in one direction or the other. This is
+ * the join itself, checked against the real reader for every id shape the
+ * office uses — not against a copy of the expression.
+ */
+const idTable = ['Q-001', 'S-002', 'Q-999', 'OB-060', 'REQ-003', 'S-02', 'S-0021', 'KFM-15'];
+const disagreements = idTable.filter(
+  (id) => answerStopsTheAsking(id) !== itemIdsInText('answer on item ' + id + '.').includes(id));
+check('the page\'s "this silences it" flag agrees with the channel\'s OWN reply reader, id for id',
+  disagreements.length === 0, disagreements.join(', '));
+
+check('the kind an answer is filed under is a kind the channel accepts',
+  ['instruction', 'decision', 'approval'].includes(q010.answer_kind)
+  && ['instruction', 'decision', 'approval'].includes(ob060.answer_kind));
+
+check('"by when" comes from the office\'s own age ladder and is never invented',
+  s002.by_when === 'RE-RAISED — 12 day(s) with no answer.'
+  && escalationSentence({}) === null && escalationSentence({ escalation: {} }) === null);
+check('an item with no recorded default reports what is MISSING rather than filling it in',
+  ob060.notice.complete === false && ob060.notice.missing.includes('what happens with no answer'));
+
+/* ---- the office-data tab's payload ---- */
+
+const automation = buildAutomation({
+  schedule: {
+    full_day_schedule: { blocks: [
+      { time: '16:30', type: 'meeting', meeting_type: 'daily_standup', label: 'Daily standup (existing meeting-engine.js type). MOVED HERE FROM somewhere for a long recorded reason nobody needs on a page.' },
+      { time: '12:30', type: 'chore_rotation', label: 'Cross-project chore rotation' },
+    ] },
+    friday_schedule: { blocks: [{ time: '12:00', type: 'meeting', meeting_type: 'weekly_summary', label: 'Weekly summary' }] },
+    saturday_schedule: { blocks: [] },
+  },
+  meetingStats: [{ type: 'daily_standup', count: 41, last_at: '2026-08-24T13:30:00Z' }],
+  reportStats: [{ type: 'daily', count: 300, last_at: '2026-08-24T13:00:00Z' }],
+});
+check('a block that produces a meeting is joined to that meeting type in the database',
+  automation.blocks.find((b) => b.meeting_type === 'daily_standup').evidence.count === 41);
+check('A BLOCK WITH NO ARTIFACT SAYS SO — no run is inferred from a nearby timestamp',
+  automation.blocks.find((b) => b.type === 'chore_rotation').evidence === null
+  && /no observable artifact/.test(automation.blocks.find((b) => b.type === 'chore_rotation').evidence_note));
+check('a scheduled meeting the database has never seen reads as never, not as zero-with-a-date',
+  automation.blocks.find((b) => b.meeting_type === 'weekly_summary').evidence === null);
+check('the tick window is named as unreadable from inside the Worker rather than guessed',
+  automation.notes.some((n) => /CANNOT BE READ FROM INSIDE THE WORKER/.test(n)));
+check('the office\'s paragraph-long block labels are cut to one sentence',
+  !/MOVED HERE FROM/.test(automation.blocks.find((b) => b.meeting_type === 'daily_standup').label)
+  && firstSentence('') === null);
+check('the automation payload carries no transcript or body field',
+  !/transcript|content/.test(JSON.stringify(automation)));
 
 /* ══════════ 6. IS THE GATE ACTUALLY ON THE ROUTE? (the §7 check) ═════════ */
 

@@ -18,6 +18,47 @@ compatibility_date = "2026-06-11"
 # the file instead of a default that moved under us.
 workers_dev = true
 
+# ── CLOUDFLARE ACCESS — GOOGLE SIGN-IN AS THE OWNER'S CREDENTIAL ────────────
+#
+# Added 2026-08-25 (Session 18, Item A). Both values are EMPTY as shipped, and
+# empty means INERT: workers/access-jwt.js refuses every assertion and
+# workers/admin-gate.js falls through to the admin token exactly as it did
+# before this block existed. Unconfigured is never a bypass.
+#
+# WHY THEY ARE VARS AND NOT SECRETS. Neither is a secret. The team domain is a
+# public hostname and the AUD tag is a public application identifier — what
+# protects the door is the SIGNATURE over the assertion, checked against
+# Cloudflare's published keys. Putting them here means the next `wrangler
+# deploy` cannot silently remove them, which is exactly what a dashboard-held
+# value invites: the [observability] and [[routes]] blocks below are both in
+# this file for that same recorded reason.
+#
+# WHY THEY ARE EMPTY RATHER THAN GUESSED. A JWT check with the WRONG audience
+# accepts tokens minted for a DIFFERENT Access application — including one with
+# a laxer policy. The session that wrote this could not read either value: the
+# OAuth token wrangler holds has no Zero Trust scope (`npx wrangler whoami`
+# lists none), and both values live in the Zero Trust dashboard. Guessing a team
+# name that happens to exist would have pointed the check at a stranger's key
+# set. So they are named, left empty, and filled in by the owner:
+#
+#   ACCESS_TEAM_DOMAIN  Zero Trust -> Settings -> Custom Pages (or the team
+#                       domain on the Zero Trust overview). Either `myteam` or
+#                       `myteam.cloudflareaccess.com` is accepted.
+#   ACCESS_AUD          Zero Trust -> Access -> Applications -> (the /admin
+#                       application) -> Overview -> Application Audience (AUD)
+#                       Tag. 64 hex characters; a truncated paste is refused
+#                       rather than half-accepted.
+#
+# THE POLICY IS THE OTHER HALF, AND IT IS NOT IN THIS FILE. As of 2026-08-25 the
+# Access application has NO POLICY ATTACHED and enforces nothing — a live
+# `GET https://office.avivnofar.com/admin/spec` returns the Worker's own 401 and
+# never a redirect to cloudflareaccess.com. Filling these two values in does not
+# by itself put Google sign-in in front of anything; attaching the `owner only`
+# policy to the application does. See the Session 18 report.
+[vars]
+ACCESS_TEAM_DOMAIN = ""
+ACCESS_AUD = ""
+
 # D1 database — storage for agents/agent_sessions/cases/interactions/reports/
 # suggestions/weekly_analytics/meetings/side_plots/promotions/year_stats
 # (database/schema.sql).

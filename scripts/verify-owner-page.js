@@ -252,7 +252,21 @@ check('the write endpoint is under /api/agents/, which the router authenticates 
   /url\.pathname === '\/api\/agents\/owner-message'/.test(runnerSrc)
   && !!gateList
   && gateList[1].includes("'/api/agents/'")
-  && /AUTHENTICATED_PREFIXES\.some\([\s\S]{0,300}token !== env\.ADMIN_TOKEN/.test(runnerSrc));
+  /*
+   * RE-POINTED 2026-08-25 (Session 18, Item A). This tail used to require the
+   * literal `token !== env.ADMIN_TOKEN` inside the gate. The gate now delegates
+   * to `adminCredential(..., { surface: 'api' })`, which accepts a verified
+   * Cloudflare Access assertion as well as the token — so the old pattern
+   * described code that no longer exists, and a check that describes nothing
+   * passes for the wrong reason.
+   *
+   * What it must still prove is unchanged: that clearing this prefix is a
+   * DECISION MADE BEFORE ANY HANDLER, and that a refusal is a 401. Both are
+   * asserted here; that the cookie is still refused on this surface is proved
+   * by running the resolver, in scripts/verify-admin-gate.js section 4.
+   */
+  && /AUTHENTICATED_PREFIXES\.some\([\s\S]{0,400}adminCredential\(request, env, \{ surface: 'api' \}\)/.test(runnerSrc)
+  && /AUTHENTICATED_PREFIXES\.some\([\s\S]{0,600}if \(!credential\.ok\)[\s\S]{0,120}401/.test(runnerSrc));
 check('the state endpoint is under /api/agents/ too',
   /url\.pathname === '\/api\/agents\/owner-state'/.test(runnerSrc));
 check('THE GATE: the handler runs the candidate through parseOwnerMessage() BEFORE committing',

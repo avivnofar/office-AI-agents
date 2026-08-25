@@ -132,9 +132,13 @@ import { buildPublicData, buildAdminData } from './site-data.js';
 import { buildSpec, specFilename, renderSpecPage } from './spec-builder.js';
 import {
   ADMIN_SESSION_PATH,
-  isAdminPagePath, adminPageAuthorized, adminUnauthorizedResponse,
+  isAdminPagePath, adminPageAuthorized, adminCredential, adminUnauthorizedResponse,
   adminCookieValue, adminSessionSetCookie,
 } from './admin-gate.js';
+// Cloudflare Access as a credential (2026-08-25, Session 18 Item A). Imported
+// here for ONE thing only: the diagnostics endpoint that says whether Access is
+// configured and enforcing. The decision itself is made in admin-gate.js.
+import { accessConfig, ACCESS_JWT_HEADER, accessKeyCacheState } from './access-jwt.js';
 import { renderOfficeSite } from './office-site-page.js';
 import {
   ownerChannelEnabled, notifyOwner, selectNotificationItems, recentFailures, OWNER_ISSUE_LABEL,
@@ -142,6 +146,10 @@ import {
   // owner-notify.js's "three-part notice" and "email notice" headers — the
   // gate is a filter, and this Worker COMPOSES the email but never sends it.
   gateNotificationItems, buildEmailNotice, buildHebrewNoticePrompt,
+  // SESSION 18 (2026-08-25): the same composer the email and the Issue use,
+  // handed to the admin page's data builder so the page shows the office's
+  // three parts rather than a second version of them written for a browser.
+  noticeParts,
 } from './owner-notify.js';
 import { improvementLoopEnabled } from './improvement-loop.js';
 // The publishing gate (2026-08-16, OB-014, audit finding #17). Deliberately has
@@ -410,6 +418,38 @@ async function siteActivity(env, limit = 25) {
   } catch (err) {
     console.warn(`[site-data] activity read failed: ${err.message}`);
     return { reports: [], meetings: [] };
+  }
+}
+
+/**
+ * How often the office's two observable artifacts actually appear, by type.
+ *
+ * Added 2026-08-25 (Session 18, Item B tab 3). TWO queries, both aggregate,
+ * both grouped — deliberately not one query per scheduled block. This Worker
+ * has had whole scheduled blocks refused for crossing Cloudflare's
+ * 50-subrequest ceiling (config/daily-schedule.json's OB-074 notes), and a
+ * page that spent twenty subrequests describing the schedule would be paying
+ * for a description of the thing that ran out of budget.
+ *
+ * No bodies and no transcripts, for the reason `siteActivity()` gives.
+ */
+async function siteCadence(env) {
+  if (!env?.DB) return { meetings: [], reports: [] };
+  try {
+    const [meetings, reports] = await Promise.all([
+      env.DB.prepare(
+        `SELECT type, COUNT(*) AS count, MAX(created_at) AS last_at
+           FROM meetings GROUP BY type ORDER BY last_at DESC`
+      ).all(),
+      env.DB.prepare(
+        `SELECT type, COUNT(*) AS count, MAX(created_at) AS last_at
+           FROM reports GROUP BY type ORDER BY last_at DESC`
+      ).all(),
+    ]);
+    return { meetings: meetings?.results || [], reports: reports?.results || [] };
+  } catch (err) {
+    console.warn(`[site-data] cadence read failed: ${err.message}`);
+    return { meetings: [], reports: [] };
   }
 }
 
@@ -6125,11 +6165,34 @@ export default {
      *
      * `scripts/verify-site-data.js` asserts this list exists and that
      * `/api/admin` is covered by it rather than by a handler-local check.
+     *
+     * ── AND WHY THE TOKEN IS NO LONGER THE ONLY CREDENTIAL (2026-08-25) ────
+     *
+     * `adminCredential(..., { surface: 'api' })` accepts a VERIFIED Cloudflare
+     * Access assertion as well as the token. Without that, Session 18's Item A
+     * could not work: the owner signs in with Google, the page loads — and then
+     * every `fetch('/api/admin')` it makes is refused, so the page shows him a
+     * paste-a-token prompt anyway. The prompt would have MOVED, not gone.
+     *
+     * THREE PROPERTIES THAT ARE NOT NEGOTIABLE, all enforced in `admin-gate.js`
+     * rather than here, because a check that lives at its call site is the one a
+     * refactor moves:
+     *
+     *   * `surface: 'api'` does NOT accept the admin session cookie. Unchanged
+     *     from the day that cookie was introduced, and for its original reason.
+     *   * A state-changing request authorised by the Access assertion must be
+     *     same-origin. That assertion is AMBIENT — Cloudflare attaches it
+     *     because the browser holds `CF_Authorization` — so without the check it
+     *     would be exactly the CSRF surface the cookie is kept off the API to
+     *     avoid.
+     *   * Unconfigured Access is INERT. With `ACCESS_TEAM_DOMAIN`/`ACCESS_AUD`
+     *     unset — which is how this ships — the credential refuses everything
+     *     and this gate behaves precisely as it did before.
      */
     const AUTHENTICATED_PREFIXES = ['/api/agents/', '/api/admin'];
     if (AUTHENTICATED_PREFIXES.some((prefix) => url.pathname === prefix || url.pathname.startsWith(prefix))) {
-      const token = request.headers.get('X-Admin-Token') || '';
-      if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) {
+      const credential = await adminCredential(request, env, { surface: 'api' });
+      if (!credential.ok) {
         return json({ error: 'unauthorized' }, 401, origin);
       }
     }
@@ -6509,6 +6572,59 @@ export default {
         }, 200, origin);
       }
       /*
+       * -- /api/admin/access — IS THE GOOGLE DOOR ACTUALLY THERE? ----------
+       *
+       * Added 2026-08-25 (Session 18, Item A). Behind the same prefix gate as
+       * everything else under `/api/admin`.
+       *
+       * It exists because of the one shape this estate keeps recording: a gate
+       * that is asserted and never watched refusing anything. Access has three
+       * states that look identical from a browser — not configured on the
+       * Worker, configured but with no policy attached to the application, and
+       * working — and the first two both end in the token prompt. This endpoint
+       * separates them, in one request, with no dashboard:
+       *
+       *   configured=false          the two vars in wrangler.toml are empty
+       *   configured, presented=false   the vars are set and NOTHING is putting
+       *                                 an assertion on the request: the policy
+       *                                 is not attached, or you are on
+       *                                 workers.dev, which no policy can cover
+       *   configured, presented, ok     Google sign-in is the credential that
+       *                                 opened this page
+       *
+       * NO SECRET IS RETURNED. The AUD tag is a public application identifier
+       * and even so only its presence is reported; the team domain is a public
+       * hostname; the key cache reports counts and ages and never a key.
+       */
+      if (request.method === 'GET' && url.pathname === '/api/admin/access') {
+        const cfg = accessConfig(env);
+        const credential = await adminCredential(request, env, { surface: 'api' });
+        return json({
+          ok: true,
+          access: {
+            configured: cfg.configured,
+            team_domain: cfg.teamDomain,
+            issuer: cfg.issuer,
+            certs_url: cfg.certsUrl,
+            aud_configured: !!cfg.aud,
+            missing: cfg.missing,
+            assertion_header: ACCESS_JWT_HEADER,
+            assertion_presented: credential.access.presented,
+            assertion_accepted: credential.access.ok,
+            assertion_refused_because: credential.access.ok ? null : credential.access.reason,
+            signed_in_as: credential.access.ok ? credential.access.email : null,
+            key_cache: accessKeyCacheState(),
+          },
+          this_request: {
+            hostname: url.hostname,
+            authorized_by: credential.via,
+          },
+          note: cfg.configured
+            ? 'Access is configured on the Worker. If assertion_presented is false on office.avivnofar.com, the Access application still has no policy attached — that is a dashboard change, not a code one.'
+            : 'Access is NOT configured on this Worker: the credential is inert and the admin token is the only way in. Fill ACCESS_TEAM_DOMAIN and ACCESS_AUD in wrangler.toml and redeploy.',
+        }, 200, origin);
+      }
+      /*
        * -- /api/admin — THE FULL PICTURE, BEHIND THE PREFIX GATE -----------
        *
        * Authenticated by AUTHENTICATED_PREFIXES above, before this handler is
@@ -6524,7 +6640,7 @@ export default {
        * benefit rather than paying for it twice.
        */
       if (request.method === 'GET' && url.pathname === '/api/admin') {
-        const [counts, activity, snapshot] = await Promise.all([
+        const [counts, activity, snapshot, cadence] = await Promise.all([
           siteCounts(env),
           siteActivity(env),
           fetchOfficeSnapshot(env).catch((err) => ({
@@ -6532,6 +6648,8 @@ export default {
             submissions: null, owner: null,
             errors: [`office snapshot fetch threw: ${err.message}`],
           })),
+          // Session 18, Item B tab 3. Two GROUP BY queries, not one per block.
+          siteCadence(env),
         ]);
         if (env.SIM_KV && snapshot) {
           await env.SIM_KV.put(OFFICE_SNAPSHOT_CACHE_KEY, JSON.stringify(snapshot)).catch(() => {});
@@ -6544,6 +6662,21 @@ export default {
           meetings: activity.meetings,
           generatedAt: new Date().toISOString(),
           versionId: workerVersion(env),
+          /*
+           * THE OFFICE'S OWN COMPOSER, HANDED IN (2026-08-25, Session 18 Item B).
+           *
+           * `noticeParts()` is what writes the ask, the options and the default
+           * into his email and into every Issue. The page shows the same three
+           * parts because it is given the same function — not because someone
+           * wrote a second version of the shape for a browser. `site-data.js`
+           * imports nothing, so injection is the only way that can be true.
+           */
+          noticeParts,
+          // The schedule the Worker's own runScheduledBlock() reads. Same
+          // object, not a copy kept for the page.
+          schedule: dailyScheduleConfig,
+          meetingStats: cadence.meetings,
+          reportStats: cadence.reports,
         }), 200, origin);
       }
 

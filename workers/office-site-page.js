@@ -788,6 +788,76 @@ const OFFICE_CSS_ADDITIONS = `
 }
 .site-footer code { font-family: var(--font-mono); color: var(--text-dim); }
 .site-header a { color: var(--accent); }
+
+/* ---------------------------------------------------------------------------
+   SESSION 18 (2026-08-25) — the answer box, and the office-data tab.
+
+   Same rule as the block above and for the same recorded reason: every colour
+   here is one of the office's own custom properties. No new variable is
+   defined, and no name is used that :root does not carry. The one literal is
+   #ff8f8f, which the block above already uses for an error.
+   --------------------------------------------------------------------------- */
+
+/* ---- the three parts, on the card ---- */
+.pending-ask { margin: var(--space-2) 0 0; font-size: 0.95rem; color: var(--text); }
+.pending-when { margin: var(--space-2) 0 0; font-size: 0.85rem; color: var(--bible-only); }
+.pending-options { margin: var(--space-3) 0 0; padding: 0; list-style: none; }
+.pending-option {
+  padding: var(--space-2) 0; border-top: 1px solid var(--border);
+  font-size: 0.9rem; color: var(--text-dim);
+}
+.pending-option-label {
+  display: block; font-family: var(--font-mono); font-size: 0.72rem;
+  letter-spacing: 0.03em; text-transform: uppercase; color: var(--text-faint);
+  margin-bottom: var(--space-1);
+}
+.pending-missing {
+  margin: var(--space-3) 0 0; padding: var(--space-2) var(--space-3);
+  border-left: 2px solid var(--bible-only); background: var(--bg-raised);
+  font-size: 0.85rem; color: var(--text-dim);
+}
+
+/* ---- answering in place ---- */
+.answer-box { margin-top: var(--space-3); border-top: 1px solid var(--border); padding-top: var(--space-3); }
+.answer-box textarea {
+  width: 100%; box-sizing: border-box; min-height: 6.5rem; resize: vertical;
+  padding: 0.6rem 0.7rem; font: inherit; font-size: 0.92rem;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.answer-box textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.answer-actions {
+  display: flex; gap: var(--space-2); flex-wrap: wrap; align-items: center;
+  margin-top: var(--space-2);
+}
+.answer-send {
+  appearance: none; border: 0; border-radius: 6px; cursor: pointer;
+  padding: 0.5rem 0.9rem; font: inherit; font-size: 0.9rem; font-weight: 600;
+  background: var(--accent); color: var(--bg);
+}
+.answer-send:disabled { opacity: 0.5; cursor: default; }
+.answer-effect { font-size: 0.8rem; color: var(--text-faint); }
+.answer-status { margin-top: var(--space-2); font-size: 0.85rem; color: var(--text-dim); }
+.answer-status--ok { color: var(--live); }
+.answer-status--err { color: #ff8f8f; }
+.answer-status code { font-family: var(--font-mono); color: var(--text-dim); }
+.pending-item--answered { border-color: var(--accent-dim); }
+
+/* ---- the office-data tab ---- */
+.auto-group { margin-top: var(--space-4); }
+.auto-group h3 { margin: 0 0 var(--space-2); font-size: 1rem; color: var(--text); }
+.auto-table { width: 100%; border-collapse: collapse; font-size: 0.88rem; }
+.auto-table th, .auto-table td {
+  text-align: left; padding: var(--space-2); border-bottom: 1px solid var(--border);
+  vertical-align: top; color: var(--text-dim);
+}
+.auto-table th {
+  font-family: var(--font-mono); font-size: 0.72rem; letter-spacing: 0.03em;
+  text-transform: uppercase; color: var(--text-faint); font-weight: 400;
+}
+.auto-table td.auto-time { font-family: var(--font-mono); color: var(--text); white-space: nowrap; }
+.auto-table td.auto-none { color: var(--text-faint); }
+.auto-scroll { overflow-x: auto; }
 `;
 
 /** The client script. Adapted from the office's `app.js`: the element
@@ -983,7 +1053,28 @@ function clientScript(mode) {
     '  }',
     '',
   ].concat(isAdmin ? [
-    '  /* ---------- waiting on you (admin only) ---------- */',
+    '  /* ---------- waiting on you (admin only) ----------',
+    '',
+    '     SESSION 18 (2026-08-25). What changed, and why:',
+    '',
+    '     THE CARD NOW CARRIES THE THREE PARTS. What is being asked, what the',
+    '     options are and what each one means, and what happens if he says',
+    '     nothing. Those are composed SERVER-SIDE by the same function that',
+    '     writes the office\'s email and its Issues — this renders them, it does',
+    '     not compose a second version of them.',
+    '',
+    '     AND IT TAKES THE ANSWER HERE. Four input channels have been built for',
+    '     this owner over a month and each one broke at the step below it. The',
+    '     answer goes through the path that already works, unchanged: the same',
+    '     POST the spec builder uses, into channel/from-owner/, refused by the',
+    '     office\'s own parser before anything is written if it would not accept',
+    '     the file.',
+    '',
+    '     THE ONE CLAIM THIS PAGE IS CAREFUL NOT TO MAKE is that answering makes',
+    '     an item disappear from THIS list. It does not: this list reads the',
+    '     ledger, and only the office marks a ledger entry. What an answer stops',
+    '     is the office ASKING AGAIN by email and Issue — and only for the items',
+    '     whose id its reader matches, which the card says on its face. ---- */',
     '  function renderPending() {',
     '    var host = byId("pending-groups");',
     '    if (!host) return;',
@@ -1000,27 +1091,171 @@ function clientScript(mode) {
     '    });',
     '    var labels = {',
     '      decision: "Open decisions", authorization: "Pending authorizations",',
-    '      blocked: "Blocked", question: "Questions for you", submission: "Awaiting your review"',
+    '      blocked: "Blocked", question: "Questions for you",',
+    '      approval: "Waiting for your approval", submission: "Awaiting your review"',
     '    };',
     '    order.forEach(function (kind) {',
     '      var kids = [el("h3", { class: "pending-group-title", text: (labels[kind] || kind) + " (" + groups[kind].length + ")" })];',
-    '      groups[kind].forEach(function (item) {',
-    '        var card = [',
-    '          el("p", { class: "pending-source", text: item.source }),',
-    '          el("h4", { class: "pending-title", text: item.title }),',
-    '          item.detail ? el("p", { class: "pending-detail", text: item.detail }) : null',
-    '        ];',
-    '        if (item.status_note) card.push(el("p", { class: "pending-status-note", text: item.status_note }));',
-    '        var respond = el("button", { type: "button", class: "respond-btn" });',
-    '        respond.textContent = "Write a spec about this";',
-    '        respond.addEventListener("click", function () { openSpecFor(item); });',
-    '        card.push(respond);',
-    '        kids.push(el("article", { class: "pending-item" }, card));',
-    '      });',
+    '      groups[kind].forEach(function (item) { kids.push(renderPendingItem(item)); });',
     '      host.appendChild(el("div", { class: "pending-group" }, kids));',
     '    });',
     '    var tabCount = byId("pending-tab-count");',
     '    if (tabCount) tabCount.textContent = "(" + items.length + ")";',
+    '  }',
+    '',
+    '  function renderPendingItem(item) {',
+    '    var notice = item.notice || null;',
+    '    var headline = item.ask || item.title || "(the office recorded no title for this)";',
+    '    var card = [',
+    '      el("p", { class: "pending-source", text: item.source_plain || "" }),',
+    '      el("h4", { class: "pending-title", text: headline })',
+    '    ];',
+    '',
+    '    /* The ask, where the office phrased what it needs differently from the',
+    '       item\'s own title. Shown only when it says something the headline',
+    '       does not. */',
+    '    if (notice && notice.ask && notice.ask !== headline) {',
+    '      card.push(el("p", { class: "pending-ask", text: notice.ask }));',
+    '    }',
+    '    if (item.detail) card.push(el("p", { class: "pending-detail", text: item.detail }));',
+    '',
+    '    if (notice && notice.options && notice.options.length) {',
+    '      var opts = notice.options.map(function (o) {',
+    '        return el("li", { class: "pending-option" }, [',
+    '          el("span", { class: "pending-option-label", text: o.label }),',
+    '          el("span", { text: o.text })',
+    '        ]);',
+    '      });',
+    '      card.push(el("ul", { class: "pending-options" }, opts));',
+    '    }',
+    '',
+    '    if (notice && notice.no_answer) {',
+    '      card.push(el("p", { class: "pending-when", text: "If you say nothing: " + notice.no_answer }));',
+    '    }',
+    '    if (item.by_when) card.push(el("p", { class: "pending-when", text: item.by_when }));',
+    '    if (item.status_note) card.push(el("p", { class: "pending-status-note", text: item.status_note }));',
+    '',
+    '    /* What the office could NOT state. Shown, never swallowed: an item with',
+    '       no recorded default is one where the office does not know what it',
+    '       will do if he stays quiet, and that is the most important sentence on',
+    '       the card. */',
+    '    if (notice && notice.missing && notice.missing.length) {',
+    '      card.push(el("p", { class: "pending-missing",',
+    '        text: "The office did not record " + notice.missing.join(", ") + " for this one. Until it does, there is no stated default here — silence is not a decision the office knows how to act on." }));',
+    '    } else if (!notice) {',
+    '      card.push(el("p", { class: "pending-missing",',
+    '        text: "The office did not compose an ask for this item, so what you see is the raw board entry rather than a question." }));',
+    '    }',
+    '',
+    '    var article = el("article", { class: "pending-item" }, card);',
+    '    article.appendChild(answerBox(item, article));',
+    '',
+    '    var respond = el("button", { type: "button", class: "respond-btn" });',
+    '    respond.textContent = "Write a full spec instead";',
+    '    respond.addEventListener("click", function () { openSpecFor(item); });',
+    '    article.appendChild(respond);',
+    '    return article;',
+    '  }',
+    '',
+    '  /* ---------- the answer, in place ---------- */',
+    '',
+    '  /* Sending needs a content type; reading does not. The token is added only',
+    '     if this tab HAS one — a browser that arrived through Google sign-in has',
+    '     no token and does not need one, because Cloudflare puts the signed',
+    '     assertion on this request and the Worker accepts it. That is the whole',
+    '     of why the prompt below stops appearing once Access is enforcing. */',
+    '  function postHeaders() {',
+    '    var h = adminHeaders();',
+    '    h["Content-Type"] = "application/json";',
+    '    return h;',
+    '  }',
+    '',
+    '  /* The subject leads with the item id and the reason is mechanical, not',
+    '     bureaucratic: the office\'s reader (itemIdsInText) attributes a reply to',
+    '     an item by finding its id in the file, and the filename slug is cut at',
+    '     48 characters — an id at the END would be truncated away, taking the',
+    '     attribution and the uniqueness of the filename with it. */',
+    '  function answerSubject(item) {',
+    '    var ask = (item.ask || item.title || "answer").replace(/\\s+/g, " ").trim();',
+    '    if (ask.length > 64) ask = ask.slice(0, 63).replace(/[\\s,;:.-]+$/, "") + "…";',
+    '    return item.item_id ? item.item_id + " — " + ask : ask;',
+    '  }',
+    '',
+    '  function answerBody(item, text) {',
+    '    var lines = [text.trim(), "", "---", ""];',
+    '    lines.push("Answered by the owner on the office\'s own page.");',
+    '    if (item.item_id) lines.push("This is my answer on item " + item.item_id + ".");',
+    '    return lines.join("\\n");',
+    '  }',
+    '',
+    '  function answerBox(item, article) {',
+    '    var box = el("div", { class: "answer-box" });',
+    '    var input = el("textarea", {',
+    '      placeholder: "Answer in your own words. Whatever you write is filed exactly as you wrote it.",',
+    '      "aria-label": "Your answer"',
+    '    });',
+    '    var send = el("button", { type: "button", class: "answer-send" });',
+    '    send.textContent = "Send this answer";',
+    '    var status = el("p", { class: "answer-status" });',
+    '',
+    '    var effect = item.answer_stops_the_asking',
+    '      ? "The office stops raising this by email and Issue once the file lands. It raises it once more after seven days if it has still not marked the entry, and then goes quiet."',
+    '      : (item.answer_note || "The office files this and reads it; it does not mark this item answered.");',
+    '',
+    '    send.addEventListener("click", function () {',
+    '      var text = input.value.trim();',
+    '      if (!text) { say(status, "Write something first — the office refuses an empty message.", "err"); return; }',
+    '      send.disabled = true;',
+    '      say(status, "Sending…", "");',
+    '      fetch("/api/agents/owner-message", {',
+    '        method: "POST",',
+    '        headers: postHeaders(),',
+    '        cache: "no-store",',
+    '        body: JSON.stringify({',
+    '          subject: answerSubject(item),',
+    '          body: answerBody(item, text),',
+    '          kind: item.answer_kind || "instruction",',
+    '          re: "new"',
+    '        })',
+    '      }).then(function (res) { return res.json().then(function (b) { return { status: res.status, body: b }; }); })',
+    '        .then(function (r) {',
+    '          if (!r.body || r.body.ok !== true) {',
+    '            send.disabled = false;',
+    '            /* The parser\'s own words, verbatim. The office refuses before it',
+    '               writes, and a page that summarised the refusal would hide the',
+    '               only thing that says how to fix it. */',
+    '            say(status, "The office refused it (HTTP " + r.status + "): " + ((r.body && r.body.reason) || "no reason given"), "err");',
+    '            return;',
+    '          }',
+    '          input.disabled = true;',
+    '          article.className = "pending-item pending-item--answered";',
+    '          clear(status);',
+    '          status.className = "answer-status answer-status--ok";',
+    '          status.appendChild(el("span", { text: "Filed as " }));',
+    '          status.appendChild(el("code", { text: r.body.path }));',
+    '          status.appendChild(el("span", { text: ". " + (r.body.note || "") }));',
+    '          status.appendChild(el("span", { text: " " + effect }));',
+    '          status.appendChild(el("span", { text: " This card stays on this page until the office marks its own ledger entry — the page reads the ledger, and only the office writes to it." }));',
+    '          send.textContent = "Answer sent";',
+    '        })',
+    '        .catch(function (err) {',
+    '          send.disabled = false;',
+    '          say(status, "Could not reach the office: " + err.message, "err");',
+    '        });',
+    '    });',
+    '',
+    '    box.appendChild(input);',
+    '    box.appendChild(el("div", { class: "answer-actions" }, [',
+    '      send, el("span", { class: "answer-effect", text: effect })',
+    '    ]));',
+    '    box.appendChild(status);',
+    '    return box;',
+    '  }',
+    '',
+    '  function say(node, text, kind) {',
+    '    clear(node);',
+    '    node.className = "answer-status" + (kind ? " answer-status--" + kind : "");',
+    '    node.textContent = text;',
     '  }',
     '',
     '  /* The office\'s Respond button used to seed a localStorage note. It now',
@@ -1029,10 +1264,75 @@ function clientScript(mode) {
     '    var frame = byId("spec-frame");',
     '    var btn = document.querySelector(\'.tab-btn[data-tab="spec"]\');',
     '    if (btn) btn.click();',
-    '    if (frame) frame.src = "/admin/spec#" + encodeURIComponent(item.title);',
+    '    if (frame) frame.src = "/admin/spec#" + encodeURIComponent(item.ask || item.title || "");',
     '  }',
     '',
-    '  extraRender = renderPending;',
+    '  /* ---------- office data: what runs, and what it produced ---------- */',
+    '  function renderOfficeData() {',
+    '    var host = byId("office-data-body");',
+    '    if (!host) return;',
+    '    clear(host);',
+    '    var auto = data.automation || null;',
+    '    if (!auto) {',
+    '      host.appendChild(el("p", { class: "state-note", text: "The office returned no automation data on this request." }));',
+    '      return;',
+    '    }',
+    '',
+    '    host.appendChild(table("What the office produces, by kind of meeting",',
+    '      ["Meeting", "Held", "Most recent"],',
+    '      (auto.meeting_types || []).map(function (m) {',
+    '        return [m.type || "—", String(m.count), m.last_at || "never"];',
+    '      })));',
+    '',
+    '    host.appendChild(table("Reports the office has written, by type",',
+    '      ["Report type", "Written", "Most recent"],',
+    '      (auto.report_types || []).map(function (r) {',
+    '        return [r.type || "—", String(r.count), r.last_at || "never"];',
+    '      })));',
+    '',
+    '    var byDay = {}, dayOrder = [];',
+    '    (auto.blocks || []).forEach(function (b) {',
+    '      if (!byDay[b.day_type]) { byDay[b.day_type] = []; dayOrder.push(b.day_type); }',
+    '      byDay[b.day_type].push(b);',
+    '    });',
+    '    dayOrder.forEach(function (day) {',
+    '      host.appendChild(table("The working day — " + day,',
+    '        ["Time", "What runs", "Last artifact the office can point at"],',
+    '        byDay[day].map(function (b) {',
+    '          var what = (b.type || "—") + (b.label ? " — " + b.label : "");',
+    '          var evidence = b.evidence',
+    '            ? (b.evidence.last_at || "never") + " (" + b.evidence.count + " in the database)"',
+    '            : b.evidence_note;',
+    '          return [b.time || "—", what, evidence];',
+    '        }), true));',
+    '    });',
+    '',
+    '    if (auto.notes && auto.notes.length) {',
+    '      var ul = el("ul", { class: "gaps-list" }, auto.notes.map(function (n) { return el("li", { text: n }); }));',
+    '      host.appendChild(el("div", { class: "auto-group" }, [',
+    '        el("h3", { text: "What this tab does not know" }), ul',
+    '      ]));',
+    '    }',
+    '  }',
+    '',
+    '  function table(title, headers, rows, timeFirst) {',
+    '    var thead = el("tr", {}, headers.map(function (h) { return el("th", { text: h }); }));',
+    '    var body = rows.length',
+    '      ? rows.map(function (cells) {',
+    '        return el("tr", {}, cells.map(function (c, i) {',
+    '          var cls = (timeFirst && i === 0) ? "auto-time" : (c === "never" ? "auto-none" : "");',
+    '          return el("td", cls ? { class: cls, text: String(c) } : { text: String(c) });',
+    '        }));',
+    '      })',
+    '      : [el("tr", {}, [el("td", { class: "auto-none", text: "nothing recorded" })])];',
+    '    var t = el("table", { class: "auto-table" }, [el("thead", {}, [thead]), el("tbody", {}, body)]);',
+    '    return el("div", { class: "auto-group" }, [',
+    '      el("h3", { text: title }),',
+    '      el("div", { class: "auto-scroll" }, [t])',
+    '    ]);',
+    '  }',
+    '',
+    '  extraRender = function () { renderPending(); renderOfficeData(); };',
     '',
   ] : []).concat([
     '  /* ---------- load ---------- */',
@@ -1150,6 +1450,7 @@ export function renderOfficeSite({ mode = 'public' } = {}) {
   tabs.push({ id: 'office', label: 'The office' });
   tabs.push({ id: 'agents', label: 'The thirteen' });
   if (isAdmin) tabs.push({ id: 'spec', label: 'Write a spec' });
+  if (isAdmin) tabs.push({ id: 'office-data', label: 'Office data' });
   tabs.push({ id: 'gaps', label: 'What this page cannot show you' });
 
   const tabButtons = tabs.map((t) =>
@@ -1183,6 +1484,22 @@ export function renderOfficeSite({ mode = 'public' } = {}) {
             not accept it.
           </p>
           <iframe id="spec-frame" class="spec-frame" src="/admin/spec" title="Spec builder"></iframe>
+        </div>
+      </section>`;
+
+  const officeDataPanel = !isAdmin ? '' : `
+      <section class="tab-panel" data-tab="office-data" hidden>
+        <div class="wrap">
+          <h2>Office data</h2>
+          <p class="section-note">
+            The office's meetings and the blocks its scheduler actually
+            iterates — read from the same configuration the Worker itself
+            reads, joined to its database where a block leaves something
+            behind. It is an instrument, not a status board: where the office
+            has no record that something ran, this says so instead of
+            inferring it.
+          </p>
+          <div id="office-data-body"></div>
         </div>
       </section>`;
 
@@ -1236,6 +1553,7 @@ ${pendingPanel}
         </div>
       </section>
 ${specPanel}
+${officeDataPanel}
       <section class="tab-panel data-gaps" data-tab="gaps" hidden>
         <div class="wrap">
           <h2>What this page cannot show you</h2>

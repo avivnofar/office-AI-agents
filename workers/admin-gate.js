@@ -57,6 +57,15 @@
  * authentication idiom in this estate, not two that must be kept in agreement.
  */
 
+/*
+ * The one import this file has, added 2026-08-25 (Session 18). `access-jwt.js`
+ * imports nothing itself, so `scripts/verify-admin-gate.js` still loads this
+ * module under plain `node` — and with no Access configuration in the test
+ * environment the credential is inert and reaches no network, so
+ * `globalThis.fetch` stays a tripwire there too.
+ */
+import { accessCredential } from './access-jwt.js';
+
 export const ADMIN_COOKIE_NAME = 'office_admin';
 export const ADMIN_SESSION_PATH = '/admin/session';
 
@@ -109,22 +118,127 @@ function constantTimeEqual(a, b) {
   return diff === 0;
 }
 
-/**
- * The decision. Two accepted credentials, both derived from one secret:
+/* ── THE THIRD CREDENTIAL: GOOGLE SIGN-IN (2026-08-25, Session 18) ────────
  *
- *   * `X-Admin-Token` — what a script or a curl presents.
- *   * the `office_admin` cookie — what a BROWSER presents, because a browser
- *     cannot set a header on a navigation.
+ * The owner should never have seen a paste-a-token prompt at his own front
+ * door. The protection that was DESIGNED was Cloudflare Access with Google
+ * sign-in; this file's token gate was built because an Access policy binds one
+ * hostname and could never cover `*.workers.dev`. It was the correct second
+ * layer and it became the first layer by accident.
+ *
+ * So a valid Access assertion is now accepted as an ALTERNATIVE, and nothing
+ * is removed:
+ *
+ *   office.avivnofar.com, after Google sign-in -> the JWT, verified. No prompt.
+ *   *.workers.dev                              -> no JWT; the token, as before.
+ *   neither                                    -> 401, as before.
+ *
+ * `access-jwt.js` holds the check itself and why merely reading the header
+ * proves nothing. Unconfigured (`ACCESS_TEAM_DOMAIN` / `ACCESS_AUD` unset) is
+ * INERT, not open: the credential refuses everything and the gate falls
+ * through to the token exactly as it did before this existed.
  */
-export async function adminPageAuthorized(request, env) {
-  if (!env || !env.ADMIN_TOKEN) return false;
+
+/** Methods that cannot change anything. Everything else is state-changing. */
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+/**
+ * Is this a state-changing request the browser sent from THIS site?
+ *
+ * ── WHY THIS EXISTS AT ALL, AND WHY ONLY ON THE ACCESS PATH ─────────────
+ *
+ * The Access assertion is an AMBIENT credential in exactly the sense this
+ * file's header warns about: Cloudflare attaches it because the browser holds
+ * a `CF_Authorization` cookie, so the browser presents it on any request to
+ * this origin — including one a hostile page caused. That is the definition of
+ * a CSRF surface on endpoints that trigger office runs and write to the owner
+ * channel, and it is precisely why the `office_admin` cookie is not honoured
+ * by the API.
+ *
+ * The token path is unaffected: `X-Admin-Token` is not ambient — a browser
+ * cannot attach it cross-site, and a script sets it deliberately.
+ *
+ * `Sec-Fetch-Site` is sent by every current browser and is the reliable
+ * signal; `Origin` is the fallback for anything that does not send it. **A
+ * state-changing request with NEITHER is refused on the Access path** rather
+ * than given the benefit of the doubt — the caller that has neither header is
+ * not a browser, and a non-browser has the token.
+ */
+export function accessRequestIsSameOrigin(request) {
+  const site = request.headers.get('Sec-Fetch-Site') || '';
+  if (site) return site === 'same-origin' || site === 'none';
+  const origin = request.headers.get('Origin') || '';
+  if (!origin) return false;
+  try {
+    return new URL(origin).host === new URL(request.url).host;
+  } catch (err) {
+    return false;
+  }
+}
+
+/**
+ * THE DECISION, for both surfaces. Returns which credential answered — never a
+ * bare boolean, because "refused" and "refused, and Access is not even
+ * configured" are different facts and the estate has spent six recorded
+ * incidents on exactly that distinction.
+ *
+ * Order: Access JWT, then `X-Admin-Token`, then the cookie.
+ *
+ * `surface` decides whether the cookie counts. `'page'` accepts it — a browser
+ * cannot set a header on a navigation, so without it the door is bricked up.
+ * `'api'` does NOT, unchanged from the day the cookie was introduced: a cookie
+ * the API honoured would be an ambient credential on endpoints that trigger
+ * office runs.
+ */
+export async function adminCredential(request, env, { surface = 'page', accessOpts = {} } = {}) {
+  // 1. Google sign-in, through Cloudflare Access.
+  let access = { ok: false, configured: false, reason: 'not evaluated', email: null, presented: false };
+  try {
+    access = await accessCredential(request, env, accessOpts);
+  } catch (err) {
+    // A throw here must never become an ALLOW, and must never take the token
+    // path down with it.
+    access = { ok: false, configured: false, reason: 'access check threw: ' + (err && err.message ? err.message : err), email: null, presented: false };
+  }
+  if (access.ok) {
+    if (!SAFE_METHODS.has(String(request.method || 'GET').toUpperCase()) && !accessRequestIsSameOrigin(request)) {
+      return {
+        ok: false, via: null, access,
+        reason: 'a signed-in session may only change something from a request this site made',
+      };
+    }
+    return { ok: true, via: 'access-jwt', email: access.email, access, reason: null };
+  }
+
+  // 2 and 3. The office's own token, and the derived cookie a browser carries.
+  if (!env || !env.ADMIN_TOKEN) {
+    return { ok: false, via: null, access, reason: 'no ADMIN_TOKEN is configured — nobody is authorized' };
+  }
 
   const header = request.headers.get('X-Admin-Token') || '';
-  if (header && constantTimeEqual(header, env.ADMIN_TOKEN)) return true;
+  if (header && constantTimeEqual(header, env.ADMIN_TOKEN)) {
+    return { ok: true, via: 'admin-token', email: null, access, reason: null };
+  }
 
-  const cookie = readCookie(request.headers.get('Cookie') || '', ADMIN_COOKIE_NAME);
-  if (!cookie) return false;
-  return constantTimeEqual(cookie, await adminCookieValue(env.ADMIN_TOKEN));
+  if (surface === 'page') {
+    const cookie = readCookie(request.headers.get('Cookie') || '', ADMIN_COOKIE_NAME);
+    if (cookie && constantTimeEqual(cookie, await adminCookieValue(env.ADMIN_TOKEN))) {
+      return { ok: true, via: 'admin-cookie', email: null, access, reason: null };
+    }
+  }
+
+  return { ok: false, via: null, access, reason: 'no accepted credential on the request' };
+}
+
+/**
+ * The decision, as a boolean, for callers that only need one.
+ *
+ * Three accepted credentials now: a verified Cloudflare Access assertion, the
+ * `X-Admin-Token` header a script or a curl presents, and the `office_admin`
+ * cookie a BROWSER presents because it cannot set a header on a navigation.
+ */
+export async function adminPageAuthorized(request, env) {
+  return (await adminCredential(request, env, { surface: 'page' })).ok;
 }
 
 /** `Path=/admin` so the browser never sends this cookie to `/api/*` at all.

@@ -332,48 +332,293 @@ export function agentSlug(agent) {
  * the office's own work and is not waiting on him; including it would make the
  * list longer and less true.
  */
-export function buildPendingItems(snapshot) {
+/* ── THE THREE-PART SHAPE, AND WHY IT IS NOT WRITTEN AGAIN HERE ──────────
+ *
+ * Added 2026-08-25 (Session 18, Item B). The office already composes what a
+ * person needs in order to answer — `noticeParts()` in `owner-notify.js`: the
+ * ASK with the board identifiers stripped out of it, the OPTIONS with what each
+ * one means, and WHAT HAPPENS IF HE SAYS NOTHING. That composition is what goes
+ * into his email and into every Issue.
+ *
+ * It is INJECTED rather than imported, because this module imports nothing (see
+ * the file header) and `owner-notify.js` imports nothing either — so the caller
+ * passes the function in and there is exactly one implementation of the shape.
+ * A9's argument, applied to a sentence instead of a document: *copies diverge.*
+ *
+ * When it is NOT passed, `notice` is null and `data_gaps` says so. It does not
+ * fall back to a second composition written here — a fallback shape is the
+ * divergence this arrangement exists to prevent, and it would be invisible.
+ */
+
+/** Board identifiers, so the visible ask never carries one. Matches
+ *  `owner-notify.js`'s ID_PATTERN — the same list, because it is the same job
+ *  and this module cannot import it. */
+const VISIBLE_ID_PATTERN = /\b(?:OB|S|REQ|C|AD|KFM|R|OQ)-\d+\b/g;
+
+function stripIdsForDisplay(text) {
+  if (!text) return '';
+  return String(text)
+    .replace(VISIBLE_ID_PATTERN, '')
+    .replace(/\(\s*\)|\[\s*\]/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .replace(/\s+([.,;:])/g, '$1')
+    .replace(/^[\s—–-]+/, '')
+    .trim();
+}
+
+/**
+ * CAN AN ANSWER TYPED ON THIS PAGE STOP THE OFFICE ASKING?
+ *
+ * This is not a presentational detail. `owner-channel.js`'s `itemIdsInText()`
+ * is what turns a file the owner wrote into "he has acted on this item", and it
+ * matches `S-NNN` and `Q-NNN` — three digits, and deliberately NOT `OB-NNN`,
+ * because a board task is the office's own work and is not a thing he is being
+ * asked to decide in the channel.
+ *
+ * So the same expression is applied here, and the answer is carried to the page
+ * as `answer_stops_the_asking`. An item where it is false gets told so on the
+ * card, in words. **The failure this replaces is the owner answering on a page
+ * and being emailed the same item the next morning** — and a page that implied
+ * every answer silences every item would have reproduced it for board tasks
+ * while fixing it for everything else, which is worse than not claiming it.
+ */
+const CHANNEL_ITEM_ID = /^[SQ]-\d{3}$/;
+
+export function answerStopsTheAsking(itemId) {
+  return CHANNEL_ITEM_ID.test(String(itemId || ''));
+}
+
+/**
+ * The board, the open questions and the submissions ledger, folded into the
+ * site's one `pending_items` shape.
+ *
+ * WHAT COUNTS AS PENDING, stated rather than implied: a board task the office
+ * cannot start (NOT-READY or BLOCKED), a question the office asked the owner
+ * that has no answer, and a submission awaiting his decision. A READY task is
+ * the office's own work and is not waiting on him; including it would make the
+ * list longer and less true.
+ *
+ * @param {object} snapshot
+ * @param {object} [deps]
+ * @param {function} [deps.noticeParts] `owner-notify.js`'s composer, injected.
+ */
+export function buildPendingItems(snapshot, { noticeParts = null } = {}) {
   const items = [];
+
+  /** The three parts, composed by the office's own composer or not at all. */
+  const notice = (item) => {
+    if (typeof noticeParts !== 'function') return null;
+    const parts = noticeParts(item);
+    return {
+      ask: parts.ask || null,
+      options: parts.options || [],
+      no_answer: parts.noAnswer || null,
+      // What the office could NOT state. Shown, not hidden: an item with no
+      // recorded default is one where the office does not know what it will do
+      // if he stays quiet, and that is the most important thing on the card.
+      missing: parts.missing || [],
+      complete: !!parts.ok,
+    };
+  };
+
   const tasks = snapshot?.board?.tasks || [];
   for (const t of tasks) {
+    const id = String(t.id || '');
     if (t.state !== 'NOT-READY' && t.state !== 'BLOCKED') continue;
     items.push({
-      id: `board-${String(t.id || '').toLowerCase()}`,
+      id: `board-${id.toLowerCase()}`,
+      item_id: id || null,
       kind: t.state === 'BLOCKED' ? 'blocked' : 'decision',
       title: t.title || t.id || null,
+      ask: stripIdsForDisplay(t.title || ''),
+      // The visible provenance, in words. `source` below keeps the identifier
+      // for the record; this is the line a person reads.
+      source_plain: t.state === 'BLOCKED'
+        ? 'On the office\'s task board, blocked — it cannot start this until something is resolved.'
+        : 'On the office\'s task board, not ready to start — something about it is still undecided.',
       source: `campus/shared/board/BOARD.md, ${t.id}, ${t.state}`,
       detail: t.blockedBy ? `Blocked by: ${t.blockedBy}` : 'No "Blocked by" line — the board does not say what this is waiting on.',
       status_note: t.stage ? `Lifecycle stage: ${t.stage}` : null,
+      by_when: null,
+      notice: notice({ title: t.title, decision: t.title, recommend: null, fallback: null }),
+      answer_kind: 'instruction',
+      answer_stops_the_asking: answerStopsTheAsking(id),
+      answer_note: 'This is the office\'s own work, not a question in the channel — an answer here is filed as an'
+        + ' instruction and reaches every agent\'s prompt, but the office does not record it as a decision against'
+        + ' this board item and nothing here will mark the item answered.',
     });
   }
 
   const questions = snapshot?.questions?.questions || [];
   for (const q of questions) {
     if (!q.open) continue;
+    const id = String(q.id || '');
+    const asked = q.title || q.question || q.id || null;
     items.push({
-      id: `question-${String(q.id || '').toLowerCase()}`,
+      id: `question-${id.toLowerCase()}`,
+      item_id: id || null,
       kind: 'question',
-      title: q.title || q.question || q.id || null,
+      title: asked,
+      ask: stripIdsForDisplay(asked || ''),
+      source_plain: 'A question the office asked you and cannot answer itself.',
       source: `channel/to-owner/OPEN-QUESTIONS.md, ${q.id}`,
       detail: q.fallback ? `If no answer comes: ${q.fallback}` : 'No fallback recorded — the office did not say what it will do without an answer.',
       status_note: q.date ? `Asked ${q.date}` : null,
+      by_when: escalationSentence(q),
+      notice: notice({
+        title: asked,
+        decision: q.need ? `${q.need} — blocking: ${q.blocking || 'unstated'}` : (q.blocking || asked),
+        recommend: null,
+        fallback: q.fallback,
+      }),
+      answer_kind: 'decision',
+      answer_stops_the_asking: answerStopsTheAsking(id),
+      answer_note: null,
     });
   }
 
   const submissions = snapshot?.submissions?.submissions || [];
   for (const s of submissions) {
     if (!s.open) continue;
+    const id = String(s.id || '');
     items.push({
-      id: `submission-${String(s.id || '').toLowerCase()}`,
+      id: `submission-${id.toLowerCase()}`,
+      item_id: id || null,
       kind: 'approval',
       title: s.title || s.id || null,
+      ask: stripIdsForDisplay(s.title || ''),
+      source_plain: 'Work the office finished and submitted to you — it is waiting on your decision to go further.',
       source: `channel/to-owner/SUBMISSIONS.md, ${s.id}`,
       detail: s.recommend ? `The office recommends: ${s.recommend}` : (s.did || 'No recommendation recorded.'),
       status_note: s.escalation?.rung ? `${s.escalation.rung}${s.escalation.days != null ? ` — ${s.escalation.days} days open` : ''}` : null,
+      by_when: escalationSentence(s),
+      notice: notice({
+        title: s.title,
+        decision: s.decision || s.title,
+        recommend: s.recommend,
+        fallback: s.fallback,
+      }),
+      answer_kind: 'decision',
+      answer_stops_the_asking: answerStopsTheAsking(id),
+      answer_note: null,
     });
   }
 
   return items;
+}
+
+/**
+ * "…and by when", in words, from the age ladder the channel already runs.
+ *
+ * Returns null rather than inventing a deadline where the office has not
+ * recorded one. A made-up date on this page would be the single most
+ * misleading thing on it.
+ */
+export function escalationSentence(entry) {
+  const esc = entry?.escalation;
+  if (!esc) return null;
+  const days = Number.isFinite(Number(esc.days)) ? Number(esc.days) : null;
+  const rung = esc.rung || null;
+  if (esc.takeFallback) {
+    return `The office has ALREADY taken its default on this (14 days or more). ${rung ? rung + '. ' : ''}`
+      + 'The entry stays open and it keeps asking, so an answer now still changes what happens next.';
+  }
+  if (rung && days !== null) return `${rung} — ${days} day(s) with no answer.`;
+  if (rung) return rung;
+  if (days !== null) return `${days} day(s) with no answer.`;
+  return null;
+}
+
+/* ────────────────── the office's clockwork, as a list ────────────────────── */
+
+/**
+ * The office's own labels are paragraphs — several of them carry an entire
+ * incident write-up (`MOVED OFF THE 08:00 TICK on 2026-08-16 (OB-074): it
+ * shared 08:00 with…`). That history belongs in the config file where it is,
+ * not on a page. This takes the first sentence and says nothing else.
+ */
+export function firstSentence(text, max = 180) {
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!s) return null;
+  const cut = s.search(/[.:]\s+[A-Z(]/);
+  const head = cut > 20 ? s.slice(0, cut + 1) : s;
+  return head.length > max ? head.slice(0, max - 1).trimEnd() + '…' : head;
+}
+
+/**
+ * WHAT RUNS, WHEN, AND WHETHER IT HAS ACTUALLY RUN.
+ *
+ * Added 2026-08-25 (Session 18, Item B tab 3). The schedule is read from the
+ * SAME `config/daily-schedule.json` the Worker's own `runScheduledBlock()`
+ * reads — passed in by the caller, never a second copy — so a block that is
+ * shown here is a block that fires.
+ *
+ * ── WHAT THIS DELIBERATELY DOES NOT CLAIM ────────────────────────────────
+ *
+ * "When it last ran" is not a thing the office records per block. There is no
+ * block-execution log, and inventing one out of nearby timestamps would produce
+ * a page that looks like an instrument and is a guess. So each block is joined
+ * to the artifact it PRODUCES where such an artifact exists and is in the
+ * database — a meeting block to that meeting type's most recent row — and every
+ * block where no such join exists says `no observable artifact` in those words.
+ *
+ * The counts are per TYPE and over all time, which is what the office's own
+ * tables can answer cheaply. Two GROUP BY queries, not one per block: this
+ * Worker has had scheduled work refused for crossing the 50-subrequest ceiling.
+ */
+export function buildAutomation({ schedule = null, meetingStats = [], reportStats = [] } = {}) {
+  const dayTypes = [
+    ['Sunday–Thursday', schedule?.full_day_schedule],
+    ['Friday (short day)', schedule?.friday_schedule],
+    ['Saturday (rest day)', schedule?.saturday_schedule],
+  ];
+
+  const meetingsByType = new Map();
+  for (const row of meetingStats || []) {
+    if (row && row.type) meetingsByType.set(String(row.type), row);
+  }
+
+  const blocks = [];
+  for (const [dayLabel, sched] of dayTypes) {
+    for (const b of (sched?.blocks || [])) {
+      const evidence = b.meeting_type && meetingsByType.has(b.meeting_type)
+        ? {
+          joined_on: 'this meeting type in the office\'s database',
+          last_at: meetingsByType.get(b.meeting_type).last_at || null,
+          count: Number(meetingsByType.get(b.meeting_type).count) || 0,
+        }
+        : null;
+      blocks.push({
+        day_type: dayLabel,
+        time: b.time || null,
+        type: b.type || null,
+        meeting_type: b.meeting_type || null,
+        label: firstSentence(b.label),
+        evidence,
+        // Said in the payload rather than left to the page to infer, so the
+        // absence is data and not a rendering accident.
+        evidence_note: evidence
+          ? null
+          : 'no observable artifact — this block writes nothing the office can join back to it',
+      });
+    }
+  }
+
+  return {
+    blocks,
+    meeting_types: (meetingStats || []).map((m) => ({
+      type: m.type || null, count: Number(m.count) || 0, last_at: m.last_at || null,
+    })),
+    report_types: (reportStats || []).map((r) => ({
+      type: r.type || null, count: Number(r.count) || 0, last_at: r.last_at || null,
+    })),
+    notes: [
+      'These are the blocks the office\'s scheduler actually iterates — read from the same configuration file the Worker reads, not a copy kept for this page.',
+      'A block only fires if a Cloudflare cron tick lands on its exact minute. That tick window is declared in the Worker\'s deployment configuration and CANNOT BE READ FROM INSIDE THE WORKER, so this page cannot show it and does not pretend to.',
+      'There is no per-block execution log anywhere in the office. Where a block produces something the database holds, it is joined to it; where it does not, this says so rather than inferring a run from a nearby timestamp.',
+      'Counts are over all time, not today.',
+    ],
+  };
 }
 
 /**
@@ -431,6 +676,10 @@ export function buildActivity({ reports = [], meetings = [] } = {}) {
 export function buildAdminData({
   agents = [], counts = {}, snapshot = null,
   reports = [], meetings = [], generatedAt = null, versionId = null,
+  // Session 18, Item B. All three injected, none imported — see the file
+  // header's rule and `buildPendingItems()`'s note on why the three-part shape
+  // is not written a second time in this module.
+  noticeParts = null, schedule = null, meetingStats = [], reportStats = [],
 } = {}) {
   const list = Array.isArray(agents) ? agents : [];
   const snapshotReadable = !!(snapshot && (snapshot.board || snapshot.requirements));
@@ -458,8 +707,9 @@ export function buildAdminData({
       bible_detail: null,
     })),
     counts: publicCounts(counts),
-    pending_items: buildPendingItems(snapshot),
+    pending_items: buildPendingItems(snapshot, { noticeParts }),
     activity: buildActivity({ reports, meetings }),
+    automation: buildAutomation({ schedule, meetingStats, reportStats }),
     // The office's own errors reading its own files. Reported, never hidden.
     errors: Array.isArray(snapshot?.errors) ? snapshot.errors : [],
     data_gaps: [
@@ -471,6 +721,11 @@ export function buildAdminData({
       'activity carries reports and meetings from the office\'s database, with NO report bodies and NO meeting transcripts — those columns are never selected.',
       'activity does NOT carry the git commit feed. data.js built that by shelling out to `git log` in two private repos, which is exactly what a Worker cannot do and exactly why that file froze on 2026-08-07.',
       'Counts are totals since the simulation began on 2026-06-17, not per-day figures.',
+      typeof noticeParts === 'function'
+        ? 'Each pending item carries the ask, the options and the office\'s default composed by THE SAME function that writes its emails and Issues — one composition, not a second one written for this page.'
+        : 'THE THREE-PART SHAPE IS MISSING from every pending item: the composer was not passed to this builder, so `notice` is null. The cards will show what the board says and not what the office would have asked you.',
+      'An answer typed on this page stops the office repeating an item ONLY where `answer_stops_the_asking` is true — the channel\'s own reader matches the ledger ids, and a board task is not one of them. Each card says which it is.',
+      'The automation list is what the scheduler iterates, joined to the office\'s database where a block leaves an artifact. There is no per-block execution log, and no block\'s run is inferred from a nearby timestamp.',
     ],
   };
 }

@@ -44,7 +44,7 @@ import { dirname, join } from 'node:path';
 
 import {
   ADMIN_COOKIE_NAME, ADMIN_SESSION_PATH,
-  isAdminPagePath, adminPageAuthorized, adminUnauthorizedResponse,
+  isAdminPagePath, adminPageAuthorized, adminCredential, adminUnauthorizedResponse,
   adminCookieValue, adminSessionSetCookie, readCookie,
   renderAdminUnlockPage,
 } from '../workers/admin-gate.js';
@@ -200,9 +200,39 @@ check('the owner page is no longer served at the unguarded /owner path',
 
 console.log('\n--- 4. the API did not learn to accept the cookie ---');
 
-const apiGateBlock = runner.slice(apiGate, apiGate + 600);
-check('the /api/* gate still reads ONLY the X-Admin-Token header',
-  /request\.headers\.get\('X-Admin-Token'\)/.test(apiGateBlock) && !/Cookie/i.test(apiGateBlock));
+/*
+ * ── RE-POINTED 2026-08-25 (Session 18, Item A) ──────────────────────────
+ *
+ * This check used to read: *the /api/* gate still reads ONLY the X-Admin-Token
+ * header* — asserted by finding that header's name in the gate's source text
+ * and no mention of a cookie. The gate now delegates to `adminCredential()`,
+ * which accepts a VERIFIED Cloudflare Access assertion as well as the token,
+ * so the old assertion no longer describes the code.
+ *
+ * **The property it existed to protect is unchanged and is now checked by
+ * RUNNING the gate rather than by reading it** — which is the stronger form,
+ * and the one this file's own header argues for. A source-text check that a
+ * cookie name is absent proves nothing about what the code decides; the two
+ * checks below hand the real function a real cookie and require a refusal.
+ */
+const apiGateBlock = runner.slice(apiGate, apiGate + 1800);
+check('the /api/* gate delegates to the one credential resolver, on the API surface',
+  /adminCredential\(request, env, \{ surface: 'api' \}\)/.test(apiGateBlock));
+check('the /api/* gate refuses when that resolver says no',
+  /if \(!credential\.ok\)[\s\S]{0,120}401/.test(apiGateBlock));
+check('THE API STILL REFUSES THE COOKIE — run, not read',
+  (await adminCredential(
+    req('/api/admin', { cookie: ADMIN_COOKIE_NAME + '=' + (await adminCookieValue(TOKEN)) }),
+    { ADMIN_TOKEN: TOKEN },
+    { surface: 'api' },
+  )).ok === false,
+  'a cookie the browser attaches automatically must never authorize an endpoint that triggers office runs');
+check('the same cookie DOES still open an admin page — the two surfaces differ, deliberately',
+  (await adminCredential(
+    req('/admin/spec', { cookie: ADMIN_COOKIE_NAME + '=' + (await adminCookieValue(TOKEN)) }),
+    { ADMIN_TOKEN: TOKEN },
+    { surface: 'page' },
+  )).ok === true);
 check('agent-runner.js never reads a cookie itself — cookie handling lives only in admin-gate.js',
   !/headers\.get\(['"]Cookie['"]\)/i.test(runner) && !/\breadCookie\s*\(/.test(runner),
   'a second cookie reader in the router is a second place the credential rule can drift');
