@@ -695,40 +695,99 @@ section h2 {
 
 /** Everything the merged page needs that a static, single-view page did not. */
 const OFFICE_CSS_ADDITIONS = `
-/* ---- tab bar (new: the static build was one long scroll) ---- */
-.tabs { border-bottom: 1px solid var(--rule, #d8d3c8); margin-bottom: 2rem; }
-.tabs .wrap { display: flex; flex-wrap: wrap; gap: .25rem; }
+/* ---------------------------------------------------------------------------
+   Everything below is NEW in the merge. It uses the office's own custom
+   properties — --text, --text-dim, --border, --bg-card, --accent, --radius,
+   --space-* — and defines none of its own.
+
+   The first cut of this block invented fallback names (--ink, --card, --rule)
+   that do not exist in the office's :root. Every one of them fell through to a
+   LIGHT-THEME fallback and painted white stat tiles and a near-black selected
+   tab onto the office's dark page: the shell was not redesigned on purpose, it
+   was redesigned by a typo. Caught by loading the deployed page and looking at
+   it, which is the only thing that would have caught it.
+   --------------------------------------------------------------------------- */
+
+/* ---- tab bar (the static build was one long scroll) ---- */
+.tabs { border-bottom: 1px solid var(--border); background: var(--bg-raised); }
+.tabs .wrap { display: flex; flex-wrap: wrap; gap: var(--space-1); }
 .tab-btn {
   appearance: none; background: none; border: 0; border-bottom: 2px solid transparent;
-  padding: .85rem 1rem; font: inherit; font-size: .95rem; color: var(--ink-soft, #5c574d);
-  cursor: pointer; border-radius: 4px 4px 0 0;
+  padding: 0.85rem var(--space-3); font: inherit; font-size: 0.95rem;
+  color: var(--text-dim); cursor: pointer; border-radius: var(--radius) var(--radius) 0 0;
+  transition: color 0.15s ease, background-color 0.15s ease;
 }
-.tab-btn:hover { color: var(--ink, #23201a); background: rgba(0,0,0,.03); }
-.tab-btn[aria-selected="true"] { color: var(--ink, #23201a); border-bottom-color: var(--accent, #7a5c2e); font-weight: 600; }
-.tab-btn:focus-visible { outline: 2px solid var(--accent, #7a5c2e); outline-offset: 2px; }
-.tab-btn .tab-count { font-size: .8em; opacity: .7; margin-left: .35rem; }
+.tab-btn:hover { color: var(--text); background: rgba(110, 168, 254, 0.08); }
+.tab-btn[aria-selected="true"] {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.tab-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tab-btn .tab-count { font-size: 0.8em; color: var(--text-faint); margin-left: var(--space-1); }
 .tab-panel[hidden] { display: none; }
 
 /* ---- stat tiles for the live counts ---- */
-.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem; margin: 1.5rem 0; }
-.stat { border: 1px solid var(--rule, #d8d3c8); border-radius: 6px; padding: 1rem 1.1rem; background: var(--card, #fff); }
-.stat-value { font-size: 1.7rem; font-weight: 600; line-height: 1.1; color: var(--ink, #23201a); }
-.stat-label { font-size: .8rem; color: var(--ink-soft, #5c574d); margin-top: .3rem; }
+.stat-row {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: var(--space-3); margin: var(--space-4) 0;
+}
+.stat {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: var(--space-3);
+}
+.stat-value {
+  font-size: 1.7rem; font-weight: 700; line-height: 1.1;
+  color: var(--text); letter-spacing: -0.01em;
+}
+.stat-label {
+  margin-top: var(--space-1); font-family: var(--font-mono); font-size: 0.72rem;
+  letter-spacing: 0.03em; text-transform: uppercase; color: var(--text-faint);
+}
 
 /* ---- the office blurb + mechanisms ---- */
-.office-text { font-size: 1.02rem; line-height: 1.7; max-width: 62ch; }
-.mech-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1.1rem; margin-top: 1.5rem; }
-.mech { border: 1px solid var(--rule, #d8d3c8); border-radius: 6px; padding: 1.1rem; background: var(--card, #fff); }
-.mech h3 { margin: 0 0 .5rem; font-size: 1rem; }
-.mech p { margin: 0; font-size: .9rem; line-height: 1.6; color: var(--ink-soft, #5c574d); }
+.office-text { max-width: 44rem; font-size: 1.05rem; color: var(--text-dim); }
+.mech-list {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  gap: var(--space-4); margin-top: var(--space-4);
+}
+.mech {
+  background: var(--bg-card); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: var(--space-4);
+}
+.mech h3 {
+  margin: 0 0 var(--space-2); font-size: 1.05rem; font-weight: 700;
+  color: var(--text); letter-spacing: -0.01em;
+}
+.mech p { margin: 0; font-size: 0.92rem; color: var(--text-dim); }
 
 /* ---- loading / error / lock states ---- */
-.state-note { padding: 1.5rem 0; color: var(--ink-soft, #5c574d); font-size: .95rem; }
-.state-note--error { color: #a3341f; }
-.token-prompt { display: flex; gap: .5rem; flex-wrap: wrap; margin-top: .75rem; }
-.token-prompt input { flex: 1 1 240px; padding: .55rem .7rem; border: 1px solid var(--rule, #d8d3c8); border-radius: 4px; font: inherit; }
-.spec-frame { width: 100%; height: 78vh; border: 1px solid var(--rule, #d8d3c8); border-radius: 6px; background: #fff; }
-.freshness { font-size: .8rem; color: var(--ink-soft, #5c574d); margin-top: 2rem; }
+.state-note { padding: var(--space-4) 0; color: var(--text-dim); }
+.state-note--error { color: #ff8f8f; }
+.token-prompt { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-top: var(--space-2); }
+.token-prompt input {
+  flex: 1 1 15rem; padding: 0.55rem 0.7rem; font: inherit;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--border); border-radius: 6px;
+}
+.token-prompt input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* ---- the framed spec builder ---- */
+.spec-frame {
+  width: 100%; height: 78vh; background: var(--bg);
+  border: 1px solid var(--border); border-radius: var(--radius);
+}
+
+/* ---- gaps list + footer ---- */
+.gaps-list { max-width: 52rem; color: var(--text-dim); padding-left: var(--space-3); }
+.gaps-list li { margin-bottom: var(--space-2); }
+#gaps-errors { margin-top: var(--space-4); color: #ff8f8f; }
+.site-footer {
+  margin-top: var(--space-6); padding: var(--space-4) 0;
+  border-top: 1px solid var(--border); color: var(--text-faint); font-size: 0.85rem;
+}
+.site-footer code { font-family: var(--font-mono); color: var(--text-dim); }
+.site-header a { color: var(--accent); }
 `;
 
 /** The client script. Adapted from the office's `app.js`: the element
