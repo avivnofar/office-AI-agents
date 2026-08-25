@@ -280,7 +280,7 @@ check('it invents no second write path — every call the page makes is a Worker
   && !ADM.js.includes('api.github.com') && !ADM.js.includes('commitFile'),
   `targets: ${fetchTargets.join(', ')}`);
 check('the answer carries the item id so the office\'s reply reader can attribute it',
-  /This is my answer on item/.test(ADM.js) && /item\.item_id/.test(ADM.js));
+  /In answer to item/.test(ADM.js) && /item\.item_id/.test(ADM.js));
 check('the subject leads with the id, because the filename slug is cut at 48 characters',
   /item\.item_id \+ " — " \+ ask/.test(ADM.js));
 check('the card renders the ask, the options and the office\'s default',

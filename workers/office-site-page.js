@@ -1183,8 +1183,13 @@ function clientScript(mode) {
     '',
     '  function answerBody(item, text) {',
     '    var lines = [text.trim(), "", "---", ""];',
-    '    lines.push("Answered by the owner on the office\'s own page.");',
-    '    if (item.item_id) lines.push("This is my answer on item " + item.item_id + ".");',
+    /* The provenance line describes the ROUTE, not the author. "Answered by
+       the owner" would be a claim about who typed it, and this page has no
+       way to check that — it knows only which door the message came through.
+       The office's record must not carry an authorship claim its writer could
+       not verify. */
+    '    lines.push("Filed through the office admin page, on the waiting-on-you tab.");',
+    '    if (item.item_id) lines.push("In answer to item " + item.item_id + ".");',
     '    return lines.join("\\n");',
     '  }',
     '',

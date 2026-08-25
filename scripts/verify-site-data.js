@@ -384,13 +384,13 @@ check('the identifier is still carried for the record, out of the visible text',
 
 check('an answer on a QUESTION is one the office\'s own reader will attribute',
   q010.answer_stops_the_asking === true
-  && itemIdsInText('This is my answer on item ' + q010.item_id + '.').includes('Q-010'));
+  && itemIdsInText('In answer to item ' + q010.item_id + '.').includes('Q-010'));
 check('an answer on a SUBMISSION is one the office\'s own reader will attribute',
   s002.answer_stops_the_asking === true
-  && itemIdsInText('This is my answer on item ' + s002.item_id + '.').includes('S-002'));
+  && itemIdsInText('In answer to item ' + s002.item_id + '.').includes('S-002'));
 check('A BOARD TASK IS MARKED AS NOT SILENCED — the reader does not match OB-, and the card says so',
   ob060.answer_stops_the_asking === false
-  && itemIdsInText('This is my answer on item ' + ob060.item_id + '.').length === 0
+  && itemIdsInText('In answer to item ' + ob060.item_id + '.').length === 0
   && /does not record it as a decision/.test(ob060.answer_note || ''),
   'claiming an answer silences a board item would reproduce the failure this page exists to end');
 
