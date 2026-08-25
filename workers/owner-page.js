@@ -255,7 +255,16 @@ export function buildOwnerState(snapshot) {
  * `endpointBase` is passed in rather than hardcoded so a preview deployment
  * serves a page that talks to itself.
  */
-export function renderOwnerPage({ endpointBase = '' } = {}) {
+/**
+ * `signedInViaAccess` (2026-08-25, Session 21): the router telling this page
+ * that the request which fetched it carried a VERIFIED Cloudflare Access
+ * assertion. When true, the paste-a-token card is not rendered — he is signed
+ * in with Google and the browser puts the same assertion on this page's own
+ * calls, because they now go to `/admin/api/...`, inside the Access
+ * application's path scope. It changes what is DRAWN; every call is still
+ * authenticated by the Worker on its own.
+ */
+export function renderOwnerPage({ endpointBase = '', signedInViaAccess = false } = {}) {
   const kindOptions = PAGE_KINDS
     .map((k) => `<option value="${k}"${k === 'instruction' ? ' selected' : ''}>${k}</option>`)
     .join('');
@@ -306,10 +315,10 @@ code{background:var(--bg);padding:1px 5px;border-radius:4px;font-size:.86em}
 </header>
 
 <div class="card" id="auth">
-  <label for="token">Admin token</label>
+  ${signedInViaAccess ? '<p class="note">Signed in. Reading your channel…</p>' : `<label for="token">Admin token</label>
   <input id="token" type="password" autocomplete="off" placeholder="X-Admin-Token">
   <p class="note">Held in this tab only (<code>sessionStorage</code>) and sent as a header, never in the URL. This page carries no secret of its own.</p>
-  <button id="unlock">Unlock</button>
+  <button id="unlock">Unlock</button>`}
   <div id="status"></div>
 </div>
 
@@ -367,7 +376,13 @@ code{background:var(--bg);padding:1px 5px;border-radius:4px;font-size:.86em}
 
   function api(path, opts){
     opts = opts || {};
-    opts.headers = Object.assign({ 'X-Admin-Token': token, 'Content-Type': 'application/json; charset=utf-8' }, opts.headers || {});
+    /* The token header is OMITTED when there is no token, rather than sent
+       empty. A signed-in owner has no token to send — Cloudflare Access put a
+       verified assertion on this request instead — and an empty header would
+       be a credential the server has to decide about for no reason. */
+    var base = { 'Content-Type': 'application/json; charset=utf-8' };
+    if (token) base['X-Admin-Token'] = token;
+    opts.headers = Object.assign(base, opts.headers || {});
     return fetch(BASE + path, opts).then(function(r){
       return r.json().catch(function(){ return { error: 'the server did not return JSON (HTTP ' + r.status + ')' }; })
         .then(function(j){ return { status: r.status, body: j }; });
@@ -438,9 +453,13 @@ code{background:var(--bg);padding:1px 5px;border-radius:4px;font-size:.86em}
     box.innerHTML = parts.join('');
   }
 
-  function load(){
-    return api('/api/agents/owner-state').then(function(r){
-      if (r.status !== 200) { setStatus(r.body.error || ('HTTP ' + r.status), true); return false; }
+  function load(opts){
+    var quiet = !!(opts && opts.quiet);
+    return api('/admin/api/agents/owner-state').then(function(r){
+      if (r.status !== 200) {
+        if (!quiet) setStatus(r.body.error || ('HTTP ' + r.status), true);
+        return false;
+      }
       renderMessages(r.body.state);
       renderOutbound(r.body.state);
       return true;
@@ -450,7 +469,9 @@ code{background:var(--bg);padding:1px 5px;border-radius:4px;font-size:.86em}
   $('kind').addEventListener('change', function(){ $('kindNote').textContent = KIND_NOTES[$('kind').value] || ''; });
   $('kindNote').textContent = KIND_NOTES.instruction;
 
-  $('unlock').addEventListener('click', function(){
+  /* Absent on a page rendered for a signed-in owner — there is no token field
+     and no unlock button in that HTML at all. */
+  if ($('unlock')) $('unlock').addEventListener('click', function(){
     token = $('token').value.trim();
     if (!token) { setStatus('Paste the admin token first.', true); return; }
     setStatus('Checking…');
@@ -466,7 +487,7 @@ code{background:var(--bg);padding:1px 5px;border-radius:4px;font-size:.86em}
     e.preventDefault();
     $('send').disabled = true;
     setStatus('Sending…');
-    api('/api/agents/owner-message', {
+    api('/admin/api/agents/owner-message', {
       method: 'POST',
       body: JSON.stringify({
         kind: $('kind').value,
@@ -488,8 +509,43 @@ code{background:var(--bg);padding:1px 5px;border-radius:4px;font-size:.86em}
 
   try {
     var saved = sessionStorage.getItem('office.token');
-    if (saved) { $('token').value = saved; }
+    if (saved && $('token')) { $('token').value = saved; token = saved; }
   } catch (e) {}
+
+  /* ── ASK THE SERVER BEFORE LOCKING THE PAGE (2026-08-25, Session 21) ─────
+   *
+   * This page used to decide, on its own, that it was locked: the form was
+   * shown and no call was made until somebody typed something into it.
+   * That is the defect the owner has reported twice. He signs in with Google,
+   * Cloudflare Access authorises the request, the Worker serves this page —
+   * and the page then asks him for a token it does not need, because it never
+   * asked whether it had one.
+   *
+   * So the first thing it does now is CALL. /admin/api/agents/owner-state
+   * is inside the Access application's path scope, so a signed-in browser
+   * carries the assertion on it and the answer is 200 with no token anywhere.
+   * The form is revealed only when the server actually refuses.
+   *
+   * Quietly, and this is the part worth keeping: a failure here writes NO
+   * error. On *.workers.dev, or signed out, a 401 is the expected answer and
+   * the correct response to it is the unlock form the page already renders —
+   * not a red line accusing the owner of something before he has typed. */
+  var SIGNED_IN = ${JSON.stringify(!!signedInViaAccess)};
+  (function boot(){
+    load({ quiet: true }).then(function(ok){
+      if (ok) {
+        $('auth').classList.add('hide');
+        $('app').classList.remove('hide');
+        return;
+      }
+      /* Silent when there is a form to fall back to — a 401 is the expected
+         answer on *.workers.dev and signed out, and the unlock card already
+         says what to do. NOT silent when the page was rendered for a signed-in
+         owner: there is no form behind it, so an unexplained empty page would
+         be the only thing he saw. */
+      if (SIGNED_IN) setStatus('Your sign-in did not carry through to the office. Reload this page; if it happens again, sign out of Cloudflare Access and back in.', true);
+    });
+  })();
 })();
 </script>
 </div>

@@ -104,8 +104,16 @@ check('the public render fetches at load time',
 check('the public render points at /api/public and nothing else',
   PUBLIC.includes('"/api/public"') && (PUBLIC.match(/\/api\//g) || []).length === 1,
   `found ${(PUBLIC.match(/\/api\/[a-z]+/g) || []).join(', ')}`);
-check('the admin render points at /api/admin',
-  ADMIN.includes('"/api/admin"'));
+/*
+ * CHANGED 2026-08-25 (Session 21). This used to assert `"/api/admin"`, and that
+ * spelling is exactly what put a paste-a-token prompt in front of a signed-in
+ * owner: the Access application binds the `/admin` PATH, so Cloudflare attaches
+ * the assertion to `/admin/...` and to nothing under `/api/...`. The page was
+ * authorised and its own calls were not. `/admin/api/data` is the same handler,
+ * reached by a rewrite in agent-runner.js.
+ */
+check('the admin render points at /admin/api/data — inside the Access path scope',
+  ADMIN.includes('"/admin/api/data"') && !ADMIN.includes('"/api/admin"'));
 check('neither render READS OR WRITES localStorage (a comment mentioning it is fine)',
   !/localStorage\s*\.\s*(get|set|remove)Item/.test(PUB.js)
   && !/localStorage\s*\.\s*(get|set|remove)Item/.test(ADM.js),
@@ -145,7 +153,7 @@ check('the one admin-shaped field name in the public script is the shared card r
   && PUB.js.indexOf('bible_detail') === PUB.js.lastIndexOf('bible_detail'),
   'more than one occurrence means something other than the shared renderer read it');
 check('the admin render DOES carry all of it',
-  ADMIN.includes('/api/admin') && ADMIN.includes('pending-groups')
+  ADMIN.includes('/admin/api/data') && ADMIN.includes('pending-groups')
   && ADMIN.includes('spec-frame') && ADMIN.includes('data-tab="pending"'));
 check('the admin render asks robots not to index it',
   /noindex/.test(ADMIN) && !/noindex/.test(PUBLIC));
@@ -164,7 +172,7 @@ check('GET /admin is routed', adminRoute !== -1);
 check('/ is served in public mode',
   /url\.pathname === '\/'\)\s*\{[\s\S]{0,120}renderOfficeSite\(\{ mode: 'public' \}\)/.test(runner));
 check('/admin is served in admin mode',
-  /renderOfficeSite\(\{ mode: 'admin' \}\)/.test(runner));
+  /renderOfficeSite\(\{ mode: 'admin'[,}]/.test(runner));
 check('the /admin page route is BELOW the gate, so it is unreachable without a credential',
   gateCall !== -1 && adminRoute !== -1 && gateCall < adminRoute,
   `gate at ${gateCall}, /admin route at ${adminRoute}`);
@@ -265,7 +273,7 @@ console.log('\n--- 8. the room takes an answer, and says what that does ---');
 check('the admin page has an answer box on the pending card',
   ADM.js.includes('answer-send') && ADM.js.includes('function answerBox('));
 check('the answer goes to the endpoint that ALREADY WORKS — no new channel',
-  ADM.js.includes('"/api/agents/owner-message"'));
+  ADM.js.includes('"/admin/api/agents/owner-message"'));
 /*
  * Behaviour, not vocabulary. The client script's own comments NAME
  * `channel/from-owner/` — that is the script explaining where its POST ends up,
@@ -274,11 +282,21 @@ check('the answer goes to the endpoint that ALREADY WORKS — no new channel',
  * /api/ paths.
  */
 const fetchTargets = [...ADM.js.matchAll(/fetch\(\s*("[^"]*"|[A-Z_]+)/g)].map((m) => m[1]);
-check('it invents no second write path — every call the page makes is a Worker /api/ path',
+check('it invents no second write path — every call the page makes is a Worker path',
   fetchTargets.length > 0
-  && fetchTargets.every((t) => t === 'ENDPOINT' || /^"\/api\//.test(t))
+  && fetchTargets.every((t) => t === 'ENDPOINT' || /^"\/(admin\/)?api\//.test(t))
   && !ADM.js.includes('api.github.com') && !ADM.js.includes('commitFile'),
   `targets: ${fetchTargets.join(', ')}`);
+/*
+ * ADDED 2026-08-25 (Session 21). The property the owner's complaint reduces to:
+ * a call the admin page makes from OUTSIDE `/admin/` arrives at the Worker with
+ * no Access assertion on it, however correct the server's acceptance of one is.
+ * ENDPOINT is checked by name above; every literal must carry the prefix.
+ */
+check('every literal URL the admin page calls is inside the Access path scope',
+  fetchTargets.filter((t) => t !== 'ENDPOINT').every((t) => t.startsWith('"/admin/')),
+  `targets: ${fetchTargets.join(', ')}`);
+
 check('the answer carries the item id so the office\'s reply reader can attribute it',
   /In answer to item/.test(ADM.js) && /item\.item_id/.test(ADM.js));
 check('the subject leads with the id, because the filename slug is cut at 48 characters',

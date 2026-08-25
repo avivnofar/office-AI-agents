@@ -134,6 +134,7 @@ import {
   ADMIN_SESSION_PATH,
   isAdminPagePath, adminPageAuthorized, adminCredential, adminUnauthorizedResponse,
   adminCookieValue, adminSessionSetCookie,
+  canonicalAdminApiPath,
 } from './admin-gate.js';
 // Cloudflare Access as a credential (2026-08-25, Session 18 Item A). Imported
 // here for ONE thing only: the diagnostics endpoint that says whether Access is
@@ -6146,6 +6147,39 @@ export default {
     }
 
     /*
+     * ── /admin/api/... — THE ADMIN PAGES' OWN CALLS, INSIDE ACCESS'S SCOPE ─
+     *
+     * (2026-08-25, Session 21. The full reasoning, and the two curls that
+     * established it, are in `admin-gate.js` above `ADMIN_API_PREFIX`.)
+     *
+     * In one line: an Access application binds a hostname AND A PATH, and this
+     * one is scoped to `/admin`. Cloudflare therefore attaches
+     * `Cf-Access-Jwt-Assertion` to `/admin/...` and to nothing under `/api/...`
+     * — so the admin page the owner had just signed into made every one of its
+     * own calls anonymously, was refused, and asked him for a token. The API
+     * gate below has accepted a verified assertion since Session 18; it was
+     * never reached with one.
+     *
+     * THIS IS A REWRITE, NOT A ROUTE. `url.pathname` is replaced with the
+     * canonical path and everything downstream — the authentication gates
+     * first — sees the request it always saw. No handler is duplicated, no
+     * handler moves, and no path acquires a credential it did not already
+     * accept. `request.url` is read nowhere else in this file, so `url` is the
+     * single source of truth for the rest of the request.
+     *
+     * IT RUNS BEFORE BOTH GATES, AND THAT ORDER IS THE SECURITY PROPERTY.
+     * Rewritten first, `/admin/api/agents/owner-message` is authenticated as
+     * `/api/agents/owner-message` — `surface: 'api'`, which does NOT accept the
+     * admin page cookie and which requires a same-origin request before an
+     * ambient Access assertion may change anything. Had the rewrite run after
+     * the page gate instead, the same URL would have been let through on a
+     * cookie, which is the CSRF surface this estate deliberately keeps the API
+     * away from.
+     */
+    const canonicalPath = canonicalAdminApiPath(url.pathname);
+    if (canonicalPath) url.pathname = canonicalPath;
+
+    /*
      * ── THE ONE AUTHENTICATION GATE, AND WHY IT IS A LIST ──────────────────
      *
      * Every prefix named here requires the admin token configured as a Worker
@@ -6233,10 +6267,24 @@ export default {
      * not refuse: it IS the authenticator. It holds no data, reads nothing, and
      * answers 401 to a wrong token on its own.
      */
+    /*
+     * `adminCredential` rather than `adminPageAuthorized` (2026-08-25, Session
+     * 21) — the same check, keeping WHICH credential answered instead of
+     * throwing it away. `signedInViaAccess` is what the three admin renderers
+     * below use to leave their paste-a-token fields out of the HTML entirely.
+     *
+     * It is a rendering signal and never an authorisation one: every call those
+     * pages make is authenticated again, on its own, by the gate above. A page
+     * rendered with the field hidden and an expired session gets a 401 from its
+     * own fetch and shows the unlock path exactly as it always did.
+     */
+    let signedInViaAccess = false;
     if (isAdminPagePath(url.pathname) && url.pathname !== ADMIN_SESSION_PATH) {
-      if (!(await adminPageAuthorized(request, env))) {
+      const pageCredential = await adminCredential(request, env, { surface: 'page' });
+      if (!pageCredential.ok) {
         return adminUnauthorizedResponse(request, url.pathname);
       }
+      signedInViaAccess = pageCredential.via === 'access-jwt';
     }
 
     /*
@@ -6302,7 +6350,7 @@ export default {
     }
 
     if (request.method === 'GET' && (url.pathname === '/admin' || url.pathname === '/admin/')) {
-      return new Response(renderOfficeSite({ mode: 'admin' }), {
+      return new Response(renderOfficeSite({ mode: 'admin', signedInViaAccess }), {
         status: 200,
         headers: {
           'Content-Type': 'text/html; charset=utf-8',
@@ -6353,7 +6401,7 @@ export default {
     }
 
     if (request.method === 'GET' && (url.pathname === '/admin/owner' || url.pathname === '/admin/owner/')) {
-      return new Response(renderOwnerPage({ endpointBase: url.origin }), {
+      return new Response(renderOwnerPage({ endpointBase: url.origin, signedInViaAccess }), {
         status: 200,
         headers: {
           'Content-Type': 'text/html; charset=utf-8',
@@ -6424,7 +6472,7 @@ export default {
      * still hold on the day the outer gate is wrong.
      */
     if (request.method === 'GET' && (url.pathname === '/admin/spec' || url.pathname === '/admin/spec/')) {
-      return new Response(renderSpecPage({ endpointBase: url.origin }), {
+      return new Response(renderSpecPage({ endpointBase: url.origin, signedInViaAccess }), {
         status: 200,
         headers: {
           'Content-Type': 'text/html; charset=utf-8',

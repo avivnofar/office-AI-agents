@@ -87,6 +87,73 @@ export function isAdminPagePath(pathname) {
   return pathname === '/admin' || pathname === '/admin/' || pathname.startsWith('/admin/');
 }
 
+/* ── THE ADMIN SURFACE'S OWN API PREFIX (2026-08-25, Session 21) ──────────
+ *
+ * Why this exists, stated as the measurement that produced it rather than as a
+ * design preference:
+ *
+ *   $ curl -i https://office.avivnofar.com/admin/api/data     -> 302 cloudflareaccess.com
+ *   $ curl -i https://office.avivnofar.com/api/admin          -> the Worker's own 401
+ *
+ * The first path is one this Worker did not serve when that was measured. It
+ * still redirected. **An Access application binds a hostname AND A PATH**, and
+ * this one is scoped to `/admin` — Cloudflare says so itself in the
+ * `Www-Authenticate: Cloudflare-Access resource_metadata=".../admin"` header on
+ * the 302. So Cloudflare attaches `Cf-Access-Jwt-Assertion` to everything under
+ * `/admin`, and to NOTHING under `/api`.
+ *
+ * That is the whole of the owner's complaint. Since Session 18 the API gate has
+ * accepted a verified assertion — `adminCredential(..., { surface: 'api' })` —
+ * and it was never once reached with one, because the page's `fetch('/api/admin')`
+ * left the Access application's path scope and arrived bare. The page was
+ * authorised; its own calls were anonymous; it fell back to asking for a token.
+ *
+ * So the admin pages call their endpoints INSIDE the prefix that Access covers,
+ * and this map turns each one back into the canonical route that already
+ * exists. Nothing is duplicated and no handler moves.
+ *
+ * WHY AN EXPLICIT MAP AND NOT `'/api/' + rest`. A prefix that rewrites anything
+ * after it into `/api/` is a path-traversal surface wearing a helpful face: a
+ * percent-encoded segment survives `new URL().pathname` undecoded, so a
+ * `.includes('..')` test would not be the check it looks like. Four named
+ * routes cannot traverse anywhere. A fifth admin endpoint is one line here, and
+ * having to write that line is the point.
+ *
+ * WHAT THIS IS NOT. It is not a new credential and not a new acceptance path.
+ * The rewrite happens BEFORE the gates, so an aliased request is authenticated
+ * by exactly the check its canonical path always had — `surface: 'api'`, which
+ * refuses the page cookie and requires same-origin for anything that changes
+ * something. On `*.workers.dev`, where no Access policy can reach and nothing
+ * strips the header, `/admin/api/data` and `/api/admin` are the same request
+ * with the same signature check in front of it.
+ */
+export const ADMIN_API_PREFIX = '/admin/api/';
+
+const ADMIN_API_ROUTES = new Map([
+  ['data', '/api/admin'],
+  ['agents/owner-state', '/api/agents/owner-state'],
+  ['agents/owner-message', '/api/agents/owner-message'],
+  ['spec/build', '/api/spec/build'],
+]);
+
+/**
+ * The canonical route an `/admin/api/...` request means, or null when the path
+ * is not one of them — null leaves the URL untouched, so an unknown path under
+ * the prefix stays an ordinary gated admin path and 404s after the gate rather
+ * than reaching anything.
+ */
+export function canonicalAdminApiPath(pathname) {
+  const p = String(pathname || '');
+  if (!p.startsWith(ADMIN_API_PREFIX)) return null;
+  return ADMIN_API_ROUTES.get(p.slice(ADMIN_API_PREFIX.length)) || null;
+}
+
+/** The prefix, as the browser should call it. Exported so the three admin page
+ *  renderers name one constant instead of three string literals that can drift. */
+export function adminApiUrl(route) {
+  return ADMIN_API_PREFIX + route;
+}
+
 /** Hex SHA-256 of the namespaced token. The namespace prefix makes the value
  *  useless anywhere else, even against a system that hashed the same secret. */
 export async function adminCookieValue(adminToken) {

@@ -147,8 +147,12 @@ const generatorSrc = code.slice(0, code.indexOf('export function renderSpecPage'
 check('the GENERATOR makes no network call', !/\bfetch\s*\(/.test(generatorSrc));
 check('...and the only fetches in the whole module are the page\'s two, to this Worker\'s own endpoints',
   (code.match(/\bfetch\s*\(/g) || []).length === 2
-  && /fetch\(BASE \+ '\/api\/spec\/build'/.test(code)
-  && /fetch\(BASE \+ '\/api\/agents\/owner-message'/.test(code),
+  /* Both moved under `/admin/` on 2026-08-25 (Session 21): the Access
+     application binds that PATH, and a call from outside it reaches the Worker
+     with no assertion on it — which is why a signed-in owner was still being
+     asked for a token. Same two handlers, same Worker, reached by a rewrite. */
+  && /fetch\(BASE \+ '\/admin\/api\/spec\/build'/.test(code)
+  && /fetch\(BASE \+ '\/admin\/api\/agents\/owner-message'/.test(code),
   'a third fetch appearing here is a new outbound call and must be justified, not absorbed');
 check('the module imports nothing at all',
   !/^\s*import\s/m.test(code), 'the pure-module rule — plain node must be able to load it');
@@ -272,7 +276,19 @@ check('the page offers all four task types',
 check('the page has a download control', /id="dl"/.test(html));
 check('the page shows the raw text for copying', /id="out"/.test(html) && /id="copy"/.test(html));
 check('the page sends the admin token in a HEADER, never a query string',
-  /'X-Admin-Token': t/.test(html) && !/[?&]token=/.test(html));
+  /headers\['X-Admin-Token'\] = t/.test(html) && !/[?&]token=/.test(html));
+/*
+ * ADDED 2026-08-25 (Session 21). Send used to refuse on an empty token box —
+ * the page stopping a signed-in owner before the office ever saw the request.
+ * The token is now sent when there is one, and the SERVER decides otherwise.
+ */
+check('Send carries no client-side lock — an absent token is the server call',
+  /if \(t\) headers\['X-Admin-Token'\] = t/.test(html)
+  && !/the admin token is required to write to the repo/.test(html));
+check('a page rendered for a signed-in owner contains no token field at all',
+  !/id="tok"/.test(renderSpecPage({ endpointBase: '', signedInViaAccess: true })));
+check('...and a page rendered WITHOUT one still does — nothing is removed',
+  /id="tok"/.test(renderSpecPage({ endpointBase: '', signedInViaAccess: false })));
 check('the page keeps the token in sessionStorage only',
   /sessionStorage/.test(html) && !/localStorage/.test(html));
 check('the page states plainly that landing a file does not start a build',

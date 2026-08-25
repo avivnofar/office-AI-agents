@@ -297,8 +297,39 @@ check('it references no external host at all except its own endpointBase',
   (html.match(/https?:\/\/[^"'\s)]+/g) || []).every((u) => u.startsWith('https://example.workers.dev')),
   (html.match(/https?:\/\/[^"'\s)]+/g) || []).join(' '));
 check('the token input is type=password and autocomplete=off', /id="token" type="password" autocomplete="off"/.test(html));
+/*
+ * CHANGED 2026-08-25 (Session 21). The header is now set CONDITIONALLY —
+ * a signed-in owner has no token to send, and an empty `X-Admin-Token` is a
+ * credential the server would have to reason about for no reason. The property
+ * this check has always been about is unchanged and still asserted: header,
+ * never a query string.
+ */
 check('the token is sent as a HEADER, never in a query string',
-  /'X-Admin-Token': token/.test(html) && !/\?token=/.test(html));
+  /\['X-Admin-Token'\] = token/.test(html) && !/\?token=/.test(html));
+check('...and it is omitted entirely when there is no token, rather than sent empty',
+  /if \(token\) base\['X-Admin-Token'\] = token/.test(html));
+/*
+ * ADDED 2026-08-25 (Session 21). Every call this page makes must sit inside the
+ * `/admin` path the Access application binds — outside it Cloudflare attaches
+ * no assertion, so a signed-in owner's own page calls arrive anonymous. That is
+ * the defect this session fixed.
+ */
+const apiCalls = html.match(/api\('[^']+'/g) || [];
+check('every call the page makes is inside the Access path scope',
+  apiCalls.length > 0 && apiCalls.every((c) => c.startsWith("api('/admin/api/")),
+  apiCalls.join(' '));
+/*
+ * ADDED 2026-08-25 (Session 21). The page must not decide on its own that it is
+ * locked. It used to render the form and call nothing until somebody typed into
+ * it; now it asks the server first and reveals the form only on a refusal.
+ */
+check('the page CALLS before it locks — the server decides, not the page',
+  /function boot\(\)/.test(html) && /load\(\{ quiet: true \}\)/.test(html));
+check('a page rendered for a signed-in owner contains no token field at all',
+  !/id="token"/.test(renderOwnerPage({ endpointBase: '', signedInViaAccess: true }))
+  && !/X-Admin-Token"/.test(renderOwnerPage({ endpointBase: '', signedInViaAccess: true })));
+check('...and a page rendered WITHOUT one still does — nothing is removed',
+  /id="token"/.test(renderOwnerPage({ endpointBase: '', signedInViaAccess: false })));
 check('the token is held in sessionStorage (this tab only), not localStorage',
   /sessionStorage/.test(html) && !/localStorage/.test(html));
 check('the page explains what each `kind` DOES, since kind is load-bearing and not a label',

@@ -334,7 +334,18 @@ function esc(s) {
  * Cloudflare Access is not yet enabled on this account: an unauthenticated
  * visitor to `/admin/spec` gets a blank form and can do nothing with it.
  */
-export function renderSpecPage({ endpointBase = '' } = {}) {
+/**
+ * `signedInViaAccess` (2026-08-25, Session 21) is the router telling this page
+ * that the request which fetched it carried a VERIFIED Cloudflare Access
+ * assertion — the owner is signed in with Google. When it is true the admin
+ * token field is not rendered at all: he has a credential, and the browser will
+ * put it on this page's own POST too, because `/admin/api/...` is inside the
+ * Access application's path scope where `/api/...` never was.
+ *
+ * It changes what is DRAWN and nothing else. The Send below is authenticated by
+ * the Worker on its own merits either way.
+ */
+export function renderSpecPage({ endpointBase = '', signedInViaAccess = false } = {}) {
   const typeOptions = TASK_TYPES
     .map((t) => `<option value="${esc(t)}"${t === 'tool' ? ' selected' : ''}>${esc(t)}</option>`)
     .join('');
@@ -436,11 +447,13 @@ code{background:var(--bg);padding:1px 5px;border-radius:4px;font-size:.86em}
 
 <div class="card">
   <h2>Send it to the office</h2>
-  <p class="hint">This writes the spec into <code>channel/from-owner/</code> in the back-office repo, in the format the office's own parser accepts. Your admin token stays in this tab and is sent as a header.</p>
-  <div class="field">
+  <p class="hint">This writes the spec into <code>channel/from-owner/</code> in the back-office repo, in the format the office's own parser accepts.${signedInViaAccess
+    ? ' You are signed in — the office already knows who you are and asks for nothing further.'
+    : ' Your admin token stays in this tab and is sent as a header.'}</p>
+  ${signedInViaAccess ? '' : `<div class="field">
     <label for="tok">Admin token</label>
     <input id="tok" type="password" autocomplete="off" placeholder="pasted once, kept in this tab only">
-  </div>
+  </div>`}
   <div class="row">
     <button id="send" type="button" disabled>Send to the office</button>
   </div>
@@ -461,13 +474,18 @@ code{background:var(--bg);padding:1px 5px;border-radius:4px;font-size:.86em}
   var out = document.getElementById('out');
   var genstatus = document.getElementById('genstatus');
   var status = document.getElementById('status');
+  /* Absent when the page was rendered for a signed-in owner — every read of
+     it below is guarded, rather than the element being drawn hidden. A hidden
+     token field is still a token field in the DOM. */
   var tok = document.getElementById('tok');
   var current = null;
 
-  try { var saved = sessionStorage.getItem('office-admin-token'); if (saved) tok.value = saved; } catch (e) {}
-  tok.addEventListener('input', function () {
-    try { sessionStorage.setItem('office-admin-token', tok.value); } catch (e) {}
-  });
+  if (tok) {
+    try { var saved = sessionStorage.getItem('office-admin-token'); if (saved) tok.value = saved; } catch (e) {}
+    tok.addEventListener('input', function () {
+      try { sessionStorage.setItem('office-admin-token', tok.value); } catch (e) {}
+    });
+  }
 
   function showConditionals() {
     var t = document.getElementById('f-type').value;
@@ -494,7 +512,7 @@ code{background:var(--bg);padding:1px 5px;border-radius:4px;font-size:.86em}
     genstatus.classList.remove('hide');
     genstatus.classList.remove('warn');
     var body = collect();
-    fetch(BASE + '/api/spec/build', {
+    fetch(BASE + '/admin/api/spec/build', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
@@ -551,19 +569,25 @@ code{background:var(--bg);padding:1px 5px;border-radius:4px;font-size:.86em}
 
   document.getElementById('send').addEventListener('click', function () {
     if (!current) return;
-    var t = tok.value.trim();
-    if (!t) { status.textContent = 'the admin token is required to write to the repo'; return; }
+    /* NO CLIENT-SIDE LOCK. This used to refuse to send on an empty box, which
+       meant a signed-in owner was stopped by his own page before the office
+       ever saw the request — the whole of the complaint this session fixes.
+       The token is sent when there IS one; otherwise the Access assertion the
+       browser carries is the credential, and the SERVER decides. */
+    var t = tok ? tok.value.trim() : '';
     var btn = document.getElementById('send');
     btn.disabled = true;
     status.textContent = 'sending…';
-    fetch(BASE + '/api/agents/owner-message', {
+    var headers = { 'Content-Type': 'application/json' };
+    if (t) headers['X-Admin-Token'] = t;
+    fetch(BASE + '/admin/api/agents/owner-message', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Admin-Token': t },
+      headers: headers,
       body: JSON.stringify({ subject: current.title, body: current.channel_body, kind: 'instruction' })
     }).then(function (r) { return r.json().then(function (j) { return { s: r.status, j: j }; }); })
       .then(function (res) {
         btn.disabled = false;
-        if (res.s === 401) { status.textContent = 'the office refused the token.'; return; }
+        if (res.s === 401) { status.textContent = tok ? 'the office refused the token.' : 'the office refused this — your sign-in may have expired. Reload the page.'; return; }
         if (!res.j.ok) { status.textContent = 'refused: ' + (res.j.reason || res.s); return; }
         status.textContent = 'Landed at ' + res.j.path + ' (id ' + res.j.id + '). The office reads this folder on its next context refresh.';
       }).catch(function (e) {

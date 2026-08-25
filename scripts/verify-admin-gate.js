@@ -47,6 +47,7 @@ import {
   isAdminPagePath, adminPageAuthorized, adminCredential, adminUnauthorizedResponse,
   adminCookieValue, adminSessionSetCookie, readCookie,
   renderAdminUnlockPage,
+  ADMIN_API_PREFIX, canonicalAdminApiPath,
 } from '../workers/admin-gate.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -286,6 +287,64 @@ check('an empty env is refused rather than throwing',
   (await adminPageAuthorized(req('/admin/spec'), {})) === false);
 check('readCookie returns a string for an absent cookie, never undefined',
   readCookie('', 'x') === '' && readCookie('a=1', 'x') === '');
+
+/* ═══ 7. /admin/api — THE ADMIN PAGES' CALLS, INSIDE ACCESS'S PATH SCOPE ══
+ *
+ * Added 2026-08-25 (Session 21). The owner signed in with Google, the page
+ * loaded, and the page then asked him for a token. The cause was not the
+ * server's acceptance of an assertion — that has been correct since Session 18
+ * — it was that the page's own `fetch('/api/admin')` left the Access
+ * application's path scope, so Cloudflare attached no assertion to it and the
+ * correct check was never reached with a credential.
+ *
+ * What must hold for the alias that fixes it:
+ *   1. it maps exactly the four routes the admin pages call, and nothing else;
+ *   2. it CANNOT be used to reach anything else — `/api/agents/trigger` above
+ *      all, which fires office runs and is the one endpoint an ambient
+ *      credential must never be able to steer;
+ *   3. it is a rewrite that happens BEFORE both gates, so an aliased request is
+ *      authenticated by the check its canonical path always had — never by the
+ *      page gate, which accepts the admin cookie.
+ */
+
+console.log('\n--- 7. the admin API alias ---');
+
+check('the prefix is under /admin, which is what makes Access cover it',
+  ADMIN_API_PREFIX.startsWith('/admin/') && isAdminPagePath(ADMIN_API_PREFIX));
+check('the four routes the admin pages call all resolve',
+  canonicalAdminApiPath('/admin/api/data') === '/api/admin'
+  && canonicalAdminApiPath('/admin/api/agents/owner-state') === '/api/agents/owner-state'
+  && canonicalAdminApiPath('/admin/api/agents/owner-message') === '/api/agents/owner-message'
+  && canonicalAdminApiPath('/admin/api/spec/build') === '/api/spec/build');
+check('THE ONE THAT MATTERS — the alias cannot reach /api/agents/trigger',
+  canonicalAdminApiPath('/admin/api/agents/trigger') === null,
+  'an ambient credential that could fire an office run is the thing this map exists to make impossible');
+check('...nor anything else under /api/agents/',
+  ['trigger', 'status', 'reports', 'suggestions', 'state', 'sync_agents']
+    .every((r) => canonicalAdminApiPath('/admin/api/agents/' + r) === null));
+check('it does not concatenate — traversal, encoded or plain, resolves to nothing',
+  canonicalAdminApiPath('/admin/api/../api/agents/trigger') === null
+  && canonicalAdminApiPath('/admin/api/%2e%2e/agents/trigger') === null
+  && canonicalAdminApiPath('/admin/api/') === null
+  && canonicalAdminApiPath('') === null);
+check('a path outside the prefix is left alone',
+  canonicalAdminApiPath('/api/admin') === null
+  && canonicalAdminApiPath('/admin/spec') === null
+  && canonicalAdminApiPath('/adminapi/data') === null);
+
+const rewriteAt = runner.indexOf('canonicalAdminApiPath(url.pathname)');
+const apiGateAt = runner.indexOf('AUTHENTICATED_PREFIXES.some(');
+const pageGateAt = runner.indexOf('if (isAdminPagePath(url.pathname)');
+check('the rewrite is wired into agent-runner.js', rewriteAt !== -1);
+check('it runs BEFORE the API gate, so an aliased call is authenticated as its canonical path',
+  rewriteAt !== -1 && apiGateAt !== -1 && rewriteAt < apiGateAt,
+  `rewrite at ${rewriteAt}, API gate at ${apiGateAt}`);
+check('it runs BEFORE the page gate, so an aliased call never rides the admin COOKIE',
+  rewriteAt !== -1 && pageGateAt !== -1 && rewriteAt < pageGateAt,
+  `rewrite at ${rewriteAt}, page gate at ${pageGateAt}`);
+check('the aliased canonical paths are all covered by AUTHENTICATED_PREFIXES or are the open builder',
+  /const AUTHENTICATED_PREFIXES = \['\/api\/agents\/', '\/api\/admin'\]/.test(runner),
+  'the prefix list is unchanged — the alias adds no route to it and removes none');
 
 /* ═══════════════════════════ RESULT ══════════════════════════════════════ */
 

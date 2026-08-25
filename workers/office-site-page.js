@@ -865,13 +865,19 @@ const OFFICE_CSS_ADDITIONS = `
  *  are its logic; what changed is where the data comes from and that there
  *  are tabs. No backticks and no `${` in here — this string is embedded in a
  *  template literal. */
-function clientScript(mode) {
+function clientScript(mode, signedInViaAccess) {
   const isAdmin = mode === 'admin';
   return [
     '(function () {',
     '  "use strict";',
     '  var MODE = ' + JSON.stringify(mode) + ';',
-    '  var ENDPOINT = ' + JSON.stringify(isAdmin ? '/api/admin' : '/api/public') + ';',
+    /* '/admin/api/data' rather than '/api/admin' — same handler, reached by
+     * a rewrite in agent-runner.js. The Access application is scoped to the
+     * `/admin` PATH, so this is the only spelling Cloudflare attaches the
+     * owner's signed-in assertion to; the old one arrived anonymous and got
+     * this page's token prompt. See admin-gate.js's ADMIN_API_PREFIX. */
+    '  var ENDPOINT = ' + JSON.stringify(isAdmin ? '/admin/api/data' : '/api/public') + ';',
+    '  var SIGNED_IN = ' + JSON.stringify(!!signedInViaAccess) + ';',
     '  var data = null;',
     // Filled in by the admin-only block below. The shared loader calls it
     // without knowing what it is, so the public bundle contains no reference
@@ -1218,7 +1224,7 @@ function clientScript(mode) {
     '      if (!text) { say(status, "Write something first — the office refuses an empty message.", "err"); return; }',
     '      send.disabled = true;',
     '      say(status, "Sending…", "");',
-    '      fetch("/api/agents/owner-message", {',
+    '      fetch("/admin/api/agents/owner-message", {',
     '        method: "POST",',
     '        headers: postHeaders(),',
     '        cache: "no-store",',
@@ -1356,7 +1362,12 @@ function clientScript(mode) {
     '  function showTokenPrompt(host) {',
     '    clear(host);',
     '    host.appendChild(el("p", { class: "state-note state-note--error",',
-    '      text: "The office accepted this page but not this tab: the admin token is not in this tab\'s session storage." }));',
+    '      text: SIGNED_IN'
+    + '        ? "You are signed in, but the office refused this tab\'s request. Your sign-in has most likely expired — reload the page."'
+    + '        : "The office accepted this page but not this tab: the admin token is not in this tab\'s session storage." }));',
+    /* Nothing to paste when a sign-in is what authorised this page: the
+       recovery is a reload, not a secret he does not have. */
+    '    if (SIGNED_IN) return;',
     '    var input = el("input", { type: "password", placeholder: "X-Admin-Token", autocomplete: "off" });',
     '    var go = el("button", { type: "button", class: "message-send-btn" });',
     '    go.textContent = "Use token";',
@@ -1451,7 +1462,7 @@ function staticGaps(mode) {
  * gate). The admin render is the only one that contains the pending list, the
  * spec builder frame, or the string `/api/admin`.
  */
-export function renderOfficeSite({ mode = 'public' } = {}) {
+export function renderOfficeSite({ mode = 'public', signedInViaAccess = false } = {}) {
   const isAdmin = mode === 'admin';
 
   const tabs = [];
@@ -1593,7 +1604,7 @@ ${officeDataPanel}
   </footer>
 
 <script>
-${clientScript(mode)}
+${clientScript(mode, signedInViaAccess)}
 </` + `script>
 </body>
 </html>`;
