@@ -1311,6 +1311,14 @@ function clientScript(mode, signedInViaAccess) {
     '        head.appendChild(el("span", { class: "item-blocker-id", text: r.item_id }));',
     '        head.appendChild(el("span", { text: " — " + (r.title || "(no title)") + (r.state ? "  ·  " + r.state : "") }));',
     '        box.appendChild(head);',
+    /* A struck-through entry is one the office's own board parser does not
+       read. Saying so matters: it is why the blocker appears in no count, and
+       it is the difference between "this is still open" and "this is finished
+       and the blocking line was never cleared". */
+    '        if (r.match === "decided") {',
+    '          box.appendChild(el("p", { class: "item-line",',
+    '            text: "This entry\'s heading is struck through. The office\'s own board parser does not read that form, so this item is in no state count — it is still named as the blocker here." }));',
+    '        }',
     '        box.appendChild(el("pre", { class: "item-verbatim", text: r.verbatim }));',
     '        panel.appendChild(box);',
     '      });',

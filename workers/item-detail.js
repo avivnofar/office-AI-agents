@@ -149,21 +149,56 @@ export function parseItemRef(rawId) {
 /* ──────────────────────────── Slicing one entry ─────────────────────────── */
 
 /**
- * The heading that opens an entry, for one item. Anchored on the identifier and
- * followed by the em-dash separator, so `OB-003` cannot match inside a longer
- * identifier.
+ * The heading that opens an entry, in the form every parser in this estate
+ * reads: `### OB-003 — Title`. Anchored on the identifier and followed by the
+ * em-dash separator, so `OB-003` cannot match inside a longer identifier.
  */
-function headingRe(itemId) {
+function canonicalHeadingRe(itemId) {
   return new RegExp(`^### ${itemId} — (.+)$`, 'm');
+}
+
+/**
+ * The heading of a **decided** entry, and it is why this file has two patterns
+ * rather than one.
+ *
+ * Found live on 2026-08-25, on the first real request this endpoint ever
+ * answered. `OB-003`'s `Blocked by:` names `OB-001`, and `OB-001` has no
+ * `### OB-001 — …` heading in `BOARD.md` — it carries the struck-through form a
+ * finished entry gets. `parseBoard()` cannot see it either, which is correct
+ * for `parseBoard()`: a DONE task is not a task the office is carrying, and it
+ * is deliberately excluded from every count.
+ *
+ * **It is exactly wrong for this endpoint.** The owner's question is *what is
+ * blocking this*, and answering "the item that blocks it does not exist" when
+ * the item is sitting in the same file, finished, would be the estate's own
+ * dominant failure shape — absence read as fact — reproduced on the one page
+ * built to end it.
+ *
+ * So the identifier is required to be **the first thing in the heading text**,
+ * after optional strikethrough. `## Blocked on OB-001` does not match; `###
+ * ~~OB-001 — Audit every model call site~~ — DONE` does. Which form matched is
+ * reported as `match`, so the expansion can say the entry was found in a shape
+ * the office's own parser skips rather than presenting it as an ordinary hit.
+ */
+function decoratedHeadingRe(itemId) {
+  return new RegExp(`^(#{2,4}) *~{0,2} *${itemId}\\b(.*)$`, 'm');
 }
 
 /**
  * One entry, sliced out of its source file by offset and returned unaltered.
  *
- * The end of an entry is the next `### ` heading or the end of the file, which
- * is the same boundary `parseBoard()`, `parseOpenQuestions()` and
- * `parseSubmissions()` all use. Trailing whitespace is trimmed and nothing else
- * is touched.
+ * ── WHERE AN ENTRY ENDS ─────────────────────────────────────────────────
+ *
+ * At the next heading of level 1 to 3, or the end of the file. `parseBoard()`
+ * slices to the next `### OB-NNN` heading instead, and that difference is not
+ * cosmetic: `BOARD.md` groups its tasks under `## Agent N — Name` sections, so
+ * the LAST task in a section is followed by a `##`, not a `###`. Slicing on
+ * `###` alone swallowed the section rule and the next agent's heading into
+ * `OB-003`'s `Notes:` field on the first live request. `parseBoard()` never
+ * noticed because it reads single-line fields and throws the rest away; an
+ * endpoint that returns the block verbatim notices immediately.
+ *
+ * Trailing whitespace is trimmed and nothing else is touched.
  *
  * SUBMISSIONS.md documents its own format inside a fenced block containing a
  * live-looking `### S-000` heading, and `parseSubmissions()` blanks fenced
@@ -176,18 +211,34 @@ export function extractEntry(markdown, itemId) {
     return { found: false, reason: 'the source file was empty or could not be read' };
   }
   const scannable = markdown.replace(/^```[\s\S]*?^```/gm, (block) => block.replace(/[^\n]/g, ' '));
-  const m = headingRe(itemId).exec(scannable);
-  if (!m) {
-    return { found: false, reason: `no "### ${itemId} — …" heading in the file — the entry has been renamed, removed, or was never there` };
+
+  let match = 'open';
+  let heading;
+  let m = canonicalHeadingRe(itemId).exec(scannable);
+  if (m) {
+    heading = m[1].trim();
+  } else {
+    m = decoratedHeadingRe(itemId).exec(scannable);
+    if (!m) {
+      return {
+        found: false,
+        match: null,
+        reason: `no heading beginning "${itemId}" anywhere in the file — the entry has been renamed, removed, or was never there`,
+      };
+    }
+    match = 'decided';
+    heading = m[0].replace(/^#{2,4} */, '').replace(/~~/g, '').replace(/^[-—–\s]+/, '').trim();
   }
+
   const start = m.index;
   const after = scannable.slice(start + m[0].length);
-  const nextRel = /^### /m.exec(after);
+  const nextRel = /^#{1,3} /m.exec(after);
   const end = nextRel ? start + m[0].length + nextRel.index : markdown.length;
   return {
     found: true,
     reason: null,
-    heading: m[1].trim(),
+    match,
+    heading,
     verbatim: markdown.slice(start, end).replace(/\s+$/, ''),
   };
 }
@@ -296,6 +347,11 @@ export function resolveBlockers(statedValue, filesByKind = {}) {
       file: ITEM_SOURCES[kind].path,
       title: entry.heading,
       state: fieldValue(fields, 'State'),
+      // 'open' or 'decided' — which heading form found it. See
+      // decoratedHeadingRe(): a struck-through entry is one the office's own
+      // board parser does not read, and a reader must be told that rather than
+      // shown a blocker that looks like every other one.
+      match: entry.match,
       verbatim: entry.verbatim,
       fields,
     });
@@ -499,6 +555,7 @@ export function buildItemDetail({ ref, card = null, files = {}, origin = null, l
     // Verbatim. See the file header: no model, no summary, no paraphrase.
     entry: {
       verbatim: entry.found ? entry.verbatim : null,
+      match: entry.match || null,
       fields,
       // Named so a reader can tell "the office wrote no fields" from "the entry
       // was not found at all" without comparing two nulls.

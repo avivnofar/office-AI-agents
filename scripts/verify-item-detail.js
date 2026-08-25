@@ -213,8 +213,46 @@ check('the fields the card never had are present',
 
 check('a missing entry is reported, never returned empty', (() => {
   const miss = extractEntry(BOARD, 'OB-999');
-  return miss.found === false && /no "### OB-999/.test(miss.reason);
+  return miss.found === false && /no heading beginning "OB-999"/.test(miss.reason);
 })());
+
+/*
+ * THE DEFECT THE FIRST LIVE REQUEST FOUND, both halves, pinned.
+ *
+ * `BOARD.md` groups tasks under `## Agent N` sections and writes a decided task
+ * with its heading struck through. Slicing on `###` alone swallowed a section
+ * rule and the next agent's heading into OB-003's `Notes:`; looking only for
+ * `### OB-001 — ` reported the live blocker as "never there" while it sat in
+ * the same file, finished.
+ */
+const SECTIONED = `## Agent 5 — The IT Chief
+
+### ~~OB-001 — Audit every model call site~~ — DONE
+
+- **State:** DONE
+- **Task:** list every place the office calls a model.
+- **Notes:** —
+
+---
+
+## Agent 6 — The QA
+
+### OB-020 — Something else
+
+- **State:** READY
+`;
+check('a struck-through decided entry is found, not reported missing', (() => {
+  const d = extractEntry(SECTIONED, 'OB-001');
+  return d.found === true && d.match === 'decided' && /Audit every model call site/.test(d.heading);
+})(), 'a finished blocker reported as "never there" is absence read as fact');
+check('an open entry is still reported as open', extractEntry(BOARD, 'OB-003').match === 'open');
+check('the slice stops at the next section heading, not the next task heading', (() => {
+  const d = extractEntry(SECTIONED, 'OB-001');
+  return !d.verbatim.includes('## Agent 6') && !d.verbatim.includes('OB-020');
+})(), 'a section rule and the next agent\'s heading landed inside a Notes: value on the first live request');
+check('a heading that merely MENTIONS an id is not mistaken for its entry',
+  extractEntry('## Blocked on OB-001\n\ntext\n', 'OB-001').found === false,
+  'the identifier must be the first thing in the heading text');
 check('an unreadable file is reported as such', extractEntry('', 'OB-003').found === false);
 
 /*
