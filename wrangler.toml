@@ -55,9 +55,52 @@ workers_dev = true
 # never a redirect to cloudflareaccess.com. Filling these two values in does not
 # by itself put Google sign-in in front of anything; attaching the `owner only`
 # policy to the application does. See the Session 18 report.
+#
+# ── FILLED IN 2026-08-25 (Session 19, Item A) ───────────────────────────
+#
+# Appended, not rewritten. Everything above stands as the record of why these
+# two values were left empty — and that reasoning is precisely what made them
+# safe to fill today.
+#
+# TWO PARAGRAPHS ABOVE ARE NOW STALE, AND ARE STRUCK RATHER THAN DELETED:
+#
+#   1. "The session that wrote this could not read either value." Still true of
+#      the Zero Trust scope — `npx wrangler whoami` lists none today either. But
+#      the dashboard is no longer the only place the values live.
+#   2. "The Access application has NO POLICY ATTACHED and enforces nothing."
+#      No longer true. The owner has since created the application and attached
+#      a policy, and the same uncredentialed GET now returns a 302 to
+#      cloudflareaccess.com rather than the Worker's own 401.
+#
+# WHERE THESE TWO VALUES CAME FROM. Cloudflare Access publishes both itself, in
+# the 302 it issues to an uncredentialed request — no Zero Trust scope needed:
+#
+#   $ curl -i https://office.avivnofar.com/admin/spec
+#   HTTP/1.1 302 Found
+#   Location: https://dark-credit-3c26.cloudflareaccess.com/cdn-cgi/access/
+#             login/office.avivnofar.com?kid=<the 64-hex AUD tag>&meta=<jwt>
+#
+# THEY WERE READ, AND THE DIFFERENCE FROM A GUESS WAS PROVED, NOT ASSERTED.
+# The session prompt made a guessed AUD a hard stop, for the reason stated
+# above: a wrong audience accepts tokens minted for a different application.
+# The AUD appears TWICE in that single response — once as the `kid` query
+# parameter, and once as the `aud` claim of the `meta` JWT that Cloudflare
+# Access SIGNED ITSELF. That meta token was verified this session against the
+# key published at this team domain's own /cdn-cgi/access/certs:
+#
+#   signing kid 482f151d… found in the team's JWKS  : true
+#   RS256 signature verifies                        : true
+#   signed `aud`      : 77c18bb8… (identical to the kid param)
+#   signed `hostname` : office.avivnofar.com  ← THIS application
+#   tampered-aud negative control verifies          : false
+#
+# So the audience below is a cryptographically signed statement by THIS
+# account's Access instance about THIS application — not an inference drawn
+# from the shape of a URL. The negative control is there because a check that
+# has only ever been seen to pass has not been seen to work.
 [vars]
-ACCESS_TEAM_DOMAIN = ""
-ACCESS_AUD = ""
+ACCESS_TEAM_DOMAIN = "dark-credit-3c26.cloudflareaccess.com"
+ACCESS_AUD = "77c18bb835d44dd7e3ea07ab949cdf886221aad31488eda9babc5c1f1bba6b14"
 
 # D1 database — storage for agents/agent_sessions/cases/interactions/reports/
 # suggestions/weekly_analytics/meetings/side_plots/promotions/year_stats

@@ -336,8 +336,37 @@ check('the API gate no longer decides on the raw token comparison alone',
   !/const token = request\.headers\.get\('X-Admin-Token'\) \|\| '';\s*\n\s*if \(!env\.ADMIN_TOKEN \|\| token !== env\.ADMIN_TOKEN\)/.test(runner));
 check('the Worker declares both Access vars in wrangler.toml',
   /ACCESS_TEAM_DOMAIN/.test(wranglerToml) && /ACCESS_AUD/.test(wranglerToml));
-check('the shipped Access vars are EMPTY until the owner fills them in',
-  /ACCESS_TEAM_DOMAIN\s*=\s*""/.test(wranglerToml) && /ACCESS_AUD\s*=\s*""/.test(wranglerToml));
+// CORRECTED 2026-08-25 (Session 19, Item A). This check used to read:
+//
+//   check('the shipped Access vars are EMPTY until the owner fills them in',
+//     /ACCESS_TEAM_DOMAIN\s*=\s*""/.test(wranglerToml) && ...);
+//
+// It was right on the day it was written and wrong the moment the values were
+// filled in — it asserted a TRANSITIONAL state as if it were an invariant, so
+// doing the very thing it was guarding the way to would have turned it red
+// forever. What actually matters is not that the values are empty; it is that
+// whatever ships is either empty (inert, the token gate answers) or WELL
+// FORMED. A half-pasted AUD is the dangerous middle: it looks configured and
+// accepts nothing.
+//
+// So the shipped values are parsed by the REAL accessConfig() rather than
+// matched by a regex that only knows one answer. `configured` true or false
+// are both acceptable outcomes; `missing` naming a MALFORMED value is not.
+const shippedVars = Object.fromEntries(
+  [...wranglerToml.matchAll(/^(ACCESS_TEAM_DOMAIN|ACCESS_AUD)\s*=\s*"([^"]*)"/gm)]
+    .map((m) => [m[1], m[2]]),
+);
+const shippedCfg = accessConfig(shippedVars);
+const bothEmpty = !shippedVars.ACCESS_TEAM_DOMAIN && !shippedVars.ACCESS_AUD;
+check('both Access vars are actually assigned in wrangler.toml',
+  Object.keys(shippedVars).length === 2);
+check('the shipped Access vars are either INERT (both empty) or fully valid — never half-set',
+  bothEmpty || shippedCfg.configured === true);
+check('no shipped Access var is set-but-malformed (the dangerous middle)',
+  !shippedCfg.missing.some((m) => /is set but/.test(m)));
+console.log('       shipped: team_domain=' + JSON.stringify(shippedCfg.teamDomain)
+  + ' aud=' + (shippedCfg.aud ? shippedCfg.aud.slice(0, 8) + '… (64 hex)' : null)
+  + ' -> ' + (shippedCfg.configured ? 'CONFIGURED' : 'inert: ' + shippedCfg.missing.join('; ')));
 
 /* ══════ 9. the gate itself: order, the CSRF rule, nothing removed ════════ */
 
