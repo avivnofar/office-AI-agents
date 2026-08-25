@@ -118,6 +118,12 @@ import {
 // adds no `kind`, changes no field, and relaxes no rule — `parseOwnerMessage()`
 // above stands between it and the folder.
 import { renderOwnerPage, buildOwnerMessage, buildOwnerState } from './owner-page.js';
+// The site's two data surfaces (2026-08-24, Session 16 Item B). Pure module,
+// no env, no D1 — the builders take their inputs as arguments so
+// scripts/verify-site-data.js can poison them and prove the public one drops
+// what nobody whitelisted. buildPublicData()'s SIGNATURE is the security
+// argument: there is no parameter through which a snapshot could reach it.
+import { buildPublicData, buildAdminData } from './site-data.js';
 import {
   ownerChannelEnabled, notifyOwner, selectNotificationItems, recentFailures, OWNER_ISSUE_LABEL,
   // SESSION 11 (2026-08-23): the three-part gate and the email notice. See
@@ -324,6 +330,77 @@ function pad(n, len) {
  * is the honest state: **absent means unknown, not current** — the same rule
  * this project applies to a null free-tier cap.
  */
+/* --------------------- The site's data surfaces (Item B) ------------------ */
+
+/**
+ * THE ONLY D1 READ BEHIND `/api/public`, and every column it names is a COUNT.
+ *
+ * Written as one statement of scalar subqueries rather than six queries, and
+ * with every aggregate spelled out rather than a `SELECT *` anywhere, because
+ * the security property of the public endpoint is that **no D1 text column is
+ * ever selected on that path**. `cases.description`, `reports.content` and
+ * `meetings.transcript` are the three that would be catastrophic; the way they
+ * do not leak is that nothing asks for them.
+ *
+ * `site-data.js publicCounts()` then coerces every value through `Number()` as
+ * a second, independent line — so even if this query one day grew a text
+ * column, it would arrive at the response as `null`.
+ *
+ * Returns nulls rather than throwing on a D1 error. A null count renders as
+ * "unknown", which is honest; a zero would be a claim that the office has done
+ * nothing, and absence read as fact is this estate's dominant failure shape.
+ */
+async function siteCounts(env) {
+  const empty = {
+    agents: null, questions_handled: null, reports_written: null,
+    meetings_held: null, interactions_logged: null, simulated_day: null,
+  };
+  if (!env?.DB) return empty;
+  try {
+    const row = await env.DB.prepare(
+      `SELECT (SELECT COUNT(*) FROM agents)       AS agents,
+              (SELECT COUNT(*) FROM cases)        AS questions_handled,
+              (SELECT COUNT(*) FROM reports)      AS reports_written,
+              (SELECT COUNT(*) FROM meetings)     AS meetings_held,
+              (SELECT COUNT(*) FROM interactions) AS interactions_logged,
+              (SELECT current_day FROM year_stats ORDER BY recorded_at DESC LIMIT 1) AS simulated_day`
+    ).first();
+    return row || empty;
+  } catch (err) {
+    console.warn(`[site-data] counts read failed: ${err.message}`);
+    return empty;
+  }
+}
+
+/**
+ * Recent activity for `/api/admin` — titles and timestamps, never bodies.
+ *
+ * The column lists are exhaustive on purpose. `reports.content` and
+ * `meetings.transcript` sit in these two tables, and a `SELECT *` here would
+ * put a meeting transcript — agent names, internal blockers, task ids,
+ * sometimes a client name — one JSON serialisation away from a response.
+ */
+async function siteActivity(env, limit = 25) {
+  if (!env?.DB) return { reports: [], meetings: [] };
+  try {
+    const [reports, meetings] = await Promise.all([
+      env.DB.prepare(
+        `SELECT id, agent_id, type, title, severity, created_at
+           FROM reports ORDER BY created_at DESC LIMIT ?`
+      ).bind(limit).all(),
+      env.DB.prepare(
+        `SELECT id, type, created_at,
+                (LENGTH(attendees) - LENGTH(REPLACE(attendees, ',', '')) + 1) AS attendee_count
+           FROM meetings ORDER BY created_at DESC LIMIT ?`
+      ).bind(limit).all(),
+    ]);
+    return { reports: reports?.results || [], meetings: meetings?.results || [] };
+  } catch (err) {
+    console.warn(`[site-data] activity read failed: ${err.message}`);
+    return { reports: [], meetings: [] };
+  }
+}
+
 function workerVersion(env) {
   const id = env?.CF_VERSION_METADATA?.id;
   if (!id) return null;
@@ -6016,11 +6093,29 @@ export default {
       return new Response(null, { status: 204, headers: corsHeaders(origin) });
     }
 
-    // All /api/agents/* endpoints require the admin token configured as a
-    // Worker secret (env.ADMIN_TOKEN). The browser never embeds this value
-    // — the admin types it into the dashboard once and it's sent back as
-    // X-Admin-Token, so the real check always happens server-side here.
-    if (url.pathname.startsWith('/api/agents/')) {
+    /*
+     * ── THE ONE AUTHENTICATION GATE, AND WHY IT IS A LIST ──────────────────
+     *
+     * Every prefix named here requires the admin token configured as a Worker
+     * secret (env.ADMIN_TOKEN). The browser never embeds that value — the
+     * owner types it in once and it is sent back as `X-Admin-Token`, so the
+     * real check always happens server-side, here, BEFORE ANY HANDLER IS
+     * REACHED.
+     *
+     * `/api/admin` joined the list on 2026-08-24 (Session 16, Item B) and it
+     * was made a LIST rather than a second `if` on purpose. §7 of
+     * ARCHITECTURAL-DECISIONS.md records six occurrences of one shape in this
+     * estate — *the guard exists and the calling path never reaches it* — and
+     * an authentication check that lives inside its own handler is that shape
+     * waiting to happen: it is one refactor away from being moved, wrapped in
+     * a condition, or returned before. A prefix a request must clear before
+     * routing begins is a check somebody has to defeat deliberately.
+     *
+     * `scripts/verify-site-data.js` asserts this list exists and that
+     * `/api/admin` is covered by it rather than by a handler-local check.
+     */
+    const AUTHENTICATED_PREFIXES = ['/api/agents/', '/api/admin'];
+    if (AUTHENTICATED_PREFIXES.some((prefix) => url.pathname === prefix || url.pathname.startsWith(prefix))) {
       const token = request.headers.get('X-Admin-Token') || '';
       if (!env.ADMIN_TOKEN || token !== env.ADMIN_TOKEN) {
         return json({ error: 'unauthorized' }, 401, origin);
@@ -6052,6 +6147,45 @@ export default {
           'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'none'",
           'Referrer-Policy': 'no-referrer',
           'X-Content-Type-Options': 'nosniff',
+        },
+      });
+    }
+
+    /*
+     * -- /api/public — UNAUTHENTICATED, AND THE FIELD LIST IS THE PRODUCT ---
+     *
+     * Deliberately NOT under `/api/agents/` and NOT under `/api/admin`, so it
+     * does not pass the token gate above. That is the point: this is what a
+     * stranger sees.
+     *
+     * TWO ENDPOINTS RATHER THAN ONE IS A SECURITY BOUNDARY, not filing. If
+     * both surfaces read one endpoint and only authentication separated them,
+     * a single auth bug would expose everything. So the public path never
+     * touches the office snapshot, never reads a transcript, and calls a
+     * builder whose signature cannot accept one — see site-data.js.
+     *
+     * `Access-Control-Allow-Origin: *` is set explicitly rather than going
+     * through corsHeaders()'s allow-list. This response is public by
+     * construction; an allow-list on public data would be security theatre
+     * that also broke the office's own site the first time it moved host.
+     */
+    if (request.method === 'GET' && url.pathname === '/api/public') {
+      const counts = await siteCounts(env);
+      const body = buildPublicData({
+        agents: agentsConfig.agents,
+        counts,
+        generatedAt: new Date().toISOString(),
+      });
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Access-Control-Allow-Origin': '*',
+          // Five minutes. The counts move on a 30-minute cron, so a stranger
+          // reading a five-minute-old total is reading a true number.
+          'Cache-Control': 'public, max-age=300',
+          'X-Content-Type-Options': 'nosniff',
+          'Referrer-Policy': 'no-referrer',
         },
       });
     }
@@ -6145,6 +6279,45 @@ export default {
           note: 'Written to back-office. The office reads this folder on every office-context refresh (30-minute cache) and records the read against this message\'s content SHA.',
         }, 200, origin);
       }
+      /*
+       * -- /api/admin — THE FULL PICTURE, BEHIND THE PREFIX GATE -----------
+       *
+       * Authenticated by AUTHENTICATED_PREFIXES above, before this handler is
+       * reached. There is no token check in here, and that absence is
+       * deliberate rather than an omission: a handler-local check is the one a
+       * refactor moves.
+       *
+       * It reads the office snapshot FRESH rather than the 30-minute cache,
+       * for the same reason `/api/agents/owner-state` does — this endpoint's
+       * whole job is answering *what is waiting on me*, and a cached answer
+       * can report a decision the owner made twenty minutes ago as still open.
+       * The refresh is written back into the cache so the office gets the
+       * benefit rather than paying for it twice.
+       */
+      if (request.method === 'GET' && url.pathname === '/api/admin') {
+        const [counts, activity, snapshot] = await Promise.all([
+          siteCounts(env),
+          siteActivity(env),
+          fetchOfficeSnapshot(env).catch((err) => ({
+            fetched_at: Date.now(), board: null, requirements: null, questions: null,
+            submissions: null, owner: null,
+            errors: [`office snapshot fetch threw: ${err.message}`],
+          })),
+        ]);
+        if (env.SIM_KV && snapshot) {
+          await env.SIM_KV.put(OFFICE_SNAPSHOT_CACHE_KEY, JSON.stringify(snapshot)).catch(() => {});
+        }
+        return json(buildAdminData({
+          agents: agentsConfig.agents,
+          counts,
+          snapshot,
+          reports: activity.reports,
+          meetings: activity.meetings,
+          generatedAt: new Date().toISOString(),
+          versionId: workerVersion(env),
+        }), 200, origin);
+      }
+
       if (request.method === 'GET' && url.pathname === '/api/agents/sessions') {
         const limit = Number(url.searchParams.get('limit')) || 50;
         return json(await getRecentInteractions(env, limit), 200, origin);

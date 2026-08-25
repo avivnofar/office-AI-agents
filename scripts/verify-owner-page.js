@@ -231,9 +231,28 @@ check('the office\'s own read errors are surfaced to him rather than hidden',
 /* ── 6. Authentication and the wiring in agent-runner.js ────────────────── */
 console.log('\n--- 6. Authenticated, with no second write path ---');
 
+/*
+ * REWRITTEN 2026-08-24 (Session 16, Item B). This used to assert the LITERAL
+ * `url.pathname.startsWith('/api/agents/')` sitting within 400 characters of
+ * the token comparison. That spelling changed when `/api/admin` joined the same
+ * gate: the router now holds an `AUTHENTICATED_PREFIXES` list and tests the
+ * path against every entry, so `/api/admin` is authenticated by the SAME check
+ * rather than by one inside its own handler.
+ *
+ * The property this check exists for did not change and is what is asserted
+ * now — the owner-message write endpoint is behind a token check that runs
+ * BEFORE any handler is reached. Rewriting a check to match a rename is how a
+ * check quietly stops testing anything, so this one was strengthened in the
+ * same edit: it additionally requires that '/api/agents/' is genuinely one of
+ * the gate's prefixes, which the old literal-string form got for free and a
+ * naive `.includes('AUTHENTICATED_PREFIXES')` would have thrown away.
+ */
+const gateList = /const AUTHENTICATED_PREFIXES\s*=\s*\[([^\]]*)\]/.exec(runnerSrc);
 check('the write endpoint is under /api/agents/, which the router authenticates before any handler',
   /url\.pathname === '\/api\/agents\/owner-message'/.test(runnerSrc)
-  && /url\.pathname\.startsWith\('\/api\/agents\/'\)[\s\S]{0,400}token !== env\.ADMIN_TOKEN/.test(runnerSrc));
+  && !!gateList
+  && gateList[1].includes("'/api/agents/'")
+  && /AUTHENTICATED_PREFIXES\.some\([\s\S]{0,300}token !== env\.ADMIN_TOKEN/.test(runnerSrc));
 check('the state endpoint is under /api/agents/ too',
   /url\.pathname === '\/api\/agents\/owner-state'/.test(runnerSrc));
 check('THE GATE: the handler runs the candidate through parseOwnerMessage() BEFORE committing',

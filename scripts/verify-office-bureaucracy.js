@@ -380,8 +380,42 @@ const liveGuard = simulationPostIsGuarded(arSrc0);
 check('the LIVE handler is guarded, and the token check precedes the state write',
   liveGuard.found === true && liveGuard.guarded === true, JSON.stringify(liveGuard));
 
-check('the closure did NOT widen the /api/agents/ prefix gate — each route carries its own explicit check',
-  arSrc0.includes("url.pathname.startsWith('/api/agents/')") && !arSrc0.includes("url.pathname.startsWith('/api/')"));
+/*
+ * REWRITTEN 2026-08-24 (Session 16, Item B), intent unchanged and reach
+ * widened.
+ *
+ * WHAT IT ALWAYS MEANT: the fix for the unauthenticated POST /api/simulation
+ * must not have been made by widening the gate to swallow everything under
+ * `/api/`. A blanket gate would authenticate routes that are deliberately
+ * public, and would do it invisibly.
+ *
+ * WHY THE FORM CHANGED: it asserted the literal string
+ * `url.pathname.startsWith('/api/agents/')`. Session 16 replaced that single
+ * call with an `AUTHENTICATED_PREFIXES` list so `/api/admin` could join the
+ * same gate instead of carrying a handler-local token check. The old form
+ * therefore failed on a change that did not widen anything.
+ *
+ * AND WHY THE NEW FORM IS STRICTLY STRONGER: the old one could only see a
+ * widening spelled as `startsWith('/api/')`. Once the gate is a list, the way
+ * someone widens it is by EDITING THE LIST — which the old assertion would
+ * have sailed straight past. This reads the list and judges its contents: no
+ * entry may be `/api/` or shorter, and `/api/public` — the office's
+ * deliberately unauthenticated surface — must not be covered by any entry.
+ */
+const gateDecl = /const AUTHENTICATED_PREFIXES\s*=\s*\[([^\]]*)\]/.exec(arSrc0);
+const gatePrefixes = gateDecl
+  ? (gateDecl[1].match(/'([^']+)'/g) || []).map((q) => q.slice(1, -1))
+  : [];
+check('the authenticated prefix gate exists and is a named list, not a scattering of per-handler checks',
+  gatePrefixes.length > 0, JSON.stringify(gatePrefixes));
+check('the closure did NOT widen the prefix gate — no entry is /api/ or broader',
+  gatePrefixes.length > 0 && gatePrefixes.every((p) => p.startsWith('/api/') && p.length > '/api/'.length),
+  JSON.stringify(gatePrefixes));
+check('/api/agents/ is still one of the gated prefixes',
+  gatePrefixes.includes('/api/agents/'));
+check('/api/public is NOT covered by any gated prefix — it is public by construction',
+  gatePrefixes.every((p) => !'/api/public'.startsWith(p)),
+  JSON.stringify(gatePrefixes));
 check('the 401 body is the SAME shape the /api/agents/* gate returns (one idiom, not two)',
   (arSrc0.match(/error: 'unauthorized' \}, 401, origin\)/g) || []).length >= 2);
 
