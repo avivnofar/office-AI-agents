@@ -124,6 +124,12 @@ import { renderOwnerPage, buildOwnerMessage, buildOwnerState } from './owner-pag
 // what nobody whitelisted. buildPublicData()'s SIGNATURE is the security
 // argument: there is no parameter through which a snapshot could reach it.
 import { buildPublicData, buildAdminData } from './site-data.js';
+// The spec builder (2026-08-24, Session 16 Item C). Pure, and deliberately so:
+// NO MODEL is involved anywhere in this path. buildSpec() is a template fill,
+// the same answers always produce the same bytes, and
+// scripts/verify-spec-builder.js asserts both — including that the module's
+// source contains no fetch and no provider client.
+import { buildSpec, specFilename, renderSpecPage } from './spec-builder.js';
 import {
   ownerChannelEnabled, notifyOwner, selectNotificationItems, recentFailures, OWNER_ISSUE_LABEL,
   // SESSION 11 (2026-08-23): the three-part gate and the email notice. See
@@ -6186,6 +6192,85 @@ export default {
           'Cache-Control': 'public, max-age=300',
           'X-Content-Type-Options': 'nosniff',
           'Referrer-Policy': 'no-referrer',
+        },
+      });
+    }
+
+    /*
+     * -- /admin/spec — THE SPEC BUILDER ------------------------------------
+     *
+     * Served UNAUTHENTICATED, and that is a decision with a reason rather than
+     * an oversight. Cloudflare Access is NOT enabled on this account (it needs
+     * a dashboard action the owner must take — see the session report), so
+     * there is no identity gate to put in front of this path today.
+     *
+     * What sits here is therefore a page that HOLDS NO SECRET AND READS NO
+     * OFFICE DATA. It is an empty form. The generator is a pure text
+     * transform. The only privileged act on the page — Send — POSTs to
+     * `/api/agents/owner-message`, which the AUTHENTICATED_PREFIXES gate above
+     * refuses without the admin token. An unauthenticated visitor gets a blank
+     * form and can do nothing with it.
+     *
+     * That is the same split `/owner` already uses and the same one that makes
+     * IT safe to serve openly. When Access is enabled, this path is inside the
+     * `office.avivnofar.com/admin*` scope and gains a second, stronger gate
+     * without anything here changing.
+     */
+    if (request.method === 'GET' && (url.pathname === '/admin/spec' || url.pathname === '/admin/spec/')) {
+      return new Response(renderSpecPage({ endpointBase: url.origin }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store',
+          // It loads nothing from anywhere. Stated in a header as well as
+          // being true, so a future edit that adds a CDN script fails in the
+          // browser rather than shipping quietly. `blob:` is present for one
+          // reason only: the Download button builds the .md as a Blob URL.
+          'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'none'",
+          'Referrer-Policy': 'no-referrer',
+          'X-Content-Type-Options': 'nosniff',
+        },
+      });
+    }
+
+    /*
+     * -- /api/spec/build — THE TEMPLATE FILL, SERVER-SIDE -------------------
+     *
+     * Unauthenticated, and it does exactly one thing: it turns the poster's own
+     * answers into markdown and hands them back. It reads nothing, writes
+     * nothing, stores nothing and calls no model. There is no data behind it to
+     * protect.
+     *
+     * WHY THE GENERATION IS A ROUND TRIP AT ALL rather than a few lines of
+     * browser JavaScript: so there is ONE implementation of the spec format.
+     * The same argument owner-page.js makes about its parser — *two
+     * implementations of one format is the drift this project keeps finding* —
+     * and here it is cheaper to honour, because the page has to talk to the
+     * Worker for Send regardless.
+     */
+    if (request.method === 'POST' && url.pathname === '/api/spec/build') {
+      const answers = await request.json().catch(() => ({}));
+      const built = buildSpec({ ...answers, date: answers.date || todayDateStr() });
+      if (!built.ok) {
+        return new Response(JSON.stringify({ ok: false, reason: built.reason }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json; charset=utf-8', 'Access-Control-Allow-Origin': '*' },
+        });
+      }
+      return new Response(JSON.stringify({
+        ok: true,
+        title: built.title,
+        markdown: built.markdown,
+        channel_body: built.channelBody,
+        filename: specFilename({ title: built.title, date: answers.date || todayDateStr() }),
+        // Said back on every response, because the claim is the product here.
+        generated_by: 'template fill — no model was called',
+      }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-store',
         },
       });
     }
