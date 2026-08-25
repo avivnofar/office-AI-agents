@@ -2,6 +2,22 @@ name = "data-center-agents"
 main = "workers/agent-runner.js"
 compatibility_date = "2026-06-11"
 
+# workers.dev STAYS ON, and this line is a guard rather than a default.
+#
+# Added 2026-08-24 alongside the [[routes]] custom-domain block at the bottom
+# of this file. Wrangler turns the `<name>.<subdomain>.workers.dev` route OFF
+# by default once a config declares routes, and this Worker's workers.dev URL
+# is NOT decorative:
+#   * .github/workflows/owner-email.yml POSTs to
+#     https://data-center-agents.avivnofar.workers.dev/api/agents/trigger
+#   * dashboard/dashboard.js has it as API_BASE
+#   * DEPLOY.md and CLAUDE.md document it as the operator's curl target
+# Adding a custom domain without this line would have silently 404'd all three
+# on the next deploy - a route change nobody would see until the owner's daily
+# email stopped arriving. Setting it explicitly makes the value a decision in
+# the file instead of a default that moved under us.
+workers_dev = true
+
 # D1 database — storage for agents/agent_sessions/cases/interactions/reports/
 # suggestions/weekly_analytics/meetings/side_plots/promotions/year_stats
 # (database/schema.sql).
@@ -151,6 +167,30 @@ binding = "AI"
 #                       external hosts, so no service binding is needed). The
 #                       11-agent Q&A engine's own Claude asks still go through
 #                       the APP_API service binding above, unaffected by this.
+
+# ── THE OFFICE'S OWN ADDRESS — office.avivnofar.com ──────────────────────────
+#
+# Added 2026-08-24 (Session 16, Item A). A Workers CUSTOM DOMAIN, not a route:
+# Cloudflare creates the proxied DNS record for the hostname and provisions its
+# certificate, and it does so for the SUBDOMAIN ONLY.
+#
+# WHAT THIS DELIBERATELY DOES NOT TOUCH: the apex `avivnofar.com`. That
+# hostname is registered here and SERVED BY NETLIFY, which manages its own
+# certificate. Proxying the apex through Cloudflare to catch an /office/*
+# route would put a working production site's TLS in the path of a cosmetic
+# gain. It is not done, and a future session must not "tidy" this into an apex
+# route. A custom domain on a subdomain is scoped to that hostname and cannot
+# reach the apex record.
+#
+# WHY IT IS IN THIS FILE AND NOT THE DASHBOARD. Custom domains can be attached
+# from the Cloudflare dashboard, and a dashboard-attached domain is exactly
+# what the next `wrangler deploy` from a config that does not declare it tears
+# down - silently, with the deploy reporting success. This estate has recorded
+# that shape six times and the [observability] block twenty lines up exists for
+# the same reason. The address the owner is given must survive a deploy.
+[[routes]]
+pattern = "office.avivnofar.com"
+custom_domain = true
 
 # Per-block office-simulation cron — OFFICE HOURS, 08:00-18:00 Israel.
 #
