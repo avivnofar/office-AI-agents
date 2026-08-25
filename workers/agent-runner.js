@@ -130,7 +130,7 @@ import { buildPublicData, buildAdminData, buildPendingItems } from './site-data.
 // file, and scripts/verify-item-detail.js can drive the search with a fake
 // probe under a fetch tripwire.
 import {
-  parseItemRef, buildItemDetail, findFirstAppearance, ITEM_SOURCES, MAX_ORIGIN_PROBES,
+  parseItemRef, buildItemDetail, findFirstAppearance, ITEM_SOURCES, MAX_ORIGIN_PROBES, MAX_SIBLING_FILES,
 } from './item-detail.js';
 // The spec builder (2026-08-24, Session 16 Item C). Pure, and deliberately so:
 // NO MODEL is involved anywhere in this path. buildSpec() is a template fill,
@@ -6796,7 +6796,62 @@ export default {
           };
         }
 
-        return json(buildItemDetail({ ref, card, files, origin: originResult, lookups }), 200, origin);
+        /*
+         * ── THE SECOND PASS, AND IT RUNS ONLY WHEN THE FIRST ONE MISSED ────
+         *
+         * Measured on the first live request this endpoint ever answered:
+         * `OB-003` is BLOCKED by `OB-001`, and `OB-001` is not in `BOARD.md` in
+         * any heading form — the board does not strike a finished task through,
+         * it takes it out of the file. So the blocker the card is built around
+         * could be named and never quoted.
+         *
+         * The fix is a DIRECTORY LISTING of the folder the board already lives
+         * in, and never a filename this code guessed at. `DONE.md` would have
+         * been an invention, and an invented path that 404s looks exactly like
+         * an entry that is not there — the confusion this whole endpoint exists
+         * to remove. Whatever markdown is actually beside the board is searched;
+         * whatever is not there is reported as not there.
+         *
+         * It costs 1 + N GETs and it is on the MISS PATH ONLY, so an item whose
+         * blocker resolved from the three files already read pays nothing.
+         */
+        let detail = buildItemDetail({ ref, card, files, origin: originResult, lookups });
+        if (detail.blocker.unresolved.length) {
+          const dir = ref.source.path.slice(0, ref.source.path.lastIndexOf('/'));
+          const listing = await fetchBackOfficeDir(env, dir)
+            .catch((err) => ({ entries: null, reason: `listing ${dir}/ threw — ${err?.message || err}` }));
+          const siblings = (listing.entries || [])
+            .filter((e) => e.type === 'file' && /\.md$/i.test(e.name) && `${dir}/${e.name}` !== ref.source.path)
+            .slice(0, MAX_SIBLING_FILES);
+          lookups.push({
+            what: `list ${dir}/ for another file the blocker might be filed in`,
+            ok: !!listing.entries,
+            reason: listing.reason
+              || ((listing.entries || []).filter((e) => e.type === 'file' && /\.md$/i.test(e.name)).length - 1 > MAX_SIBLING_FILES
+                ? `more than ${MAX_SIBLING_FILES} markdown files beside the board; only the first ${MAX_SIBLING_FILES} were read`
+                : null),
+            count: siblings.length,
+          });
+
+          const extraFiles = [];
+          if (siblings.length) {
+            const bodies = await Promise.all(siblings.map((e) => fetchBackOfficeFile(env, `${dir}/${e.name}`)
+              .catch((err) => ({ text: null, reason: `${dir}/${e.name}: fetch threw — ${err?.message || err}` }))));
+            siblings.forEach((e, i) => {
+              const path = `${dir}/${e.name}`;
+              if (typeof bodies[i]?.text === 'string') extraFiles.push({ path, text: bodies[i].text });
+              lookups.push({
+                what: `read ${path}`,
+                ok: typeof bodies[i]?.text === 'string',
+                reason: bodies[i]?.reason || null,
+                bytes: typeof bodies[i]?.text === 'string' ? bodies[i].text.length : null,
+              });
+            });
+          }
+          detail = buildItemDetail({ ref, card, files, extraFiles, origin: originResult, lookups });
+        }
+
+        return json(detail, 200, origin);
       }
       /*
        * -- /api/admin — THE FULL PICTURE, BEHIND THE PREFIX GATE -----------

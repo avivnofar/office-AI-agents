@@ -1315,6 +1315,15 @@ function clientScript(mode, signedInViaAccess) {
        read. Saying so matters: it is why the blocker appears in no count, and
        it is the difference between "this is still open" and "this is finished
        and the blocking line was never cleared". */
+    /* Found beside the board rather than on it. "Finished and filed elsewhere"
+       and "still on the board" are different answers to the owner's question,
+       so the card names the file it actually came out of. */
+    '        if (r.elsewhere) {',
+    '          box.appendChild(el("p", { class: "item-line" }, [',
+    '            el("span", { text: "This is not on the board. It was found in " }),',
+    '            el("code", { text: r.file })',
+    '          ]));',
+    '        }',
     '        if (r.match === "decided") {',
     '          box.appendChild(el("p", { class: "item-line",',
     '            text: "This entry\'s heading is struck through. The office\'s own board parser does not read that form, so this item is in no state count — it is still named as the blocker here." }));',

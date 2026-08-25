@@ -315,12 +315,28 @@ export function kindOfItemId(itemId) {
  * returned verbatim as `stated` with `names_no_item: true`, so the expansion
  * says what the board says instead of implying a lookup failed.
  *
+ * ── AND WHY IT LOOKS PAST THE THREE KNOWN FILES ─────────────────────────
+ *
+ * Measured live on 2026-08-25: `OB-003`'s blocker `OB-001` is not in
+ * `BOARD.md` in ANY heading form, decided or open, and neither is `OB-074`,
+ * while `OB-002` through `OB-005` are. The board does not strike a finished
+ * task through — it takes it out of the file.
+ *
+ * So `extraFiles` exists, and what fills it is a DIRECTORY LISTING of the
+ * folder the board already lives in — never a filename this code guessed at. A
+ * hard-coded `DONE.md` would be an invention, and an invented path that happens
+ * to 404 looks exactly like an entry that is not there, which is the confusion
+ * this whole function is built to remove.
+ *
  * @param {string|null} statedValue the raw `Blocked by:` value, or null
  * @param {object} filesByKind `{ board: '<markdown>', question: …, submission: … }`
+ * @param {Array<{path: string, text: string}>} [extraFiles] searched only for an
+ *   identifier its own kind's file does not hold
  */
-export function resolveBlockers(statedValue, filesByKind = {}) {
+export function resolveBlockers(statedValue, filesByKind = {}, extraFiles = []) {
   const stated = statedValue == null ? null : String(statedValue).replace(/\s+$/, '');
   const ids = referencedItemIds(stated);
+  const extras = Array.isArray(extraFiles) ? extraFiles.filter((x) => x && typeof x.text === 'string') : [];
   const resolved = [];
   const unresolved = [];
 
@@ -331,20 +347,43 @@ export function resolveBlockers(statedValue, filesByKind = {}) {
       unresolved.push({ item_id: id, reason: `"${id}" is not an identifier from any file the office reads for this page` });
       continue;
     }
-    if (typeof markdown !== 'string') {
+    if (typeof markdown !== 'string' && !extras.length) {
       unresolved.push({ item_id: id, reason: `${ITEM_SOURCES[kind].path} was not read on this request, so ${id} could not be looked up` });
       continue;
     }
-    const entry = extractEntry(markdown, id);
+
+    let entry = typeof markdown === 'string'
+      ? extractEntry(markdown, id)
+      : { found: false, reason: `${ITEM_SOURCES[kind].path} was not read on this request` };
+    let file = ITEM_SOURCES[kind].path;
     if (!entry.found) {
-      unresolved.push({ item_id: id, reason: `${id}: ${entry.reason}` });
+      for (const x of extras) {
+        if (x.path === file) continue;
+        const alt = extractEntry(x.text, id);
+        if (alt.found) { entry = alt; file = x.path; break; }
+      }
+    }
+
+    if (!entry.found) {
+      // NAMED, AND NOT THERE. That is a fact about the office, not a lookup
+      // failure to apologise for — and the sentence says where it looked so a
+      // reader can tell the two apart.
+      const looked = [ITEM_SOURCES[kind].path, ...extras.map((x) => x.path)]
+        .filter((p, i, a) => a.indexOf(p) === i);
+      unresolved.push({
+        item_id: id,
+        reason: `${id} is named as a blocker but has no entry in ${looked.join(', ')}`
+          + ` — ${entry.reason}`,
+        looked_in: looked,
+      });
       continue;
     }
+
     const fields = entryFields(entry.verbatim);
     resolved.push({
       item_id: id,
       kind,
-      file: ITEM_SOURCES[kind].path,
+      file,
       title: entry.heading,
       state: fieldValue(fields, 'State'),
       // 'open' or 'decided' — which heading form found it. See
@@ -352,6 +391,11 @@ export function resolveBlockers(statedValue, filesByKind = {}) {
       // board parser does not read, and a reader must be told that rather than
       // shown a blocker that looks like every other one.
       match: entry.match,
+      // TRUE when the entry was found somewhere other than the file its
+      // identifier belongs to. Said on the card, because "finished and filed
+      // elsewhere" and "still on the board" are different answers to the
+      // owner's question.
+      elsewhere: file !== ITEM_SOURCES[kind].path,
       verbatim: entry.verbatim,
       fields,
     });
@@ -378,6 +422,16 @@ export function resolveBlockers(statedValue, filesByKind = {}) {
  * "2" is the same lie as a truncated list.
  */
 export const MAX_ORIGIN_PROBES = 9;
+
+/**
+ * How many markdown files beside the source file may be read looking for a
+ * blocker that is not in the source file itself.
+ *
+ * Four. `campus/shared/board/` holds a handful of files and the cap is a
+ * subrequest guard, not a judgement about which of them matters — so like every
+ * other cap in this estate it is REPORTED when it bites, in `lookups`.
+ */
+export const MAX_SIBLING_FILES = 4;
 
 /**
  * The commit that put this entry into the file, by binary search on presence.
@@ -519,10 +573,12 @@ export function statedDefault(fields) {
  *   so the expansion can carry the card's own honest sentences rather than
  *   composing second copies of them
  * @param {object} input.files      `{ board, question, submission }` markdown or null
+ * @param {Array} [input.extraFiles] `{ path, text }` siblings of the source file,
+ *   searched only for a blocker its own file does not hold — see resolveBlockers()
  * @param {object|null} input.origin findFirstAppearance()'s result
  * @param {Array} input.lookups     `{ what, ok, reason }` per read attempted
  */
-export function buildItemDetail({ ref, card = null, files = {}, origin = null, lookups = [] } = {}) {
+export function buildItemDetail({ ref, card = null, files = {}, extraFiles = [], origin = null, lookups = [] } = {}) {
   const src = ref.source;
   const markdown = files[ref.kind];
   const entry = typeof markdown === 'string'
@@ -562,7 +618,7 @@ export function buildItemDetail({ ref, card = null, files = {}, origin = null, l
       field_count: fields.length,
     },
 
-    blocker: resolveBlockers(blockerSource, files),
+    blocker: resolveBlockers(blockerSource, files, extraFiles),
 
     origin: origin || {
       ok: false,

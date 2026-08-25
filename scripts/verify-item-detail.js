@@ -166,6 +166,7 @@ check('a refusal always says why', HOSTILE.every((h) => typeof parseItemRef(h).r
  * expression anywhere in the module that builds a path out of an id.
  */
 const MODULE = readFileSync(join(repo, 'workers', 'item-detail.js'), 'utf8');
+const RUNNER_SRC = readFileSync(join(repo, 'workers', 'agent-runner.js'), 'utf8');
 check('each source path is written exactly once, as a constant',
   Object.values(ITEM_SOURCES).every((s) => (MODULE.split(s.path).length - 1) === 1),
   'a second spelling of a source path is a second place a path can be built');
@@ -294,6 +295,56 @@ check('a blocker in a file that was not read says which file it needed',
 
 check('a cross-file blocker resolves when that file was read',
   resolveBlockers('Q-001 must be answered first', FILES).resolved[0].item_id === 'Q-001');
+
+/*
+ * THE SECOND LIVE FINDING. `OB-001` is not in `BOARD.md` in any heading form —
+ * the board removes a finished task rather than striking it through. So a
+ * blocker is looked for in the board's SIBLING files, whose names come from a
+ * directory listing and never from a guess in this code.
+ */
+const ARCHIVE = `# FINISHED
+
+### OB-001 — Audit every model call site
+
+- **State:** DONE
+- **Task:** list every place the office calls a model, and which key answers.
+`;
+const viaSibling = resolveBlockers('**OB-001.** Flow analysis first.',
+  { ...FILES, board: withoutOB001 },
+  [{ path: 'campus/shared/board/ARCHIVE.md', text: ARCHIVE }]);
+check('a blocker filed beside the board is found there',
+  viaSibling.resolved.length === 1 && viaSibling.resolved[0].item_id === 'OB-001'
+  && viaSibling.resolved[0].file === 'campus/shared/board/ARCHIVE.md');
+check('and the card is told it was found somewhere other than the board',
+  viaSibling.resolved[0].elsewhere === true,
+  '"finished and filed elsewhere" and "still on the board" are different answers');
+check('a blocker in NO file says where it looked',
+  (() => {
+    const none = resolveBlockers('**OB-001.**', { ...FILES, board: withoutOB001 },
+      [{ path: 'campus/shared/board/ARCHIVE.md', text: '# empty\n' }]);
+    return none.unresolved.length === 1
+      && /has no entry in campus\/shared\/board\/BOARD\.md, campus\/shared\/board\/ARCHIVE\.md/.test(none.unresolved[0].reason)
+      && none.unresolved[0].looked_in.length === 2;
+  })(),
+  'named and not there is a fact about the office, and the sentence must say where it looked');
+check('the sibling read is on the MISS PATH only', (() => {
+  const i = RUNNER_SRC.indexOf("url.pathname === '/api/admin/item'");
+  const body = RUNNER_SRC.slice(i, RUNNER_SRC.indexOf("url.pathname === '/api/admin'", i));
+  return /if \(detail\.blocker\.unresolved\.length\)/.test(body) && /fetchBackOfficeDir\(env, dir\)/.test(body);
+})(), 'an item whose blocker already resolved must pay nothing for this');
+check('the sibling filename comes from a listing, never from a literal', (() => {
+  const i = RUNNER_SRC.indexOf("url.pathname === '/api/admin/item'");
+  const body = RUNNER_SRC.slice(i, RUNNER_SRC.indexOf("url.pathname === '/api/admin'", i));
+  // No quoted `.md` filename anywhere in the handler. The comment above it
+  // names `DONE.md` in backticks precisely to say why it is not written here,
+  // and a backtick is not a string quote for this purpose.
+  return !/['"][^'"]*\.md['"]/.test(body) && /e\.name/.test(body);
+})(), 'an invented path that 404s looks exactly like an entry that is not there');
+check('the sibling cap is reported when it bites', (() => {
+  const i = RUNNER_SRC.indexOf("url.pathname === '/api/admin/item'");
+  const body = RUNNER_SRC.slice(i, RUNNER_SRC.indexOf("url.pathname === '/api/admin'", i));
+  return /only the first \$\{MAX_SIBLING_FILES\} were read/.test(body);
+})());
 check('identifiers are found wherever they sit in the sentence',
   referencedItemIds('blocked by OB-001 and also S-001, plus OB-001 again').join(',') === 'OB-001,S-001');
 check('kindOfItemId maps each family to its own file',
