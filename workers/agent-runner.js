@@ -135,6 +135,7 @@ import {
   isAdminPagePath, adminPageAuthorized, adminUnauthorizedResponse,
   adminCookieValue, adminSessionSetCookie,
 } from './admin-gate.js';
+import { renderOfficeSite } from './office-site-page.js';
 import {
   ownerChannelEnabled, notifyOwner, selectNotificationItems, recentFailures, OWNER_ISSUE_LABEL,
   // SESSION 11 (2026-08-23): the three-part gate and the email notice. See
@@ -6203,6 +6204,53 @@ export default {
           'Content-Type': 'application/json; charset=utf-8',
           'Cache-Control': 'no-store',
           'Set-Cookie': adminSessionSetCookie(await adminCookieValue(env.ADMIN_TOKEN)),
+        },
+      });
+    }
+
+    /*
+     * -- THE OFFICE'S OWN SITE, TWO SURFACES (2026-08-25, Session 17 Item C) -
+     *
+     * The shell is the office's — built in the warehouse across four phases,
+     * copied here with its stylesheet byte for byte. What changed is that it
+     * reads live endpoints instead of a 52KB snapshot frozen on 2026-08-07,
+     * and that its localStorage message box is now the real spec builder.
+     *
+     * TWO RENDERS, NOT ONE PAGE WITH A FLAG. `/` fetches `/api/public` and
+     * contains no code that knows how to read the office's internal material;
+     * `/admin` fetches `/api/admin` and is reachable only through the gate at
+     * the top of fetch(). Session 16 split the endpoints so that one auth bug
+     * could not expose everything — shipping one bundle that could talk to
+     * either would have handed that property straight back.
+     */
+    if (request.method === 'GET' && url.pathname === '/') {
+      return new Response(renderOfficeSite({ mode: 'public' }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          // Sixty seconds. The page's numbers come from a 30-minute cron, so a
+          // minute of edge cache costs nothing and absorbs a link being shared.
+          'Cache-Control': 'public, max-age=60',
+          'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'",
+          'Referrer-Policy': 'no-referrer',
+          'X-Content-Type-Options': 'nosniff',
+        },
+      });
+    }
+
+    if (request.method === 'GET' && (url.pathname === '/admin' || url.pathname === '/admin/')) {
+      return new Response(renderOfficeSite({ mode: 'admin' }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          // Never cached: it is behind a gate and it shows what is waiting on
+          // him right now. A cached copy of either is wrong.
+          'Cache-Control': 'no-store',
+          // `frame-src 'self'` is here and NOT on the public page: only this
+          // render frames /admin/spec.
+          'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; frame-src 'self'; form-action 'none'; frame-ancestors 'none'",
+          'Referrer-Policy': 'no-referrer',
+          'X-Content-Type-Options': 'nosniff',
         },
       });
     }
