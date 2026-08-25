@@ -464,6 +464,12 @@ check('a scheduled meeting the database has never seen reads as never, not as ze
   automation.blocks.find((b) => b.meeting_type === 'weekly_summary').evidence === null);
 check('the tick window is named as unreadable from inside the Worker rather than guessed',
   automation.notes.some((n) => /CANNOT BE READ FROM INSIDE THE WORKER/.test(n)));
+const noisyLabel = 'Architect liaison: file the headless run as a report (gated) MOVED OFF THE 08:00 TICK on 2026-08-16 (OB-074): it shared the tick with a case batch.';
+const trimmedLabel = buildAutomation({ schedule: { full_day_schedule: { blocks: [
+  { time: '08:30', type: 'architect_liaison', label: noisyLabel },
+] } } }).blocks[0].label;
+check('a block label loses its identifier AND its incident history',
+  trimmedLabel === 'Architect liaison: file the headless run as a report (gated)…', trimmedLabel);
 check('the office\'s paragraph-long block labels are cut to one sentence',
   !/MOVED HERE FROM/.test(automation.blocks.find((b) => b.meeting_type === 'daily_standup').label)
   && firstSentence('') === null);

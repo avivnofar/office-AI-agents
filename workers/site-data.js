@@ -584,12 +584,31 @@ export function escalationSentence(entry) {
  * shared 08:00 with…`). That history belongs in the config file where it is,
  * not on a page. This takes the first sentence and says nothing else.
  */
-export function firstSentence(text, max = 180) {
-  const s = String(text || '').replace(/\s+/g, ' ').trim();
+export function firstSentence(text, max = 120) {
+  const s = plainOfficeIds(String(text || '').replace(/\s+/g, ' ').trim());
   if (!s) return null;
-  const cut = s.search(/[.:]\s+[A-Z(]/);
-  const head = cut > 20 ? s.slice(0, cut + 1) : s;
-  return head.length > max ? head.slice(0, max - 1).trimEnd() + '…' : head;
+
+  /*
+   * TWO CUTS, and the second one is the office-specific one.
+   *
+   * A sentence end is the obvious boundary. The office's labels have another:
+   * they carry their own incident history, and it always starts with a SHOUTED
+   * marker — `MOVED OFF THE 08:00 TICK on 2026-08-16`, `ADDED 2026-08-17:`,
+   * `SHIPPED OFF 2026-08-07`. That history is real and belongs in the config
+   * file where it is written; a person looking at a schedule does not need to
+   * read why a block moved eight days ago. So the label is cut where the
+   * shouting starts.
+   */
+  const candidates = [];
+  const sentence = s.search(/[.:]\s+[A-Z(]/);
+  if (sentence > 20) candidates.push(sentence + 1);
+  const shout = s.search(/\s(?=[A-Z]{2,}(?:\s+[A-Z0-9]{2,}){1,})/);
+  if (shout > 20) candidates.push(shout);
+  const head = candidates.length ? s.slice(0, Math.min(...candidates)) : s;
+
+  const trimmed = head.length > max ? head.slice(0, max - 1) : head;
+  const clean = trimmed.replace(/[\s,;:(—–-]+$/, '');
+  return clean.length < s.length ? clean + '…' : clean;
 }
 
 /**
