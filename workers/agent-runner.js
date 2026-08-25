@@ -131,6 +131,11 @@ import { buildPublicData, buildAdminData } from './site-data.js';
 // source contains no fetch and no provider client.
 import { buildSpec, specFilename, renderSpecPage } from './spec-builder.js';
 import {
+  ADMIN_SESSION_PATH,
+  isAdminPagePath, adminPageAuthorized, adminUnauthorizedResponse,
+  adminCookieValue, adminSessionSetCookie,
+} from './admin-gate.js';
+import {
   ownerChannelEnabled, notifyOwner, selectNotificationItems, recentFailures, OWNER_ISSUE_LABEL,
   // SESSION 11 (2026-08-23): the three-part gate and the email notice. See
   // owner-notify.js's "three-part notice" and "email notice" headers — the
@@ -6129,6 +6134,80 @@ export default {
     }
 
     /*
+     * ── THE SECOND GATE: EVERY /admin PAGE (2026-08-25, Session 17 Item A) ─
+     *
+     * The block above protects `/api/*`. This one protects the HTML pages, and
+     * it exists because on 2026-08-25 a private-browsing window loaded the full
+     * spec-builder form at `/admin/spec` on BOTH hostnames, with no login and
+     * no token.
+     *
+     * WHAT THE PREVIOUS REASONING GOT RIGHT, AND WHERE IT STOPPED. The comment
+     * that used to sit on `/admin/spec` argued the page was safe to serve open
+     * because it HOLDS NO SECRET AND READS NO OFFICE DATA — an empty form whose
+     * only privileged act, Send, is refused by the gate above without the
+     * token. **That argument was correct and it still is.** Nothing was
+     * writable through that page by a stranger, and the verification in this
+     * session confirmed it rather than assuming it.
+     *
+     * It stopped one step short of what the office actually needs:
+     *
+     *   * An unauthenticated page at a URL that says `/admin` is an invitation
+     *     to a stranger, an indexer and a scanner, and the office's instruction
+     *     format is on display in it.
+     *   * The plan of record was that Cloudflare Access would cover `/admin*`.
+     *     Access is configured with **no policy attached**, so it enforces
+     *     nothing — and it binds a HOSTNAME, so it could never have covered
+     *     `*.workers.dev`, which `workers_dev = true` deliberately keeps live.
+     *     A gate that arrives only when a dashboard is configured is a gate the
+     *     code cannot depend on.
+     *
+     * So: same secret, same idiom, one line earlier in the request. The cookie
+     * form of the credential is what lets a BROWSER through — see admin-gate.js
+     * for why the cookie is a hash and never the token itself.
+     *
+     * `/admin/session` is the one path inside the prefix that this gate must
+     * not refuse: it IS the authenticator. It holds no data, reads nothing, and
+     * answers 401 to a wrong token on its own.
+     */
+    if (isAdminPagePath(url.pathname) && url.pathname !== ADMIN_SESSION_PATH) {
+      if (!(await adminPageAuthorized(request, env))) {
+        return adminUnauthorizedResponse(request, url.pathname);
+      }
+    }
+
+    /*
+     * -- /admin/session — THE ONLY THING THAT TURNS A TOKEN INTO A COOKIE ---
+     *
+     * POST only. A GET here would be a login form at a second URL, and a second
+     * live entrance to the admin surface is exactly what this item set out not
+     * to build — the unlock form is served as the BODY of the 401 above, at
+     * whatever admin path was asked for.
+     *
+     * What it sets is `sha256('office-admin-page:v1:' + token)`, never the
+     * token. A cookie lifted off this browser opens admin pages, which are
+     * empty forms; it cannot be replayed as `X-Admin-Token` against anything
+     * under `/api/`.
+     */
+    if (request.method === 'POST' && url.pathname === ADMIN_SESSION_PATH) {
+      const creds = await request.json().catch(() => ({}));
+      const offered = typeof creds.token === 'string' ? creds.token : '';
+      if (!env.ADMIN_TOKEN || offered !== env.ADMIN_TOKEN) {
+        return new Response(JSON.stringify({ ok: false, error: 'unauthorized' }), {
+          status: 401,
+          headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true, expires_in: 43200 }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'Set-Cookie': adminSessionSetCookie(await adminCookieValue(env.ADMIN_TOKEN)),
+        },
+      });
+    }
+
+    /*
      * ── THE OWNER'S PAGE (2026-08-10, REQ-003) ─────────────────────────────
      *
      * Served UNAUTHENTICATED and deliberately so: it holds no secret. It is an
@@ -6140,7 +6219,29 @@ export default {
      * Every WRITE path is under `/api/agents/`, which the block above
      * authenticates before any handler is reached. There is no second write path.
      */
+    /*
+     * MOVED UNDER /admin ON 2026-08-25 (Session 17, Item A4).
+     *
+     * The owner page is the office's other admin surface and it was the only
+     * sensitive path OUTSIDE the `/admin` prefix. Leaving it there would have
+     * meant the single Access policy the prefix exists for could never cover
+     * everything sensitive — the owner would have had to remember a second rule
+     * for a second path, and the rule nobody remembers is the one that lapses.
+     *
+     * `/owner` is kept as a REDIRECT rather than deleted, because four
+     * documents in back-office name it as his entry point — CLIENT-REQUIREMENTS
+     * §345, PROJECT-SPEC-TABLES §409, the channel reply of 2026-08-10 and
+     * SUBMISSIONS §195. A redirect INTO a gated path is not a second entrance:
+     * the destination refuses just as hard, and every bookmark keeps working.
+     */
     if (request.method === 'GET' && (url.pathname === '/owner' || url.pathname === '/owner/')) {
+      return new Response(null, {
+        status: 302,
+        headers: { Location: '/admin/owner', 'Cache-Control': 'no-store' },
+      });
+    }
+
+    if (request.method === 'GET' && (url.pathname === '/admin/owner' || url.pathname === '/admin/owner/')) {
       return new Response(renderOwnerPage({ endpointBase: url.origin }), {
         status: 200,
         headers: {
@@ -6199,22 +6300,17 @@ export default {
     /*
      * -- /admin/spec — THE SPEC BUILDER ------------------------------------
      *
-     * Served UNAUTHENTICATED, and that is a decision with a reason rather than
-     * an oversight. Cloudflare Access is NOT enabled on this account (it needs
-     * a dashboard action the owner must take — see the session report), so
-     * there is no identity gate to put in front of this path today.
+     * GATED since 2026-08-25 by the /admin block at the top of fetch(). Reached
+     * only with the admin token or the derived cookie.
      *
-     * What sits here is therefore a page that HOLDS NO SECRET AND READS NO
-     * OFFICE DATA. It is an empty form. The generator is a pure text
-     * transform. The only privileged act on the page — Send — POSTs to
-     * `/api/agents/owner-message`, which the AUTHENTICATED_PREFIXES gate above
-     * refuses without the admin token. An unauthenticated visitor gets a blank
-     * form and can do nothing with it.
-     *
-     * That is the same split `/owner` already uses and the same one that makes
-     * IT safe to serve openly. When Access is enabled, this path is inside the
-     * `office.avivnofar.com/admin*` scope and gains a second, stronger gate
-     * without anything here changing.
+     * The properties that made it defensible when it was open are unchanged and
+     * still worth keeping, because they are what makes the gate a second layer
+     * rather than the only thing between a stranger and the office: the page
+     * HOLDS NO SECRET AND READS NO OFFICE DATA, the generator is a pure text
+     * transform, and the only privileged act — Send — POSTs to
+     * `/api/agents/owner-message`, which the AUTHENTICATED_PREFIXES gate
+     * refuses without the token. Defence in depth means the inner properties
+     * still hold on the day the outer gate is wrong.
      */
     if (request.method === 'GET' && (url.pathname === '/admin/spec' || url.pathname === '/admin/spec/')) {
       return new Response(renderSpecPage({ endpointBase: url.origin }), {
