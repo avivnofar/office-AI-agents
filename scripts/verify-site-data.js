@@ -36,7 +36,7 @@
 // description of them.
 import { itemIdsInText } from '../workers/owner-channel.js';
 import { noticeParts } from '../workers/owner-notify.js';
-import { answerStopsTheAsking, escalationSentence, firstSentence, buildAutomation } from '../workers/site-data.js';
+import { answerStopsTheAsking, escalationSentence, firstSentence, buildAutomation, plainOfficeIds } from '../workers/site-data.js';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -374,11 +374,37 @@ check('WITHOUT the composer, notice is null and data_gaps SAYS SO — no second 
   buildAdminData({ snapshot }).pending_items.every((i) => i.notice === null)
   && buildAdminData({ snapshot }).data_gaps.some((g) => /THREE-PART SHAPE IS MISSING/.test(g)));
 
-const VISIBLE = ['ask', 'source_plain'];
+const VISIBLE = ['ask', 'source_plain', 'detail_plain', 'status_note_plain'];
 const idInVisible = composed.pending_items.filter(
   (i) => VISIBLE.some((k) => /\b(?:OB|S|REQ|C|AD|KFM|R|OQ)-\d+\b/.test(String(i[k] || ''))));
 check('NO board identifier appears in any visible field of any card',
   idInVisible.length === 0, idInVisible.map((i) => i.id).join(', '));
+/*
+ * The office's own prose names items — "Blocked by: OB-001. Flow analysis
+ * before the call audit…". Deleting the id from the middle of that sentence is
+ * what produced Issue #47's broken text, so the visible form SUBSTITUTES a noun
+ * phrase and the sentence still reads. Both halves are checked: the id is gone,
+ * AND the reason survives.
+ */
+const blocked = buildPendingItems({ board: { tasks: [
+  { id: 'OB-003', title: 'Trace every write path', state: 'BLOCKED',
+    blockedBy: 'OB-001. Flow analysis before the call audit repeats the call audit inside it.' },
+  { id: 'OB-055', title: 'Where the page lives', state: 'BLOCKED',
+    blockedBy: '`OB-054` — nothing to place yet — and `Q-002`, which asks whether REQ-003 and this are one thing.' },
+] } });
+check('a blocked task\'s reason loses the identifier and KEEPS THE SENTENCE',
+  blocked[0].detail_plain === 'Blocked by another item on the board. Flow analysis before the call audit repeats the call audit inside it.',
+  blocked[0].detail_plain);
+check('every id shape in one sentence is said in English, and the prose still runs',
+  blocked[1].detail_plain === 'Blocked by another item on the board — nothing to place yet — and an open question, which asks whether a client requirement and this are one thing.',
+  blocked[1].detail_plain);
+check('the office\'s own words are still kept, unedited, in the record field',
+  blocked[0].detail.includes('OB-001'),
+  'the id is removed from what he reads, not from what the office recorded');
+check('plainOfficeIds substitutes rather than deletes — a bare id becomes a noun phrase',
+  plainOfficeIds('S-002') === 'a submission awaiting your decision'
+  && plainOfficeIds(null) === null);
+
 check('the identifier is still carried for the record, out of the visible text',
   ob060.item_id === 'OB-060' && q010.item_id === 'Q-010' && s002.item_id === 'S-002');
 

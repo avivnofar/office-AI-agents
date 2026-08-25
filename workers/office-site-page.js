@@ -1117,7 +1117,12 @@ function clientScript(mode) {
     '    if (notice && notice.ask && notice.ask !== headline) {',
     '      card.push(el("p", { class: "pending-ask", text: notice.ask }));',
     '    }',
-    '    if (item.detail) card.push(el("p", { class: "pending-detail", text: item.detail }));',
+    /* detail_plain, never detail: the office's own "Blocked by: OB-001" names
+       an item the client has never agreed to learn. The plain form substitutes
+       a noun phrase rather than deleting the id, because deleting one from the
+       middle of a sentence is what produced Issue #47's broken text. */
+    '    var detail = item.detail_plain || item.detail;',
+    '    if (detail) card.push(el("p", { class: "pending-detail", text: detail }));',
     '',
     '    if (notice && notice.options && notice.options.length) {',
     '      var opts = notice.options.map(function (o) {',
@@ -1133,7 +1138,8 @@ function clientScript(mode) {
     '      card.push(el("p", { class: "pending-when", text: "If you say nothing: " + notice.no_answer }));',
     '    }',
     '    if (item.by_when) card.push(el("p", { class: "pending-when", text: item.by_when }));',
-    '    if (item.status_note) card.push(el("p", { class: "pending-status-note", text: item.status_note }));',
+    '    var note = item.status_note_plain || item.status_note;',
+    '    if (note) card.push(el("p", { class: "pending-status-note", text: note }));',
     '',
     '    /* What the office could NOT state. Shown, never swallowed: an item with',
     '       no recorded default is one where the office does not know what it',

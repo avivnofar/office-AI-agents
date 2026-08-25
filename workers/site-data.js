@@ -367,6 +367,40 @@ function stripIdsForDisplay(text) {
 }
 
 /**
+ * The other half of the identifier problem, and the office already learned this
+ * one the hard way.
+ *
+ * `stripOfficeIds()` DELETES. That is right for the ask — one short sentence
+ * that survives the removal — and it was wrong everywhere else: Issue #47 went
+ * out reading *"sequenced against 's one finished, polished product"* because
+ * an id was deleted from the middle of a sentence. `owner-notify.js` records
+ * the correction: only the ask is stripped, everything below it is quoted as
+ * the office wrote it.
+ *
+ * But the office's own prose DOES name items — *"Blocked by: OB-001. Flow
+ * analysis before the call audit…"* — and a card that shows a person `OB-001`
+ * is asking him to look something up he has never agreed to learn.
+ *
+ * So this SUBSTITUTES instead of deleting: a noun phrase for a noun phrase. The
+ * sentence still reads, and nothing in it asks him to decode an identifier.
+ * *"Blocked by another item on the board. Flow analysis before…"*
+ */
+const ID_PLAIN_LANGUAGE = [
+  [/`?\bOB-\d+`?/g, 'another item on the board'],
+  [/`?\b(?:Q|OQ)-\d+`?/g, 'an open question'],
+  [/`?\bS-\d+`?/g, 'a submission awaiting your decision'],
+  [/`?\bREQ-\d+`?/g, 'a client requirement'],
+  [/`?\b(?:C|AD|KFM|R)-\d+`?/g, 'another recorded item'],
+];
+
+export function plainOfficeIds(text) {
+  if (!text) return text === 0 ? '0' : null;
+  let out = String(text);
+  for (const [pattern, phrase] of ID_PLAIN_LANGUAGE) out = out.replace(pattern, phrase);
+  return out.replace(/\s{2,}/g, ' ').trim();
+}
+
+/**
  * CAN AN ANSWER TYPED ON THIS PAGE STOP THE OFFICE ASKING?
  *
  * This is not a presentational detail. `owner-channel.js`'s `itemIdsInText()`
@@ -438,7 +472,14 @@ export function buildPendingItems(snapshot, { noticeParts = null } = {}) {
         : 'On the office\'s task board, not ready to start — something about it is still undecided.',
       source: `campus/shared/board/BOARD.md, ${t.id}, ${t.state}`,
       detail: t.blockedBy ? `Blocked by: ${t.blockedBy}` : 'No "Blocked by" line — the board does not say what this is waiting on.',
+      // What the CARD shows. `detail` above keeps the office's own words for
+      // the record; this is the same sentence with the identifiers said in
+      // English. See plainOfficeIds().
+      detail_plain: t.blockedBy
+        ? `Blocked by ${plainOfficeIds(t.blockedBy)}`
+        : 'The board does not say what this is waiting on — there is no "blocked by" line on it.',
       status_note: t.stage ? `Lifecycle stage: ${t.stage}` : null,
+      status_note_plain: t.stage ? `Where it is in the office's own lifecycle: ${plainOfficeIds(t.stage)}` : null,
       by_when: null,
       notice: notice({ title: t.title, decision: t.title, recommend: null, fallback: null }),
       answer_kind: 'instruction',
@@ -463,7 +504,9 @@ export function buildPendingItems(snapshot, { noticeParts = null } = {}) {
       source_plain: 'A question the office asked you and cannot answer itself.',
       source: `channel/to-owner/OPEN-QUESTIONS.md, ${q.id}`,
       detail: q.fallback ? `If no answer comes: ${q.fallback}` : 'No fallback recorded — the office did not say what it will do without an answer.',
+      detail_plain: q.fallback ? `If no answer comes: ${plainOfficeIds(q.fallback)}` : 'No fallback recorded — the office did not say what it will do without an answer.',
       status_note: q.date ? `Asked ${q.date}` : null,
+      status_note_plain: q.date ? `Asked ${q.date}` : null,
       by_when: escalationSentence(q),
       notice: notice({
         title: asked,
@@ -490,7 +533,11 @@ export function buildPendingItems(snapshot, { noticeParts = null } = {}) {
       source_plain: 'Work the office finished and submitted to you — it is waiting on your decision to go further.',
       source: `channel/to-owner/SUBMISSIONS.md, ${s.id}`,
       detail: s.recommend ? `The office recommends: ${s.recommend}` : (s.did || 'No recommendation recorded.'),
+      detail_plain: s.recommend
+        ? `The office recommends: ${plainOfficeIds(s.recommend)}`
+        : (plainOfficeIds(s.did) || 'No recommendation recorded.'),
       status_note: s.escalation?.rung ? `${s.escalation.rung}${s.escalation.days != null ? ` — ${s.escalation.days} days open` : ''}` : null,
+      status_note_plain: s.escalation?.rung ? `${s.escalation.rung}${s.escalation.days != null ? ` — ${s.escalation.days} days open` : ''}` : null,
       by_when: escalationSentence(s),
       notice: notice({
         title: s.title,

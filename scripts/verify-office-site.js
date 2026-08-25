@@ -288,6 +288,9 @@ check('the card renders the ask, the options and the office\'s default',
   && ADM.js.includes('item.by_when'));
 check('the card renders the PLAIN provenance, not the board line with its identifier',
   ADM.js.includes('item.source_plain') && !ADM.js.includes('text: item.source }'));
+check('the card renders the PLAIN detail and status note, so no identifier reaches the reader',
+  /item\.detail_plain \|\| item\.detail/.test(ADM.js)
+  && /item\.status_note_plain \|\| item\.status_note/.test(ADM.js));
 check('the headline is the stripped ask, not the raw title',
   /var headline = item\.ask \|\| item\.title/.test(ADM.js));
 check('what the office FAILED to state is shown rather than hidden',
