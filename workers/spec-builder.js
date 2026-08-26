@@ -56,6 +56,19 @@
  * the seven required fields, and a spec is valid with all of them blank. If
  * this branching ever grows into a decision tree it has stopped being a form
  * and started being a wizard, and a wizard is a place people abandon.
+ *
+ * ── ONE SENTENCE ABOVE STOPPED BEING TRUE ON 2026-08-26 ──────────────────
+ *
+ * *"their answers are appended to the spec as context"* still holds, and so does
+ * *"a spec is valid with all of them blank"*. **But the TASK TYPE itself is now
+ * load-bearing**: it gates the specimen floor on `io` via SPECIMEN_TASK_TYPES.
+ * Picking `fix` instead of `tool` changes whether a field can be refused.
+ *
+ * That is a real cost of the scoping change and it is written here rather than
+ * left for someone to discover: **nothing validates that the chosen task type
+ * matches the request**, so a person who picks the wrong one escapes or meets
+ * the floor by accident. The alternative was a rule that refuses legitimate
+ * answers, which was measured and was worse.
  */
 
 /* ────────────────────────────── The vocabulary ──────────────────────────── */
@@ -74,6 +87,27 @@ export const OPEN_DECISIONS_INSTRUCTION =
 
 /** The four task types the conditional questions branch on. */
 export const TASK_TYPES = Object.freeze(['tool', 'interface', 'fix', 'integration']);
+
+/**
+ * THE TASK TYPES WHOSE DELIVERABLE IS DEFINED BY DATA MOVING, and therefore the
+ * only ones the specimen floor applies to.
+ *
+ * Added 2026-08-26 after the floor refused a legitimate request twice. Someone
+ * asking for an accessibility overlay described the change completely — the entry
+ * point, the current state, the new control, its position, what opens, what each
+ * option does — and was refused, because that description contains no digit, no
+ * path and no file extension. **It contains none because there is no file.**
+ *
+ * `hasSpecimen()` reads character classes, which is what makes it work in any
+ * language and what makes it blind to a shape made of screens rather than
+ * delimiters. There is no character-class signature for *"a round button opens a
+ * menu"* — any pattern loose enough to catch it accepts all prose.
+ *
+ * So the rule is scoped instead of weakened. **A false refusal that blocks a
+ * legitimate request is worse than a missing floor on one that would merely have
+ * been weak**, and that trade is deliberate rather than incidental.
+ */
+export const SPECIMEN_TASK_TYPES = Object.freeze(['tool', 'integration']);
 
 /**
  * The seven fields, in the order they render.
@@ -332,7 +366,7 @@ export function buildSpec(answers = {}) {
      * caveat unprompted, that is their sentence and their judgement; what this
      * form must not do is manufacture the retraction itself.
      */
-    if (f.specimen && !hasSpecimen(tidy(answers[f.key]))) {
+    if (f.specimen && SPECIMEN_TASK_TYPES.includes(taskType) && !hasSpecimen(tidy(answers[f.key]))) {
       return {
         ok: false,
         reason: `"${f.heading}" describes the shape instead of showing it — there is no example anywhere in it.`

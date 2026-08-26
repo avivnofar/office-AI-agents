@@ -30,7 +30,7 @@ import { dirname, join } from 'node:path';
 import {
   OPEN_DECISIONS_INSTRUCTION, TASK_TYPES, SPEC_FIELDS, CONDITIONAL_QUESTIONS,
   buildSpec, specFilename, renderSpecPage, prefillFromItem, PREFILL_LOCATION_LABELS,
-  hasSpecimen,
+  hasSpecimen, SPECIMEN_TASK_TYPES,
 } from '../workers/spec-builder.js';
 import { PAGE_KINDS } from '../workers/owner-page.js';
 import { parseOwnerMessage } from '../workers/owner-channel.js';
@@ -583,6 +583,42 @@ check('the reference answers still build [PASSES-OLD]', buildSpec(ANSWERS).ok ==
 check('...byte-for-byte as before the rule [PASSES-OLD]',
   buildSpec(ANSWERS).markdown === built.markdown,
   'the specimen rule refuses or it does nothing; it never edits');
+
+/* --- THE FLOOR IS SCOPED TO DATA-SHAPED TASK TYPES ---------------------
+ *
+ * Added 2026-08-26 after the floor refused a legitimate request twice: a
+ * complete before/after description of a UI change, refused because it holds no
+ * digit, path or file extension — and it holds none because there is no file.
+ *
+ * Every case below is [FAILS-OLD]: before the scoping, the SAME prose was
+ * refused under every task type, because the rule did not look at the type.
+ */
+const proseUi = 'In: someone opens our home page on a phone and there is no accessibility button anywhere.'
+  + ' Out: the same page with a round button in the corner that opens a menu offering larger text and higher contrast.';
+check('the floor does not apply to `interface` — a UI change has no specimen and needs none [FAILS-OLD]',
+  buildSpec({ ...ANSWERS, task_type: 'interface', io: proseUi }).ok === true);
+check('...nor to `fix`, which is where both real false refusals landed [FAILS-OLD]',
+  buildSpec({ ...ANSWERS, task_type: 'fix', io: proseUi }).ok === true);
+check('...and it DOES still apply to `tool` [PASSES-OLD]',
+  buildSpec({ ...ANSWERS, task_type: 'tool', io: proseUi }).ok === false);
+check('...and to `integration` [PASSES-OLD]',
+  buildSpec({ ...ANSWERS, task_type: 'integration', io: proseUi }).ok === false);
+
+/* The scoping list is the whole mechanism, so it is asserted rather than assumed:
+ * every member must be a real task type, and it must be a strict subset — a list
+ * equal to TASK_TYPES would silently disable the floor everywhere. */
+check('SPECIMEN_TASK_TYPES is a strict, non-empty subset of TASK_TYPES',
+  SPECIMEN_TASK_TYPES.length > 0
+  && SPECIMEN_TASK_TYPES.length < TASK_TYPES.length
+  && SPECIMEN_TASK_TYPES.every((t) => TASK_TYPES.includes(t)),
+  SPECIMEN_TASK_TYPES.join(','));
+
+/* THE COST, ASSERTED SO IT CANNOT BE FORGOTTEN. A data-shaped `fix` — a CSV bug —
+ * now escapes the floor. This was pre-registered as the price of the change and
+ * is pinned here so nobody later reads the scoping as free. */
+check('KNOWN COST: a data-shaped `fix` escapes the floor, deliberately [FAILS-OLD]',
+  buildSpec({ ...ANSWERS, task_type: 'fix', io: 'the export comes out wrong sometimes' }).ok === true,
+  'accepted on purpose — a false refusal that blocks a legitimate request was measured as worse');
 
 /* ONLY `io` CARRIES IT. The rule is one field's floor, not a form-wide policy —
  * a `where` or `done` that reads as prose is still the person's to write. */
