@@ -93,9 +93,35 @@ export const SPEC_FIELDS = Object.freeze([
     hint: 'Explicit. This is the field that stops a build from adding an interface when an engine was asked for — without it, an ambiguity gets resolved by adding.',
     placeholder: 'No web interface. No database. No scheduling — it runs when I run it.',
   }),
+  /*
+   * WHERE — the hint was rewritten 2026-08-26 (Session 25, campaign runs 1 and
+   * 3) because it asked for the wrong half and reliably got it.
+   *
+   * It used to read: *"The exact repo path. Not 'somewhere in the warehouse'."*
+   * Two requesters, in two languages and two registers, each answered it with
+   * an exact path hung off a repository they only DESCRIBED:
+   *
+   *     run 1 (English)  "My homelab repo, under services/temp-logger/"
+   *     run 3 (Hebrew)   "בגיטהאב של העסק שלי, תחת tools/invoices"
+   *
+   * Both gave the sub-path precisely, because the sub-path is what the hint
+   * asked for. Neither named the repository, because the hint never asked. The
+   * blind judge flagged the first and FAILED the second on it — *"the path
+   * inside the repo is given; the repo is not... A builder cannot check out or
+   * create the destination without asking."*
+   *
+   * The placeholder was already right — `warehouse-office-AI-agents/tasks/...`
+   * carries the repo name — and both fillers followed the hint over the
+   * example. So the hint now asks for what the placeholder shows.
+   *
+   * WHY THIS FIX IS A DIFFERENT KIND FROM THE ONES DEFERRED IN THE RUN LOG:
+   * the person HAS this information. They own the repository; they know its
+   * name. Nothing here tries to make a form extract what its user does not
+   * know — it stops the form from discarding what its user does.
+   */
   Object.freeze({
     key: 'where', heading: 'Where it lives', required: true,
-    hint: 'The exact repo path. Not "somewhere in the warehouse".',
+    hint: 'Name the repository, and then the path inside it. "My homelab repo" and "the GitHub of my business" are not names — nobody can check out a repository you have only described. If it does not exist yet, say that and give the name it should have.',
     placeholder: 'warehouse-office-AI-agents/tasks/invoice-checker/',
   }),
   Object.freeze({
