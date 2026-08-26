@@ -125,7 +125,7 @@ export const SPEC_FIELDS = Object.freeze([
     placeholder: 'warehouse-office-AI-agents/tasks/invoice-checker/',
   }),
   Object.freeze({
-    key: 'io', heading: 'Input and output', required: true,
+    key: 'io', heading: 'Input and output', required: true, specimen: true,
     hint: 'The shape, not a description of the shape. Show a line of input and a line of output if you can.',
     placeholder: 'In: a path to a .csv with columns id,vendor,amount,due_date.\nOut: a markdown table of the rows with an empty or unparseable due_date, printed to stdout.',
   }),
@@ -173,6 +173,61 @@ export const CONDITIONAL_QUESTIONS = Object.freeze({
 });
 
 /* ───────────────────────────── The generator ────────────────────────────── */
+
+/**
+ * ── THE SPECIMEN RULE (2026-08-26, Session 25) ──────────────────────────────
+ *
+ * A structural floor under `io`, and the first thing in this form that governs a
+ * field WITHOUT anyone having to read anything.
+ *
+ * WHY IT EXISTS. A campaign run against this generator established that a
+ * field's hint reaches only the register that already reads hints: a rewritten
+ * `where` hint changed the careful requester's answer and left the careless
+ * requester's byte-identical, in two languages, with the hint naming that
+ * person's exact phrasing as the wrong answer. Six of the seven fields are
+ * governed by nothing except their hint. **A refusal is the cheapest mechanism
+ * that does not depend on being read** — and it costs the careful register
+ * nothing, because their answer already passes it.
+ *
+ * WHAT IT LOOKS AT: character classes, never words. That is not fastidiousness.
+ * A word list would be a list in ONE language, and the request that motivated
+ * this was in Hebrew. This function would behave identically on a form filled in
+ * a language nobody here has thought of.
+ *
+ * WHAT IT CANNOT DO, stated here rather than discovered later. **It detects the
+ * ABSENCE of a specimen. It cannot detect the presence of a good one.** Two
+ * consequences, both real and both measured:
+ *
+ *   - `about 50 invoices` passes rule 4 with no shape in it whatsoever.
+ *   - `io` holds two questions, and one specimen satisfies the whole field. A
+ *     campaign run supplied a real input example — a camera filename — and
+ *     described the output in prose; the blind judge failed it on exactly that,
+ *     naming the input example as *"the one concrete token in the entire
+ *     section"*, while this rule accepted it.
+ *
+ * The rule was written down and scored BEFORE it was built — 6 of 7 agreement
+ * with blind judgements on that criterion, the single disagreement being the
+ * case above. **It was deliberately NOT strengthened afterwards to catch it**,
+ * because a rule tuned to the case that broke it is no longer a rule that was
+ * tested. Splitting `io` into two fields, each requiring its own specimen, is
+ * the obvious next move and belongs to whoever has the evidence to justify
+ * changing the seven fields.
+ */
+export function hasSpecimen(v) {
+  const s = String(v ?? '');
+  // 1. a backticked span with something in it
+  if (/`[^`\n]*\S[^`\n]*`/.test(s)) return true;
+  for (const tok of s.split(/\s+/)) {
+    if (!tok) continue;
+    // 2. a path
+    if (/[\/]/.test(tok) && /[A-Za-z0-9\u0590-\u05FF]/.test(tok)) return true;
+    // 3. a dot-extension — .csv, .json, .JPG
+    if (/\.[A-Za-z0-9]{1,8}(?:[^A-Za-z0-9]|$)/.test(tok) && /[A-Za-z]/.test(tok)) return true;
+    // 4. a token of digits and punctuation — 9600, 2026-08-26T21:14:03Z,21.4375
+    if (/^[\d\p{P}\p{S}]+$/u.test(tok) && /\d/.test(tok)) return true;
+  }
+  return false;
+}
 
 /** Collapses runs of whitespace at line ends and normalises newlines, so the
  *  same answers typed on Windows and on a phone produce the same bytes. */
@@ -232,6 +287,25 @@ export function buildSpec(answers = {}) {
   for (const f of SPEC_FIELDS) {
     if (f.required && !tidy(answers[f.key])) {
       return { ok: false, reason: `"${f.heading}" is empty, and it is required. ${f.hint}` };
+    }
+    /*
+     * THE SPECIMEN REFUSAL. Fires after the emptiness check, so a blank field is
+     * still told it is blank rather than told it has no example.
+     *
+     * The message SHOWS rather than TELLS, which is the whole point: the reader
+     * this exists for is the one who did not read the hint. Inventing an example
+     * is explicitly allowed — someone with no data yet still has to state a
+     * shape, and "make one up and say so" keeps the floor while removing the
+     * only honest reason to be stuck.
+     */
+    if (f.specimen && !hasSpecimen(tidy(answers[f.key]))) {
+      return {
+        ok: false,
+        reason: `"${f.heading}" describes the shape instead of showing it — there is no example anywhere in it.`
+          + ' Paste one real line of what goes in and one real line of what should come out, exactly as they look.'
+          + ' For instance: In: a row like  4471,Acme Ltd,1200.00,2026-03-01  —  Out: a line like  4471 | Acme Ltd | due date missing.'
+          + ' If you have nothing to paste yet, invent the closest thing and say that you invented it.',
+      };
     }
   }
 

@@ -30,6 +30,7 @@ import { dirname, join } from 'node:path';
 import {
   OPEN_DECISIONS_INSTRUCTION, TASK_TYPES, SPEC_FIELDS, CONDITIONAL_QUESTIONS,
   buildSpec, specFilename, renderSpecPage, prefillFromItem, PREFILL_LOCATION_LABELS,
+  hasSpecimen,
 } from '../workers/spec-builder.js';
 import { PAGE_KINDS } from '../workers/owner-page.js';
 import { parseOwnerMessage } from '../workers/owner-channel.js';
@@ -489,6 +490,109 @@ check('a failed carry is SAID rather than silently opening an empty form',
   /Could not carry/.test(html) && /everything in it is yours to type/.test(html),
   'a silent empty form is indistinguishable from the behaviour this replaces');
 check('the honest note still renders on the builder', /pre\.answer_note/.test(html));
+
+
+/* ══════════ N. THE SPECIMEN RULE — the refusal that does not need reading ══
+ *
+ * Added 2026-08-26 (Session 25). Every case below is marked [FAILS-OLD] or
+ * [PASSES-OLD] against the code as it stood before the rule existed, because a
+ * table where nothing fails against the old path is documentation of a change
+ * rather than a test of one — the standard this estate already applies in
+ * scripts/verify-permissions.js.
+ *
+ * Before the rule, `buildSpec()` validated `io` for EMPTINESS ONLY. So every
+ * non-empty prose case below built successfully and is [FAILS-OLD]; every
+ * accept case built successfully then too and is [PASSES-OLD], which is the
+ * point of including them — they prove the rule did not become a blanket
+ * refusal.
+ *
+ * The four REFUSE strings are the real `io` answers from campaign runs 2, 3, 4
+ * and R3, and the four ACCEPT strings from runs 1, 5, 6 and R1. They are not
+ * invented for this table.
+ */
+
+/* --- the predicate, directly ------------------------------------------- */
+
+/* ACCEPT — all [PASSES-OLD]: they built before the rule and must still build. */
+for (const [label, value] of [
+  ['a backticked span', 'Out: a row like `4471,Acme,1200.00`'],
+  ['a path', 'In: lines on /dev/ttyUSB0 at 9600 baud'],
+  ['a dot-extension', 'the folder of photos with names like DSC_0431.JPG'],
+  ['a bare number', '9600 baud, one reading every 2 seconds'],
+  ['Hebrew prose carrying a Latin specimen', 'קלט: קובץ quotas.json עם מיפוי {"groq": 14400}'],
+]) check(`specimen accepted — ${label}`, hasSpecimen(value) === true, JSON.stringify(value));
+
+/* REFUSE — all [FAILS-OLD]: every one of these built a spec before the rule. */
+for (const [label, value] of [
+  ['English prose, no example', 'In: our customer data I guess? Out: a list of accounts, worst first.'],
+  ['terse English prose', 'in: discord messages. out: message gone, user banned'],
+  ['Hebrew prose, no example', 'קלט: תיקייה עם קבצי חשבוניות. פלט: טבלה עם מספר חשבונית, ספק, תאריך.'],
+  ['column names without a shape', 'a table with columns id, vendor, amount, and one row per invoice'],
+]) check(`specimen refused — ${label}`, hasSpecimen(value) === false, JSON.stringify(value));
+
+/* Language neutrality is a property of the mechanism, not a happy accident:
+ * the predicate reads character classes and never words, so the SAME sentence
+ * with and without a specimen must flip regardless of script. */
+check('the rule is decided by the specimen, not by the language [FAILS-OLD]',
+  hasSpecimen('פלט: טבלה עם עמודות ספק, קריאות, טוקנים') === false
+  && hasSpecimen('פלט: שורה כמו | groq | 312 | 84210 |') === true,
+  'two Hebrew sentences differing only in whether an example is present');
+
+/* --- the refusal, through buildSpec() ---------------------------------- */
+
+const proseIo = { ...ANSWERS, io: 'In: the customer records. Out: a list of who is at risk, worst first.' };
+const refusedIo = buildSpec(proseIo);
+check('buildSpec refuses an io with no specimen [FAILS-OLD]', refusedIo.ok === false, JSON.stringify(refusedIo).slice(0, 120));
+check('...and names the field rather than saying "invalid" [FAILS-OLD]',
+  refusedIo.ok === false && refusedIo.reason.includes('"Input and output"'));
+check('...and SHOWS an example instead of only asking for one [FAILS-OLD]',
+  refusedIo.ok === false && /4471,Acme Ltd,1200\.00/.test(refusedIo.reason),
+  'the reader this exists for is the one who did not read the hint');
+check('...and permits an invented example, so nobody with no data yet is stuck [FAILS-OLD]',
+  refusedIo.ok === false && /invent/i.test(refusedIo.reason));
+
+/* EMPTINESS STILL WINS. A blank io must be told it is blank, not told it has no
+ * example — the more specific message is the wrong one here. */
+const emptyIo = buildSpec({ ...ANSWERS, io: '   ' });
+check('an empty io is still refused as EMPTY, not as specimen-less [PASSES-OLD]',
+  emptyIo.ok === false && /is empty, and it is required/.test(emptyIo.reason),
+  emptyIo.reason || '');
+
+/* THE COST SIDE. A rule that fixes one register by breaking another is not a
+ * fix, so the unchanged reference answers must still build untouched. */
+check('the reference answers still build [PASSES-OLD]', buildSpec(ANSWERS).ok === true);
+check('...byte-for-byte as before the rule [PASSES-OLD]',
+  buildSpec(ANSWERS).markdown === built.markdown,
+  'the specimen rule refuses or it does nothing; it never edits');
+
+/* ONLY `io` CARRIES IT. The rule is one field's floor, not a form-wide policy —
+ * a `where` or `done` that reads as prose is still the person's to write. */
+check('exactly one field declares specimen, and it is io',
+  SPEC_FIELDS.filter((f) => f.specimen).length === 1
+  && SPEC_FIELDS.find((f) => f.specimen)?.key === 'io');
+check('a prose `done` still builds — the rule did not leak to other fields [PASSES-OLD]',
+  buildSpec({ ...ANSWERS, done: 'when it feels right and the team is happy' }).ok === true);
+
+/* NO MODEL, NO NETWORK, NO WORD LIST. The third is the one worth asserting:
+ * a language-specific phrase list is the patch that passes one run and fails
+ * the next one written in another language. */
+{
+  const src = readFileSync(join(repo, 'workers', 'spec-builder.js'), 'utf8');
+  const fn = src.slice(src.indexOf('export function hasSpecimen'), src.indexOf('/** Collapses runs of whitespace'));
+  check('hasSpecimen makes no network or model call', !/\bfetch\s*\(/.test(fn) && !/env\./.test(fn));
+  /*
+   * NO WORD LIST — asserted structurally rather than by scrubbing the source.
+   * A list of phrases needs either string literals to compare against or a
+   * membership call to compare with. The body has neither: its only string
+   * literal is the empty-string default in `String(v ?? '')`.
+   */
+  const literals = fn.match(/'[^']*'|"[^"]*"/g) || [];
+  check('hasSpecimen holds no word list — its only string literal is empty',
+    literals.every((l) => l.length === 2), literals.join(' '));
+  check('...and compares against no vocabulary',
+    !/\.includes\s*\(|\.indexOf\s*\(|\bWORDS\b|\bPHRASES\b/.test(fn),
+    'a word list would be a list in one language, and this rule has to hold in every language');
+}
 
 /* ═══════════════════════════════ Result ════════════════════════════════ */
 
