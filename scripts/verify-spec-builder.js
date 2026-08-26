@@ -548,18 +548,27 @@ check('...and names the field rather than saying "invalid" [FAILS-OLD]',
 check('...and SHOWS an example instead of only asking for one [FAILS-OLD]',
   refusedIo.ok === false && /4471,Acme Ltd,1200\.00/.test(refusedIo.reason),
   'the reader this exists for is the one who did not read the hint');
-check('...and permits an invented example, so nobody with no data yet is stuck [FAILS-OLD]',
-  refusedIo.ok === false && /invent/i.test(refusedIo.reason));
+/* Permission to proceed WITHOUT real data, so that having none is not a dead
+ * end — but stated as "write the closest thing you can", never as an
+ * instruction to announce that it is invented. See the guard below. */
+check('...and permits an example the person does not yet have, so nobody with no data is stuck [FAILS-OLD]',
+  refusedIo.ok === false && /nothing to paste yet/.test(refusedIo.reason)
+  && /closest thing/.test(refusedIo.reason), refusedIo.reason || '');
 /*
- * WHERE the invention is disclaimed decides whether it counts. The first version
- * of this message told people to say so IN THE BOX; three refused requesters did,
- * and all three were failed on the criterion the refusal exists to serve. An
- * ablation removing only the disclaimer flipped that criterion NO -> YES.
+ * IT MUST NOT TELL ANYONE TO CAVEAT THE EXAMPLE. Tried twice, measured twice,
+ * worse both times and in different sections:
+ *   v1 "say that you invented it"  -> three requesters complied, all three
+ *      failed criterion 4; an ablation deleting only the disclaimer flipped it.
+ *   v2 "say it needs confirming under Open decisions" -> moved the caveat into
+ *      the one section that was working. "Needs confirming" is a REQUEST, both
+ *      requesters wrote it as one, and criterion 7 began failing.
+ * This check is a regression guard, not a description. Re-adding either phrasing
+ * is a change that has already been measured as harmful twice.
  */
-check('...and routes the "this is invented" caveat to Open decisions, not into the field [FAILS-OLD]',
-  refusedIo.ok === false && /Open decisions/.test(refusedIo.reason)
-  && /not in this box/.test(refusedIo.reason),
-  'a shape retracted in the same breath reads to a builder as no shape at all');
+check('the refusal does NOT instruct the person to caveat their own example',
+  refusedIo.ok === false
+  && !/say that you invented|needs confirming|Open decisions/i.test(refusedIo.reason),
+  refusedIo.reason || '');
 
 /* EMPTINESS STILL WINS. A blank io must be told it is blank, not told it has no
  * example — the more specific message is the wrong one here. */

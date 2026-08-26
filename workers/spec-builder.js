@@ -298,28 +298,39 @@ export function buildSpec(answers = {}) {
      * shape, and permitting an invention removes the only honest reason to be
      * stuck.
      *
-     * ── WHERE THE INVENTION IS DISCLAIMED IS LOAD-BEARING, AND THIS WAS
-     *    LEARNED THE EXPENSIVE WAY, IN THE SAME SESSION THAT BUILT THE RULE ──
+     * ── THIS MESSAGE DOES NOT ASK ANYONE TO CAVEAT THEIR EXAMPLE, AND THAT
+     *    ABSENCE COST TWO MEASURED ATTEMPTS TO ARRIVE AT ──────────────────
      *
-     * The first version of this message ended *"invent the closest thing and say
-     * that you invented it."* Three requesters, in two languages, were refused
-     * and all three did exactly that — and **all three were then failed on the
-     * very criterion the refusal exists to serve.** Every one of the three blind
-     * judgements cited the disclaimer as the reason: *"the given shape is
-     * retracted by its own author"*, *"explicitly disclaimed by its own author,
-     * twice"*, *"the spec says so itself"*.
+     * **Do not add a caveat instruction back. It has been tried twice and both
+     * versions made the spec worse — in different sections.**
      *
-     * It was not a guess. One of the three answers was re-judged with **only the
-     * two disclaimer sentences removed and nothing else changed**, and the
-     * criterion flipped from NO to YES: *"These are shapes a builder can
-     * regularise by decision; they are defects in the shape, not an absence of
-     * one."*
+     *   v1  *"...and say that you invented it."*
+     *       Three requesters, two languages, all three complied — and all three
+     *       were then failed on the very criterion this refusal exists to serve.
+     *       Each blind judgement named the disclaimer: *"the given shape is
+     *       retracted by its own author"*, *"explicitly disclaimed by its own
+     *       author, twice"*, *"the spec says so itself"*.
      *
-     * So the honesty is kept and **moved**. An invented shape belongs under Open
-     * decisions, where the fixed instruction converts it into something to
-     * resolve and record; the same sentence inside this box converts a usable
-     * shape into a retracted one. **A refusal that tells people to undermine
-     * their own answer is worse than no refusal.**
+     *   v2  *"...say that it needs confirming under Open decisions, not in this
+     *       box."* Moved the caveat out of the field and **into the one section
+     *       that was working.** "Say it needs confirming" is a REQUEST, and both
+     *       requesters wrote it as one: *"someone will need to check that... and
+     *       tell me what's really in there"*, *"תגידו לי ואני אשלח חשבונית
+     *       אמיתית"*. Open decisions is the section whose whole purpose is
+     *       *decide it, do not ask* — so criterion 7, which had passed in every
+     *       run before, began failing. *"A directive header over a body of
+     *       questions does not convert the questions."*
+     *
+     * The only measured condition in which the criterion PASSES is one with no
+     * caveat anywhere: an ablation that deleted the disclaimer sentences and
+     * changed nothing else flipped it NO -> YES, with the judge noting the
+     * remaining problems were *"defects in the shape, not an absence of one."*
+     *
+     * So: permission to invent is kept, because someone with no data still has
+     * to state a shape and being stuck is the only honest alternative. **The
+     * instruction to announce the invention is gone.** Where a person chooses to
+     * caveat unprompted, that is their sentence and their judgement; what this
+     * form must not do is manufacture the retraction itself.
      */
     if (f.specimen && !hasSpecimen(tidy(answers[f.key]))) {
       return {
@@ -327,8 +338,7 @@ export function buildSpec(answers = {}) {
         reason: `"${f.heading}" describes the shape instead of showing it — there is no example anywhere in it.`
           + ' Paste one real line of what goes in and one real line of what should come out, exactly as they look.'
           + ' For instance: In: a row like  4471,Acme Ltd,1200.00,2026-03-01  —  Out: a line like  4471 | Acme Ltd | due date missing.'
-          + ' If you have nothing to paste yet, invent the closest thing and put it here plainly.'
-          + ' Say that it needs confirming under "Open decisions", not in this box — a shape taken back in the same breath reads to a builder as no shape at all.',
+          + ' If you have nothing to paste yet, write the closest thing you can and put it here plainly.',
       };
     }
   }
