@@ -462,9 +462,27 @@ function esc(s) {
  *
  * ── WHAT IS AND IS NOT PROTECTED HERE, STATED PLAINLY ────────────────────
  *
- * The page holds NO SECRET and reads NO OFFICE DATA. It is an empty form; the
- * generator runs entirely in the browser; the markdown never leaves the tab
- * unless the owner presses Send.
+ * The page holds NO SECRET and reads NO OFFICE DATA. It is an empty form.
+ *
+ * ── CORRECTED 2026-08-26 (Session 25). This block used to say "the generator
+ * runs entirely in the browser; the markdown never leaves the tab unless the
+ * owner presses Send." BOTH HALVES WERE FALSE, and had been since the round
+ * trip was introduced. Generate POSTs the whole form body to
+ * `/api/spec/build` and renders what comes back; the answers leave the tab the
+ * moment the button is pressed, before Send is anywhere near it.
+ *
+ * The round trip is deliberate and is defended at the endpoint — ONE
+ * implementation of the spec format, rather than a second one in browser
+ * JavaScript. What was wrong was only this comment, which described the design
+ * that was considered and not the one that shipped. It is corrected rather
+ * than deleted because it was the stated PRIVACY basis for serving this page
+ * unauthenticated, and a reader reasoning from it would have concluded that a
+ * draft spec is tab-local. It is not: it reaches this Worker.
+ *
+ * What survives the correction is the part that actually carries the safety
+ * argument, and it is unaffected — `/api/spec/build` reads nothing, writes
+ * nothing, stores nothing and calls no model. The answers reach the Worker,
+ * are turned into markdown, and are handed straight back.
  *
  * SEND is the only privileged act, and it is authenticated — it POSTs to
  * `/api/agents/owner-message`, which the router's `AUTHENTICATED_PREFIXES`
