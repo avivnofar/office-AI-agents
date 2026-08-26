@@ -295,8 +295,31 @@ export function buildSpec(answers = {}) {
      * The message SHOWS rather than TELLS, which is the whole point: the reader
      * this exists for is the one who did not read the hint. Inventing an example
      * is explicitly allowed — someone with no data yet still has to state a
-     * shape, and "make one up and say so" keeps the floor while removing the
-     * only honest reason to be stuck.
+     * shape, and permitting an invention removes the only honest reason to be
+     * stuck.
+     *
+     * ── WHERE THE INVENTION IS DISCLAIMED IS LOAD-BEARING, AND THIS WAS
+     *    LEARNED THE EXPENSIVE WAY, IN THE SAME SESSION THAT BUILT THE RULE ──
+     *
+     * The first version of this message ended *"invent the closest thing and say
+     * that you invented it."* Three requesters, in two languages, were refused
+     * and all three did exactly that — and **all three were then failed on the
+     * very criterion the refusal exists to serve.** Every one of the three blind
+     * judgements cited the disclaimer as the reason: *"the given shape is
+     * retracted by its own author"*, *"explicitly disclaimed by its own author,
+     * twice"*, *"the spec says so itself"*.
+     *
+     * It was not a guess. One of the three answers was re-judged with **only the
+     * two disclaimer sentences removed and nothing else changed**, and the
+     * criterion flipped from NO to YES: *"These are shapes a builder can
+     * regularise by decision; they are defects in the shape, not an absence of
+     * one."*
+     *
+     * So the honesty is kept and **moved**. An invented shape belongs under Open
+     * decisions, where the fixed instruction converts it into something to
+     * resolve and record; the same sentence inside this box converts a usable
+     * shape into a retracted one. **A refusal that tells people to undermine
+     * their own answer is worse than no refusal.**
      */
     if (f.specimen && !hasSpecimen(tidy(answers[f.key]))) {
       return {
@@ -304,7 +327,8 @@ export function buildSpec(answers = {}) {
         reason: `"${f.heading}" describes the shape instead of showing it — there is no example anywhere in it.`
           + ' Paste one real line of what goes in and one real line of what should come out, exactly as they look.'
           + ' For instance: In: a row like  4471,Acme Ltd,1200.00,2026-03-01  —  Out: a line like  4471 | Acme Ltd | due date missing.'
-          + ' If you have nothing to paste yet, invent the closest thing and say that you invented it.',
+          + ' If you have nothing to paste yet, invent the closest thing and put it here plainly.'
+          + ' Say that it needs confirming under "Open decisions", not in this box — a shape taken back in the same breath reads to a builder as no shape at all.',
       };
     }
   }

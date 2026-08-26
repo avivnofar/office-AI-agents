@@ -550,6 +550,16 @@ check('...and SHOWS an example instead of only asking for one [FAILS-OLD]',
   'the reader this exists for is the one who did not read the hint');
 check('...and permits an invented example, so nobody with no data yet is stuck [FAILS-OLD]',
   refusedIo.ok === false && /invent/i.test(refusedIo.reason));
+/*
+ * WHERE the invention is disclaimed decides whether it counts. The first version
+ * of this message told people to say so IN THE BOX; three refused requesters did,
+ * and all three were failed on the criterion the refusal exists to serve. An
+ * ablation removing only the disclaimer flipped that criterion NO -> YES.
+ */
+check('...and routes the "this is invented" caveat to Open decisions, not into the field [FAILS-OLD]',
+  refusedIo.ok === false && /Open decisions/.test(refusedIo.reason)
+  && /not in this box/.test(refusedIo.reason),
+  'a shape retracted in the same breath reads to a builder as no shape at all');
 
 /* EMPTINESS STILL WINS. A blank io must be told it is blank, not told it has no
  * example — the more specific message is the wrong one here. */
