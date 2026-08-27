@@ -429,6 +429,74 @@ export function buildAssignments(boardTasks = [], opts = {}) {
   return { draw, deferred, skipped };
 }
 
+/**
+ * Desk 6 (session 31, Item B) — own-build's SECOND mode: drawing a task
+ * whose own spec names a real artifact this office has not yet committed,
+ * so a real file gets produced rather than another status note (that stays
+ * `buildAssignments()`/`build_note` above, unchanged).
+ *
+ * Deliberately capped at ONE per tick (`MAX_BUILD_ARTIFACTS_PER_TICK`),
+ * lower than `build_note`'s two: a wrong status note costs a markdown file
+ * to look at; a wrong artifact costs a warehouse file a human or the
+ * Architect then has to notice is wrong.
+ *
+ * @param {Array<object>} boardTasks - `parseBoard().tasks`, needs `.warehouse`
+ * @param {object} [opts]
+ * @param {object} [opts.noTarget] - `{ [taskId]: reason }` — this task's spec
+ *   could not be read, or names no file directly under its own warehouse task
+ *   directory (see office-context.js `readSpecTargetPath()`). Resolved by the
+ *   caller BEFORE calling this, since it requires a warehouse read this pure
+ *   module may not perform.
+ * @param {object} [opts.alreadyBuilt] - `{ [taskId]: true }` — the exact
+ *   artifact path this spec names already has a committed `repo_writes` row.
+ * @returns {{draw: Array<object>, deferred: Array<object>, skipped: Array<object>}}
+ */
+export const MAX_BUILD_ARTIFACTS_PER_TICK = 1;
+
+export function buildArtifactAssignments(boardTasks = [], opts = {}) {
+  const max = Number.isInteger(opts.max) ? opts.max : MAX_BUILD_ARTIFACTS_PER_TICK;
+  const agents = opts.agents || DESK_AGENTS;
+  const noTarget = opts.noTarget || {};
+  const alreadyBuilt = opts.alreadyBuilt || {};
+
+  const draw = [];
+  const deferred = [];
+  const skipped = [];
+
+  for (const task of boardTasks || []) {
+    if (!task || task.state !== 'IN-PROGRESS') continue;
+    if (!task.warehouse) continue;
+
+    const agentId = Number(task.agentId);
+    if (!Number.isInteger(agentId)) {
+      skipped.push({ taskId: task.id, slug: task.warehouse, why: 'Assignee carries no readable "Agent N" id' });
+      continue;
+    }
+    if (agentId === ARCHITECT_ID) {
+      skipped.push({ taskId: task.id, agentId, slug: task.warehouse, why: 'the Architect is the sole build RUNTIME for warehouse code — his own build is not drawn through this desk' });
+      continue;
+    }
+    if (!agents.includes(agentId)) {
+      skipped.push({ taskId: task.id, agentId, slug: task.warehouse, why: 'not an admin-desk agent' });
+      continue;
+    }
+    if (noTarget[task.id]) {
+      skipped.push({ taskId: task.id, agentId, slug: task.warehouse, why: noTarget[task.id] });
+      continue;
+    }
+    if (alreadyBuilt[task.id]) {
+      skipped.push({ taskId: task.id, agentId, slug: task.warehouse, why: 'the artifact this spec names is already committed — nothing to draw' });
+      continue;
+    }
+
+    const item = { taskId: task.id, title: task.title, agentId, slug: task.warehouse, holder: task.dispatched || null };
+    if (draw.length < max) draw.push(item);
+    else deferred.push(item);
+  }
+
+  return { draw, deferred, skipped };
+}
+
 /* ───────────────────────────── The honest report ────────────────────────── */
 
 /**

@@ -82,6 +82,14 @@ import {
   parseIssueReply, issueReplySections,
   parseSubmissions, submissionSections, ageQuestions,
 } from './owner-channel.js';
+// Session 31, Item B — the office's first WAREHOUSE read. Everything above
+// this line reads back-office; nothing before this session ever fetched
+// FROM the warehouse (only commitFileToRepo() ever wrote TO it — see
+// repo-write.js's own header on why "the Worker cannot read the warehouse
+// back" used to be true). Pull is always allowed regardless of push
+// (project-permissions.json's own push_semantics note), so this is a read,
+// not a new write capability.
+import { REPO_OWNER, WAREHOUSE_REPO_NAME } from './repo-write.js';
 
 /**
  * Local token estimate — NOT imported from provider-common.js, deliberately.
@@ -1125,6 +1133,66 @@ export async function fetchBackOfficeFile(env, filePath, { ref = null } = {}) {
 }
 
 /**
+ * Reads one file from the WAREHOUSE repo. Same shape as fetchBackOfficeFile()
+ * above — deliberately not merged with it into one parameterised function,
+ * because the two repos carry different tokens (WAREHOUSE_REPO_TOKEN vs
+ * BACKOFFICE_REPO_TOKEN) and a shared helper would be one more place a caller
+ * could pass the wrong one silently. Session 31, Item B — used only to read a
+ * task's own SPEC.md, to compose own-build's "you owe THIS FILE" prompt
+ * section and to know which artifact path processBuildArtifactBlock() must
+ * write.
+ */
+export async function fetchWarehouseFile(env, filePath, { ref = null } = {}) {
+  if (!env?.WAREHOUSE_REPO_TOKEN) return { text: null, reason: 'WAREHOUSE_REPO_TOKEN is not configured' };
+  const url = `https://api.github.com/repos/${REPO_OWNER}/${WAREHOUSE_REPO_NAME}/contents/${filePath}`
+    + (ref ? `?ref=${encodeURIComponent(ref)}` : '');
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'data-center-agent-sim',
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${env.WAREHOUSE_REPO_TOKEN}`,
+    },
+  }).catch((err) => ({ ok: false, status: 0, _err: err?.message }));
+
+  if (!res?.ok) return { text: null, reason: `GET ${filePath} failed: HTTP ${res?.status ?? 'network error'}` };
+  const body = await res.json().catch(() => null);
+  if (!body?.content) return { text: null, reason: `${filePath}: no content field in Contents API response` };
+  try {
+    return { text: decodeURIComponent(escape(atob(body.content.replace(/\n/g, '')))), reason: null };
+  } catch (err) {
+    return { text: null, reason: `${filePath}: base64/UTF-8 decode failed — ${err.message}` };
+  }
+}
+
+/**
+ * Extracts the ONE file path a spec's own "## Where it lives" section names
+ * directly under `warehouse-office-AI-agents/tasks/<slug>/`. FAIL-CLOSED:
+ * returns not-ok rather than guessing when the section is missing or names
+ * no file under that exact prefix — inventing a path here would be exactly
+ * the "convincing wrong spec" workers/spec-builder.js's own header warns
+ * against, just moved one layer downstream of it.
+ */
+export function readSpecTargetPath(specText, slug) {
+  const s = String(specText || '');
+  const secStart = s.search(/^##\s+Where it lives\s*$/m);
+  if (secStart === -1) return { ok: false, reason: 'the spec has no "## Where it lives" section' };
+  const rest = s.slice(secStart);
+  const afterHeading = rest.slice(rest.indexOf('\n') + 1);
+  const nextHeading = afterHeading.search(/^##\s/m);
+  const section = nextHeading === -1 ? afterHeading : afterHeading.slice(0, nextHeading);
+  const re = new RegExp(`warehouse-office-AI-agents/tasks/${slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/([\\w./-]+\\.[A-Za-z0-9]+)`);
+  const m = re.exec(section);
+  if (!m) {
+    return {
+      ok: false,
+      reason: `the spec's "Where it lives" section names no file directly under warehouse-office-AI-agents/tasks/${slug}/`,
+      section: section.trim(),
+    };
+  }
+  return { ok: true, targetPath: `tasks/${slug}/${m[1]}`, section: section.trim() };
+}
+
+/**
  * Lists a back-office DIRECTORY. The first directory read this module has ever
  * needed, and it exists for exactly one reason: the owner writes one file per
  * message and cannot be asked to maintain an index of them.
@@ -1550,6 +1618,32 @@ export async function fetchOfficeSnapshot(env, { today = new Date().toISOString(
     ownerIssueReplies = { ok: true, replies, malformed: replyMalformed };
   }
 
+  // ── THE WAREHOUSE, READ FOR THE FIRST TIME (session 31, Item B) ─────────
+  //
+  // own-build's prompt section (below, in buildOfficeContext()) needs to say
+  // WHICH FILE an agent owes, not just that a task is being built — and the
+  // only place that lives is the task's own SPEC.md, in the warehouse. This
+  // is a SECOND, small wave, deliberately not folded into the Promise.all
+  // above: it depends on `board` having been parsed, and it is bounded by
+  // however many tasks are actually IN-PROGRESS-and-paired right now — 0 in
+  // every real measurement to date (OB-134's own count, session 30's own
+  // live draw), so in production this costs nothing extra most refreshes.
+  // A task whose SPEC cannot be read or names no parseable target simply
+  // gets a `reason` here rather than a guessed path — see
+  // readSpecTargetPath()'s own header.
+  const buildTargets = {};
+  if (board?.tasks?.length) {
+    const building = board.tasks.filter((t) => t.state === 'IN-PROGRESS' && t.warehouse);
+    const slugs = [...new Set(building.map((t) => t.warehouse))];
+    const specFiles = await Promise.all(slugs.map((slug) => fetchWarehouseFile(env, `tasks/${slug}/SPEC.md`)));
+    slugs.forEach((slug, i) => {
+      const f = specFiles[i];
+      if (f.reason) { buildTargets[slug] = { ok: false, reason: `could not read tasks/${slug}/SPEC.md: ${f.reason}` }; return; }
+      buildTargets[slug] = readSpecTargetPath(f.text, slug);
+    });
+  }
+  if (board) board.buildTargets = buildTargets;
+
   return { fetched_at: Date.now(), today, board, requirements, questions, lifecycle, policy, owner, ownerIssueReplies, submissions, errors };
 }
 
@@ -1970,10 +2064,30 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
     if (opts.agentId && mine.length) {
       const building = mine.filter((t) => t.state === 'IN-PROGRESS' && t.warehouse);
       if (building.length) {
+        /*
+         * SESSION 31, ITEM B — a second mode, added beside the original.
+         * `own-review` works because it says *you owe a review*; the
+         * original own-build only ever said *there is work* — "YOU ARE
+         * BUILDING: X", with no file named. This says *you owe this file*
+         * whenever the task's own SPEC.md (fetched in fetchOfficeSnapshot(),
+         * see its "THE WAREHOUSE, READ FOR THE FIRST TIME" block, and cached
+         * on `board.buildTargets`) names one directly under its own
+         * warehouse task directory — and falls back to the honest original
+         * sentence, never a guessed path, when it does not.
+         */
+        const targets = board.buildTargets || {};
+        const lines = building.map((t) => {
+          const resolved = targets[t.warehouse];
+          const base = `${t.id} — "${t.title}" — warehouse \`warehouse-office-AI-agents/tasks/${t.warehouse}/\`${t.dispatched ? ` (${t.dispatched})` : ''}`;
+          if (resolved?.ok) {
+            return `${base}. THE SPEC NAMES THE FILE YOU OWE: \`${resolved.targetPath}\`. Produce and commit it exactly as \`tasks/${t.warehouse}/SPEC.md\`'s "Where it lives" and "Input and output" sections describe.`;
+          }
+          return `${base}. Its SPEC does not name one file plainly enough to state here (${resolved?.reason || 'tasks/' + t.warehouse + '/SPEC.md 404s or is unreadable'}) — read \`tasks/${t.warehouse}/SPEC.md\` yourself and file the artifact it describes.`;
+        });
         sections.push({
           label: 'own-build',
           priority: PRIORITY.headline,
-          text: `YOU ARE BUILDING: ${building.map((t) => `${t.id} — "${t.title}" — warehouse \`warehouse-office-AI-agents/tasks/${t.warehouse}/\`${t.dispatched ? ` (${t.dispatched})` : ''}`).join('; ')}. `
+          text: `YOU ARE BUILDING: ${lines.join('; ')}. `
             + 'Assigned as work, not offered. This may span days — it is not expected to finish in one sitting. '
             + 'If your shift ends before it is done, file what you completed and where you stopped; the next session resumes from there, it does not start over.',
         });

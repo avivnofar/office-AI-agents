@@ -82,7 +82,7 @@ import { resolveIssueTarget } from './permission-guard.js';
 // read-back ONLY (2026-08-10): the meeting and per-agent shapes are the two that
 // actually bind, and a probe that reports only the generous `report` shape cannot
 // tell you that the meeting shape is at 98% and trimming the board out of view.
-import { getOfficeContext, getOfficeSnapshot, fetchOfficeSnapshot, officeContextEnabled, buildOfficeContext, fetchBackOfficeFile, fetchBackOfficeDir, fetchBackOfficeCommits, BUDGETS as OFFICE_BUDGETS, CACHE_KEY as OFFICE_SNAPSHOT_CACHE_KEY } from './office-context.js';
+import { getOfficeContext, getOfficeSnapshot, fetchOfficeSnapshot, officeContextEnabled, buildOfficeContext, fetchBackOfficeFile, fetchBackOfficeDir, fetchBackOfficeCommits, fetchWarehouseFile, readSpecTargetPath, BUDGETS as OFFICE_BUDGETS, CACHE_KEY as OFFICE_SNAPSHOT_CACHE_KEY } from './office-context.js';
 // The admin tier's scheduled draw from real queues (2026-08-17). Pure — every
 // fetch, model call and write for it is in processAdminDeskBlock() below.
 import {
@@ -94,6 +94,9 @@ import {
   // is a SEPARATE supervised-only function, not wired into the scheduled
   // admin-desk tick. Graduated rollout (CLAUDE.md): supervised run first.
   buildAssignments, MAX_BUILD_NOTES_PER_TICK,
+  // Desk 6 (session 31, Item B) — see processBuildArtifactBlock() below,
+  // same supervised-only posture as Desk 5 above.
+  buildArtifactAssignments, MAX_BUILD_ARTIFACTS_PER_TICK,
 } from './admin-desk.js';
 // The lifecycle's own live index of what is in flight and who owes what on it.
 // `LOCATIONS` gives the back-office directory a readable deliverable sits in.
@@ -2280,6 +2283,177 @@ async function processBuildNotesBlock(env, opts = {}) {
     ? `${out.produced} produced from a queue of ${out.queued}.`
     : (out.queued === 0 ? 'queue empty — nothing written, nothing recorded.' : `${out.queued} queued and 0 produced.`);
   console.log(`[build-notes] ${today}: ${out.produced} produced, ${out.queued} queued, ${out.errors.length} error(s)`);
+  return out;
+}
+
+/**
+ * Desk 6 (session 31, Item B) — own-build's SECOND mode: producing the real
+ * artifact a spec names, not a status note about it (processBuildNotesBlock()
+ * above, unchanged). SUPERVISED ONLY, not on the schedule — same graduated-
+ * rollout posture session 30 set for Desk 5.
+ *
+ * Two ways in, same pattern this file's other supervised triggers use:
+ *  - opts.taskId + opts.slug + opts.agentId: build ONE named task directly,
+ *    skipping the live board draw — the only way to produce real evidence
+ *    while the live draw itself has nothing to draw (0 real IN-PROGRESS +
+ *    warehouse-paired board tasks, the same measured state session 30 left
+ *    this board in). Never touches BOARD.md.
+ *  - otherwise: draws from the live board via buildArtifactAssignments(),
+ *    the actual mechanism a scheduled tick would use once wired.
+ */
+async function processBuildArtifactBlock(env, opts = {}) {
+  if (!opts.bypassGate && !(await officeContextEnabled(env))) {
+    return { ok: false, skipped: true, reason: 'office_context_disabled' };
+  }
+
+  const out = { desk: 'build_artifact', mode: 'board', queued: 0, produced: 0, filed: [], deferred: [], skipped: [], errors: [] };
+
+  const resolveTarget = async (slug) => {
+    const specFile = await fetchWarehouseFile(env, `tasks/${slug}/SPEC.md`);
+    if (specFile.reason) return { ok: false, reason: `could not read tasks/${slug}/SPEC.md: ${specFile.reason}` };
+    const target = readSpecTargetPath(specFile.text, slug);
+    if (!target.ok) return { ok: false, reason: target.reason };
+    return { ok: true, targetPath: target.targetPath, specText: specFile.text };
+  };
+
+  // Same idempotency source build_note uses (this Worker's OWN write
+  // history) and the same fail-closed posture on a read it cannot verify —
+  // `null` means "cannot tell", never "nothing logged yet".
+  const alreadyCommitted = async (targetPath) => {
+    if (!env.DB) return null;
+    await env.DB.prepare(REPO_WRITE_TABLE_SQL).run();
+    const row = await env.DB.prepare(
+      `SELECT path FROM repo_writes WHERE repo = ? AND path = ? AND committed = 1 LIMIT 1`
+    ).bind(WAREHOUSE_REPO_NAME, targetPath).first();
+    return !!row;
+  };
+
+  let candidates;
+  if (opts.taskId && opts.slug && opts.agentId) {
+    out.mode = 'explicit';
+    const resolved = await resolveTarget(opts.slug);
+    if (!resolved.ok) {
+      out.errors.push(`${opts.taskId}: ${resolved.reason}`);
+      return out;
+    }
+    const exists = await alreadyCommitted(resolved.targetPath);
+    if (exists === null) {
+      out.errors.push(`${resolved.targetPath}: repo_writes could not be read — idempotency could not be checked, nothing drawn`);
+      return out;
+    }
+    if (exists) {
+      out.skipped.push({ taskId: opts.taskId, slug: opts.slug, why: `${resolved.targetPath} is already committed` });
+      out.summary = 'already committed — nothing drawn.';
+      return out;
+    }
+    candidates = [{
+      taskId: opts.taskId, title: opts.title || opts.taskId, agentId: Number(opts.agentId),
+      slug: opts.slug, targetPath: resolved.targetPath, specText: resolved.specText,
+    }];
+    out.queued = 1;
+  } else {
+    let snapshot = null;
+    try {
+      snapshot = await getOfficeSnapshot(env, { allowFetch: true });
+    } catch (err) {
+      out.errors.push(`office snapshot threw: ${err?.message}`);
+      return out;
+    }
+    const boardTasks = snapshot?.board?.tasks || null;
+    if (!Array.isArray(boardTasks)) {
+      out.errors.push('the board could not be read from the office snapshot — this desk produced nothing because its queue was UNREADABLE, which is not the same fact as empty');
+      return out;
+    }
+
+    const building = boardTasks.filter((t) => t?.state === 'IN-PROGRESS' && t?.warehouse);
+    const resolvedBySlug = {};
+    for (const t of building) {
+      if (resolvedBySlug[t.warehouse]) continue;
+      resolvedBySlug[t.warehouse] = await resolveTarget(t.warehouse);
+    }
+
+    const noTarget = {};
+    const alreadyBuilt = {};
+    for (const t of building) {
+      const r = resolvedBySlug[t.warehouse];
+      if (!r.ok) { noTarget[t.id] = r.reason; continue; }
+      const exists = await alreadyCommitted(r.targetPath);
+      if (exists === null) { noTarget[t.id] = `${r.targetPath}: repo_writes could not be read — idempotency could not be checked`; continue; }
+      if (exists) alreadyBuilt[t.id] = true;
+    }
+
+    const assigned = buildArtifactAssignments(boardTasks, { noTarget, alreadyBuilt });
+    out.queued = assigned.draw.length + assigned.deferred.length;
+    out.deferred = assigned.deferred;
+    out.skipped = assigned.skipped;
+    candidates = assigned.draw.map((item) => {
+      const r = resolvedBySlug[item.slug];
+      return { ...item, targetPath: r.targetPath, specText: r.specText };
+    });
+  }
+
+  // task-router.js resolveLane()/routeTask() never reads a lane's own
+  // max_tokens field — see this field's own note in model-routing.json.
+  // Reading it HERE is what makes it real rather than decorative.
+  const laneMaxTokens = MODEL_ROUTING?.lanes?.build_artifact?.max_tokens || 4000;
+
+  for (const item of candidates) {
+    const config = getAgentConfig(item.agentId);
+    const routed = await routeTaskTypeCall(env, 'build_artifact', {
+      systemPrompt: `You are ${config?.name || `Agent ${item.agentId}`}, ${config?.role || 'an agent'} in an AI office. `
+        + `${config?.personality?.core || ''} You are producing a real deliverable file, not a status note about one.`,
+      prompt: [
+        `You are building board task ${item.taskId} — "${item.title}" — warehouse \`tasks/${item.slug}/\`.`,
+        '',
+        'This task\'s own spec, in full:',
+        '---',
+        item.specText,
+        '---',
+        '',
+        `Produce the COMPLETE, FINAL content of the file at \`${item.targetPath}\` — exactly what the spec's "Where it lives" and "Input and output" sections describe.`,
+        'Output ONLY the raw file content. No markdown code fence, no commentary before or after it, no explanation.',
+      ].join('\n'),
+      maxTokens: laneMaxTokens,
+      agentId: `build-artifact:${item.taskId}:${item.agentId}`,
+    });
+
+    const text = routed.ok ? routed.result?.text : null;
+    if (!routed.ok || !text || !String(text).trim()) {
+      out.errors.push(`${item.taskId}: ${routed.reason || 'empty artifact from provider'} (provider: ${routed.provider || 'none'})`);
+      continue;
+    }
+
+    let content = String(text).trim();
+    // A model told "no fence" sometimes adds one anyway — stripped rather
+    // than refused, since the content itself is what was asked for.
+    content = content.replace(/^```[\w-]*\n/, '').replace(/\n```\s*$/, '');
+
+    let commit;
+    try {
+      commit = await commitFileToRepo(
+        env, WAREHOUSE_REPO_NAME, item.targetPath, content,
+        `office: Agent ${item.agentId} build artifact for ${item.taskId} [skip ci]`
+      );
+    } catch (err) {
+      out.errors.push(`${item.targetPath}: commit threw — ${err?.message}`);
+      continue;
+    }
+    if (!commit.committed) {
+      out.errors.push(`${item.targetPath}: not committed (${commit.reason || 'no reason given'})`);
+      continue;
+    }
+
+    out.produced += 1;
+    out.filed.push({
+      taskId: item.taskId, path: item.targetPath, provider: routed.provider,
+      outputTokens: routed.result?.usage?.outputTokens ?? null, outputChars: content.length,
+    });
+  }
+
+  out.summary = out.produced > 0
+    ? `${out.produced} produced from a queue of ${out.queued}.`
+    : (out.queued === 0 ? 'queue empty — nothing written, nothing recorded.' : `${out.queued} queued and 0 produced.`);
+  console.log(`[build-artifact] ${out.mode}: ${out.produced} produced, ${out.queued} queued, ${out.errors.length} error(s)`);
   return out;
 }
 
@@ -7796,6 +7970,18 @@ export default {
             // Anthropic call against the new component:'architect' sub-budget.
             result = await processArchitectSpecBlock(env, {
               taskId: body.taskId, slug: body.slug, bypassGate: body.bypassGate !== false,
+            });
+            break;
+          case 'build_artifact_block':
+            // Session 31, Item B — own-build's second mode. SUPERVISED ONLY,
+            // not on the schedule. Body either { taskId, slug, agentId,
+            // title? } (build ONE named task directly, see
+            // processBuildArtifactBlock()'s own header) or {} to draw from
+            // the live board instead. bypassGate?: false to honour
+            // office_context_enabled.
+            result = await processBuildArtifactBlock(env, {
+              taskId: body.taskId, slug: body.slug, agentId: body.agentId, title: body.title,
+              bypassGate: body.bypassGate !== false,
             });
             break;
           case 'qa_instruments_block':
