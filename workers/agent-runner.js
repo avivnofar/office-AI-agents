@@ -143,6 +143,10 @@ import {
 // scripts/verify-spec-builder.js asserts both — including that the module's
 // source contains no fetch and no provider client.
 import { buildSpec, specFilename, renderSpecPage, prefillFromItem } from './spec-builder.js';
+// The Architect's NAMED spec-writing path (session 31, Item A) — see this
+// module's own header for why `routable: false` on the `architect` lane in
+// model-routing.json is unaffected by this import.
+import { runArchitectSpecCall } from './architect-spec.js';
 import {
   ADMIN_SESSION_PATH,
   isAdminPagePath, adminPageAuthorized, adminCredential, adminUnauthorizedResponse,
@@ -2089,6 +2093,74 @@ async function processAdminDeskBlock(env, opts = {}) {
  * exact, not a heuristic, and adds no new capability.
  */
 const BUILD_NOTE_REPORT_TYPE = 'admin_desk';
+
+/**
+ * Session 31, Item A — the Architect's named spec-writing path, wired into
+ * this Worker as a SUPERVISED trigger, same posture as `build_notes_block`
+ * and `warehouse_write` before it: not on any schedule, one deliberate call
+ * at a time. Reads one real board task's own text, has the Architect (agent
+ * 10, direct Anthropic, `workers/architect-spec.js`) fill spec-builder.js's
+ * seven fields for it, and commits the result to the warehouse as that
+ * task's `SPEC.md` — never touching `BOARD.md` itself (Rule 7: pairing a
+ * board task with a `Warehouse:` slug is a human/owner decision, not this
+ * function's to make).
+ *
+ * @param {object} opts.taskId - a real "OB-NNN" id already on the board.
+ * @param {object} opts.slug - the warehouse task directory to write
+ *   `SPEC.md` into (lowercase-hyphenated) — chosen by the caller, never
+ *   derived from the title here, so a slug collision or a live pairing
+ *   decision is always a deliberate choice, not a side effect.
+ */
+async function processArchitectSpecBlock(env, opts = {}) {
+  if (!opts.bypassGate && !(await officeContextEnabled(env))) {
+    return { ok: false, skipped: true, reason: 'office_context_disabled' };
+  }
+
+  const taskId = String(opts.taskId || '').trim();
+  const slug = String(opts.slug || '').trim();
+  if (!/^OB-\d+$/.test(taskId)) {
+    return { ok: false, reason: 'opts.taskId must be a real "OB-NNN" board task id' };
+  }
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(slug)) {
+    return { ok: false, reason: 'opts.slug must be a lowercase-hyphenated warehouse task directory name' };
+  }
+
+  const boardFile = await fetchBackOfficeFile(env, 'campus/shared/board/BOARD.md');
+  if (boardFile.reason) {
+    return { ok: false, reason: `could not read the board: ${boardFile.reason}` };
+  }
+
+  // Same heading grammar parseBoard() and dispatch.js both use, deliberately
+  // re-matched here rather than fetched off the parsed task object — parseBoard()
+  // keeps only the structured fields it names explicitly (state, assignee,
+  // metric, ...); it does not retain each task's full raw text, which is what
+  // the Architect actually needs to read.
+  const headingRe = /^### (OB-\d{3}) — (.+)$/gm;
+  const starts = [];
+  let m;
+  while ((m = headingRe.exec(boardFile.text)) !== null) starts.push({ id: m[1], title: m[2].trim(), index: m.index });
+  const at = starts.findIndex((s) => s.id === taskId);
+  if (at === -1) {
+    return { ok: false, reason: `${taskId} is not on the board (no "### ${taskId} — ..." heading found)` };
+  }
+  const end = at + 1 < starts.length ? starts[at + 1].index : boardFile.text.length;
+  const taskText = boardFile.text.slice(starts[at].index, end).trim();
+
+  const spec = await runArchitectSpecCall(env, { taskId, title: starts[at].title, taskText });
+  if (!spec.ok) return spec;
+
+  const path = `tasks/${slug}/SPEC.md`;
+  let commit;
+  try {
+    commit = await commitFileToRepo(
+      env, WAREHOUSE_REPO_NAME, path, spec.markdown,
+      `office: Architect spec for ${taskId} -> ${slug} [skip ci]`
+    );
+  } catch (err) {
+    return { ...spec, committed: false, commitError: err.message, path };
+  }
+  return { ...spec, committed: commit.committed, commitReason: commit.reason || null, path };
+}
 
 async function processBuildNotesBlock(env, opts = {}) {
   if (!opts.bypassGate && !(await officeContextEnabled(env))) {
@@ -7716,6 +7788,15 @@ export default {
             // second run the same day for the same task+agent draws nothing
             // new for that pair.
             result = await processBuildNotesBlock(env, { bypassGate: body.bypassGate !== false });
+            break;
+          case 'architect_spec_block':
+            // Session 31, Item A — SUPERVISED ONLY, not on the schedule.
+            // Body: { taskId: "OB-NNN", slug: "warehouse-task-dir", bypassGate?: false }.
+            // See processArchitectSpecBlock()'s own header. Costs one real
+            // Anthropic call against the new component:'architect' sub-budget.
+            result = await processArchitectSpecBlock(env, {
+              taskId: body.taskId, slug: body.slug, bypassGate: body.bypassGate !== false,
+            });
             break;
           case 'qa_instruments_block':
             // Runs the Friday qa_instruments block directly, gate bypassed —

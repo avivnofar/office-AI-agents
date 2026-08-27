@@ -32,6 +32,11 @@
     "cap_usd_per_month": 4.50
   },
 
+  "architect_claude_budget": {
+    "_meta": "Session 31 (2026-08-28), Item A — a THIRD, independent Claude sub-budget for the Architect's (agent 10) NAMED spec-writing path (workers/architect-spec.js), the one place a real board task is turned into a buildable spec via the SAME seven-field template workers/spec-builder.js already renders (no second format was invented — buildSpec() is called directly, not re-implemented). Same D1 claude_budget_usage table and the SAME workers/model-router.js getClaudeBudgetStatus()/recordClaudeSpend() functions as shared_claude_budget/guides_claude_budget, distinguished by component:'architect' and month key 'YYYY-MM#architect' — an overrun here cannot drain, and cannot be drained by, either of the other two. Deliberately set BELOW both existing $4.50 soft-stops and well below the account's own hard ceiling (back-office-AI-agents CLAUDE.md's Standing Constraints: $4.50 soft-stop / $5 hard ceiling — read literally rather than combined, since this project's own combined-spend note under guides_claude_budget above already shows the two existing sub-budgets alone summing past that single-account figure; that pre-existing inconsistency is NOT resolved here, only flagged, per this project's standing rule to surface a documentation-vs-reality gap rather than silently reconcile it). Architect spec-writing is rare by design — once per build (this path) plus once more for the approval pass (Item E, still workers/claude-client.js, not this module), never routine volume — so a small ceiling is a genuine backstop, not a formality. Covers: workers/architect-spec.js's runArchitectSpecCall() only.",
+    "cap_usd_per_month": 1.00
+  },
+
   "notebook_x_gemini_pacing": {
     "_meta": "Added 2026-07-18. See workers/gemini-pacer.js's header comment for the full reasoning — summary here for anyone reading this config without the code.",
     "min_spacing_ms_between_calls": 20000,

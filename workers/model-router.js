@@ -166,14 +166,20 @@ const BUDGET_TABLE_SQL = `CREATE TABLE IF NOT EXISTS claude_budget_usage (
 
 function currentMonthKey(date = new Date(), component = 'qa') {
   const base = date.toISOString().slice(0, 7); // 'YYYY-MM'
-  return component === 'guides' ? `${base}#guides` : base;
+  if (component === 'guides') return `${base}#guides`;
+  if (component === 'architect') return `${base}#architect`;
+  return base;
 }
 
 /** Per-component monthly $ cap. 'qa' keeps reading the pre-existing
  * chore_automation/shared_claude_budget value (unchanged); 'guides' reads
- * the new config/token-economy.json `guides_claude_budget` block. */
+ * config/token-economy.json `guides_claude_budget`; 'architect' (session 31,
+ * Item A — workers/architect-spec.js) reads the new `architect_claude_budget`
+ * block, a third sub-budget disjoint from both by month-key suffix, same as
+ * 'guides' is disjoint from 'qa'. */
 function capUsdForComponent(component) {
   if (component === 'guides') return tokenEconomy.guides_claude_budget?.cap_usd_per_month ?? 4.5;
+  if (component === 'architect') return tokenEconomy.architect_claude_budget?.cap_usd_per_month ?? 1.0;
   return CHORE.claude_budget_usd_per_month;
 }
 
