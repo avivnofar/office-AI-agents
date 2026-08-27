@@ -58,9 +58,11 @@ export const ARCHITECT_SPEC_SYSTEM = [
   '',
   `Under "open_decisions": ${OPEN_DECISIONS_INSTRUCTION} Do not leave a real ambiguity in the board task unresolved — decide it yourself and record the decision and reasoning as the value of this field. Leave the field genuinely empty only if there is truly nothing to decide.`,
   'Be specific and concrete. "io" especially needs a real example line of input and a real example line of output, not a description of their shape.',
+  '',
+  'This spec is written for a build that will happen INSIDE the warehouse-office-AI-agents repo, by a builder that only has write access there — never in office-AI-agents or back-office-AI-agents, which are Architect/owner-authorized only. So "where" MUST name a path of the exact shape `warehouse-office-AI-agents/tasks/<a-short-lowercase-hyphenated-slug>/...` — never a path in either of the other two repos, and never a bare path with no repo name.',
 ].join('\n');
 
-export function buildArchitectSpecUserPrompt({ taskId, title, taskText }) {
+export function buildArchitectSpecUserPrompt({ taskId, title, taskText, slug }) {
   return [
     `Board task ${taskId} — "${title}"`,
     '',
@@ -68,6 +70,8 @@ export function buildArchitectSpecUserPrompt({ taskId, title, taskText }) {
     '---',
     taskText,
     '---',
+    '',
+    `This spec is about to be committed to \`warehouse-office-AI-agents/tasks/${slug}/SPEC.md\`. Your "where" answer MUST start with \`warehouse-office-AI-agents/tasks/${slug}/\` — that directory is already decided, not yours to rename.`,
     '',
     'Produce the JSON object now.',
   ].join('\n');
@@ -105,7 +109,14 @@ export function parseArchitectAnswers(text) {
  * own "NEVER routed, NEVER shuffled."
  *
  * @param {object} env
- * @param {object} task - { taskId, title, taskText }
+ * @param {object} task - { taskId, title, taskText, slug } — `slug` is the
+ *   warehouse task directory the caller has already decided to commit this
+ *   spec into, so the model's own "where" answer can be anchored to the
+ *   real path rather than free to name a different one (see this module's
+ *   git history for the live mismatch this closes: a real call named
+ *   `tasks/dependency-advisory-check/` while the caller committed to
+ *   `tasks/dependency-audit/SPEC.md` — two mechanisms agreeing by
+ *   coincidence, not by anything tying them together).
  * @param {string} [date] - YYYY-MM-DD, passed through to buildSpec(); a
  *   parameter rather than `new Date()` so this function can be exercised by
  *   a caller that pins the date, same reason buildSpec() itself takes one.

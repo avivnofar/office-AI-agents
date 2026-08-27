@@ -2146,7 +2146,7 @@ async function processArchitectSpecBlock(env, opts = {}) {
   const end = at + 1 < starts.length ? starts[at + 1].index : boardFile.text.length;
   const taskText = boardFile.text.slice(starts[at].index, end).trim();
 
-  const spec = await runArchitectSpecCall(env, { taskId, title: starts[at].title, taskText });
+  const spec = await runArchitectSpecCall(env, { taskId, title: starts[at].title, taskText, slug });
   if (!spec.ok) return spec;
 
   const path = `tasks/${slug}/SPEC.md`;
