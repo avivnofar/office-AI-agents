@@ -177,3 +177,96 @@ export async function runArchitectSpecCall(env, task, { date } = {}) {
     stopReason: result.stopReason,
   };
 }
+
+/**
+ * Session 31, Item E: the Architect's SECOND and LAST touch on a build —
+ * approval, once no blocking review remains. He does not repair (E1); by
+ * the time this is called, the repair loop has already brought every
+ * blocking review to a non-blocking state or the loop has stopped and
+ * surfaced the stalemate to the owner instead of reaching here.
+ *
+ * Same named path, same component:'architect' sub-budget as
+ * runArchitectSpecCall() above — "one live call" and "the second Anthropic
+ * touch" from the brief both assume ONE budget for the Architect's work on
+ * a build, not per-call-type budgets that would need their own accounting.
+ */
+export const ARCHITECT_APPROVAL_SYSTEM = [
+  'You are the Architect — Agent 10 of this AI office, root clearance, the office\'s final technical authority.',
+  'You are giving the FINAL approval on a build before it merges. You do not repair code yourself — if something is genuinely wrong, you say so and refuse; you do not fix it in this call.',
+  '',
+  'Answer with a SINGLE JSON object and nothing else: { "verdict": "approve" | "block", "reasoning": "<why>" }.',
+  '"approve" means the artifact is ready to merge as-is. "block" means it is not, and "reasoning" must say plainly what is wrong — that becomes a new finding for the repair loop, so be specific.',
+].join('\n');
+
+export function buildArchitectApprovalUserPrompt({ taskId, slug, specText, artifactContent, reviewSummary }) {
+  return [
+    `Board task ${taskId || slug} — warehouse \`tasks/${slug}/\`.`,
+    '',
+    'The spec:',
+    '---', specText, '---',
+    '',
+    'The artifact as it stands now:',
+    '---', artifactContent, '---',
+    '',
+    'What the review loop found (empty means no reviewer raised a blocking finding this round):',
+    '---', reviewSummary || '(no outstanding blocking findings recorded)', '---',
+    '',
+    'Give your verdict now.',
+  ].join('\n');
+}
+
+export function parseArchitectVerdict(text) {
+  const s = String(text || '');
+  const start = s.indexOf('{');
+  const end = s.lastIndexOf('}');
+  if (start === -1 || end === -1 || end <= start) return { ok: false, reason: 'no JSON object found in the Architect\'s reply' };
+  let parsed;
+  try { parsed = JSON.parse(s.slice(start, end + 1)); } catch (err) { return { ok: false, reason: `not valid JSON: ${err.message}` }; }
+  const verdict = String(parsed?.verdict || '').toLowerCase().trim();
+  if (verdict !== 'approve' && verdict !== 'block') {
+    return { ok: false, reason: `verdict must be "approve" or "block", got ${JSON.stringify(parsed?.verdict)}` };
+  }
+  return { ok: true, verdict, reasoning: String(parsed?.reasoning || '') };
+}
+
+export async function runArchitectApprovalCall(env, task) {
+  if (!env?.ANTHROPIC_API_KEY) return { ok: false, reason: 'anthropic_api_key_not_configured' };
+
+  const budget = await getClaudeBudgetStatus(env, { component: 'architect' });
+  if (budget.overBudget) {
+    return { ok: false, reason: `architect_spec_budget_exhausted ($${budget.spentUsd.toFixed(2)}/$${budget.capUsd}/mo)`, budget };
+  }
+
+  let result;
+  try {
+    result = await callClaudeMessages({
+      apiKey: env.ANTHROPIC_API_KEY,
+      system: ARCHITECT_APPROVAL_SYSTEM,
+      messages: [{ role: 'user', content: buildArchitectApprovalUserPrompt(task) }],
+      maxTokens: 1500,
+      effort: 'medium',
+      disableThinking: true,
+    });
+  } catch (err) {
+    return { ok: false, reason: `anthropic call threw: ${err.message}` };
+  }
+
+  const spend = await recordClaudeSpend(env, {
+    inputTokens: result.inputTokens, outputTokens: result.outputTokens, component: 'architect',
+  });
+
+  const parsed = parseArchitectVerdict(result.text);
+  if (!parsed.ok) {
+    return { ok: false, reason: parsed.reason, raw: result.text, usage: { inputTokens: result.inputTokens, outputTokens: result.outputTokens }, spend, model: CLAUDE_MODEL };
+  }
+
+  return {
+    ok: true,
+    verdict: parsed.verdict,
+    reasoning: parsed.reasoning,
+    usage: { inputTokens: result.inputTokens, outputTokens: result.outputTokens },
+    spend,
+    budget,
+    model: CLAUDE_MODEL,
+  };
+}

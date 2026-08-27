@@ -97,6 +97,9 @@ import {
   // Desk 6 (session 31, Item B) — see processBuildArtifactBlock() below,
   // same supervised-only posture as Desk 5 above.
   buildArtifactAssignments, MAX_BUILD_ARTIFACTS_PER_TICK,
+  // The repair loop (session 31, Item E) — pure decision logic only; the
+  // fetching, model call and writes are in processRepairBlock() below.
+  fingerprintFinding, repairDecision,
 } from './admin-desk.js';
 // The lifecycle's own live index of what is in flight and who owes what on it.
 // `LOCATIONS` gives the back-office directory a readable deliverable sits in.
@@ -113,6 +116,9 @@ import {
   REPO_OWNER, REPO_NAME, BACKOFFICE_REPO_NAME, WAREHOUSE_REPO_NAME,
   REPO_TO_PROJECT_KEY, REPO_TO_TOKEN_SECRET, secretsPresentIn, commitFileToRepo,
   REPO_WRITE_TABLE_SQL,
+  // Session 31, Item E — branch + merge, added to this SAME governed module
+  // rather than as a bypass of it. See their own headers in repo-write.js.
+  ensureBranch, mergeBranchToMain,
 } from './repo-write.js';
 // The owner channel (2026-08-10, REQ-001). The BASE only — the interface and
 // the visual page over it are the office's work and are on the board.
@@ -149,7 +155,7 @@ import { buildSpec, specFilename, renderSpecPage, prefillFromItem } from './spec
 // The Architect's NAMED spec-writing path (session 31, Item A) — see this
 // module's own header for why `routable: false` on the `architect` lane in
 // model-routing.json is unaffected by this import.
-import { runArchitectSpecCall } from './architect-spec.js';
+import { runArchitectSpecCall, runArchitectApprovalCall } from './architect-spec.js';
 import {
   ADMIN_SESSION_PATH,
   isAdminPagePath, adminPageAuthorized, adminCredential, adminUnauthorizedResponse,
@@ -2505,6 +2511,227 @@ async function processBuildArtifactBlock(env, opts = {}) {
     : (out.queued === 0 ? 'queue empty — nothing written, nothing recorded.' : `${out.queued} queued and 0 produced.`);
   console.log(`[build-artifact] ${out.mode}: ${out.produced} produced, ${out.queued} queued, ${out.errors.length} error(s)`);
   return out;
+}
+
+/**
+ * Session 31, Item E — writes one new entry to `channel/to-owner/
+ * OPEN-QUESTIONS.md` when the repair loop's three strikes are reached. This
+ * is the office's own real owner-facing channel (`office-context.js
+ * parseOpenQuestions()` is its reader, both in every agent prompt and on
+ * `/owner`) — not a new, separate escalation path a human would have to
+ * learn to check. Follows the SAME contract `parseOpenQuestions()` enforces
+ * (`### Q-NNN — <question>`, required `Asked by:` and `If no answer comes:`
+ * fields) so this entry is readable by the mechanism that already exists,
+ * not a hand-invented shape that only looks like one.
+ */
+async function surfaceRepairStalemate(env, { slug, taskId, findingText, strikeCount }) {
+  const QUESTIONS_PATH = 'channel/to-owner/OPEN-QUESTIONS.md';
+  const existing = await fetchBackOfficeFile(env, QUESTIONS_PATH);
+  const body = existing.reason ? '' : existing.text;
+
+  const ids = [...body.matchAll(/^### Q-(\d{3})\s/gm)].map((m) => Number(m[1]));
+  const nextId = `Q-${String((ids.length ? Math.max(...ids) : 0) + 1).padStart(3, '0')}`;
+  const today = todayDateStr();
+
+  const entry = [
+    '',
+    `### ${nextId} — Repair loop stalled on \`tasks/${slug}/\` — the same finding blocked it three times`,
+    '',
+    `- **Asked by:** the repair loop (office-AI-agents \`workers/agent-runner.js\` \`processRepairBlock()\`), ${today}`,
+    `- **If no answer comes:** the branch \`repair/${slug}\` stays open and unmerged; the office does not keep repairing this finding on its own past this point.`,
+    `- **Answer:** —`,
+    '',
+    `Board task: ${taskId || '(none recorded)'}. The blocking finding that recurred ${strikeCount} times, verbatim:`,
+    '',
+    '```',
+    findingText,
+    '```',
+    '',
+    `This is E3 from session 31's brief: three repair attempts at the SAME finding is treated as non-convergence, not a reason to keep spending. `
+      + `The artifact as it stands is committed on \`repair/${slug}\` in the warehouse, unmerged, waiting on a human decision — fix it directly, `
+      + 'change the spec if the finding is actually a spec problem, or decide the finding does not actually block and say so.',
+    '',
+  ].join('\n');
+
+  const newBody = body ? `${body.replace(/\n+$/, '')}\n${entry}` : `# OPEN QUESTIONS — to the owner\n${entry}`;
+
+  let commit;
+  try {
+    commit = await commitFileToRepo(env, BACKOFFICE_REPO_NAME, QUESTIONS_PATH, newBody, `office: repair loop stalemate on ${slug} — ${nextId} [skip ci]`);
+  } catch (err) {
+    return { ok: false, reason: `commit threw: ${err?.message}` };
+  }
+  return { ok: commit.committed, questionId: nextId, reason: commit.committed ? null : commit.reason };
+}
+
+/**
+ * Session 31, Item E — the repair loop's ONE round. SUPERVISED ONLY, not on
+ * the schedule. The Architect NEVER repairs (E1): this desk's model call is
+ * always Cerebras (the `build_artifact` lane, reused — a repair produces
+ * the same SHAPE of thing a first build does, a complete file).
+ *
+ * Repairs land on a branch (`repair/<slug>`), never directly on main — a
+ * repair in progress must never silently overwrite what a reviewer already
+ * saw on main. The three-strike decision (admin-desk.js repairDecision())
+ * is made from a log committed alongside the repair on that same branch, so
+ * the count survives across rounds and across ticks without a new D1 table.
+ */
+async function processRepairBlock(env, opts = {}) {
+  if (!opts.bypassGate && !(await officeContextEnabled(env))) {
+    return { ok: false, skipped: true, reason: 'office_context_disabled' };
+  }
+
+  const { taskId, slug, agentId, findingText } = opts;
+  if (!slug || !findingText || !agentId) {
+    return { ok: false, reason: 'opts.slug, opts.agentId and opts.findingText are all required' };
+  }
+
+  const branchName = `repair/${slug}`;
+
+  const specFile = await fetchWarehouseFile(env, `tasks/${slug}/SPEC.md`);
+  if (specFile.reason) return { ok: false, reason: `could not read tasks/${slug}/SPEC.md: ${specFile.reason}` };
+  const target = readSpecTargetPath(specFile.text, slug);
+  if (!target.ok) return { ok: false, reason: target.reason };
+
+  const logPath = `tasks/${slug}/notes/repair-log.json`;
+  let logFile = await fetchWarehouseFile(env, logPath, { ref: branchName });
+  if (logFile.reason) logFile = await fetchWarehouseFile(env, logPath);
+  let repairLog = [];
+  if (!logFile.reason) {
+    try { const parsed = JSON.parse(logFile.text); if (Array.isArray(parsed)) repairLog = parsed; } catch { /* malformed log — treated as empty, never as a reason to skip a strike check */ }
+  }
+
+  const decision = repairDecision(repairLog, findingText);
+  if (decision.action === 'stop_surface_to_owner') {
+    const surfaced = await surfaceRepairStalemate(env, { slug, taskId, findingText, strikeCount: decision.strikeCount });
+    return {
+      ok: true, action: 'stop_surface_to_owner', slug, fingerprint: decision.fingerprint,
+      strikeCount: decision.strikeCount, surfacedToOwner: surfaced,
+    };
+  }
+
+  const branch = await ensureBranch(env, WAREHOUSE_REPO_NAME, branchName);
+  if (!branch.ok) return { ok: false, reason: `could not create/reach branch ${branchName}: ${branch.reason}` };
+
+  let currentFile = await fetchWarehouseFile(env, target.targetPath, { ref: branchName });
+  if (currentFile.reason) currentFile = await fetchWarehouseFile(env, target.targetPath);
+  if (currentFile.reason) return { ok: false, reason: `could not read current content of ${target.targetPath} from branch or main: ${currentFile.reason}` };
+
+  const config = getAgentConfig(agentId);
+  const laneMaxTokens = MODEL_ROUTING?.lanes?.build_artifact?.max_tokens || 6000;
+  const routed = await routeTaskTypeCall(env, 'build_artifact', {
+    systemPrompt: `You are ${config?.name || `Agent ${agentId}`}, ${config?.role || 'an agent'} in an AI office. `
+      + `${config?.personality?.core || ''} You are repairing a real deliverable file to address ONE specific review finding.`,
+    prompt: [
+      `Task ${taskId || slug} — warehouse \`tasks/${slug}/\`. Repair round ${decision.strikeCount}.`,
+      '',
+      'The spec, in full:',
+      '---', specFile.text, '---',
+      '',
+      `The CURRENT content of \`${target.targetPath}\`:`,
+      '---', currentFile.text, '---',
+      '',
+      'The blocking review finding you must fix, and ONLY this — do not rewrite unrelated parts of the file:',
+      '---', findingText, '---',
+      '',
+      `Produce the COMPLETE repaired content of \`${target.targetPath}\`. Output ONLY the raw file content — no fence, no commentary.`,
+    ].join('\n'),
+    maxTokens: laneMaxTokens,
+    agentId: `repair:${slug}:${agentId}:${decision.strikeCount}`,
+  });
+
+  const text = routed.ok ? routed.result?.text : null;
+  if (!routed.ok || !text || !String(text).trim()) {
+    return { ok: false, reason: `${routed.reason || 'empty repair from provider'} (provider: ${routed.provider || 'none'})` };
+  }
+  const content = String(text).trim().replace(/^```[\w-]*\n/, '').replace(/\n```\s*$/, '');
+
+  const commit = await commitFileToRepo(
+    env, WAREHOUSE_REPO_NAME, target.targetPath, content,
+    `office: repair round ${decision.strikeCount} for ${taskId || slug} (finding ${decision.fingerprint}) [skip ci]`,
+    { branch: branchName }
+  );
+  if (!commit.committed) return { ok: false, reason: `repair commit failed: ${commit.reason || 'no reason given'}` };
+
+  repairLog.push({ fingerprint: decision.fingerprint, at: new Date().toISOString(), taskId: taskId || null, agentId });
+  const logCommit = await commitFileToRepo(
+    env, WAREHOUSE_REPO_NAME, logPath, `${JSON.stringify(repairLog, null, 2)}\n`,
+    `office: repair log for ${taskId || slug}, round ${decision.strikeCount} [skip ci]`,
+    { branch: branchName }
+  );
+
+  return {
+    ok: true, action: 'repaired', slug, branch: branchName, targetPath: target.targetPath,
+    provider: routed.provider, strikeCount: decision.strikeCount, fingerprint: decision.fingerprint,
+    committed: commit.committed, logCommitted: logCommit.committed,
+  };
+}
+
+/**
+ * Session 31, Item E, ADDENDUM — the Architect's approval and, on approval,
+ * the merge. His SECOND and LAST touch on a build (component:'architect',
+ * the same sub-budget runArchitectSpecCall() draws from). He does not
+ * repair — a "block" verdict here is handed back as a new finding for
+ * processRepairBlock(), never fixed in this call.
+ *
+ * MERGE SCOPE IS ABSOLUTE: warehouse-office-AI-agents only, via
+ * mergeBranchToMain() (repo-write.js), which refuses (never resolves, never
+ * forces) on any conflict. On a conflict this function returns the artifact
+ * committed-but-unmerged, which the brief itself calls a fine outcome.
+ */
+async function processArchitectApprovalBlock(env, opts = {}) {
+  if (!opts.bypassGate && !(await officeContextEnabled(env))) {
+    return { ok: false, skipped: true, reason: 'office_context_disabled' };
+  }
+
+  const { taskId, slug, reviewSummary } = opts;
+  if (!slug) return { ok: false, reason: 'opts.slug is required' };
+
+  const branchName = `repair/${slug}`;
+
+  const specFile = await fetchWarehouseFile(env, `tasks/${slug}/SPEC.md`);
+  if (specFile.reason) return { ok: false, reason: `could not read tasks/${slug}/SPEC.md: ${specFile.reason}` };
+  const target = readSpecTargetPath(specFile.text, slug);
+  if (!target.ok) return { ok: false, reason: target.reason };
+
+  // Prefer the repair branch's version if one exists (a repaired artifact
+  // awaiting approval); fall back to main's (nothing has ever blocked it).
+  let artifactFile = await fetchWarehouseFile(env, target.targetPath, { ref: branchName });
+  let onBranch = !artifactFile.reason;
+  if (artifactFile.reason) {
+    artifactFile = await fetchWarehouseFile(env, target.targetPath);
+    onBranch = false;
+  }
+  if (artifactFile.reason) return { ok: false, reason: `could not read ${target.targetPath} from branch or main: ${artifactFile.reason}` };
+
+  const approval = await runArchitectApprovalCall(env, {
+    taskId, slug, specText: specFile.text, artifactContent: artifactFile.text, reviewSummary,
+  });
+  if (!approval.ok) return approval;
+
+  if (approval.verdict === 'block') {
+    return { ok: true, verdict: 'block', reasoning: approval.reasoning, usage: approval.usage, merged: false };
+  }
+
+  // approve, and nothing to merge (the artifact never left main) — done,
+  // no merge to attempt.
+  if (!onBranch) {
+    return { ok: true, verdict: 'approve', reasoning: approval.reasoning, usage: approval.usage, merged: false, mergeReason: 'nothing on a branch — the artifact was never repaired off main' };
+  }
+
+  const merge = await mergeBranchToMain(env, WAREHOUSE_REPO_NAME, branchName, `office: Architect-approved merge for ${taskId || slug} [skip ci]`);
+  if (!merge.merged) {
+    return { ok: true, verdict: 'approve', reasoning: approval.reasoning, usage: approval.usage, merged: false, conflict: merge.conflict, mergeReason: merge.reason };
+  }
+
+  // VERIFY THE MERGE, DO NOT ASSUME IT — a fresh read of main, not the
+  // merge API's own success status.
+  const verify = await fetchWarehouseFile(env, target.targetPath);
+  return {
+    ok: true, verdict: 'approve', reasoning: approval.reasoning, usage: approval.usage,
+    merged: true, mergeSha: merge.sha, path: target.targetPath,
+    verifiedOnMain: !verify.reason && verify.text === artifactFile.text,
+  };
 }
 
 async function processOwnerChannelBlock(env, opts = {}) {
@@ -8031,6 +8258,27 @@ export default {
             // office_context_enabled.
             result = await processBuildArtifactBlock(env, {
               taskId: body.taskId, slug: body.slug, agentId: body.agentId, title: body.title,
+              bypassGate: body.bypassGate !== false,
+            });
+            break;
+          case 'repair_block':
+            // Session 31, Item E — SUPERVISED ONLY, not on the schedule.
+            // Body: { taskId?, slug, agentId, findingText }. See
+            // processRepairBlock()'s own header. Cerebras only — the
+            // Architect never repairs.
+            result = await processRepairBlock(env, {
+              taskId: body.taskId, slug: body.slug, agentId: body.agentId, findingText: body.findingText,
+              bypassGate: body.bypassGate !== false,
+            });
+            break;
+          case 'architect_approval_block':
+            // Session 31, Item E, addendum — SUPERVISED ONLY, not on the
+            // schedule. Body: { taskId?, slug, reviewSummary? }. On
+            // approve, attempts a clean merge of repair/<slug> into main;
+            // never forces, never resolves a conflict. Costs one real
+            // Anthropic call against component:'architect'.
+            result = await processArchitectApprovalBlock(env, {
+              taskId: body.taskId, slug: body.slug, reviewSummary: body.reviewSummary,
               bypassGate: body.bypassGate !== false,
             });
             break;

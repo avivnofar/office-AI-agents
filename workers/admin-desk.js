@@ -497,6 +497,61 @@ export function buildArtifactAssignments(boardTasks = [], opts = {}) {
   return { draw, deferred, skipped };
 }
 
+/* ───────────────────────────── The repair loop ───────────────────────────── */
+
+/**
+ * Session 31, Item E — a small, deterministic fingerprint for a blocking
+ * finding's text, so the SAME finding recurring can be told apart from
+ * different findings that each happen to block once. Normalized (lowercase,
+ * collapsed whitespace) before hashing so cosmetic rewording of the same
+ * complaint by a different reviewer still counts as the same finding. Not
+ * cryptographic — FNV-1a, the same family this repo already uses elsewhere
+ * (task-router.js's embodiment hash) for a deterministic, dependency-free
+ * fingerprint.
+ */
+export function fingerprintFinding(text) {
+  const s = String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i += 1) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
+ * Given a repair log (an array of prior attempts, each carrying at least
+ * `{ fingerprint }`, OLDEST FIRST) and the CURRENT blocking finding, decides
+ * whether to attempt another repair or to stop and surface it to the owner.
+ *
+ * THREE STRIKES, counted from the most recent attempt BACKWARD: this is
+ * consecutive-from-the-tail, not a total-ever count. A finding that was
+ * fixed, recurred once much later for an unrelated reason, and gets fixed
+ * again is a different story than one that has never actually converged —
+ * counting from the tail catches "this exact thing keeps not getting
+ * fixed" without also catching an old, already-resolved recurrence.
+ *
+ * The THIRD attempt at the same finding is refused (strikeCount would reach
+ * 3) — two repairs are given a real chance to converge; a third attempt at
+ * something that has already failed twice is the "will run until the
+ * budget is gone" failure E3 exists to prevent.
+ *
+ * @param {Array<{fingerprint: string}>} repairLog
+ * @param {string} findingText
+ * @returns {{action: 'repair'|'stop_surface_to_owner', fingerprint: string, strikeCount: number}}
+ */
+export function repairDecision(repairLog, findingText) {
+  const fingerprint = fingerprintFinding(findingText);
+  let priorStreak = 0;
+  for (let i = (repairLog || []).length - 1; i >= 0; i -= 1) {
+    if (repairLog[i]?.fingerprint === fingerprint) priorStreak += 1;
+    else break;
+  }
+  const strikeCount = priorStreak + 1;
+  if (strikeCount >= 3) return { action: 'stop_surface_to_owner', fingerprint, strikeCount };
+  return { action: 'repair', fingerprint, strikeCount };
+}
+
 /* ───────────────────────────── The honest report ────────────────────────── */
 
 /**

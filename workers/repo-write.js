@@ -326,9 +326,18 @@ export async function commitFileToRepo(env, repoName, path, content, message, op
    * moved in between. A refused write with a conflict status is a good
    * outcome: it is the lost update, surfaced instead of absorbed.
    */
+  /*
+   * ── opts.branch (session 31, Item E) ─────────────────────────────────────
+   * When given, the sha lookup below reads FROM that branch (`?ref=`) rather
+   * than the repo's default branch, and the PUT commits TO that branch — so a
+   * repair round never reads main's sha and never lands on main by accident.
+   * Absent, this is byte-for-byte the pre-existing behaviour (every caller
+   * before this session).
+   */
   let sha = opts.expectedSha;
   if (!sha) {
-    const existing = await fetch(url, { headers }).catch(() => null);
+    const shaUrl = opts.branch ? `${url}?ref=${encodeURIComponent(opts.branch)}` : url;
+    const existing = await fetch(shaUrl, { headers }).catch(() => null);
     if (existing?.ok) {
       const data = await existing.json().catch(() => null);
       sha = data?.sha;
@@ -351,6 +360,7 @@ export async function commitFileToRepo(env, repoName, path, content, message, op
       // 0x7F. See the header's note on opts.contentIsBase64.
       content: opts.contentIsBase64 ? String(content) : btoa(unescape(encodeURIComponent(content))),
       ...(sha ? { sha } : {}),
+      ...(opts.branch ? { branch: opts.branch } : {}),
     }),
   });
 
@@ -379,4 +389,141 @@ export async function commitFileToRepo(env, repoName, path, content, message, op
     path,
     ...(conflict ? { conflict: true, reason: 'sha_conflict_or_missing' } : {}),
   };
+}
+
+/**
+ * Session 31, Item E — creates a branch from the repo's current default
+ * branch, if it does not already exist. Goes through the SAME
+ * resolveRepoWrite() permission check commitFileToRepo() uses (an unmapped
+ * or push:false repo is refused here too, before any git object is touched).
+ * The representative path carries no code-file extension, so this call never
+ * trips the code-write gate on its own — it creates a branch, not a file.
+ *
+ * A7's "one active branch per project" is NOT enforced here — this only
+ * refuses an unauthorized repo, the same as every other write in this
+ * module. Enforcing "one active branch" is the CALLER's responsibility (the
+ * repair loop tracks its own branch state), because this function has no
+ * shared state with a caller to know what "active" means for it.
+ *
+ * @returns {Promise<{ok: boolean, created: boolean, sha: string|null, reason: string|null}>}
+ */
+export async function ensureBranch(env, repoName, branchName) {
+  const verdict = resolveRepoWrite(projectPermissions, {
+    repoToProjectKey: REPO_TO_PROJECT_KEY,
+    repoToTokenSecret: REPO_TO_TOKEN_SECRET,
+    ownRepoName: REPO_NAME,
+    targetRepoName: repoName,
+    path: `_branch_check/${branchName}`,
+    secretsPresent: secretsPresentIn(env),
+  });
+  if (!verdict.allowed) return { ok: false, created: false, sha: null, reason: verdict.reason };
+
+  repoName = verdict.repoName;
+  const headers = {
+    Authorization: `Bearer ${env[verdict.tokenSecret]}`,
+    'User-Agent': 'data-center-agent-sim',
+    Accept: 'application/vnd.github+json',
+  };
+
+  const existingRef = await fetch(
+    `https://api.github.com/repos/${REPO_OWNER}/${repoName}/git/ref/heads/${encodeURIComponent(branchName)}`,
+    { headers }
+  ).catch(() => null);
+  if (existingRef?.ok) {
+    const data = await existingRef.json().catch(() => null);
+    return { ok: true, created: false, sha: data?.object?.sha || null, reason: null };
+  }
+
+  const repoInfo = await fetch(`https://api.github.com/repos/${REPO_OWNER}/${repoName}`, { headers }).catch(() => null);
+  const repoData = repoInfo?.ok ? await repoInfo.json().catch(() => null) : null;
+  const defaultBranch = repoData?.default_branch || 'main';
+
+  const baseRef = await fetch(
+    `https://api.github.com/repos/${REPO_OWNER}/${repoName}/git/ref/heads/${encodeURIComponent(defaultBranch)}`,
+    { headers }
+  ).catch(() => null);
+  if (!baseRef?.ok) {
+    return { ok: false, created: false, sha: null, reason: `could not read ${defaultBranch}'s ref (HTTP ${baseRef?.status ?? 'network error'})` };
+  }
+  const baseData = await baseRef.json().catch(() => null);
+  const baseSha = baseData?.object?.sha;
+  if (!baseSha) return { ok: false, created: false, sha: null, reason: `${defaultBranch}'s ref carried no sha` };
+
+  const created = await fetch(
+    `https://api.github.com/repos/${REPO_OWNER}/${repoName}/git/refs`,
+    {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ref: `refs/heads/${branchName}`, sha: baseSha }),
+    }
+  ).catch(() => null);
+  if (!created?.ok) {
+    const body = created ? await created.text().catch(() => '') : '';
+    return { ok: false, created: false, sha: null, reason: `branch creation failed (HTTP ${created?.status ?? 'network error'}): ${body.slice(0, 300)}` };
+  }
+  return { ok: true, created: true, sha: baseSha, reason: null };
+}
+
+/**
+ * Session 31, Item E, ADDENDUM — the Architect's merge step. CLEAN MERGES
+ * ONLY: a 409/conflict from GitHub is returned as-is, never retried, never
+ * resolved, never forced. No `--force`, no history rewrite, no deleting the
+ * branch to route around a failure — if it does not go cleanly by ordinary
+ * means, it does not go, and the branch is left exactly as it was for a
+ * human to look at. Verified LIVE 2026-08-28: a real branch, a real commit
+ * on it, and a real clean merge via this exact API shape, read back from the
+ * remote afterward (`git pull`) rather than trusted from the HTTP status
+ * alone.
+ *
+ * Goes through the SAME resolveRepoWrite() permission check as every other
+ * write here.
+ *
+ * @returns {Promise<{merged: boolean, sha: string|null, conflict: boolean, reason: string|null, status: number|null}>}
+ */
+export async function mergeBranchToMain(env, repoName, branchName, message) {
+  const verdict = resolveRepoWrite(projectPermissions, {
+    repoToProjectKey: REPO_TO_PROJECT_KEY,
+    repoToTokenSecret: REPO_TO_TOKEN_SECRET,
+    ownRepoName: REPO_NAME,
+    targetRepoName: repoName,
+    path: `_merge_check/${branchName}`,
+    secretsPresent: secretsPresentIn(env),
+  });
+  if (!verdict.allowed) return { merged: false, sha: null, conflict: false, reason: verdict.reason, status: null };
+
+  repoName = verdict.repoName;
+  const headers = {
+    Authorization: `Bearer ${env[verdict.tokenSecret]}`,
+    'User-Agent': 'data-center-agent-sim',
+    Accept: 'application/vnd.github+json',
+  };
+
+  const repoInfo = await fetch(`https://api.github.com/repos/${REPO_OWNER}/${repoName}`, { headers }).catch(() => null);
+  const repoData = repoInfo?.ok ? await repoInfo.json().catch(() => null) : null;
+  const base = repoData?.default_branch || 'main';
+
+  const res = await fetch(
+    `https://api.github.com/repos/${REPO_OWNER}/${repoName}/merges`,
+    {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ base, head: branchName, commit_message: message }),
+    }
+  ).catch((err) => ({ ok: false, status: 0, _err: err?.message }));
+
+  if (res.status === 204) {
+    // Already up to date — head carries nothing base does not already have.
+    // Not a failure, and not a real merge either.
+    return { merged: false, sha: null, conflict: false, reason: 'already_up_to_date', status: 204 };
+  }
+  if (res.status === 409) {
+    const body = await res.text().catch(() => '');
+    return { merged: false, sha: null, conflict: true, reason: `merge conflict (HTTP 409): ${body.slice(0, 500)}`, status: 409 };
+  }
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    return { merged: false, sha: null, conflict: false, reason: `merge failed (HTTP ${res.status}): ${body.slice(0, 500)}`, status: res.status };
+  }
+  const data = await res.json().catch(() => null);
+  return { merged: true, sha: data?.sha || null, conflict: false, reason: null, status: res.status };
 }
