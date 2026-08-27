@@ -1509,8 +1509,49 @@ const MEETING_LANE = 'long_document';
  * Both are stamped onto the meeting record beside the `finish_reason` they
  * belong with, so the next session revises them from evidence.
  */
-const TRANSCRIPT_MAX_TOKENS = 3000;
-const DECISIONS_MAX_TOKENS = 1500;
+const TRANSCRIPT_MAX_TOKENS = 6000;
+const DECISIONS_MAX_TOKENS = 4000;
+
+/*
+ * ── REVISED THE SAME DAY, FROM THE FIRST LIVE RUN (3000/1500 -> 6000/4000) ──
+ *
+ * The paragraphs above are preserved exactly as they were written, because the
+ * reasoning in them was sound and it was still not enough — and that is the
+ * lesson worth keeping rather than editing away.
+ *
+ * WHAT THEY MISSED: Cerebras' `gpt-oss-120b` is a REASONING model, and its
+ * thinking is charged against `max_tokens` alongside the answer. The budgets
+ * above were sized from output LENGTHS measured on Groq and Cloudflare, which
+ * are not reasoning models, so they were sized for the visible half of a
+ * number that now has two halves. `cerebras-client.js` MIN_OUTPUT_TOKENS
+ * documents exactly this and it was read for the wrong purpose — as a floor to
+ * clear, rather than as a per-call overhead to budget on top of.
+ *
+ * MEASURED on the first live run of this code (daily_standup, 2026-08-27):
+ *
+ *   transcript call   finish_reason "stop",   output_tokens 2244 / 3000
+ *                     — but only 1,366 characters of visible transcript,
+ *                       roughly 340 tokens. ~1,900 tokens went to reasoning.
+ *   decisions call    finish_reason "length", output_tokens 1500 / 1500
+ *                     — and NOTHING came back. Every array empty, no summary.
+ *                       The reasoning consumed the whole budget before the
+ *                       model reached the JSON.
+ *
+ * So the overhead is roughly 1,900 tokens per call on these prompts, and it is
+ * charged BEFORE any answer is written. 4,000 for the decisions call leaves
+ * ~2,100 for a JSON object whose largest plausible form is 700-900 tokens.
+ * 6,000 for the transcript leaves ~4,100 for the dialogue — the first budget
+ * was not binding on that call, but at 3,000 it had ~1,100 usable tokens for
+ * an agenda that asks for up to twenty turns, which is one good meeting away
+ * from being binding again.
+ *
+ * THE CEILING IS NOT FREE, AND IT IS ALSO NOT PAID FOR. Cerebras is on its
+ * free tier, capped by requests per minute rather than by tokens, so a larger
+ * output budget costs quota nothing here — the overtime rule is untouched. If
+ * the lane ever degrades to Mistral, these numbers should be re-measured
+ * against it, because a non-reasoning model spends none of this overhead and
+ * the budgets would then be far larger than anything needs.
+ */
 
 /**
  * ONE call, however it ends up being served. Both of Item C's calls go through
