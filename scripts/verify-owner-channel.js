@@ -30,7 +30,7 @@ import {
   parseSubmissions, submissionSections, ageQuestions,
   classifyOwnerIssueReadback, messageAddressesAgent,
   // SESSION 14 (2026-08-23), ITEM B: the client's Issue replies.
-  OWNER_ISSUE_REPLIES_DIR, parseIssueReply, issueReplySections,
+  OWNER_ISSUE_REPLIES_DIR, parseIssueReply, issueReplySections, collapseDuplicateIssueReplies,
   // SESSION 15 (2026-08-24), ITEM D: a reply stops the repeat.
   classifyOwnerReply, itemIdsInText, RERAISE_AFTER_DAYS,
 } from '../workers/owner-channel.js';
@@ -955,6 +955,65 @@ section('§12 the client\'s Issue replies — filed, versioned, and (until today
     /OUTRANKS the delegation board/.test(rendered));
   check('every reply reads as OUTSTANDING — no read/acted state is claimed for these',
     /NO READ\/ACTED STATE/.test(rendered));
+
+  /* ── ONE MESSAGE POSTED TO FIVE ISSUES (SESSION 28, ITEM A) ────────────
+   *
+   * The rule under test, stated so a reader can apply it by hand: two issue
+   * replies are the same message when their bodies are identical after
+   * collapsing runs of whitespace, AND they name the same author, AND they
+   * carry the same date — in which case the earliest is shown and the other
+   * Issue numbers are recorded on it.
+   *
+   * The SAFETY cases below matter more than the collapsing one. A dedup that
+   * merges two things the client said separately is far worse than 3,637
+   * wasted tokens, so each conjunct is tested by breaking it on its own.
+   */
+  const dupOf = (n, { body = 'the same words', author = 'avivnofar', date = '2026-08-25', written = null } = {}) => ({
+    id: `${date}-issue-${n}-comment-${1000 + n}`,
+    path: `channel/from-owner-issues/${date}-issue-${n}-comment-${1000 + n}.md`,
+    issueNumber: String(n), issueTitle: `t${n}`, author, date,
+    written: written || `${date}T09:10:${String(10 + n).padStart(2, '0')}Z`,
+    commentId: String(1000 + n), body,
+  });
+
+  const fiveCopies = [37, 38, 39, 40, 47].map((n) => dupOf(n));
+  const collapsedFive = collapseDuplicateIssueReplies(fiveCopies);
+  check('five identical bodies, same author and same day, collapse to ONE',
+    collapsedFive.kept.length === 1 && collapsedFive.collapsed === 4);
+  check('...and the survivor is the EARLIEST, not whichever the directory listed first',
+    collapsedFive.kept[0].issueNumber === '37');
+  check('...and it names every other Issue the same text went to',
+    collapsedFive.kept[0].alsoPostedTo.map((o) => o.issueNumber).join(',') === '38,39,40,47');
+  check('whitespace-only differences still collapse — that IS the normalisation',
+    collapseDuplicateIssueReplies([dupOf(1), dupOf(2, { body: 'the   same\n\nwords' })]).kept.length === 1);
+
+  // Each conjunct, broken on its own. All three must REFUSE to collapse.
+  check('[SAFETY] same body on a DIFFERENT DAY is NOT collapsed — saying it again is the message',
+    collapseDuplicateIssueReplies([dupOf(1), dupOf(2, { date: '2026-09-01' })]).kept.length === 2);
+  check('[SAFETY] same body from a DIFFERENT AUTHOR is NOT collapsed — that is two people agreeing',
+    collapseDuplicateIssueReplies([dupOf(1), dupOf(2, { author: 'someone-else' })]).kept.length === 2);
+  check('[SAFETY] a missing author or date NEVER matches another missing one',
+    collapseDuplicateIssueReplies([dupOf(1, { author: null }), dupOf(2, { author: null })]).kept.length === 2);
+  check('[SAFETY] bodies differing in WORDING are two replies, not one',
+    collapseDuplicateIssueReplies([dupOf(1), dupOf(2, { body: 'the same words, roughly' })]).kept.length === 2);
+  check('[SAFETY] bodies differing only in CASE are two replies — casing is not normalised away',
+    collapseDuplicateIssueReplies([dupOf(1), dupOf(2, { body: 'The Same Words' })]).kept.length === 2);
+
+  // ── A COLLAPSED COPY IS RECORDED, NEVER VANISHED (A4) ─────────────────
+  const dupRendered = issueReplySections(fiveCopies, { shape: 'agent' })
+    .map((x) => (x.items ? `${x.header}\n${x.items.join('\n')}` : x.text)).join('\n');
+  check('the COUNT LINE states both numbers — 5 on record, 1 distinct — and never just the smaller one',
+    /5 on record, 1 distinct/.test(dupRendered));
+  check('...and says plainly that nothing was omitted',
+    /NOTHING IS OMITTED/.test(dupRendered));
+  check('the shown copy tells the reader he posted it to FIVE Issues, naming them',
+    /WORD FOR WORD, TO 5 ISSUES/.test(dupRendered) && /#38, #39, #40, #47/.test(dupRendered));
+  check('...and warns an agent not to read it as said once — repetition is emphasis',
+    /DO NOT READ THIS AS SAID ONCE/.test(dupRendered));
+  check('the client\'s words themselves are still rendered in full, not summarised away',
+    /the same words/.test(dupRendered));
+  check('[FAILS-OLD] before this rule the same five rendered five times',
+    (dupRendered.match(/the same words/g) || []).length === 1);
 
   // ── THE ZERO CASE, WHICH IS WHERE THE ORIGINAL DEFECT LIVED ────────────
   const empty = issueReplySections([], { shape: 'agent' });

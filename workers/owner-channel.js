@@ -864,6 +864,104 @@ function issueReplyBodyForShape(reply, shape) {
 }
 
 /**
+ * Whitespace-collapsed body text. THE ONLY NORMALISATION APPLIED, deliberately.
+ *
+ * Not casing, not punctuation, not wording. Two replies that differ in any of
+ * those are TWO REPLIES and both are shown. The rule below has to be applicable
+ * by hand by someone reading the two files, and every extra normalisation step
+ * is another way for it to silence something the client said twice on purpose.
+ */
+function normaliseReplyBody(body) {
+  return String(body || '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Collapses replies that are THE SAME MESSAGE POSTED TO SEVERAL ISSUES.
+ *
+ * ── THE RULE, IN ONE SENTENCE ────────────────────────────────────────────
+ *
+ *   Two issue replies are the same message when their bodies are identical
+ *   after collapsing runs of whitespace, AND they name the same author, AND
+ *   they carry the same date — in which case the office shows the earliest one
+ *   and records the other Issue numbers on it.
+ *
+ * All three conjuncts are required. Same body, different author is two people
+ * agreeing. Same body a week later is the client saying it AGAIN because
+ * nothing happened the first time — the single most important thing a reply can
+ * mean, and it must never be folded into the original.
+ *
+ * ── WHY THE HEADER IS NOT PART OF THE COMPARISON ─────────────────────────
+ *
+ * It already cannot be. parseIssueReply() takes `body` as everything after the
+ * first `---` rule, and the four lines that differ between copies — the title,
+ * the `Issue:` line, `Written:` and `Comment id:` — all sit above it. So this
+ * compares exactly what the client wrote and nothing the office stamped on.
+ *
+ * ── WHAT THIS IS NOT ─────────────────────────────────────────────────────
+ *
+ * NOT a cap, and not a budget mechanism. Nothing here drops a message to save
+ * tokens; it removes copies of text already present verbatim elsewhere in the
+ * same prompt, and every distinct thing the client said still appears in full.
+ * The saving is a consequence, never the criterion — see the 2026-08-23 finding
+ * that fitToBudget() had been silently trimming `owner-messages` for two weeks,
+ * which is the defect this channel exists to not repeat.
+ *
+ * MEASURED, 2026-08-27: five files in `channel/from-owner-issues/` (Issues
+ * 37/38/39/40/47, comments 5408107654..5408110004, written 09:10:11Z through
+ * 09:10:21Z) carry byte-identical bodies — one md5 across all five, differing
+ * only in those four header lines. They are five REAL GitHub comments, not a
+ * writer defect: `recordIssueReplies()` files one file per comment and is
+ * idempotent by an explicit read. The client posted the same closing text to
+ * five threads because the office had asked him the same question in five
+ * notifications — which his own reply says in as many words.
+ *
+ * @param {Array} replies - parsed replies from parseIssueReply()
+ * @returns {{kept: Array, collapsed: number}} `kept` preserves first-seen order;
+ *   a survivor that absorbed copies carries `alsoPostedTo`.
+ */
+export function collapseDuplicateIssueReplies(replies) {
+  const list = Array.isArray(replies) ? replies : [];
+  const groups = new Map();
+
+  for (const r of list) {
+    /*
+     * A null author or a null date does NOT match another null. An
+     * unattributed reply is not evidence of sameness, and the office's own
+     * transcriber records both fields — so a missing one is a defect worth
+     * seeing twice, never a licence to merge two of the client's messages.
+     */
+    const key = (r.author && r.date)
+      ? ['dup', normaliseReplyBody(r.body), r.author, r.date].join(' :: ')
+      : ['solo', r.id].join(' :: ');
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  }
+
+  const kept = [];
+  let collapsed = 0;
+
+  for (const group of groups.values()) {
+    // Earliest first, by the timestamp the client's own comment carries.
+    // `written` is ISO, so a lexical compare is a chronological one; `id`
+    // breaks a tie so the survivor is deterministic rather than dependent on
+    // the order the directory happened to list.
+    const ordered = group.slice().sort((a, b) =>
+      String(a.written || '').localeCompare(String(b.written || ''))
+      || String(a.id || '').localeCompare(String(b.id || '')));
+
+    const survivor = ordered[0];
+    const others = ordered.slice(1);
+    collapsed += others.length;
+
+    kept.push(others.length
+      ? { ...survivor, alsoPostedTo: others.map((o) => ({ issueNumber: o.issueNumber, commentId: o.commentId, path: o.path })) }
+      : survivor);
+  }
+
+  return { kept, collapsed };
+}
+
+/**
  * The office-context sections for the client's Issue replies.
  *
  * ── A SEPARATE SECTION, NOT A MERGE INTO `owner-messages` ────────────────
@@ -915,12 +1013,19 @@ export function issueReplySections(replies, { shape = 'agent', malformed = [] } 
   // Renders at ZERO, exactly as the owner-message count does. "He has not
   // replied" and "the reply directory could not be read" are different facts and
   // must not look alike; the second lands in office-context.js's errors section.
+  // The same text posted to several Issues is shown once, with the other Issue
+  // numbers named on the copy that is shown. See collapseDuplicateIssueReplies().
+  const { kept, collapsed } = collapseDuplicateIssueReplies(list);
+
   sections.push({
     label: 'owner-issue-replies-count',
     priority: 0,
     text: list.length === 0
       ? `CLIENT REPLIES ON GITHUB ISSUES (back-office ${OWNER_ISSUE_REPLIES_DIR}/): none on record.${refused.length ? ` ${refused.length} were REFUSED and are named above — this is NOT an empty channel.` : ''}`
-      : `CLIENT REPLIES ON GITHUB ISSUES (back-office ${OWNER_ISSUE_REPLIES_DIR}/): ${list.length} on record.`
+      : `CLIENT REPLIES ON GITHUB ISSUES (back-office ${OWNER_ISSUE_REPLIES_DIR}/): ${list.length} on record`
+        + (collapsed
+          ? `, ${kept.length} distinct. ${collapsed} of them are the SAME TEXT he posted to more than one Issue; each is shown ONCE, and the copy that is shown names every Issue it went to. NOTHING IS OMITTED — every distinct thing he said is below, in full.`
+          : '.')
         + ' These are the office\'s TRANSCRIPTIONS of what he wrote in an Issue thread — his words, but NOT files he wrote himself.'
         + ' They carry NO read/acted state, so treat every one as OUTSTANDING until the work it asks for is done.',
   });
@@ -929,7 +1034,7 @@ export function issueReplySections(replies, { shape = 'agent', malformed = [] } 
 
   // Newest first. A client reply is the most recent thing he has said, and if a
   // budget squeeze ever trims this list the oldest is the right one to lose.
-  const ordered = list.slice().sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
+  const ordered = kept.slice().sort((a, b) => String(b.date || '').localeCompare(String(a.date || '')));
 
   sections.push({
     label: 'owner-issue-replies',
@@ -942,9 +1047,26 @@ export function issueReplySections(replies, { shape = 'agent', malformed = [] } 
         ? `Issue #${r.issueNumber}${r.issueTitle ? ` — ${r.issueTitle}` : ''}`
         : 'ISSUE NUMBER NOT RECORDED BY THE OFFICE\'S OWN TRANSCRIBER';
       const who = r.author ? `by ${r.author}` : 'AUTHOR NOT RECORDED';
+      /*
+       * A COLLAPSED COPY IS RECORDED, NEVER VANISHED.
+       *
+       * Two readers have to be served by this line and they need opposite
+       * things. The CLIENT must be able to see that his reply reached all five
+       * threads, so he is not told the office lost four of them. An AGENT must
+       * not conclude he said this once when he said it five times to five
+       * different notifications — repetition is emphasis, and a dedup that
+       * hides the count has edited his meaning while preserving his words.
+       */
+      const alsoLine = Array.isArray(r.alsoPostedTo) && r.alsoPostedTo.length
+        ? `  HE POSTED THIS SAME TEXT, WORD FOR WORD, TO ${r.alsoPostedTo.length + 1} ISSUES: `
+          + `#${r.issueNumber || '?'} (shown here) and ${r.alsoPostedTo.map((o) => `#${o.issueNumber || '?'}`).join(', ')}. `
+          + 'One copy is shown because the text is identical; the others are on record at back-office '
+          + `${OWNER_ISSUE_REPLIES_DIR}/. DO NOT READ THIS AS SAID ONCE — he answered every one of those threads.\n`
+        : '';
       return '- [CLIENT REPLY — transcribed by the office from a GitHub Issue thread, NOT a file he wrote] '
         + `${r.date || 'DATE NOT RECORDED'} — ${where} — ${who}`
         + ' — NO READ/ACTED STATE EXISTS FOR THESE; TREAT AS OUTSTANDING\n'
+        + alsoLine
         + `  ${issueReplyBodyForShape(r, shape).replace(/\n/g, '\n  ')}`;
     }),
   });
