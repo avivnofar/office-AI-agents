@@ -44,6 +44,12 @@ import relationships from '../config/relationships.json' with { type: 'json' };
 import officeProjects from '../config/office-projects.json' with { type: 'json' };
 import { callGemini, callCloudflareFallback } from './gemini-client.js';
 import { callGroq } from './groq-client.js';
+// ITEM B (2026-08-27). The meeting's model choice becomes a CONFIG entry
+// (config/model-routing.json) rather than a constant in this file — see
+// composeMeetingCall() for why, and for what the direct chain below it is
+// still there to do.
+import { routeTaskTypeCall } from './model-router.js';
+import { routingEnabled } from './task-router.js';
 import { commitFileToRepo, BACKOFFICE_REPO_NAME } from './repo-write.js';
 import { getOfficeContext, getOfficeSnapshot } from './office-context.js';
 import { enforceAttendeeGate, GATED_EFFECT_FIELDS } from './meeting-attendance.js';
@@ -677,11 +683,15 @@ ${data.outputCensus || ''}`,
   pip_session: (data) => `PIP SESSION for Agent ${data.targetAgentId}. Recent weekly history: ${JSON.stringify(data.history)}\nPast PIP records: ${JSON.stringify(data.pastPip)}\nDecide: place on PIP / continue existing PIP / graduate from PIP, with specific, measurable improvement targets and a 1-simulated-month duration.`,
 };
 
-const DECISIONS_SCHEMA_HINT = `
-Respond in two parts:
-1. A realistic dialogue transcript between the attendees, staying strictly in character (use their personality, mood, and behavioral rules). Use "Name: line" format, one line per turn, 6-20 turns.
-2. On a new line, the exact marker ---DECISIONS--- followed by a single JSON object (no markdown fences) with this shape:
-{
+/*
+ * ITEM C (2026-08-27). The JSON shape and its rules, lifted out of
+ * DECISIONS_SCHEMA_HINT below so that BOTH the old combined prompt and the new
+ * decisions-only prompt read the SAME text. Not one character of the schema
+ * moved: C2 is explicit that this session changes the wiring and not what a
+ * meeting is asked to produce, and two copies of a schema held together by a
+ * comment is the exact drift this repo has a name for.
+ */
+const DECISIONS_JSON_SHAPE = `{
   "summary": "1-3 sentence summary of outcomes",
   "mood_effects": [{ "agent_id": <int>, "delta": <int -20..20>, "reason": "<short reason>" }],
   "irritation_effects": [{ "agent_id": <int>, "delta": <int -2..2>, "reason": "<short reason>" }],
@@ -712,6 +722,56 @@ RULES FOR context_amendments — OFFICE-POLICY A2/A3. This is ONLY meaningful fo
 - "proposed_by" must be 6 (the QA) or 7 (the Team Lead) — those are the only two roles this policy lets change another agent's context.
 - "content" is the EXACT text to add — specific enough to change behaviour, not a vague impression. "Be more careful" is not usable; "when a case cites a firewall rule, name the specific rule number before recommending a change" is.
 - Every entry here enters PROBATION, not a permanent change — do not write as though this is final. If nothing concrete changed today, the correct answer is an empty array, not a manufactured entry to fill it.`;
+
+/**
+ * The ORIGINAL combined instruction, rebuilt from the shape above so it is
+ * byte-for-byte what it has always been. Kept because it is what a single-call
+ * meeting asks for, and single-call is still the shape a caller gets if the
+ * two-call split is ever unwound.
+ */
+const DECISIONS_SCHEMA_HINT = `
+Respond in two parts:
+1. A realistic dialogue transcript between the attendees, staying strictly in character (use their personality, mood, and behavioral rules). Use "Name: line" format, one line per turn, 6-20 turns.
+2. On a new line, the exact marker ---DECISIONS--- followed by a single JSON object (no markdown fences) with this shape:
+${DECISIONS_JSON_SHAPE}`;
+
+/*
+ * ══════════════════════════════════════════════════════════════════════════
+ * ITEM C — THE TRANSCRIPT AND THE DECISIONS STOPPED COMPETING
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * MEASURED, 2026-08-26: `output_tokens = 1024` against a `maxTokens: 1024`
+ * ceiling, with the JSON cut mid-word inside the block. Three of the seven
+ * meetings recorded since the instrumentation landed ended on that exact
+ * number. One budget was serving two products, the dialogue was written
+ * first, and so the dialogue always won — the truncation lands in the
+ * decisions every time, which is why 27 of the last 35 meetings have empty
+ * decision arrays.
+ *
+ * A bigger single budget was the obvious move and it is the wrong one: it
+ * makes truncation rarer without making it impossible, and it leaves the
+ * order of consumption unchanged. Two calls with two budgets is a structural
+ * answer to a structural problem.
+ *
+ * THE SECOND CALL'S INPUT IS THE TRANSCRIPT, NOT THE AGENDA (C3). That is the
+ * more important half. The office has a recorded case of a closing review
+ * asserting "it has been a week since the owner's instruction and we seem to
+ * be stuck" three hours BEFORE that instruction was read — a model handed an
+ * agenda and told to produce conclusions produces conclusions about the
+ * meeting it was ASKED to hold, not the one that happened. Reading decisions
+ * off the transcript that actually exists is what removes the gap that
+ * invention fills.
+ */
+const TRANSCRIPT_ONLY_HINT = `Produce ONE thing and nothing else: a realistic dialogue transcript between the attendees, staying strictly in character (use their personality, mood, and behavioral rules). Use "Name: line" format, one line per turn, 6-20 turns.
+
+Let the meeting reach its natural end and then stop. Do NOT write a JSON block, do NOT write the marker ---DECISIONS---, and do NOT append a summary. A separate pass reads the decisions off this transcript, so anything decided here must be VISIBLE HERE as something someone said. There is no budget being shared with anything else: write the conversation the agenda actually calls for.`;
+
+const DECISIONS_ONLY_HINT = `A meeting has ALREADY HAPPENED. Its transcript is printed below. Your one job is to record what it decided.
+
+Every entry you write must be traceable to a line in that transcript. If the transcript does not show something being settled, the correct answer is an EMPTY ARRAY — an agenda item that was raised and not resolved produces no entry, and a decision that is not in the transcript did not happen no matter what the agenda asked for. Do not complete the meeting on its behalf.
+
+Output the exact marker ---DECISIONS--- on its own line, then a single JSON object (no markdown fences) with this shape:
+${DECISIONS_JSON_SHAPE}`;
 
 /**
  * Meeting types that get the office's own work in their prompt.
@@ -759,7 +819,11 @@ function buildMeetingPrompt(meetingType, attendeeSnapshots, data, opts) {
     personas,
     relNotes.length ? `Known dynamics:\n- ${relNotes.join('\n- ')}` : '',
     officeBlock,
-    DECISIONS_SCHEMA_HINT,
+    // ITEM C: this call now asks for the transcript ALONE. The decisions are
+    // asked for separately, by buildDecisionsPrompt() below, off the
+    // transcript this produces. DECISIONS_SCHEMA_HINT — the combined
+    // instruction — is unchanged and simply has no caller on this path.
+    TRANSCRIPT_ONLY_HINT,
   ].filter(Boolean).join('\n\n');
 
   const agendaBuilder = AGENDA_BUILDERS[meetingType] || (() => 'Run a general meeting and produce decisions.');
@@ -794,6 +858,45 @@ function buildMeetingPrompt(meetingType, attendeeSnapshots, data, opts) {
     : '';
 
   const prompt = `Meeting type: ${meta.label}\nDate: ${new Date().toISOString()}\n\n${requirementsFirst}${architectNight}Agenda data:\n${agendaBuilder(data)}`;
+
+  return { systemPrompt, prompt };
+}
+
+/**
+ * ITEM C's second call. Deliberately NOT a variant of buildMeetingPrompt():
+ * the two prompts share the personas and nothing else, and that is the point.
+ *
+ * WHAT THIS PROMPT DOES NOT CARRY: the agenda, the office context block, the
+ * board, the metrics, the census — everything the transcript call was given in
+ * order to HOLD the meeting. A decisions pass that can still see the agenda can
+ * still answer from it, which is the failure this split exists to remove. What
+ * it can see is the conversation that actually happened.
+ *
+ * WHAT IT DOES CARRY: the personas, in full. `refusals` requires a
+ * `character_line` quoted from that agent's own persona text "in this prompt" —
+ * a rule that silently becomes unfollowable, and a field that silently becomes
+ * empty, if the personas are dropped here to save tokens.
+ */
+function buildDecisionsPrompt(meetingType, attendeeSnapshots, transcript) {
+  const meta = MEETING_TYPES[meetingType];
+
+  const personas = attendeeSnapshots
+    .map((snap) => {
+      const persona = fillPlaceholders(snap.config?.system_prompt_additions || `You are ${snap.config?.name}.`, snap);
+      return `=== Agent ${snap.id} — ${snap.config?.name} (${snap.config?.role}) ===\n${persona}`;
+    })
+    .join('\n\n');
+
+  const systemPrompt = [
+    `You are recording the decisions of a "${meta.label}" that has already taken place at a small IT company's office. These are the people who were in the room.`,
+    personas,
+    DECISIONS_ONLY_HINT,
+  ].filter(Boolean).join('\n\n');
+
+  const prompt = `Meeting type: ${meta.label}\nDate: ${new Date().toISOString()}\n`
+    + 'Attendees (authoritative — nobody else was in the room): '
+    + `${attendeeSnapshots.map((s) => `Agent ${s.id} — ${s.config?.name}`).join(', ')}\n\n`
+    + `TRANSCRIPT OF THE MEETING:\n\n${transcript}`;
 
   return { systemPrompt, prompt };
 }
@@ -1313,6 +1416,181 @@ async function commitMeetingReport(env, meetingType, markdown) {
  * @param {object} env - Worker env (DB, AGENT_STATE, GEMINI_API_KEY, GITHUB_TOKEN, SIM_CONFIG)
  * @param {object} [opts] - meeting-type-specific options (see MEETING_TYPES[type].requiresOpts)
  */
+/*
+ * ══════════════════════════════════════════════════════════════════════════
+ * ITEM B — WHY EVERY MEETING FOR MONTHS WAS COMPOSED BY AN 8B MODEL
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * THE 2026-08-25 MODEL FIX DID REACH THIS CALL SITE. That was the suspicion,
+ * it is wrong, and the wrong answer is worth writing down because it is the
+ * one anyone will reach for again. `meeting-engine.js` imports `callGroq` from
+ * `groq-client.js` like every other Groq consumer, and `callGroq` sends
+ * `GROQ_MODEL` — the single exported constant. There is no second model
+ * identifier in this file and there never was.
+ *
+ * WHAT ACTUALLY HAPPENS, captured live from `wrangler tail` on 2026-08-27
+ * against a real `daily_standup`:
+ *
+ *   [agent-meeting-daily_standup] Groq API error (413): Request too large for
+ *   model `openai/gpt-oss-20b` in organization `org_...` service tier
+ *   `on_demand` on tokens per minute (TPM): Limit 8000, Requested 17836
+ *
+ * A meeting prompt is 17,836 tokens — personas for the attendees, the office
+ * context block, the board, the Workflow's metrics, the output census. Groq's
+ * free tier admits 8,000 tokens per minute, which is also its effective
+ * per-request ceiling. The model was never the problem; the request has been
+ * more than twice too big for the tier for as long as the office context block
+ * has existed.
+ *
+ * AND IT IS A 413, NOT A 429. `callGroq`'s `!res.ok` branch returns null on
+ * both, every caller degrades to Cloudflare Workers AI, and Cloudflare answers
+ * perfectly well — so nothing was ever broken enough to look at. Same failure
+ * shape as the two retired Groq models this file's sibling header documents,
+ * arriving by a third route: a silent, successful degradation. The evidence
+ * was in the logged response body the whole time and nothing read it.
+ *
+ * ── SO THE FIX IS A LANE, NOT A MODEL ID ────────────────────────────────
+ *
+ * A meeting is routed like everything else the office does now, through
+ * `config/model-routing.json`. `long_document` is the lane whose stated job is
+ * "anything past what a single judgment call should carry": Cerebras primary,
+ * per-request input MEASURED at 131,000 tokens, Mistral behind it. 17,836
+ * tokens sits comfortably inside that. A future model change reaches this call
+ * site because the lane is data — which is what B2 was actually asking for.
+ *
+ * THE `conversation` LANE WAS NOT USED, AND THE OWNER SHOULD KNOW WHY. That
+ * lane names meetings and standups in its own description and is the designed
+ * home for this. It is `controlled_random` across five providers, and three of
+ * them — groq at 8,000 TPM, cloudflare-ai, and gemini on a shared free quota —
+ * cannot reliably accept a 17,836-token prompt. Its backup is null, so a call
+ * landing on one of those does not degrade, it fails. Pointing meetings there
+ * today would replace a silent degradation with an intermittent one. Choosing
+ * between the two lanes is a design decision about who composes the office's
+ * display surface, and it is the owner's, not this session's.
+ *
+ * ── THE CLOUDFLARE FALLBACK IS NOT REMOVED (B4) ─────────────────────────
+ *
+ * It is what kept meetings running at all, and it stays exactly where it was:
+ * routing off, or a routed call that comes back empty, still walks the
+ * original Groq → Cloudflare chain untouched. What changes is that it is now
+ * the third thing tried rather than, in practice, the only one.
+ */
+const MEETING_LANE = 'long_document';
+
+/*
+ * ITEM C4 — THE TWO BUDGETS, FROM THE MEASUREMENT AND NOT FROM A ROUND NUMBER.
+ *
+ * What was measured across the seven meetings recorded since the
+ * instrumentation landed (D1 `meetings`, 2026-08-23..26): `output_tokens` of
+ * 1024, 1024, 993, 655 and 490 against a shared ceiling of 1024 — three of
+ * them ON the ceiling. Transcript lengths 1,445-4,129 characters; decisions
+ * objects 165-1,128 characters.
+ *
+ * Both figures are LOWER BOUNDS, which is exactly why they cannot be used
+ * directly: those transcripts were cut off BY the shared ceiling, so the
+ * length a real meeting wants has never once been observed here.
+ *
+ * TRANSCRIPT: 3,000. The agenda asks for 6-20 turns; twenty turns of a genuine
+ * sentence or two is 1,300-1,800 tokens, and the longest transcript ever
+ * recorded (4,129 chars, roughly 1,030 tokens) was still being truncated when
+ * it stopped. 3,000 is a little under three times that truncated observation,
+ * and C5 is explicit that this must not be capped below what a real
+ * conversation needs — the owner reads these.
+ *
+ * DECISIONS: 1,500. The largest decisions object on record is 1,128
+ * characters, about 280 tokens — but it was written second, out of whatever
+ * the dialogue left, so it measures the defect rather than the need. Eight
+ * arrays with several entries each is plausibly 700-900 tokens. 1,500 also has
+ * to clear the reasoning overhead Cerebras' `gpt-oss-120b` charges against
+ * `max_tokens` — the property `cerebras-client.js` `MIN_OUTPUT_TOKENS` exists
+ * for, and which returns an EMPTY answer rather than a short one when the
+ * budget is too tight.
+ *
+ * Both are stamped onto the meeting record beside the `finish_reason` they
+ * belong with, so the next session revises them from evidence.
+ */
+const TRANSCRIPT_MAX_TOKENS = 3000;
+const DECISIONS_MAX_TOKENS = 1500;
+
+/**
+ * ONE call, however it ends up being served. Both of Item C's calls go through
+ * here so the transcript and the decisions cannot quietly be composed under
+ * different rules.
+ *
+ * Order: the routed lane, then the pre-existing direct chain, unchanged.
+ * Returns the same envelope `callGroq`/`callGemini` return — `{ text, source,
+ * finishReason, outputTokens }` — where `source` is the provider that ACTUALLY
+ * answered, never the one that was asked for. The same rule the `composed_by`
+ * column states.
+ */
+async function composeMeetingCall(env, meetingType, { prompt, systemPrompt, maxTokens, label }) {
+  const simConfig = env.SIM_CONFIG?.GEMINI || {};
+  const agentId = `meeting-${meetingType}-${label}`;
+
+  // Gemini keeps the long-range meetings it has always had — those are report
+  // synthesis and are not what Item B measured. Untouched, including the
+  // Cloudflare fallback inside callGemini() itself.
+  if (GEMINI_MEETING_TYPES.has(meetingType)) {
+    const r = await callGemini({
+      apiKey: env.GEMINI_API_KEY,
+      model: simConfig.model || 'gemini-3.1-flash-lite', // gemini-3.5-flash is deprecated — never reintroduce it, see CLAUDE.md
+      endpoint: simConfig.api_endpoint || 'https://generativelanguage.googleapis.com/v1beta/models',
+      temperature: simConfig.temperature ?? 0.9,
+      maxTokens: Math.max(simConfig.max_tokens ?? 1024, maxTokens),
+      prompt,
+      systemPrompt,
+      ai: env.AI,
+    });
+    if (r?.source === 'cloudflare-fallback') {
+      console.warn(`[meeting-engine] Gemini quota exhausted (${meetingType}/${label}) — used cloudflare-fallback (@cf/meta/llama-3.1-8b-instruct-fp8)`);
+    }
+    return r;
+  }
+
+  if (await routingEnabled(env)) {
+    const routed = await routeTaskTypeCall(env, MEETING_LANE, {
+      prompt, systemPrompt, maxTokens,
+      geminiModel: simConfig.model,
+      geminiEndpoint: simConfig.api_endpoint,
+      agentId,
+    });
+    if (routed?.ok && routed.result?.text) {
+      return {
+        text: routed.result.text,
+        // The provider that answered, after any degradation inside the lane —
+        // routed.provider, never the lane's planned primary.
+        source: routed.provider || routed.result.source || null,
+        finishReason: routed.result.finishReason ?? null,
+        outputTokens: typeof routed.result.outputTokens === 'number'
+          ? routed.result.outputTokens
+          : (routed.result.usage?.outputTokens ?? null),
+      };
+    }
+    console.warn(`[meeting-engine] routed lane "${MEETING_LANE}" did not answer (${meetingType}/${label}): `
+      + `${routed?.reason || 'no text returned'}. Falling through to the direct Groq -> Cloudflare chain.`);
+  }
+
+  // ── THE ORIGINAL CHAIN, UNCHANGED (B4) ────────────────────────────────
+  const groqResult = await callGroq({
+    apiKey: env.GROQ_API_KEY,
+    prompt,
+    systemPrompt,
+    temperature: 0.9,
+    maxTokens,
+    agentId,
+  });
+  if (groqResult) return groqResult;
+
+  console.warn(`[meeting-engine] Groq unavailable (${meetingType}/${label}) — used cloudflare-fallback (@cf/meta/llama-3.1-8b-instruct-fp8)`);
+  return callCloudflareFallback({
+    ai: env.AI,
+    prompt,
+    systemPrompt,
+    temperature: 0.9,
+    maxTokens,
+  });
+}
+
 export async function runMeeting(meetingType, env, opts = {}) {
   const meta = MEETING_TYPES[meetingType];
   if (!meta) throw new Error(`Unknown meeting type: ${meetingType}`);
@@ -1400,48 +1678,74 @@ export async function runMeeting(meetingType, env, opts = {}) {
 
   const { systemPrompt, prompt } = buildMeetingPrompt(meetingType, attendeeSnapshots, data, { ...opts, officeContext, architectRuns });
 
-  let modelResult;
-  if (GEMINI_MEETING_TYPES.has(meetingType)) {
-    const simConfig = env.SIM_CONFIG?.GEMINI || {};
-    modelResult = await callGemini({
-      apiKey: env.GEMINI_API_KEY,
-      model: simConfig.model || 'gemini-3.1-flash-lite', // gemini-3.5-flash is deprecated — never reintroduce it, see CLAUDE.md
-      endpoint: simConfig.api_endpoint || 'https://generativelanguage.googleapis.com/v1beta/models',
-      temperature: simConfig.temperature ?? 0.9,
-      maxTokens: Math.max(simConfig.max_tokens ?? 1024, 2048),
-      prompt,
-      systemPrompt,
-      ai: env.AI,
-    });
-    if (modelResult.source === 'cloudflare-fallback') {
-      console.warn(`[meeting-engine] Gemini quota exhausted (${meetingType}) — used cloudflare-fallback (@cf/meta/llama-3.1-8b-instruct-fp8)`);
-    }
+  const modelResult = await composeMeetingCall(env, meetingType, {
+    prompt, systemPrompt, maxTokens: TRANSCRIPT_MAX_TOKENS, label: 'transcript',
+  });
+
+  /*
+   * ITEM C, the second call. The transcript is parsed FIRST, with the same
+   * parser, because a transcript call is now expected to contain no
+   * ---DECISIONS--- marker: parseMeetingResponse() returns the whole text as
+   * the transcript and empty decisions, which is exactly right here. Running
+   * it anyway rather than assigning `modelResult.text` straight across means a
+   * model that ignores the instruction and appends a JSON block still gets it
+   * stripped out of the transcript instead of printed into the report.
+   */
+  const { transcript } = parseMeetingResponse(modelResult.text);
+
+  /*
+   * A DECISIONS CALL IS NOT MADE ON A TRANSCRIPT THAT IS NOT THERE. An empty
+   * or failed first call would otherwise be handed to a second model with
+   * "record what this meeting decided" — a prompt with nothing in it, which is
+   * the shape that produces invention. Empty decisions here are the honest
+   * answer and the meeting still persists, with its own reason recorded.
+   */
+  let decisionsResult = null;
+  let decisions;
+  if (!transcript || !transcript.trim()) {
+    console.warn(`[meeting-engine] ${meetingType}: the transcript call returned nothing `
+      + `(composed_by ${modelResult?.source || 'unknown'}, finish_reason ${modelResult?.finishReason || 'unknown'}). `
+      + 'No decisions call was made — there is nothing to read decisions off.');
+    decisions = emptyDecisions();
+    decisions.no_transcript = {
+      reason: 'the transcript call returned no text; the decisions call was not made',
+      composed_by: modelResult?.source || null,
+      finish_reason: modelResult?.finishReason || null,
+    };
   } else {
-    const groqResult = await callGroq({
-      apiKey: env.GROQ_API_KEY,
-      prompt,
-      systemPrompt,
-      temperature: 0.9,
-      maxTokens: 1024,
-      agentId: `meeting-${meetingType}`,
+    const dPrompt = buildDecisionsPrompt(meetingType, attendeeSnapshots, transcript);
+    decisionsResult = await composeMeetingCall(env, meetingType, {
+      prompt: dPrompt.prompt, systemPrompt: dPrompt.systemPrompt,
+      maxTokens: DECISIONS_MAX_TOKENS, label: 'decisions',
     });
-    if (groqResult) {
-      modelResult = groqResult;
-    } else {
-      console.warn(`[meeting-engine] Groq unavailable (${meetingType}) — used cloudflare-fallback (@cf/meta/llama-3.1-8b-instruct-fp8)`);
-      modelResult = await callCloudflareFallback({
-        ai: env.AI,
-        prompt,
-        systemPrompt,
-        temperature: 0.9,
-        maxTokens: 1024,
-      });
+    ({ decisions } = parseMeetingResponse(decisionsResult.text));
+    /*
+     * ITEM C. There are two calls now and the `meetings` row has three columns
+     * for one of them, so the decisions call's own numbers ride on the
+     * decisions object — beside the arrays they explain. "Were the decisions
+     * truncated?" is then answerable from the record rather than from a log
+     * line that expires in three days.
+     */
+    decisions.composed = {
+      transcript: {
+        composed_by: modelResult?.source ?? null,
+        finish_reason: modelResult?.finishReason ?? null,
+        output_tokens: typeof modelResult?.outputTokens === 'number' ? modelResult.outputTokens : null,
+        max_tokens: TRANSCRIPT_MAX_TOKENS,
+      },
+      decisions: {
+        composed_by: decisionsResult?.source ?? null,
+        finish_reason: decisionsResult?.finishReason ?? null,
+        output_tokens: typeof decisionsResult?.outputTokens === 'number' ? decisionsResult.outputTokens : null,
+        max_tokens: DECISIONS_MAX_TOKENS,
+      },
+    };
+    if (decisionsResult?.finishReason === 'length') {
+      console.warn(`[meeting-engine] ${meetingType}: the DECISIONS call stopped at its ceiling `
+        + `(${DECISIONS_MAX_TOKENS}) — the object may be truncated. Item C makes this visible rather `
+        + 'than impossible; a ceiling reached is a budget to revisit, not a defect to hide.');
     }
   }
-
-  const responseText = modelResult.text;
-
-  const { transcript, decisions } = parseMeetingResponse(responseText);
 
   // The attendee gate (audit 2026-08-15, finding #1). Placed here on purpose:
   // this is the only point where the resolved attendee set and the composed
@@ -1569,6 +1873,16 @@ export async function runMeeting(meetingType, env, opts = {}) {
     composedBy: modelResult?.source ?? null,
     finishReason: modelResult?.finishReason ?? null,
     outputTokens: typeof modelResult?.outputTokens === 'number' ? modelResult.outputTokens : null,
+    /*
+     * ITEM C. There are two calls now and three columns, so the row can only
+     * carry one call's numbers. It carries the TRANSCRIPT call's, unchanged —
+     * that is what `transcript` in the same row is the text of, and a row whose
+     * `output_tokens` described a different call than its own `transcript`
+     * would be worse than one that described neither. The decisions call's
+     * numbers go on the decisions object itself, where the arrays they explain
+     * already live, so "were the decisions truncated?" stays answerable from
+     * the record rather than from a log line.
+     */
   });
 
   const markdown = renderMeetingReport(meetingType, attendeeSnapshots, transcript, decisions, opts);

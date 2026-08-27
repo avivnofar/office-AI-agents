@@ -356,11 +356,41 @@ check('agent-base.js does not import the task router (its providers are unchange
 check('agent-base.js still routes routine work through callGroq (unchanged)', /callGroq\(/.test(agentBaseSrc));
 check('agent-base.js still composes Hebrew through callGemini (unchanged)', /callGemini\(/.test(agentBaseSrc));
 
-for (const f of ['meeting-engine.js', 'qa-engine.js', 'gap-reports.js', 'chore-runner.js', 'guide-engine.js', 'claude-client.js']) {
+/*
+ * meeting-engine.js LEFT THIS LIST ON 2026-08-27 (Session 26, ITEM B), and
+ * that is a decision rather than a verifier being made to pass.
+ *
+ * This block exists to prove that enabling routing did not silently move any
+ * pre-existing caller onto a different provider. The meeting engine was moved
+ * ON PURPOSE, because it was measured composing every meeting on an 8B
+ * Cloudflare fallback: its prompt is 17,836 tokens and Groq's free tier
+ * refuses anything past 8,000 with a 413, which `callGroq` returns as null and
+ * every caller degrades past in silence.
+ *
+ * So the rule the list encodes is unchanged — a caller does not move without a
+ * decision — and the checks below record what the decision WAS, which the file
+ * simply dropping out of the list would not. The other five are untouched and
+ * still assert the original property.
+ */
+for (const f of ['qa-engine.js', 'gap-reports.js', 'chore-runner.js', 'guide-engine.js', 'claude-client.js']) {
   const src = readFileSync(new URL(`../workers/${f}`, import.meta.url), 'utf8');
   check(`${f} does not import the task router`, !IMPORTS_TASK_ROUTER.test(src));
   check(`${f} does not call routeTaskTypeCall`, !/routeTaskTypeCall/.test(src));
 }
+
+const meetingEngineSrc = readFileSync(new URL('../workers/meeting-engine.js', import.meta.url), 'utf8');
+check('[FAILS-OLD] meeting-engine.js is routed — deliberately, and only since 2026-08-27',
+  IMPORTS_TASK_ROUTER.test(meetingEngineSrc) && /routeTaskTypeCall\(env, MEETING_LANE/.test(meetingEngineSrc));
+check('...down the long_document lane, the one whose measured input ceiling fits a 17,836-token prompt',
+  /const MEETING_LANE = 'long_document'/.test(meetingEngineSrc));
+check('...behind the routing kill switch, like every other routed caller',
+  /if \(await routingEnabled\(env\)\)[\s\S]{0,400}routeTaskTypeCall\(env, MEETING_LANE/.test(meetingEngineSrc));
+check('B4 — the Cloudflare fallback was NOT removed; it is still the last resort',
+  /callCloudflareFallback\(\{/.test(meetingEngineSrc));
+check('B4 — the direct Groq call is still there ahead of it, unchanged',
+  /const groqResult = await callGroq\(\{[\s\S]{0,300}\}\);[\s\S]{0,80}if \(groqResult\) return groqResult;/.test(meetingEngineSrc));
+check('routing OFF walks the original chain — the router is not called at all',
+  meetingEngineSrc.indexOf('await routingEnabled(env)') < meetingEngineSrc.indexOf('const groqResult = await callGroq('));
 
 const modelRouterSrc = readFileSync(new URL('../workers/model-router.js', import.meta.url), 'utf8');
 check('selectModelForChoreTask() is unchanged — Notebook-X easy tasks still pick groq',

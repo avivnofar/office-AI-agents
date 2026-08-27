@@ -1614,6 +1614,70 @@ section('\u00a715 meeting context_amendments gate (2026-08-27)');
     && /meeting_context_amendments_enabled: !!body\.enabled/.test(ar));
 }
 
+/* ═════ §16 the meeting is two calls, not one (Session 26, ITEM C) ═════ */
+section('§16 transcript and decisions stopped competing (2026-08-27)');
+{
+  const eng = read('workers/meeting-engine.js');
+
+  // C1 — two calls with two budgets.
+  check('[FAILS-OLD] the meeting makes TWO model calls, not one',
+    (eng.match(/await composeMeetingCall\(env, meetingType, \{/g) || []).length === 2);
+  const tBudget = /const TRANSCRIPT_MAX_TOKENS = (\d+)/.exec(eng);
+  const dBudget = /const DECISIONS_MAX_TOKENS = (\d+)/.exec(eng);
+  check('...the transcript call and the decisions call carry SEPARATE budgets',
+    !!tBudget && !!dBudget
+    && /maxTokens: TRANSCRIPT_MAX_TOKENS/.test(eng)
+    && /maxTokens: DECISIONS_MAX_TOKENS/.test(eng),
+    `transcript ${tBudget?.[1]} / decisions ${dBudget?.[1]}`);
+  // C5 — the transcript must not be capped below what a real conversation
+  // needs. The shared ceiling it replaced was 1024 and three of seven meetings
+  // hit it exactly; anything at or under that would be the same defect renamed.
+  check('C5 — the transcript budget is meaningfully above the 1024 ceiling it replaced',
+    Number(tBudget?.[1]) > 1024 * 2, tBudget?.[1]);
+
+  // C2 — wiring, not schema. The JSON shape has exactly one definition and
+  // both prompts read it.
+  check('C2 — the decisions JSON shape has ONE definition, shared by both prompts',
+    (eng.match(/const DECISIONS_JSON_SHAPE = /g) || []).length === 1
+    && /\$\{DECISIONS_JSON_SHAPE\}/.test(eng));
+  check('C2 — the original combined instruction is preserved verbatim, not edited',
+    /const DECISIONS_SCHEMA_HINT = `\s*\nRespond in two parts:/.test(eng));
+  for (const field of ['summary', 'mood_effects', 'irritation_effects', 'state_changes',
+    'action_items', 'context_amendments', 'config_overrides', 'suggestion_decisions', 'refusals']) {
+    check(`C2 — the decisions schema still carries "${field}"`,
+      new RegExp(`"${field}":`).test(eng));
+  }
+
+  // C3 — the second call reads the transcript, not the agenda.
+  check('[FAILS-OLD] C3 — the decisions prompt is built from the TRANSCRIPT',
+    /function buildDecisionsPrompt\(meetingType, attendeeSnapshots, transcript\)/.test(eng)
+    && /TRANSCRIPT OF THE MEETING:/.test(eng));
+  // Scoped to the function's OWN body, sliced out by index. A proximity window
+  // would have matched the mention of this function inside buildMeetingPrompt
+  // and then found that function's agenda variables — the same
+  // comment-trips-the-check failure verify-routing.js records fixing in 2026-08-07.
+  const bdpStart = eng.indexOf('function buildDecisionsPrompt(');
+  const bdpBody = bdpStart >= 0
+    ? eng.slice(bdpStart, eng.indexOf('return { systemPrompt, prompt };', bdpStart))
+    : '';
+  check('C3 — ...and it does NOT carry the agenda or the office context block',
+    !!bdpBody && !/agendaBuilder|officeBlock|workflowMetrics|outputCensus|architectNight/.test(bdpBody));
+  check('C3 — ...but it DOES carry the personas, which the refusals rule requires',
+    /system_prompt_additions/.test(bdpBody));
+  check('the transcript call is told NOT to emit the decisions marker',
+    /TRANSCRIPT_ONLY_HINT/.test(eng) && /do NOT write the marker ---DECISIONS---/.test(eng));
+
+  // The empty-transcript case: no second call on nothing.
+  check('a transcript that came back empty does NOT get a decisions call made on it',
+    /if \(!transcript \|\| !transcript\.trim\(\)\)[\s\S]{0,700}?no_transcript/.test(eng));
+
+  // The measurement rides on the record, not only in a log.
+  check('both calls\' finish_reason and output_tokens are recorded on the meeting',
+    /decisions\.composed = \{[\s\S]{0,700}?transcript: \{[\s\S]{0,400}?decisions: \{/.test(eng));
+  check('the meetings ROW still describes the transcript call, which is the text it stores',
+    /composedBy: modelResult\?\.source \?\? null/.test(eng));
+}
+
 console.log(`\n${pass}/${pass + fail} checks passed.`);
 if (fail) { console.log(`${fail} FAILED`); process.exit(1); }
 process.exit(0);
