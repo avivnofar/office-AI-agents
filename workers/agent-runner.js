@@ -683,7 +683,7 @@ async function getSimulationState(env) {
  */
 async function updateSimulationState(env, patch) {
   const current = await getSimulationState(env);
-  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled', 'improvement_loop_enabled', 'architect_liaison_enabled', 'office_context_enabled', 'action_items_to_board_enabled', 'report_pipeline_enabled', 'owner_channel_enabled', 'learning_loop_enabled', 'judge_sampler_enabled', 'cases_enabled'];
+  const allowedKeys = ['inspection_mode', 'paused', 'phase', 'guides_enabled', 'routing_enabled', 'improvement_loop_enabled', 'architect_liaison_enabled', 'office_context_enabled', 'action_items_to_board_enabled', 'report_pipeline_enabled', 'owner_channel_enabled', 'learning_loop_enabled', 'judge_sampler_enabled', 'cases_enabled', 'meeting_context_amendments_enabled'];
   const next = { ...current };
   const rejected = [];
   for (const key of Object.keys(patch)) {
@@ -7892,6 +7892,26 @@ export default {
             });
             break;
           }
+          case 'meeting_amendments_toggle':
+            /*
+             * ITEM A (Session 26, 2026-08-27). Flips
+             * `meeting_context_amendments_enabled` — whether a meeting may
+             * reach into an agent's active-context file under
+             * `campus/agents/<slug>/` and change
+             * who an agent is. See meeting-engine.js
+             * meetingContextAmendmentsEnabled() for why this one DEFAULTS ON
+             * where every other switch here defaults off. Body:
+             * { enabled: true|false }. While off, the amendments a meeting
+             * produces are recorded on the meeting record under
+             * `refused_context_amendments` and rendered in the report — never
+             * dropped silently — and every other meeting effect keeps running.
+             *
+             * The response is the WHOLE simulation-state object read back
+             * after the write, so the caller sees the stored value rather than
+             * the value it asked for.
+             */
+            result = await updateSimulationState(env, { meeting_context_amendments_enabled: !!body.enabled });
+            break;
           case 'routing_toggle':
             // Task-type routing kill switch (see workers/task-router.js
             // routingEnabled()): flips the SIM_KV simulation-state

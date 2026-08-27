@@ -101,6 +101,55 @@ export async function actionItemsToBoardEnabled(env) {
   return stored?.[ACTION_ITEMS_FLAG] === true;
 }
 
+/*
+ * ══════════════════════════════════════════════════════════════════════════
+ * ITEM A (SESSION 26, 2026-08-27) — THE MEETING'S REACH INTO CHARACTER FILES
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * A meeting's `context_amendments` are the only effect it produces that
+ * changes WHO AN AGENT IS. Every other effect it applies — mood, irritation,
+ * state, durable config overrides — is state a later meeting can move back.
+ * An amendment goes through proposeChange() into probation and from there
+ * LIVE into the active-context file under `campus/agents/<slug>/`, which feeds that
+ * agent's every prompt from the moment it lands.
+ *
+ * The attendee gate (2026-08-24) closed the case where the amendment was
+ * proposed against an agent WHO WAS NOT IN THE ROOM. It cannot close the
+ * case measured this session: 27 of the last 35 meetings produced no
+ * decisions at all, every one of them composed by an 8B fallback model, and
+ * one closing review asserted "it has been a week since the owner's
+ * instruction and we seem to be stuck" three hours BEFORE that instruction
+ * was read. That is not a fabricated attendee. It is a real attendee, in a
+ * real meeting, reaching a conclusion about a conversation that did not
+ * happen — and the gate has nothing to test it against.
+ *
+ * So this is a switch and not a fix. It does not make the conclusions better;
+ * it decides whether a conclusion of unknown provenance is allowed to edit a
+ * persona while Items B and C work on the provenance.
+ *
+ * ── DEFAULT ON, WHICH IS THE OPPOSITE OF EVERY OTHER SWITCH HERE ─────────
+ *
+ * `guides_enabled`, `routing_enabled`, `learning_loop_enabled` and the rest
+ * all default OFF so that deploying a feature does not start it. This one
+ * governs a path that is ALREADY RUNNING in production, so an OFF default
+ * would mean the deploy itself silently stopped it — a behaviour change
+ * smuggled in as a code change. The deploy must change nothing; the owner's
+ * toggle is the decision. Same shape as `cases_enabled`, which defaults ON
+ * for the same reason.
+ *
+ * The one exception is an ABSENT SIM_KV binding. A default-ON switch read
+ * from nowhere is not a default, it is an unread switch — and this is the one
+ * write in the engine that cannot be undone by a later meeting. With no
+ * binding it refuses, and says so.
+ */
+const MEETING_AMENDMENTS_FLAG = 'meeting_context_amendments_enabled';
+
+export async function meetingContextAmendmentsEnabled(env) {
+  if (!env?.SIM_KV) return false; // unread, not defaulted — see the block above
+  const stored = await env.SIM_KV.get(SIM_STATE_KEY, 'json').catch(() => null);
+  return stored?.[MEETING_AMENDMENTS_FLAG] !== false;
+}
+
 /** Meeting types whose transcripts are synthesized by Gemini 3.1 Flash-Lite
  *  (large-context report writing) — see config/token-economy.json
  *  report_models_by_meeting_type. All other meeting types use Groq
@@ -954,15 +1003,61 @@ async function applyMeetingEffects(meetingType, attendeeSnapshots, decisions, en
     const rosterIds = agentsConfig.agents.map((a) => a.id);
     const { items, dropped } = normalizeContextAmendments(decisions.context_amendments, { rosterIds });
     for (const d of dropped) console.warn(`[meeting-engine] context_amendment DROPPED: ${d.reason}`);
-    for (const item of items) {
-      const result = await proposeChange(env, {
-        actorId: item.proposedBy,
-        targetAgentId: item.agentId,
-        aspect: item.aspect,
-        content: item.content,
-      }).catch((err) => ({ proposed: false, reason: `threw: ${err.message}` }));
-      if (!result.proposed) {
-        console.warn(`[meeting-engine] context_amendment for agent ${item.agentId} (${item.aspect}) NOT entered into probation: ${result.reason}`);
+
+    /*
+     * ITEM A's gate (2026-08-27). Placed HERE, after normalization and before
+     * proposeChange(), for two reasons:
+     *
+     *   1. The record has to say what would have been written, not merely that
+     *      something was. A refusal that reports a count is unauditable; the
+     *      normalised item carries the target agent, the aspect and the exact
+     *      text, which is what makes a later "was this one right after all?"
+     *      answerable.
+     *   2. It is scoped to THE MEETING PATH ONLY. proposeChange() has a second
+     *      caller — agent-runner.js's supervised `learning_loop_active_context_write`
+     *      trigger, which the owner drives by hand with a real conclusion in it.
+     *      Gating inside probation.js would have taken that down too, and the
+     *      thing being distrusted this session is a small model's unattended
+     *      judgement, not the owner's.
+     *
+     * Everything else applyMeetingEffects() does is untouched — mood,
+     * irritation, state_changes, config_overrides, suggestion decisions and
+     * the action_items -> board write all still run. Only the write into a
+     * character file stops.
+     */
+    if (!(await meetingContextAmendmentsEnabled(env))) {
+      if (items.length) {
+        /*
+         * Recorded, not discarded — the same convention `refused_action_items`
+         * follows above. An effect that simply vanishes is the same defect as
+         * an effect applied on no evidence, pointing the other way: the office
+         * would show a meeting that reached conclusions and a set of character
+         * files that never received them, with nothing anywhere saying why.
+         */
+        decisions.refused_context_amendments = {
+          reason: `${MEETING_AMENDMENTS_FLAG} is off — a meeting may not amend a character file`,
+          refused_amendments: items.map((it) => ({
+            agent_id: it.agentId,
+            aspect: it.aspect,
+            content: it.content,
+            proposed_by: it.proposedBy,
+          })),
+        };
+        console.warn(`[meeting-engine] ${items.length} context amendment(s) REFUSED (${MEETING_AMENDMENTS_FLAG} off): `
+          + items.map((it) => `agent ${it.agentId}/${it.aspect}`).join(', ')
+          + '. Recorded on the meeting record, not applied.');
+      }
+    } else {
+      for (const item of items) {
+        const result = await proposeChange(env, {
+          actorId: item.proposedBy,
+          targetAgentId: item.agentId,
+          aspect: item.aspect,
+          content: item.content,
+        }).catch((err) => ({ proposed: false, reason: `threw: ${err.message}` }));
+        if (!result.proposed) {
+          console.warn(`[meeting-engine] context_amendment for agent ${item.agentId} (${item.aspect}) NOT entered into probation: ${result.reason}`);
+        }
       }
     }
   }
@@ -1093,6 +1188,21 @@ function renderMeetingReport(meetingType, attendeeSnapshots, transcript, decisio
       .join('\n')}\n`
     : '';
 
+  /*
+   * ITEM A (2026-08-27). Rendered beside the two refusal sections above and in
+   * the same words, because it is the same kind of fact: something this
+   * meeting decided, which the office declined to act on. The reader of a
+   * meeting report is the owner, and the question this section exists to
+   * answer for him is "what did this meeting try to change about my agents,
+   * and why didn't it?"
+   */
+  const refusedAmendments = decisions.refused_context_amendments;
+  const refusedAmendmentsList = refusedAmendments?.refused_amendments?.length
+    ? `\n## Refused Character-File Amendments\n\n_${refusedAmendments.reason}_\n\n${refusedAmendments.refused_amendments
+      .map((a) => `- Agent ${a.agent_id} — \`${a.aspect}\` (proposed by agent ${a.proposed_by}): ${a.content} — **refused**, not written to the character file`)
+      .join('\n')}\n`
+    : '';
+
   return `# ${meta.label} — ${date}
 
 ${fabricationBanner}${opts?.trigger ? `**Trigger:** ${opts.trigger}\n` : ''}
@@ -1103,7 +1213,7 @@ ${attendeeList}
 ## Transcript
 
 ${transcript}
-${refusedList}${refusedEffectsList}
+${refusedList}${refusedEffectsList}${refusedAmendmentsList}
 
 ## Summary
 

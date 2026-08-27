@@ -510,6 +510,13 @@ const ALLOW_LIST_TO_TRIGGER = {
   // switch means a feature that never starts; an absent route on this one means
   // a capability that cannot be stopped.
   cases_enabled: 'cases_toggle',
+  // Added 2026-08-27 (Session 26, ITEM A) — whether a meeting may amend a
+  // character file. Four for four; the map caught this one on its first run
+  // too. Like `cases_enabled` above and unlike everything before it, this
+  // switch DEFAULTS ON, so an absent route would again mean a running
+  // capability that cannot be stopped — which is the whole reason the switch
+  // was added.
+  meeting_context_amendments_enabled: 'meeting_amendments_toggle',
 };
 const allowListMatch = /const allowedKeys = \[([^\]]+)\]/.exec(arSrc0);
 const allowListKeys = allowListMatch
@@ -1562,6 +1569,49 @@ if (boardSrc === null) {
   }
   check('§14 — no `DONE` task remains on the live board (the retirement path actually ran)',
     (realBoard.counts.DONE || 0) === 0, `${realBoard.counts.DONE} still on the board`);
+}
+
+/* ═════ §15 the meeting's reach into character files (Session 26, ITEM A) ═════ */
+section('\u00a715 meeting context_amendments gate (2026-08-27)');
+{
+  const eng = read('workers/meeting-engine.js');
+  const ar = read('workers/agent-runner.js');
+
+  check('[FAILS-OLD] meeting-engine.js has a switch of its own for character-file amendments',
+    /export async function meetingContextAmendmentsEnabled\(env\)/.test(eng));
+
+  // The whole point of the default. A switch that defaults OFF would have made
+  // the DEPLOY the behaviour change, which is precisely what this estate's
+  // switch convention exists to prevent.
+  check('the switch DEFAULTS ON — `!== false`, not `=== true`',
+    /MEETING_AMENDMENTS_FLAG\]\s*!==\s*false/.test(eng));
+  check('...but an ABSENT SIM_KV binding refuses rather than defaulting on',
+    /meetingContextAmendmentsEnabled\(env\)\s*\{\s*[\r\n]+\s*if \(!env\?\.SIM_KV\) return false/.test(eng));
+
+  // Scope. proposeChange() has a second caller the owner drives by hand; the
+  // gate must be at the meeting call site, not inside probation.js.
+  check('the gate is at the MEETING call site, not inside probation.js',
+    /if \(!\(await meetingContextAmendmentsEnabled\(env\)\)\)/.test(eng)
+    && !/meetingContextAmendmentsEnabled/.test(read('workers/probation.js')));
+
+  // A4 — recorded, not discarded.
+  check('[FAILS-OLD] a refused amendment is RECORDED on the meeting record, not dropped',
+    /decisions\.refused_context_amendments = \{[\s\S]{0,400}?refused_amendments: items\.map/.test(eng));
+  check('...and the record carries the target agent, aspect and exact text — not a count',
+    /agent_id: it\.agentId,[\s\S]{0,160}?aspect: it\.aspect,[\s\S]{0,160}?content: it\.content/.test(eng));
+  check('...and it is rendered into the meeting report the owner reads',
+    /Refused Character-File Amendments/.test(eng) && /\$\{refusedAmendmentsList\}/.test(eng));
+
+  // A3 — everything else stays on. The gate sits inside the context_amendments
+  // branch only, downstream of the action-items branch.
+  check('A3 — mood, irritation, state, config and action-item effects are NOT gated by it',
+    eng.indexOf('await meetingContextAmendmentsEnabled(env)')
+      > eng.indexOf('if (await actionItemsToBoardEnabled(env))')
+    && (eng.match(/await meetingContextAmendmentsEnabled\(env\)/g) || []).length === 1);
+
+  check('the toggle route exists and writes the same key the engine reads',
+    /case 'meeting_amendments_toggle'/.test(ar)
+    && /meeting_context_amendments_enabled: !!body\.enabled/.test(ar));
 }
 
 console.log(`\n${pass}/${pass + fail} checks passed.`);
