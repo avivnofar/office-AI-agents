@@ -1544,6 +1544,47 @@ const ADMIN_DESK_ARTIFACT_CHARS = 6000;
 const ADMIN_DESK_ARTIFACT_FILES = Object.freeze(['SPEC.md', 'README.md']);
 
 /**
+ * Session 31, Item D — a distinct question per reviewer role, so QA, the
+ * Cyber Expert and the IT Chief stop producing three agreements and start
+ * producing coverage. Everyone else on this desk (Team Lead 7, Lead QA 8,
+ * Designer 9, CEO 11, the Workflow 12) keeps a generic "review honestly"
+ * frame — this session's brief named exactly three roles and said "do not
+ * add reviewers, do not change the review count," so nobody else's prompt
+ * changes shape.
+ *
+ * The IT Chief's question is deliberately the longest and the most
+ * concrete: this estate's own history (AD-030's Groq/Cloudflare incident, a
+ * silently-dead model ID passing as a live one for months, the 2026-08-16
+ * pacer/KV race) is that OPERATIONAL failure — something running, wrongly,
+ * with nobody able to tell — is the class this office has paid for
+ * repeatedly and the class "is this good" never asks about.
+ */
+const QA_REVIEWER_ID = 6;
+const CYBER_REVIEWER_ID = 13;
+
+function reviewerLensQuestion(agentId) {
+  if (agentId === QA_REVIEWER_ID) {
+    return 'YOUR QUESTION: does it do what the spec said? Check the deliverable against its own SPEC.md line by line — '
+      + 'not "is this well-written" but "does what is described here match what the spec asked for, and is anything the '
+      + 'spec required simply missing."';
+  }
+  if (agentId === CYBER_REVIEWER_ID) {
+    return 'YOUR QUESTION: can this be misused? Read it as an attacker would — what input would make it do something it '
+      + 'should not, what does it trust that it should not, and what happens if it is handed malformed, oversized, or '
+      + 'adversarial input rather than the well-behaved kind the spec\'s own example assumes.';
+  }
+  if (agentId === IT_CHIEF_ID) {
+    return 'YOUR QUESTION: can this actually be run, operated, and diagnosed? Specifically: where does it run and what does '
+      + 'it need to run there (credentials, network, a specific version of something); what happens when it fails partway '
+      + 'through; and — the one this office has paid for repeatedly, not hypothetically — HOW WOULD ANYONE KNOW IT FAILED? '
+      + 'A provider silently answering wrong for weeks, a key sitting in an abandoned Worker, logs nobody reads, a health '
+      + 'check returning 404 to every monitor that asks it — each of those was a real incident here, and each would have '
+      + 'been caught by this question alone. Also say what it costs to run, if that is knowable from what you were given.';
+  }
+  return 'Review honestly: is this good, does it hold up, and is there anything here you would not want to put your name on.';
+}
+
+/**
  * A judgment-lane call for one desk. Returns `{ text, provider, reason }` and
  * never throws — a desk that cannot reach a model must produce nothing, not
  * half a review.
@@ -1757,6 +1798,13 @@ async function processAdminDeskBlock(env, opts = {}) {
         ? 'You are a REQUIRED reviewer. A full reasoned review is owed: what you checked, what you found, and a verdict of approve or revise.'
         : 'You are not a required reviewer here. A brief comment or an EXPLICIT abstention is owed. Silence is never approval — if you have nothing to add, say so and abstain in words.';
 
+      // Session 31, Item D — three reviewers asking "is this good" produces
+      // three agreeing opinions, not coverage. Each of QA (6), the Cyber
+      // Expert (13) and the IT Chief (5) gets a DISTINCT question rendered
+      // into its prompt; everyone else on this desk keeps the generic frame.
+      // No reviewer was added and none removed — same roster, same count.
+      const lensQuestion = reviewerLensQuestion(item.agentId);
+
       const judged = await adminDeskJudgment(env, {
         agentId: item.agentId,
         eventId: `admin-desk:review:${item.slug}:${item.agentId}`,
@@ -1772,6 +1820,8 @@ async function processAdminDeskBlock(env, opts = {}) {
           `Round ${item.round} review of the deliverable \`${item.slug}\`${item.boardTask ? ` (board task ${item.boardTask})` : ''}.`,
           '',
           owed,
+          '',
+          lensQuestion,
           '',
           /*
            * ── WHAT YOU WERE AND WERE NOT GIVEN (2026-08-17) ────────────────
