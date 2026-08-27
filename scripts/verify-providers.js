@@ -457,7 +457,20 @@ check('cohere-client.js documents WHY the lane has no backup (vectors from two m
 console.log('\n--- Error semantics mirror workers/groq-client.js ---');
 
 const groqSrc = readFileSync(new URL('../workers/groq-client.js', import.meta.url), 'utf8');
-check('groq-client.js (the shape being mirrored) returns null on 429', /res\.status === 429[\s\S]{0,200}return null/.test(groqSrc));
+/*
+ * WINDOW WIDENED 200 -> 400 ON 2026-08-27 (Session 27 ITEM B). The PROPERTY is
+ * unchanged and still asserted: Groq returns null on a 429 rather than throwing.
+ * What changed is the number of characters between the status test and that
+ * `return null` — callGroq() now reads the 429 body and fires `onResponse` with
+ * it, so the router's attempt trail carries the provider's own message instead of
+ * `msg=""`. The old window fitted the old block by coincidence, not by design;
+ * narrowing a regex until it happens to fit is how a check stops testing the
+ * thing it names. See workers/groq-client.js's call-site block.
+ */
+check('groq-client.js (the shape being mirrored) returns null on 429', /res\.status === 429[\s\S]{0,400}return null/.test(groqSrc));
+check('groq-client.js carries the 429 AND the non-ok body into the router attempt trail (Session 27)',
+  /res\.status === 429[\s\S]{0,400}onResponse\?\.\(\{ status: res\.status, error:/.test(groqSrc)
+  && /if \(!res\.ok\)[\s\S]{0,400}onResponse\?\.\(\{ status: res\.status, error:/.test(groqSrc));
 
 for (const { name } of MODULES) {
   const src = readFileSync(new URL(`../workers/${name}`, import.meta.url), 'utf8');

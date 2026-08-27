@@ -11,7 +11,7 @@
  * Status: DRAFT (Phase 1 foundation).
  */
 
-import { normalizeOpenAiChat, NOT_REPORTED } from './provider-common.js';
+import { normalizeOpenAiChat, NOT_REPORTED, parseRateLimitHeaders } from './provider-common.js';
 
 const GROQ_ENDPOINT = 'https://api.groq.com/openai/v1/chat/completions';
 
@@ -131,6 +131,11 @@ export const GROQ_MODEL = 'openai/gpt-oss-20b';
  * @param {number} [opts.temperature]
  * @param {number} [opts.maxTokens] - kept short (default 512) for routine case work
  * @param {number|string} [opts.agentId] - for warning logs only
+ * @param {(info: {status: number|null, rateLimit?: object, error?: string}) => void} [opts.onResponse]
+ *   Fired once the API responds, BEFORE the status checks, and again with the
+ *   body text on a rejection. task-router.js uses it to count a consumed
+ *   free-tier request and to carry the provider's own message into the attempt
+ *   trail — see the block at the call site.
  * @returns {Promise<{text: string, source: 'groq', finishReason: string|null,
  *   outputTokens: number|null, usage: object|null, rateLimit: object}|null>}
  *   null on missing key, 429 (quota exhausted), or any other failure — caller
@@ -151,7 +156,7 @@ export const GROQ_MODEL = 'openai/gpt-oss-20b';
  * envelope is a superset, so no caller's behaviour changes. Nothing about the
  * model, the limits, the prompt or the routing moves with it.
  */
-export async function callGroq({ apiKey, prompt, systemPrompt, temperature = 0.8, maxTokens = 512, agentId }) {
+export async function callGroq({ apiKey, prompt, systemPrompt, temperature = 0.8, maxTokens = 512, agentId, onResponse }) {
   if (!apiKey) {
     console.warn(`[agent-${agentId}] GROQ_API_KEY not configured`);
     return null;
@@ -173,17 +178,57 @@ export async function callGroq({ apiKey, prompt, systemPrompt, temperature = 0.8
     });
   } catch (err) {
     console.warn(`[agent-${agentId}] Groq request failed: ${err.message}`);
+    onResponse?.({ status: null, error: String(err?.message || err).slice(0, 200) });
     return null;
   }
 
+  /*
+   * ── THE BODY NOW REACHES THE ROUTER (2026-08-27, Session 27 ITEM B) ──────
+   *
+   * `onResponse` did not exist in this client. cerebras-client.js and
+   * mistral-client.js have fired it since the router gained the hook; this file
+   * never did, so `task-router.js` routeTask() saw `responded === false` for
+   * EVERY Groq outcome and recorded `{ outcome: 'failed', reason: 'no_response',
+   * status: null, providerMessage: '' }` — the same trail for a 413, a 429, a
+   * decommissioned model and a dead key alike.
+   *
+   * That is this file's own header turned against itself. It says, about the
+   * fourth retired model: "Read the BODY before blaming a secret." The body was
+   * written to a console.warn and to nowhere a caller could read it, which is
+   * precisely the log-tail race `responseError` was added to routeTask() to end.
+   *
+   * FOUND BY MEASUREMENT, not by reading. Session 27 sent the real 20,253-token
+   * meeting prompt down `routine_volume` to establish Groq's input ceiling and
+   * got back `reason=no_response, status=-, msg=""` — blind, on the one provider
+   * whose 413 is the documented cause of the meetings defect. The 8,000 TPM
+   * limit and the requested-token count were in the response body the whole
+   * time, exactly as they were in 2026-08-09's captured 400.
+   *
+   * TWO EFFECTS, AND THE SECOND IS DELIBERATE. It carries the evidence; and,
+   * because it fires BEFORE the status checks, a Groq call that reached the API
+   * and was rejected is now recorded with `confirmed: true` rather than
+   * `confirmed: false`. That is cerebras-client.js's documented reason for the
+   * same placement — "a 429 or 5xx still consumed a free-tier request allowance
+   * and must be counted" — and it applies identically here. Groq was
+   * under-counting its rejected calls against its own free tier; the correction
+   * is in the conservative direction.
+   *
+   * What does NOT change: the return contract. Every path that returned null
+   * still returns null, and no caller's behaviour moves.
+   */
+  onResponse?.({ status: res.status, rateLimit: parseRateLimitHeaders(res) });
+
   if (res.status === 429) {
-    console.warn(`[agent-${agentId}] Groq 429 — daily quota exhausted`);
+    const errText = await res.text().catch(() => '');
+    console.warn(`[agent-${agentId}] Groq 429 — daily quota exhausted: ${errText.slice(0, 300)}`);
+    onResponse?.({ status: res.status, error: `429 ${errText.slice(0, 240)}` });
     return null;
   }
 
   if (!res.ok) {
     const errText = await res.text().catch(() => '');
     console.warn(`[agent-${agentId}] Groq API error (${res.status}): ${errText.slice(0, 300)}`);
+    onResponse?.({ status: res.status, error: `${res.status} ${errText.slice(0, 240)}` });
     return null;
   }
 
