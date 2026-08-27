@@ -474,7 +474,8 @@ const BLOCKED_BY_MAX_CHARS = 150;
  */
 export const DIRECT_REVIEW_CONTEXT_TOKENS = 131000;
 /** Headroom for the estimate itself being wrong in the cheap direction.
- *  estimateTokens over-estimates by design (length/3), which is the right
+ *  estimateTokens over-estimates by design (length/2.75 since 2026-08-27, when
+ *  length/3 was measured under-estimating by 7.8%), which is the right
  *  asymmetry here: over-estimating costs a skipped review, under-estimating
  *  publishes a truncated one. */
 const CONTEXT_SAFETY_MARGIN = 400;
@@ -505,10 +506,16 @@ function droppedRowsNote(malformed, noun = 'row') {
 }
 
 /** Kept identical to office-context.js estimateTokens() and
- *  provider-common.js's — length/3, deliberately over-estimating. */
+ *  provider-common.js's — length/2.75 since 2026-08-27, deliberately
+ *  over-estimating; it was length/3 and measured UNDER-estimating. */
+/* DIVISOR 3 -> 2.75 ON 2026-08-27. Measured against a real tokenizer: a live
+ * Groq 413 counted 21,832 tokens on a prompt this function called 20,253 —
+ * 2.783 chars/token, so /3 UNDER-counted by 7.8%%. Kept character-for-character
+ * identical to the other three copies; see provider-common.js for the full
+ * measurement and for why the budgets were rescaled in the same commit. */
 function estimateTokens(text) {
   if (!text) return 0;
-  return Math.ceil(String(text).length / 3);
+  return Math.ceil(String(text).length / 2.75);
 }
 
 /**
@@ -523,7 +530,9 @@ function estimateTokens(text) {
  * context block (agent-base.js:266-274). Measured on the first live run:
  * 8,347 tokens against an 8,192 ceiling. The call overran, and the only thing
  * that stopped the guard from saying so was its own over-estimating bias
- * (length/3 against a real ~length/4) pointing the other way.
+ * (length/2.75 against a MEASURED ~length/2.78) pointing the other way. The
+ * '~length/4 on English prose' this once assumed did not survive contact with
+ * the office's own mixed English/Hebrew prompts — see provider-common.js.
  *
  * A guard that measures the wrong string and happens not to bite is the exact
  * shape this project has now named in three subsystems. So the caller must

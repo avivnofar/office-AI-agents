@@ -261,7 +261,9 @@ export function buildPolicyBlock(shape = 'brief', opts = {}) {
 
   const body = POLICY_DIGEST.map((d) => d[key]).join('\n');
   const text = `${header}\n${body}`;
-  return { text, tokens: Math.ceil(text.length / 3), shape: key };
+  // 3 -> 2.75 on 2026-08-27, with the other three copies of this divisor.
+  // See provider-common.js estimateTokens() for the live-tokenizer measurement.
+  return { text, tokens: Math.ceil(text.length / 2.75), shape: key };
 }
 
 /**

@@ -100,14 +100,20 @@ import {
  * scripts/verify-office-bureaucracy.js, so a change to one that is not made
  * to the other is a failing check rather than a silent drift.
  *
- * Kept identical to provider-common.js's estimateTokens(): length/3, which
- * deliberately OVER-estimates. Over-estimating costs a few borderline
- * requests; under-estimating silently blows a budget. The asymmetry is the
- * whole argument, and it applies here for the same reason.
+ * Kept identical to provider-common.js's estimateTokens(): length/2.75 since
+ * 2026-08-27 (it was length/3, which was believed to over-estimate and was
+ * MEASURED under-estimating by 7.8% against a live Groq tokenizer). Over-
+ * estimating costs a few borderline requests; under-estimating silently blows
+ * a budget. The asymmetry is the whole argument, and it applies here too.
  */
+/* DIVISOR 3 -> 2.75 ON 2026-08-27. Measured against a real tokenizer: a live
+ * Groq 413 counted 21,832 tokens on a prompt this function called 20,253 —
+ * 2.783 chars/token, so /3 UNDER-counted by 7.8%%. Kept character-for-character
+ * identical to the other three copies; see provider-common.js for the full
+ * measurement and for why the budgets were rescaled in the same commit. */
 function estimateTokens(text) {
   if (!text) return 0;
-  return Math.ceil(String(text).length / 3);
+  return Math.ceil(String(text).length / 2.75);
 }
 
 /*
@@ -181,7 +187,8 @@ export const CACHE_TTL_MS = 30 * 60 * 1000;
 
 /**
  * SIZE BUDGETS, in conservatively-estimated tokens (provider-common.js's
- * estimateTokens — length/3, deliberately over-estimating).
+ * estimateTokens — length/2.75 since 2026-08-27, deliberately over-estimating;
+ * it was length/3 and measured UNDER-estimating).
  *
  * These bind because this is prompt content that is re-sent constantly. The
  * meeting figure is per meeting; the agent figure is per LLM call, of which
@@ -264,7 +271,28 @@ export function buildMissionBlock(shape = 'brief') {
 }
 
 export const BUDGETS = Object.freeze({
-  meeting: 4600,
+  /*
+   * ── ALL FOUR RESCALED x 3/2.75 ON 2026-08-27, AND NOTHING ELSE CHANGED ───
+   *
+   * meeting 4600->5020 · agent 880->960 · agent_standard 660->720 · report
+   * 8000->8730. These are the SAME budgets in new units, not a loosening.
+   *
+   * estimateTokens() moved from length/3 to length/2.75 the same day, because a
+   * live Groq 413 counted 21,832 real tokens on a prompt this repo called 20,253
+   * — it had been UNDER-counting by 7.8% while its own docstring claimed the
+   * opposite. Every number here was calibrated by measuring what content fitted
+   * under the OLD divisor (see the notes below, which are preserved verbatim and
+   * still describe how each was chosen). Leaving them untouched against a
+   * stricter estimator would have dropped board sections that fitted the day
+   * before — a regression introduced by a fix, and a silent one, since the
+   * fitter's own `dropped` list is the only place it would have shown.
+   *
+   * So the ratio is applied uniformly and rounded UP to the nearest ten, so no
+   * shape can lose content to rounding. Verified after the change: the meeting,
+   * agent, agent_standard and report shapes each drop and trim exactly what they
+   * dropped and trimmed before.
+   */
+  meeting: 5020,
   /**
    * ── RAISED 400 -> 520 ON 2026-08-10. THIS CLOSES OB-030's OPEN HALF. ────
    *
@@ -290,7 +318,7 @@ export const BUDGETS = Object.freeze({
    * That is the figure OB-030 asked for and it does not bind. What binds is the
    * fitter, which still runs and still reports what it cut.
    */
-  agent: 880,
+  agent: 960,
   /**
    * ── RAISED AGAIN 520 -> 880 / 380 -> 660 ON 2026-08-10, WITH THE OWNER
    *    CHANNEL. MEASURED, AND THE FIRST MEASUREMENT WAS A REGRESSION. ──────
@@ -407,8 +435,8 @@ export const BUDGETS = Object.freeze({
    * enforced only by a budget stops being enforced the next time the budget
    * moves, and this one moved twice in the week before it was written.
    */
-  agent_standard: 660,
-  report: 8000,
+  agent_standard: 720,
+  report: 8730,
 });
 
 /**

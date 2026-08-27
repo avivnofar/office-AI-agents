@@ -147,8 +147,23 @@ check('BUDGETS.report is the loosest — those two sites make no model call',
  * the budget drift upward one convenience at a time, which is how a budget stops
  * being one.
  */
-check('BUDGETS.agent is 880 as measured (raised with the owner channel)', officeContext.BUDGETS.agent === 880);
-check('BUDGETS.agent_standard is 660 as measured', officeContext.BUDGETS.agent_standard === 660);
+/*
+ * RESCALED x 3/2.75 ON 2026-08-27: 880 -> 960, 660 -> 720, 4600 -> 5020,
+ * 8000 -> 8730. Still pinned to exact numbers, for the reason stated above —
+ * what moved is the UNIT, not the allowance.
+ *
+ * estimateTokens() went from length/3 to length/2.75 after a live Groq 413
+ * counted 21,832 real tokens on a prompt this repo called 20,253. Leaving these
+ * figures alone against a 9% stricter estimator would have silently dropped
+ * sections that fitted the day before — the fitter's `dropped` list being the
+ * only place it would ever have shown. Both moved in one commit, and the
+ * drop/trim/withheld lists were verified UNCHANGED for all four shapes.
+ *
+ * This is the one kind of budget change that is not drift, and the raw-number
+ * comparisons below are rescaled with it so they keep testing what they meant.
+ */
+check('BUDGETS.agent is 960 — 880 as measured, rescaled x3/2.75 with the estimator', officeContext.BUDGETS.agent === 960);
+check('BUDGETS.agent_standard is 720 — 660 as measured, rescaled the same way', officeContext.BUDGETS.agent_standard === 720);
 check('BUDGETS.agent_standard exists and is tighter than the admin one (A11)',
   officeContext.BUDGETS.agent_standard < officeContext.BUDGETS.agent);
 // 3,500 since 2026-08-10 (was 1,200). OB-030 closed: at 1,200 the meeting
@@ -162,11 +177,15 @@ check('BUDGETS.agent_standard exists and is tighter than the admin one (A11)',
 // "fitted" at 3,488 by trimming the REQUIREMENT DETAIL — the thing agenda item 1
 // is about. Same lesson as OB-030's, one raise later: the percentage was never
 // the number that mattered; what the fitter had to cut to reach it is.
-check('BUDGETS.meeting is 4600 as specified (2026-08-10, the lifecycle raise)', officeContext.BUDGETS.meeting === 4600);
+// The untrimmed sizes below (4,277 and 5,944) were MEASURED under the old
+// length/3 divisor, so they are rescaled here too. Comparing a new-unit budget
+// against an old-unit measurement would quietly weaken both checks by 9%.
+const OLD_UNIT = (n) => Math.ceil((n * 3) / 2.75);
+check('BUDGETS.meeting is 5020 — 4600 as specified, rescaled x3/2.75 (2026-08-27)', officeContext.BUDGETS.meeting === 5020);
 check('the meeting budget clears the shape\'s full untrimmed size WITH a deliverable in the loop',
-  officeContext.BUDGETS.meeting >= 4277);
+  officeContext.BUDGETS.meeting >= OLD_UNIT(4277));
 check('the report budget clears the three-deliverable shape — it is free, it makes no model call',
-  officeContext.BUDGETS.report >= 5944);
+  officeContext.BUDGETS.report >= OLD_UNIT(5944));
 
 const snapshot = { fetched_at: Date.now(), board, requirements: reqs, errors: [] };
 

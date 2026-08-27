@@ -44,10 +44,56 @@
  * Over-estimating costs a few borderline requests that get routed to the
  * backup lane instead. Under-estimating costs a silent failure inside a
  * judgment path. The asymmetry is the whole argument.
+ *
+ * ── THE DIVISOR WAS 3, AND THE PARAGRAPHS ABOVE WERE WRONG (2026-08-27) ──
+ *
+ * Everything above is preserved because the REASONING is right and the NUMBER
+ * it justified was not. The argument concludes that this estimate is
+ * pessimistic. It was optimistic, on precisely the traffic reason 1 names.
+ *
+ * MEASURED, and by a provider rather than by another estimate. A real
+ * `daily_standup` meeting prompt — mixed English and Hebrew, the office context
+ * block included — was sent down `routine_volume` on 2026-08-27. Groq refused it
+ * and its own tokenizer counted the request in the 413 body:
+ *
+ *     Groq 413: "... on tokens per minute (TPM): Limit 8000, Requested 21832"
+ *     chars/3 on the identical prompt:                          20253
+ *
+ * 60,759 characters against 21,832 real tokens is **2.783 characters per
+ * token** — so `/3` under-counted by **7.8%**, and a cap enforced with it was,
+ * in this file's own words, "not enforced".
+ *
+ * WHY 2.75 AND NOT 2.783. The measured ratio is the point where the estimate
+ * becomes exactly right, which is the one place a safety margin must not sit.
+ * 2.75 clears the single measurement by ~1.2% and finally makes the direction
+ * match the docstring. It is deliberately NOT a large margin: this rests on ONE
+ * prompt from ONE tokenizer, so the number is defensible rather than confident,
+ * and a second measurement on a different provider should revise it.
+ *
+ * NOT a real tokenizer, deliberately — that is a dependency and a per-call cost
+ * for a function called on every routed request.
+ *
+ * THE DIVISOR IS A LITERAL IN FOUR FILES, and it stays that way. office-context.js
+ * is forbidden by its own verifier from importing this layer at all, so a shared
+ * constant cannot reach it; the four copies are held together instead by
+ * scripts/verify-office-bureaucracy.js asserting them character-for-character
+ * identical. All four moved 3 -> 2.75 in one commit. A future change to one of
+ * them that is not made to the others fails a check rather than drifting.
+ *
+ * ── EVERY BUDGET CALIBRATED AGAINST THE OLD DIVISOR MOVED WITH IT ────────
+ *
+ * The `BUDGETS` in office-context.js were set by measuring what content fitted,
+ * not by converting from a provider ceiling — see their own notes ("At 400 the
+ * ADMIN agent shape measured 327 tokens … while dropping deliverables-count and
+ * questions-headline outright"). A stricter estimator against unchanged budgets
+ * would therefore have silently dropped board sections that fit yesterday, which
+ * is a regression introduced by a fix rather than a fix. They were rescaled by
+ * the same 3/2.75 ratio in the same commit so the SAME CONTENT still fits and
+ * only the number describing it became honest.
  */
 export function estimateTokens(text) {
   if (!text) return 0;
-  return Math.ceil(String(text).length / 3);
+  return Math.ceil(String(text).length / 2.75);
 }
 
 /** Combined conservative estimate for a chat-style request's input side. */

@@ -393,10 +393,16 @@ check('the refusal reason says it is NOT truncating', /[Nn]ot truncating/.test(o
 check('the refusal says there is no larger provider behind this lane',
   /no larger provider/i.test(overVerdict.reason || ''), overVerdict.reason);
 
-// A 130K-token batch must still PASS — the cap has to admit the work the lane
-// exists for, not just reject the extreme. The estimator over-counts (chars/3),
-// so size the input by the estimate rather than by raw length.
-const nearLimit = 'x'.repeat(130_000 * 3 - 3000);
+// A near-limit batch must still PASS — the cap has to admit the work the lane
+// exists for, not just reject the extreme.
+//
+// SIZED THROUGH THE ESTIMATOR, not through a copy of its divisor (2026-08-27).
+// This read `130_000 * 3 - 3000`, which quietly became an OVER-limit input the
+// moment the divisor moved 3 -> 2.75 — the check would then have failed for a
+// reason that had nothing to do with the cap it exists to test. Deriving the
+// ratio from estimateTokens() itself means the next revision cannot stale it.
+const charsPerEstToken = 1000 / estimateTokens('x'.repeat(1000));
+const nearLimit = 'x'.repeat(Math.floor(128_000 * charsPerEstToken));
 check('a just-under-limit batch is still ACCEPTED (the cap admits the lane\'s real work)',
   cerebras.checkInputWithinCaps({ prompt: nearLimit, maxTokens: 512 }).ok === true);
 
@@ -524,8 +530,19 @@ check('estimateTokens("") is 0', estimateTokens('') === 0);
 check('estimateTokens(null) is 0 (no crash on an absent system prompt)', estimateTokens(null) === 0);
 check('estimator over-counts vs the ~chars/4 English rule of thumb (Hebrew tokenizes worse)',
   estimateTokens('x'.repeat(4000)) > 1000, String(estimateTokens('x'.repeat(4000))));
+/*
+ * Tests the SUM, not an equality with the concatenation (2026-08-27). It used to
+ * assert `=== estimateTokens('x'.repeat(600))`, which held only because 300/3 is
+ * a whole number: each part is rounded up independently, so with a non-integer
+ * divisor two ceilings do not equal one. That made a TRUE property read as false
+ * the moment the divisor became 2.75. The property was always "both are counted".
+ */
 check('estimatePromptTokens sums prompt AND systemPrompt (a persona prompt is not free)',
-  estimatePromptTokens({ prompt: 'x'.repeat(300), systemPrompt: 'y'.repeat(300) }) === estimateTokens('x'.repeat(600)));
+  estimatePromptTokens({ prompt: 'x'.repeat(300), systemPrompt: 'y'.repeat(300) })
+    === estimateTokens('x'.repeat(300)) + estimateTokens('y'.repeat(300)));
+check('...and a system prompt strictly increases the estimate — it is never free',
+  estimatePromptTokens({ prompt: 'x'.repeat(300), systemPrompt: 'y'.repeat(300) })
+    > estimateTokens('x'.repeat(300)));
 
 /* ── Config and code agree ──────────────────────────────────────────────── */
 console.log('\n--- config/token-economy.json `providers` block agrees with the modules ---');
