@@ -22,6 +22,7 @@ import {
   DESK_AGENTS, ARCHITECT_ID, MAX_REVIEWS_PER_TICK, MAX_INCIDENTS_PER_NOTE,
   NOT_CARRIED_STATES, carriedDeliverables, reviewAssignments, approvalQueue,
   probationDecisionDraw, recentIncidents, deskSummary, producedAnything,
+  MAX_BUILD_NOTES_PER_TICK, buildAssignments,
 } from '../workers/admin-desk.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -309,6 +310,67 @@ check('...and that parser strips markdown emphasis before matching',
   /replace\(\/\[\*_`\]\/g/.test(runner));
 check('...while a genuine no-match still returns null for the caller to refuse on',
   /return m \? m\[1\]\.toLowerCase\(\) : null;/.test(runner));
+
+/* ═══════════════ §9 — Desk 5: build progress notes (session 30, OB-146) ═══════════════ */
+section('§9 the build-note draw');
+const BOARD_TASKS = [
+  { id: 'OB-A', title: 'Paired and dispatched, desk agent', state: 'IN-PROGRESS', agentId: 7, warehouse: 'demo-slug', dispatched: '2026-08-27 · held by x' },
+  { id: 'OB-B', title: 'IN-PROGRESS but no Warehouse pairing', state: 'IN-PROGRESS', agentId: 8, warehouse: null, dispatched: '2026-08-27 · held by x' },
+  { id: 'OB-C', title: 'Paired but only READY, not dispatched', state: 'READY', agentId: 9, warehouse: 'another-slug', dispatched: null },
+  { id: 'OB-D', title: 'Paired and dispatched, but the Architect', state: 'IN-PROGRESS', agentId: ARCHITECT_ID, warehouse: 'office-site', dispatched: '2026-08-14 · held by x' },
+  { id: 'OB-E', title: 'Paired and dispatched, a case worker (not a desk agent)', state: 'IN-PROGRESS', agentId: 2, warehouse: 'yet-another-slug', dispatched: '2026-08-27 · held by x' },
+];
+const b1 = buildAssignments(BOARD_TASKS, {});
+check('only IN-PROGRESS + paired + desk-agent draws (OB-A)',
+  b1.draw.length === 1 && b1.draw[0].taskId === 'OB-A' && b1.draw[0].slug === 'demo-slug');
+check('IN-PROGRESS with no Warehouse pairing draws nothing and is not even reported — nothing to report against yet (OB-134)',
+  !b1.draw.some((d) => d.taskId === 'OB-B') && !b1.skipped.some((s) => s.taskId === 'OB-B'));
+check('READY (not dispatched) never draws, paired or not',
+  !b1.draw.some((d) => d.taskId === 'OB-C'));
+check('the Architect is skipped with a reason naming him as the sole build runtime',
+  b1.skipped.some((s) => s.taskId === 'OB-D' && s.agentId === ARCHITECT_ID && /sole build RUNTIME/.test(s.why)));
+check('a non-desk-agent (case worker) is skipped, not silently dropped',
+  b1.skipped.some((s) => s.taskId === 'OB-E' && s.agentId === 2 && /not an admin-desk agent/.test(s.why)));
+
+section('§9b idempotency — already logged today does not redraw');
+const b2 = buildAssignments(BOARD_TASKS, { alreadyLogged: { 'OB-A': [7] } });
+check('an agent who already filed today\'s note for that task is not drawn again',
+  !b2.draw.some((d) => d.taskId === 'OB-A'));
+check('...and the skip reason says why',
+  b2.skipped.some((s) => s.taskId === 'OB-A' && s.agentId === 7 && /already filed for today/.test(s.why)));
+
+section('§9c the cap is honoured and reported, same as the review desk');
+const MANY_TASKS = Array.from({ length: MAX_BUILD_NOTES_PER_TICK + 2 }, (_, i) => ({
+  id: `OB-M${i}`, title: `many ${i}`, state: 'IN-PROGRESS', agentId: 7, warehouse: `slug-${i}`, dispatched: 'x',
+}));
+const b3 = buildAssignments(MANY_TASKS, {});
+check(`the draw is capped at MAX_BUILD_NOTES_PER_TICK (${MAX_BUILD_NOTES_PER_TICK})`,
+  b3.draw.length === MAX_BUILD_NOTES_PER_TICK);
+check('the cap is not silent — everything past it is deferred, not dropped',
+  b3.deferred.length === MANY_TASKS.length - MAX_BUILD_NOTES_PER_TICK);
+
+section('§9d an empty queue draws nothing');
+check('no board tasks at all', buildAssignments([], {}).draw.length === 0);
+check('no IN-PROGRESS+paired tasks among a real board shape',
+  buildAssignments([{ id: 'OB-X', state: 'READY', agentId: 5, warehouse: 'x' }], {}).draw.length === 0);
+
+section('§9e the wiring — asserted against the real files, session 30 item B');
+const runnerB = readFileSync(path.join(ROOT, 'workers/agent-runner.js'), 'utf8');
+const routingConfig = JSON.parse(readFileSync(path.join(ROOT, 'config/model-routing.json'), 'utf8'));
+check('processBuildNotesBlock() exists', /async function processBuildNotesBlock\(/.test(runnerB));
+check('it is reachable only via a SUPERVISED trigger, not the scheduled admin_desk tick',
+  /case 'build_notes_block'/.test(runnerB)
+  && !/block\.type === 'build_notes'/.test(runnerB));
+check('it routes through the DEDICATED build_note lane, not a silent reuse of judgment',
+  /taskType: 'build_note'/.test(runnerB));
+check('the build_note lane exists in model-routing.json and declares a kind (never lane_kind_unstated)',
+  !!routingConfig.lanes.build_note && !!routingConfig.lanes.build_note.kind);
+check('the build_note lane is explicitly flagged as an unmeasured placeholder, not a measured choice',
+  /_placeholder_unmeasured/.test(JSON.stringify(routingConfig.lanes.build_note)));
+check('it writes markdown only — no explicitCodeTask, so no code-write-warehouse capability is touched',
+  !/processBuildNotesBlock[\s\S]{0,4000}explicitCodeTask/.test(runnerB));
+check('idempotency is read from this Worker\'s OWN repo_writes history, not from the (unreadable) warehouse',
+  /repo_writes WHERE repo = \? AND path LIKE \?/.test(runnerB));
 
 /* ═══════════════ done ═══════════════ */
 console.log(`\n${fail === 0 ? '✅' : '❌'} verify-admin-desk: ${pass} passed, ${fail} failed`);

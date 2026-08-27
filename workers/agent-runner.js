@@ -90,6 +90,10 @@ import {
   probationDecisionDraw, recentIncidents, deskSummary, producedAnything,
   PROBATION_TEAM_LEAD, PROBATION_QA, PROBATION_DECIDER, IT_CHIEF_ID,
   CEO_ID as DESK_CEO_ID, INCIDENT_WINDOW_HOURS, MAX_INCIDENTS_PER_NOTE,
+  // Desk 5 (session 30 / OB-146) — see processBuildNotesBlock() below, which
+  // is a SEPARATE supervised-only function, not wired into the scheduled
+  // admin-desk tick. Graduated rollout (CLAUDE.md): supervised run first.
+  buildAssignments, MAX_BUILD_NOTES_PER_TICK,
 } from './admin-desk.js';
 // The lifecycle's own live index of what is in flight and who owes what on it.
 // `LOCATIONS` gives the back-office directory a readable deliverable sits in.
@@ -105,6 +109,7 @@ import { fetchOpenBranches, renderBranchSection } from './branch-watch.js';
 import {
   REPO_OWNER, REPO_NAME, BACKOFFICE_REPO_NAME, WAREHOUSE_REPO_NAME,
   REPO_TO_PROJECT_KEY, REPO_TO_TOKEN_SECRET, secretsPresentIn, commitFileToRepo,
+  REPO_WRITE_TABLE_SQL,
 } from './repo-write.js';
 // The owner channel (2026-08-10, REQ-001). The BASE only — the interface and
 // the visual page over it are the office's work and are on the board.
@@ -1541,9 +1546,16 @@ const ADMIN_DESK_ARTIFACT_FILES = Object.freeze(['SPEC.md', 'README.md']);
  * back empty with `finishReason: 'length'`, which is the defect the routing
  * supervised test found on 2026-08-10 and which an HTTP 200 hid.
  */
-async function adminDeskJudgment(env, { agentId, systemPrompt, prompt, maxTokens = 1200, eventId }) {
+async function adminDeskJudgment(env, { agentId, systemPrompt, prompt, maxTokens = 1200, eventId, taskType = 'judgment' }) {
   try {
-    const routed = await routeTaskTypeCall(env, 'judgment', {
+    // `taskType` is a real parameter, not a stray default, since session 30 /
+    // OB-146: the build-notes desk below passes 'build_note' rather than
+    // inheriting this function's original lane by silent reuse — see that
+    // lane's own `_added_2026-08-27_why_a_new_lane` note in
+    // config/model-routing.json for why a shared call site must still name
+    // its lane explicitly rather than let a second caller ride the first
+    // one's routing by accident.
+    const routed = await routeTaskTypeCall(env, taskType, {
       prompt, systemPrompt, maxTokens, agentId: eventId || `admin-desk-${agentId}`,
     });
     if (!routed.ok) return { text: null, provider: routed.provider || null, reason: routed.reason || 'routed_call_failed' };
@@ -2037,6 +2049,165 @@ async function processAdminDeskBlock(env, opts = {}) {
   // four queues were empty would be exactly the thing this block was built to
   // stop being: output produced because a block is scheduled.
   console.log(`[admin-desk] ${today}: ${out.produced} produced across ${out.desks.length} desks; ${out.errors.length} error(s)`);
+  return out;
+}
+
+/**
+ * ── DESK 5: BUILD PROGRESS NOTES (session 30, OB-146) ─────────────────────
+ *
+ * OB-146: "the office has a review queue and no work queue." This is the
+ * write half of that gap, and it is DELIBERATELY NOT wired into the
+ * scheduled `admin_desk` tick above — CLAUDE.md's standing rule is graduated
+ * rollout for anything that runs on a schedule ("supervised run → small
+ * unattended window → full schedule"), and this is the office's FIRST
+ * capability that lets any persona other than the Architect write to the
+ * warehouse. Reachable only via the `build_notes_block` admin trigger below,
+ * same posture `admin_desk_block` already has for testing its own desk.
+ * Putting it on a timer is a separate, later, owner-approved step.
+ *
+ * ── WHAT IT WRITES, AND WHY THAT IS SAFE ───────────────────────────────────
+ *
+ * A markdown status note — what admin-desk.js `buildAssignments()`'s own
+ * header explains at length: the Architect stays the sole build RUNTIME for
+ * warehouse CODE (dispatch.js, capability-manifest.json's
+ * `code-write-warehouse`, agent 10 only). This desk's artifact is prose in
+ * the assignee's own voice, filed under `tasks/<slug>/notes/`, and
+ * `commitFileToRepo()`'s code-file gate is keyed on extension — a `.md`
+ * write needs no `explicitCodeTask` and touches no code-write capability at
+ * all. Nothing here expands who may write CODE to the warehouse.
+ *
+ * ── IDEMPOTENCY WITHOUT READING THE WAREHOUSE ──────────────────────────────
+ *
+ * Nothing in this Worker reads the warehouse (see repo-write.js's header and
+ * `Stage:`'s comment in office-context.js parseBoard()) — only `commitFileToRepo()`
+ * pushes to it. So "has this agent already logged today for this task" cannot
+ * be answered by listing `tasks/<slug>/notes/` the way the review desk lists
+ * the back-office lifecycle inbox. It is answered instead from THIS WORKER'S
+ * OWN RECORD of what it already committed — `repo_writes` (repo-write.js
+ * recordRepoWrite()), which already logs every commitFileToRepo() call,
+ * including this desk's. A path match against today's exact filename is
+ * exact, not a heuristic, and adds no new capability.
+ */
+const BUILD_NOTE_REPORT_TYPE = 'admin_desk';
+
+async function processBuildNotesBlock(env, opts = {}) {
+  if (!opts.bypassGate && !(await officeContextEnabled(env))) {
+    console.log('[build-notes] office_context_enabled is not true — block is a no-op');
+    return { skipped: true, reason: 'office_context_disabled' };
+  }
+
+  const today = todayDateStr();
+  const out = { today, desk: 'build_notes', queued: 0, produced: 0, filed: [], deferred: [], skipped: [], errors: [] };
+
+  let snapshot = null;
+  try {
+    snapshot = await getOfficeSnapshot(env, { allowFetch: true });
+  } catch (err) {
+    out.errors.push(`office snapshot threw: ${err?.message}`);
+  }
+  const boardTasks = snapshot?.board?.tasks || null;
+  if (!Array.isArray(boardTasks)) {
+    out.errors.push('the board could not be read from the office snapshot — this desk produced nothing because its queue was UNREADABLE, which is not the same fact as empty');
+    return out;
+  }
+
+  const candidates = boardTasks.filter((t) => t?.state === 'IN-PROGRESS' && t?.warehouse);
+
+  // Idempotency, from this Worker's OWN write history — see this function's
+  // header for why the warehouse itself cannot be read back.
+  const alreadyLogged = {};
+  if (env.DB && candidates.length) {
+    try {
+      await env.DB.prepare(REPO_WRITE_TABLE_SQL).run();
+      for (const t of candidates) {
+        const likePath = `tasks/${t.warehouse}/notes/${today}-agent%.md`;
+        const rows = await env.DB.prepare(
+          `SELECT path FROM repo_writes WHERE repo = ? AND path LIKE ? AND committed = 1`
+        ).bind(WAREHOUSE_REPO_NAME, likePath).all();
+        alreadyLogged[t.id] = (rows.results || [])
+          .map((r) => /-agent(\d+)\.md$/.exec(r.path || ''))
+          .filter(Boolean)
+          .map((m) => Number(m[1]));
+      }
+    } catch (err) {
+      // Cannot tell what is already logged -> cannot safely draw. A failed
+      // idempotency check must never be read as "nothing logged yet", the
+      // same posture the review desk takes on an unreadable lifecycle inbox.
+      out.errors.push(`repo_writes read failed (${err?.message}) — idempotency could not be checked, no notes drawn this tick`);
+      return out;
+    }
+  }
+
+  const assigned = buildAssignments(boardTasks, { alreadyLogged });
+  out.queued = assigned.draw.length + assigned.deferred.length;
+  out.deferred = assigned.deferred;
+  out.skipped = assigned.skipped;
+
+  for (const item of assigned.draw) {
+    const config = getAgentConfig(item.agentId);
+    const judged = await adminDeskJudgment(env, {
+      agentId: item.agentId,
+      taskType: 'build_note',
+      eventId: `build-notes:${item.taskId}:${item.agentId}`,
+      maxTokens: 900,
+      systemPrompt:
+        `You are ${config?.name || `Agent ${item.agentId}`}, ${config?.role || 'an agent'} in an AI office. `
+        + `${config?.personality?.core || ''} Write a short status note in character, in English.`,
+      prompt: [
+        `You hold board task ${item.taskId} — "${item.title}" — dispatched (${item.holder || 'holder unrecorded'}), warehouse \`tasks/${item.slug}/\`.`,
+        '',
+        'This office\'s Architect (agent 10) is the sole build runtime for warehouse code — you did not write and have not read any code for this task in this call. What you are filing is YOUR OWN accountable record of where the work stands, in your own voice, per this office\'s standing rule that a task spanning days is never expected to finish in one sitting: what is done, what is not, and what you would need to continue or to hand off.',
+        'Do not claim to have written, run, or reviewed any code. If you genuinely have nothing to add today, say so plainly — that is a real note, not a failure to file one.',
+        '',
+        'Under 250 words.',
+      ].join('\n'),
+    });
+
+    if (!judged.text) {
+      out.errors.push(`${item.taskId}/agent ${item.agentId}: judgment lane produced nothing (${judged.reason}) — no note filed`);
+      continue;
+    }
+
+    const path = `tasks/${item.slug}/notes/${today}-agent${String(item.agentId).padStart(2, '0')}.md`;
+    const content = [
+      `# Progress note — ${item.taskId}`,
+      '',
+      `Agent ${item.agentId}${config?.name ? ` (${config.name})` : ''} — ${today}`,
+      '',
+      judged.text,
+      '',
+      '---',
+      `Filed by office-AI-agents agent-runner.js processBuildNotesBlock(), provider ${judged.provider || 'unrecorded'}. Accountable persona per BOARD.md \`${item.taskId}\`; the Architect (agent 10) is this office's sole build runtime for warehouse code.`,
+      '',
+    ].join('\n');
+
+    let commit;
+    try {
+      commit = await commitFileToRepo(
+        env, WAREHOUSE_REPO_NAME, path, content,
+        `office: Agent ${item.agentId} progress note on ${item.taskId} [skip ci]`
+      );
+    } catch (err) {
+      out.errors.push(`${path}: commit threw — ${err?.message}`);
+      continue;
+    }
+    if (!commit.committed) {
+      out.errors.push(`${path}: not committed (${commit.reason || 'no reason given'})`);
+      continue;
+    }
+
+    await fileAdminDeskReport(
+      env, item.agentId, `Build progress note — ${item.taskId}`,
+      `${judged.text}\n\n---\nFiled to ${path}.`
+    );
+    out.produced += 1;
+    out.filed.push(path);
+  }
+
+  out.summary = out.produced > 0
+    ? `${out.produced} produced from a queue of ${out.queued}.`
+    : (out.queued === 0 ? 'queue empty — nothing written, nothing recorded.' : `${out.queued} queued and 0 produced.`);
+  console.log(`[build-notes] ${today}: ${out.produced} produced, ${out.queued} queued, ${out.errors.length} error(s)`);
   return out;
 }
 
@@ -7534,6 +7705,17 @@ export default {
             // in the same day draws the NEXT two reviews rather than re-filing
             // the first two.
             result = await processAdminDeskBlock(env, { bypassGate: body.bypassGate !== false });
+            break;
+          case 'build_notes_block':
+            // Session 30 / OB-146, Desk 5 — SUPERVISED ONLY, deliberately not
+            // on the schedule. See processBuildNotesBlock()'s own header:
+            // graduated rollout for the office's first non-Architect
+            // warehouse write. Body: { bypassGate?: false to honour
+            // office_context_enabled }. Safe to run repeatedly: idempotency
+            // is checked against this Worker's own repo_writes history, so a
+            // second run the same day for the same task+agent draws nothing
+            // new for that pair.
+            result = await processBuildNotesBlock(env, { bypassGate: body.bypassGate !== false });
             break;
           case 'qa_instruments_block':
             // Runs the Friday qa_instruments block directly, gate bypassed —

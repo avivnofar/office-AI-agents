@@ -42,8 +42,10 @@
  * | `ceo_approval`       | 11          | in-flight deliverables at `AWAITING-APPROVAL` | the review loop converging |
  * | `probation_decision` | 7,6,8       | `probation` rows at 20 actions            | `recordProbationAction()`, one per case answer |
  * | `incident_triage`    | 5           | `reports` rows `type='incident'`, last 24h | failing ticks and irritation stacks |
+ * | `build_notes`        | 5,6,7,8,9,  | board tasks at `IN-PROGRESS` with a       | `dispatch.js` (the Dispatched line) and a |
+ * | (session 30, OB-146) | 11,12,13    | `- **Warehouse:**` pairing                | human writing the `Warehouse:` line (OB-134) |
  *
- * None of the four is invented for this block. `owed_by` has been published in
+ * None of the four original desks is invented for this block. `owed_by` has been published in
  * `campus/shared/lifecycle/IN-FLIGHT.md` since 2026-08-10 and is already read
  * into every office-context build (`office-context.js` line ~1779 filters it
  * per agent for the agent's own prompt) — **it was told to the agents and
@@ -342,6 +344,89 @@ export function recentIncidents(rows = [], cutoff, opts = {}) {
     total: inWindow.length,
     overflow: Math.max(0, inWindow.length - max),
   };
+}
+
+/* ─────────────────── Desk 5: build progress notes (OB-146) ──────────────── */
+
+/**
+ * OB-146: the office could tell an agent it owed a REVIEW and had no way to
+ * tell it to BUILD — `own-review` (office-context.js) is the only prompt
+ * shape in this office that reads as an instruction rather than a
+ * recitation, and nothing paired it for dispatched work.
+ *
+ * ── WHAT THIS DESK DOES NOT DO ───────────────────────────────────────────
+ *
+ * It does not write the deliverable. `dispatch.js`'s own note names the
+ * Architect as the sole build RUNTIME for warehouse code — "Executed by the
+ * headless Architect run as the RUNTIME; {assignee} remains the persona
+ * answerable for it (AUTOMATION-MANIFEST.md §3 — the two axes are not
+ * synonyms)" — and `capability-manifest.json`'s `code-write-warehouse` lists
+ * agent 10 alone. Handing a second persona that capability is exactly the
+ * "owner decision on Worker-code authority" OB-146 itself says is still
+ * open, and this desk does not make that decision.
+ *
+ * What it draws instead is A5's own obligation, applied to a real queue: *"A
+ * task is not expected to finish in one sitting [...] the agent writes what
+ * it completed and where it stopped."* The artifact is a status note, in the
+ * assignee's own voice, filed to the SAME warehouse task directory dispatch
+ * already created — a markdown write, which needs no code-write capability
+ * at all (`repo-write.js`'s code-file gate is keyed on extension), so this
+ * desk changes nothing about who may write code to the warehouse.
+ *
+ * ── THE PAIRING IS THE GATE ──────────────────────────────────────────────
+ *
+ * A task draws here only if it is `IN-PROGRESS` (dispatched — real work, not
+ * a READY task nobody has started) AND carries a `- **Warehouse:** <slug>`
+ * line (the human-pairing act OB-134 already requires before `dispatch.js
+ * --auto` will touch it). Absent either, there is nothing to report against.
+ *
+ * @param {Array<object>} boardTasks - `parseBoard().tasks` (office-context.js) — needs `.warehouse`, added session 30 item B
+ * @param {object} [opts]
+ * @param {object} [opts.alreadyLogged] - `{ taskId: number[] }`, agents who already filed today's note for that task
+ * @param {number} [opts.max] - cap, default MAX_BUILD_NOTES_PER_TICK
+ * @param {Array<number>} [opts.agents] - which ids this desk acts for
+ * @returns {{draw: Array<object>, deferred: Array<object>, skipped: Array<object>}}
+ */
+export const MAX_BUILD_NOTES_PER_TICK = 2;
+
+export function buildAssignments(boardTasks = [], opts = {}) {
+  const max = Number.isInteger(opts.max) ? opts.max : MAX_BUILD_NOTES_PER_TICK;
+  const agents = opts.agents || DESK_AGENTS;
+  const alreadyLogged = opts.alreadyLogged || {};
+
+  const draw = [];
+  const deferred = [];
+  const skipped = [];
+
+  for (const task of boardTasks || []) {
+    if (!task || task.state !== 'IN-PROGRESS') continue;
+    if (!task.warehouse) continue; // no pairing — nothing to report a build note against yet (OB-134)
+
+    const agentId = Number(task.agentId);
+    if (!Number.isInteger(agentId)) {
+      skipped.push({ taskId: task.id, slug: task.warehouse, why: 'Assignee carries no readable "Agent N" id' });
+      continue;
+    }
+    if (agentId === ARCHITECT_ID) {
+      skipped.push({ taskId: task.id, agentId, slug: task.warehouse, why: 'the Architect is the sole build RUNTIME for warehouse code (dispatch.js) and needs no status note about his own work' });
+      continue;
+    }
+    if (!agents.includes(agentId)) {
+      skipped.push({ taskId: task.id, agentId, slug: task.warehouse, why: 'not an admin-desk agent' });
+      continue;
+    }
+    const logged = new Set((alreadyLogged[task.id] || []).map(Number));
+    if (logged.has(agentId)) {
+      skipped.push({ taskId: task.id, agentId, slug: task.warehouse, why: 'a progress note from this agent is already filed for today' });
+      continue;
+    }
+
+    const item = { taskId: task.id, title: task.title, agentId, slug: task.warehouse, holder: task.dispatched || null };
+    if (draw.length < max) draw.push(item);
+    else deferred.push(item);
+  }
+
+  return { draw, deferred, skipped };
 }
 
 /* ───────────────────────────── The honest report ────────────────────────── */

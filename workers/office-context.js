@@ -531,6 +531,11 @@ export const STANDARD_SECTIONS = Object.freeze([
   'owner-issue-replies',
   'own-tasks',
   'own-review',
+  // A regular agent needs to see THEIR OWN build obligation for the same
+  // reason `own-review` is here: it is an instruction to them specifically,
+  // not the office's recitation about itself that A11 withholds from
+  // standard rank (session 30 / OB-146).
+  'own-build',
   'board-counts',
   'requirements-headline',
   'requirements-status',
@@ -761,6 +766,15 @@ export function parseBoard(markdown) {
       // blocked" rule broken by the mechanism meant to implement it.
       dispatched: plain(boardField(block, 'Dispatched')) || null,
       offered: plain(boardField(block, 'Offered')) || null,
+      // ── THE FOURTH MARKER, ADDED SESSION 30 / OB-146 (2026-08-27) ──────
+      //
+      // The human-pairing act OB-134 requires before `dispatch.js --auto`
+      // will touch a task: `- **Warehouse:** <slug>`, the warehouse task
+      // directory this board item belongs to. Read the same way `Dispatched:`
+      // and `Offered:` are — a marker, not a state, and it moves no count.
+      // Session 30 item B's `own-build` prompt section (below) and
+      // `admin-desk.js buildAssignments()` are its first readers.
+      warehouse: plain(boardField(block, 'Warehouse')) || null,
       // ── THE THIRD MARKER, ADDED 2026-08-10 ────────────────────────────
       //
       // `Stage:` is the deliverable lifecycle's projection onto the board —
@@ -1937,6 +1951,33 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
         priority: PRIORITY.status,
         text: 'You have no tasks on the delegation board right now.',
       });
+    }
+
+    // ── own-build (session 30 / OB-146) ─────────────────────────────────
+    //
+    // `own-tasks` above says a task exists. `own-review` (below, in the
+    // lifecycle block) says a review is OWED, in imperative voice, at
+    // `headline` — the one shape in this office that reads as an instruction
+    // rather than a recitation (OB-146's own finding). This is `own-review`'s
+    // shape applied to dispatched work: a task this agent holds (`IN-PROGRESS`,
+    // theirs) that ALSO carries the human pairing OB-134 requires — a
+    // `- **Warehouse:** <slug>` line — is named here, imperatively, with
+    // exactly where the warehouse task lives. A held task with no pairing
+    // yet says nothing new here; `own-tasks` above already showed it as
+    // IN-PROGRESS, and inventing an instruction before a human has made the
+    // pairing decision would be exactly the "an unattended run invents an
+    // answer" failure the board's own readiness rule exists to prevent.
+    if (opts.agentId && mine.length) {
+      const building = mine.filter((t) => t.state === 'IN-PROGRESS' && t.warehouse);
+      if (building.length) {
+        sections.push({
+          label: 'own-build',
+          priority: PRIORITY.headline,
+          text: `YOU ARE BUILDING: ${building.map((t) => `${t.id} — "${t.title}" — warehouse \`warehouse-office-AI-agents/tasks/${t.warehouse}/\`${t.dispatched ? ` (${t.dispatched})` : ''}`).join('; ')}. `
+            + 'Assigned as work, not offered. This may span days — it is not expected to finish in one sitting. '
+            + 'If your shift ends before it is done, file what you completed and where you stopped; the next session resumes from there, it does not start over.',
+        });
+      }
     }
 
     const actionable = board.tasks.filter((t) => t.state === 'READY' || t.state === 'IN-PROGRESS');
