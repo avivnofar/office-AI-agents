@@ -110,6 +110,77 @@ check('a deliverable at IN-REVIEW that everyone has already answered draws nothi
 check('a deliverable NOT at IN-REVIEW is never drawn for review',
   reviewAssignments([{ slug: 's', stage: 'IMPROVING', owed_by: [5, 6], required: [6] }], {}).draw.length === 0);
 
+section('§3d session 30 item A — an unreadable slug never displaces a readable one\'s slot');
+/*
+ * The live scenario, 2026-08-23 through 2026-08-27: OB-043 flipped back to
+ * READY on 2026-08-23, so `office-site` is CARRIED again (unlike §2/§3's
+ * fixture, where OB-043 is still NOT-READY/frozen). It sorts first in board
+ * order, has no readable artifact (nothing under `tools/office-site/`), and
+ * its five `owed_by` entries filled BOTH of MAX_REVIEWS_PER_TICK's slots
+ * every tick — before this fix, the artifact check ran one layer up, AFTER
+ * the draw. `verifier-count-ledger`, whose artifact IS readable, never got a
+ * turn.
+ */
+const RECORDS_D = [
+  { slug: 'office-site', board_task: 'OB-043', stage: 'IN-REVIEW', round: 0, owed_by: [10, 5, 7, 8, 12], required: [6, 9, 10, 13], open_gaps: 14, gaps: [] },
+  { slug: 'verifier-count-ledger', board_task: 'OB-018', stage: 'IN-REVIEW', round: 0, owed_by: [10, 9, 12, 13], required: [5, 6, 10], open_gaps: 0, gaps: [] },
+];
+const BOARD_D = [{ id: 'OB-043', state: 'READY' }, { id: 'OB-018', state: 'IN-PROGRESS' }];
+const carriedD = carriedDeliverables(RECORDS_D, BOARD_D).carried;
+check('the fixture reflects OB-043 back to READY — office-site is carried, not frozen',
+  carriedD.some((r) => r.slug === 'office-site') && carriedD.length === 2);
+const a4 = reviewAssignments(carriedD, { alreadyFiled: {}, unreadableSlugs: new Set(['office-site']) });
+check('none of the unreadable slug\'s candidates enter the draw',
+  !a4.draw.some((d) => d.slug === 'office-site'));
+check('...nor the deferred list — they never had a slot to lose',
+  !a4.deferred.some((d) => d.slug === 'office-site'));
+check('...they are recorded in skipped, with a reason naming the artifact',
+  a4.skipped.filter((s) => s.slug === 'office-site').length > 0
+  && a4.skipped.some((s) => s.slug === 'office-site' && /no readable artifact/.test(s.why)));
+check('the freed slots go to the readable deliverable instead',
+  a4.draw.every((d) => d.slug !== 'office-site') && a4.draw.length === MAX_REVIEWS_PER_TICK
+  && a4.draw.some((d) => d.slug === 'verifier-count-ledger'));
+
+/*
+ * THE PRE-FIX LOGIC, TRANSCRIBED — per this project's own standing rule that
+ * a test describing a fix is not a test that catches a bug (CLAUDE.md,
+ * "A test that describes a fix is not a test that catches a bug"). This is
+ * `reviewAssignments()` exactly as it read before session 30 item A: no
+ * `unreadableSlugs` parameter, no check against it, so the draw fills purely
+ * from `owed_by` in board order regardless of whether the slug is readable.
+ */
+function reviewAssignmentsPreFix(carriedIn = [], opts = {}) {
+  const max = Number.isInteger(opts.max) ? opts.max : MAX_REVIEWS_PER_TICK;
+  const agents = opts.agents || DESK_AGENTS;
+  const alreadyFiled = opts.alreadyFiled || {};
+  const draw = [];
+  const deferred = [];
+  const skipped = [];
+  for (const record of carriedIn || []) {
+    if (record?.stage !== 'IN-REVIEW') continue;
+    const required = new Set((record.required || []).map(Number));
+    const filed = new Set((alreadyFiled[record.slug] || []).map(Number));
+    for (const rawId of record.owed_by || []) {
+      const agentId = Number(rawId);
+      if (!Number.isInteger(agentId)) continue;
+      if (agentId === ARCHITECT_ID) { skipped.push({ slug: record.slug, agentId, why: 'architect' }); continue; }
+      if (!agents.includes(agentId)) { skipped.push({ slug: record.slug, agentId, why: 'not desk agent' }); continue; }
+      if (filed.has(agentId)) { skipped.push({ slug: record.slug, agentId, why: 'already filed' }); continue; }
+      const item = { slug: record.slug, agentId, kind: required.has(agentId) ? 'review' : 'comment' };
+      if (draw.length < max) draw.push(item); else deferred.push(item);
+    }
+  }
+  return { draw, deferred, skipped };
+}
+const preFix = reviewAssignmentsPreFix(carriedD, { alreadyFiled: {} });
+check('FAILS OLD: the pre-fix draw fills BOTH slots from the unreadable slug (agents 5 and 7 on office-site)',
+  preFix.draw.length === MAX_REVIEWS_PER_TICK && preFix.draw.every((d) => d.slug === 'office-site'));
+check('FAILS OLD: the pre-fix draw contains nothing from the readable deliverable at all',
+  !preFix.draw.some((d) => d.slug === 'verifier-count-ledger'));
+check('the new scenario table is therefore evidence, not documentation — it fails against the transcribed old path',
+  preFix.draw.length === MAX_REVIEWS_PER_TICK && a4.draw.length === MAX_REVIEWS_PER_TICK
+  && JSON.stringify(preFix.draw.map((d) => d.slug)) !== JSON.stringify(a4.draw.map((d) => d.slug)));
+
 /* ═══════════════ §4 — the CEO's queue ═══════════════ */
 section('§4 the CEO approval queue');
 check('AWAITING-APPROVAL is the CEO\'s queue and it finds the one record at it',

@@ -198,9 +198,27 @@ export function carriedDeliverables(records = [], boardTasks = []) {
  * inbox file both say which was owed, rather than filing everything as a full
  * review and overstating what was done.
  *
+ * ── THE DOABILITY CHECK RUNS BEFORE THE SLOT IS CONSUMED (2026-08-27) ──────
+ *
+ * Fixed session 30, item A. The board's fixed order put a warehouse-located
+ * deliverable (`office-site`) first, and the pre-fix code filled BOTH of
+ * `MAX_REVIEWS_PER_TICK`'s slots from its `owed_by` before anything asked
+ * whether the artifact could even be read — the artifact check happened one
+ * layer up, in `agent-runner.js`, AFTER the draw. Every slot spent on an
+ * unreadable deliverable is a slot a readable one never got, and because
+ * `office-site` sorts first, this happened on **every tick**, every day,
+ * from 2026-08-23 (the day `office-site` re-entered `carried`) onward.
+ *
+ * The fix: readability is a property of the SLUG, decided by the caller (this
+ * file makes no fetch — see the header) and handed in as `unreadableSlugs`,
+ * checked per candidate right before it would enter `draw`. An unreadable
+ * slug's candidates are recorded in `skipped`, never in `draw` or `deferred`
+ * — they never had a slot to begin with, so there is nothing to defer.
+ *
  * @param {Array<object>} carried - output of `carriedDeliverables().carried`
  * @param {object} [opts]
  * @param {object} [opts.alreadyFiled] - `{ slug: number[] }`, agents with a review already in the inbox
+ * @param {Set<string>|Array<string>} [opts.unreadableSlugs] - slugs whose artifact the caller could not read this tick
  * @param {number} [opts.max] - cap, default MAX_REVIEWS_PER_TICK
  * @param {Array<number>} [opts.agents] - which ids this block acts for
  * @returns {{draw: Array<object>, deferred: Array<object>, skipped: Array<object>}}
@@ -209,6 +227,9 @@ export function reviewAssignments(carried = [], opts = {}) {
   const max = Number.isInteger(opts.max) ? opts.max : MAX_REVIEWS_PER_TICK;
   const agents = opts.agents || DESK_AGENTS;
   const alreadyFiled = opts.alreadyFiled || {};
+  const unreadableSlugs = opts.unreadableSlugs instanceof Set
+    ? opts.unreadableSlugs
+    : new Set(opts.unreadableSlugs || []);
 
   const draw = [];
   const deferred = [];
@@ -233,6 +254,10 @@ export function reviewAssignments(carried = [], opts = {}) {
       }
       if (filed.has(agentId)) {
         skipped.push({ slug: record.slug, agentId, why: 'a review from this agent is already in the lifecycle inbox awaiting ingest' });
+        continue;
+      }
+      if (unreadableSlugs.has(record.slug)) {
+        skipped.push({ slug: record.slug, agentId, why: 'no readable artifact for this deliverable (most likely warehouse-located) — no slot drawn for it, so it never displaced a reviewable deliverable' });
         continue;
       }
 

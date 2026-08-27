@@ -1656,7 +1656,24 @@ async function processAdminDeskBlock(env, opts = {}) {
     // What is already sitting in the inbox, per slug. Without this the desk
     // re-files the same reviews every weekday: `owed_by` does not move until
     // the next `scripts/lifecycle.mjs ingest`, which may be days away.
+    //
+    // ── AND WHETHER THE ARTIFACT CAN BE READ, ALSO PER SLUG, ALSO HERE ─────
+    //
+    // Session 30, item A. Before this fix the artifact fetch happened AFTER
+    // `reviewAssignments()` had already filled `MAX_REVIEWS_PER_TICK` slots
+    // from `owed_by` in board order — so a fixed order that starts with a
+    // warehouse-located deliverable (`office-site`) filled every slot on
+    // deliverables this desk could never review, every single day, and
+    // nothing downstream ever got a turn. Checked here, BEFORE the draw, for
+    // every IN-REVIEW slug (not just the ones that would have been drawn) so
+    // `reviewAssignments()` can skip an unreadable slug's candidates before
+    // they ever consume a slot — see that function's own header. Bounded by
+    // the number of in-review deliverables (measured low single digits),
+    // not by `owed_by` count, so this does not reintroduce the subrequest
+    // pressure the cap exists to avoid.
     const alreadyFiled = {};
+    const artifactCache = new Map();
+    const unreadableSlugs = new Set();
     const inReview = carried.filter((r) => r?.stage === 'IN-REVIEW');
     for (const record of inReview) {
       const dir = await fetchBackOfficeDir(env, `${LIFECYCLE_INBOX_DIR}/${record.slug}`);
@@ -1670,40 +1687,46 @@ async function processAdminDeskBlock(env, opts = {}) {
         } else {
           alreadyFiled[record.slug] = [];
         }
-        continue;
+      } else {
+        alreadyFiled[record.slug] = (dir.entries || [])
+          .map((e) => /-review-agent(\d+)\.json$/.exec(e?.name || ''))
+          .filter(Boolean)
+          .map((m) => Number(m[1]));
       }
-      alreadyFiled[record.slug] = (dir.entries || [])
-        .map((e) => /-review-agent(\d+)\.json$/.exec(e?.name || ''))
-        .filter(Boolean)
-        .map((m) => Number(m[1]));
+
+      // The artifact itself, so a later reviewer reviews the thing and not a
+      // summary of it. A deliverable in the warehouse is not readable from the
+      // Worker at all — nothing here fetches from that repo.
+      let found = null;
+      for (const file of ADMIN_DESK_ARTIFACT_FILES) {
+        const got = await fetchBackOfficeFile(env, `${LOCATIONS['back-office-tools'].dir}/${record.slug}/${file}`);
+        if (got.text) { found = { file, text: got.text }; break; }
+      }
+      artifactCache.set(record.slug, found);
+      if (!found) {
+        unreadableSlugs.add(record.slug);
+        out.errors.push(
+          `${record.slug}: no readable artifact under back-office \`${LOCATIONS['back-office-tools'].dir}/${record.slug}/\` `
+          + `(${ADMIN_DESK_ARTIFACT_FILES.join(' or ')}). It is most likely warehouse-located, which nothing in the Worker reads. `
+          + 'NO SLOT WAS DRAWN FOR IT this tick — a review of a deliverable the reviewer could not see is fabricated participation, '
+          + 'so its candidates are recorded in reviewDesk.skipped instead of displacing a reviewable deliverable\'s slot.'
+        );
+      }
     }
 
-    const assigned = reviewAssignments(carried, { alreadyFiled });
+    const assigned = reviewAssignments(carried, { alreadyFiled, unreadableSlugs });
     reviewDesk.queued = assigned.draw.length + assigned.deferred.length;
     reviewDesk.deferred = assigned.deferred.map((d) => `Agent ${d.agentId} on ${d.slug} (${d.kind})`);
     reviewDesk.skipped = assigned.skipped;
 
-    const artifactCache = new Map();
     for (const item of assigned.draw) {
-      // The artifact itself, so the reviewer reviews the thing and not a
-      // summary of it. A deliverable in the warehouse is not readable from the
-      // Worker at all — nothing here fetches from that repo — and in that case
-      // this desk REFUSES to file a review rather than reviewing a description.
-      if (!artifactCache.has(item.slug)) {
-        let found = null;
-        for (const file of ADMIN_DESK_ARTIFACT_FILES) {
-          const got = await fetchBackOfficeFile(env, `${LOCATIONS['back-office-tools'].dir}/${item.slug}/${file}`);
-          if (got.text) { found = { file, text: got.text }; break; }
-        }
-        artifactCache.set(item.slug, found);
-      }
       const artifact = artifactCache.get(item.slug);
       if (!artifact) {
-        out.errors.push(
-          `${item.slug}: no readable artifact under back-office \`${LOCATIONS['back-office-tools'].dir}/${item.slug}/\` `
-          + `(${ADMIN_DESK_ARTIFACT_FILES.join(' or ')}). It is most likely warehouse-located, which nothing in the Worker reads. `
-          + 'NO REVIEW WAS FILED — a review of a deliverable the reviewer could not see is fabricated participation.'
-        );
+        // Unreachable in normal operation: `reviewAssignments()` was given
+        // `unreadableSlugs` and must not draw from one. Kept as a hard stop
+        // rather than a silent skip — if this ever fires, the pre-check above
+        // and the draw have gone out of sync with each other.
+        out.errors.push(`${item.slug}/agent ${item.agentId}: drawn despite an unreadable artifact — desk logic is out of sync, no review filed`);
         continue;
       }
 
