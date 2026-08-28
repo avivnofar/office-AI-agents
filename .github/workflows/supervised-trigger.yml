@@ -55,6 +55,8 @@ on:
         type: choice
         options:
           - admin_desk_block
+          - brain_audit_decompose
+          - brain_audit_task
           - repair_block
           - architect_approval_block
           - build_artifact_block
