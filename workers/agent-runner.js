@@ -185,6 +185,18 @@ import {
   noticeParts,
 } from './owner-notify.js';
 import { improvementLoopEnabled } from './improvement-loop.js';
+// SESSION 33, ITEM B (2026-08-28) - the build chain's queue. The two blocks
+// existed and worked; what they had no way to do was remember what they were
+// in the middle of, because a tick has no arguments. See build-chain.js.
+import {
+  BUILD_CHAIN_TABLE_SQL, AWAITING_APPROVAL, AWAITING_REPAIR,
+  // ALIASED: admin-desk.js already exports an `approvalQueue` (the CEO's
+  // AWAITING-APPROVAL deliverables). Different queue, same word — aliased
+  // rather than renamed at source, because each name is right in its own
+  // module and it is only this one file that sees both.
+  repairQueue as buildRepairQueue, approvalQueue as buildApprovalQueue,
+  nextStateAfterApproval, nextStateAfterRepair,
+} from './build-chain.js';
 // SESSION 33, ITEM A (2026-08-28) - the daily obligation. `nextSequence` and
 // `recordNotifyAttempt` come from owner-notify.js above rather than being
 // reimplemented, so a failure notice carries the SAME sequence the rest of the
@@ -2516,6 +2528,16 @@ async function processBuildArtifactBlock(env, opts = {}) {
     }
 
     out.produced += 1;
+    // SESSION 33, ITEM B — the artifact now ENTERS THE CHAIN rather than
+    // stopping here. Until today a built artifact sat on main with nobody
+    // scheduled to look at it: Session 31 approved and repaired its one
+    // artifact by hand, from a supervised session, with the slug typed in.
+    // This row is what a tick can find tomorrow without being told anything.
+    await setBuildChainState(env, {
+      slug: item.slug, taskId: item.taskId, agentId: item.agentId,
+      state: AWAITING_APPROVAL, finding: null, rounds: 0,
+      detail: `built ${item.targetPath} via ${routed.provider || 'an unrecorded provider'}`,
+    });
     out.filed.push({
       taskId: item.taskId, path: item.targetPath, provider: routed.provider,
       outputTokens: routed.result?.usage?.outputTokens ?? null, outputChars: content.length,
@@ -2748,6 +2770,172 @@ async function processArchitectApprovalBlock(env, opts = {}) {
     merged: true, mergeSha: merge.sha, path: target.targetPath,
     verifiedOnMain: !verify.reason && verify.text === artifactFile.text,
   };
+}
+
+/* ════════════════ SESSION 33, ITEM B — THE CHAIN ON A TICK ════════════════ */
+
+/**
+ * The chain's memory. Read and written by the two scheduled blocks below and
+ * by `processBuildArtifactBlock()`, which is what puts a row on the queue in
+ * the first place.
+ *
+ * `INSERT OR REPLACE` on the slug primary key, so a task has ONE position in
+ * the chain at a time — see `BUILD_CHAIN_TABLE_SQL`'s own note for why two
+ * rows for one slug is the failure to avoid.
+ *
+ * It cannot throw (KFM-14): a lost queue update costs the next round, never
+ * the artifact that was just committed.
+ */
+async function setBuildChainState(env, { slug, taskId, agentId, state, finding, rounds, detail }) {
+  try {
+    if (!env?.DB || !slug || !state) return { recorded: false, reason: 'no_db_or_no_slug_or_no_state' };
+    await env.DB.prepare(BUILD_CHAIN_TABLE_SQL).run();
+    const prior = await env.DB.prepare('SELECT task_id, agent_id, rounds FROM build_chain WHERE slug = ?').bind(slug).first();
+    await env.DB.prepare(
+      `INSERT OR REPLACE INTO build_chain (slug, task_id, agent_id, state, finding, rounds, last_detail, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+    ).bind(
+      slug,
+      taskId ?? prior?.task_id ?? null,
+      agentId ?? prior?.agent_id ?? null,
+      state,
+      finding ?? null,
+      rounds ?? ((prior?.rounds || 0) + 1),
+      detail || null
+    ).run();
+    return { recorded: true };
+  } catch (err) {
+    console.warn(`[build-chain] could not record ${slug} -> ${state}: ${err?.message || err}`);
+    return { recorded: false, reason: 'record_error' };
+  }
+}
+
+async function readBuildChain(env) {
+  if (!env?.DB) return null;
+  await env.DB.prepare(BUILD_CHAIN_TABLE_SQL).run();
+  const res = await env.DB.prepare(
+    'SELECT slug, task_id, agent_id, state, finding, rounds FROM build_chain ORDER BY updated_at ASC'
+  ).all();
+  return res?.results || [];
+}
+
+/**
+ * The SCHEDULED repair block. A thin queue reader over
+ * `processRepairBlock()`, which is unchanged — the model call, the branch,
+ * the three-strike decision and the commits all still live there.
+ *
+ * An UNREADABLE queue is not an empty one, and the two are reported
+ * differently. That distinction is the whole of `admin-desk.js`'s header and
+ * it is not re-argued here.
+ */
+async function processScheduledRepairBlock(env, opts = {}) {
+  if (!opts.bypassGate && !(await officeContextEnabled(env))) {
+    console.log('[build-chain] office_context_enabled is not true — repair block is a no-op');
+    return { desk: 'repair', skipped: true, reason: 'office_context_disabled' };
+  }
+  const out = { desk: 'repair', queued: 0, produced: 0, drawn: [], deferred: [], skipped: [], errors: [] };
+
+  let rows;
+  try {
+    rows = await readBuildChain(env);
+  } catch (err) {
+    out.errors.push(`the build-chain queue could not be read (${err?.message}) — this block produced nothing because its queue was UNREADABLE, which is not the same fact as empty`);
+    return out;
+  }
+  if (rows === null) { out.errors.push('no D1 binding — queue unreadable'); return out; }
+
+  const q = buildRepairQueue(rows);
+  out.queued = q.draw.length + q.deferred.length;
+  out.deferred = q.deferred.map((r) => r.slug);
+  out.skipped = q.skipped;
+  if (!q.draw.length) {
+    console.log('[build-chain] repair: queue empty — nothing written, nothing recorded');
+    return out;
+  }
+
+  for (const row of q.draw) {
+    const result = await processRepairBlock(env, {
+      taskId: row.task_id, slug: row.slug, agentId: Number(row.agent_id),
+      findingText: row.finding, bypassGate: true,
+    });
+    const next = nextStateAfterRepair(result);
+    if (next.state) {
+      await setBuildChainState(env, {
+        slug: row.slug, state: next.state, finding: next.finding,
+        detail: next.reason, rounds: (row.rounds || 0) + 1,
+      });
+      out.produced += 1;
+    } else {
+      // The row is LEFT WHERE IT WAS. A transport failure says nothing about
+      // the artifact, and moving it would convert "we could not repair" into
+      // "it needs no repair".
+      out.errors.push(`${row.slug}: ${next.reason}`);
+    }
+    out.drawn.push({ slug: row.slug, action: result?.action || null, next: next.state, why: next.reason });
+  }
+  console.log(`[build-chain] repair: ${out.produced} of ${out.queued} drawn`);
+  return out;
+}
+
+/**
+ * The SCHEDULED approval block. A thin queue reader over
+ * `processArchitectApprovalBlock()`, unchanged.
+ *
+ * ── THE SPEND GUARD IS NOT HERE, AND THAT IS THE POINT (ITEM B3) ──────────
+ *
+ * The Architect's `component:'architect'` sub-budget is checked INSIDE
+ * `runArchitectApprovalCall()` (workers/architect-spec.js), before the
+ * Anthropic call and returning a refusal rather than a degrade. It is not at
+ * any call site, so the supervised trigger and this scheduled block are
+ * guarded by the same check, in one place, and a THIRD caller added later
+ * cannot bypass it either. `scripts/verify-build-chain.js` §4 proves that by
+ * running the real function against an over-budget D1 double with
+ * `globalThis.fetch` as a tripwire — a claim about a guard that nobody has
+ * watched refuse something is exactly what this estate keeps getting wrong.
+ */
+async function processScheduledApprovalBlock(env, opts = {}) {
+  if (!opts.bypassGate && !(await officeContextEnabled(env))) {
+    console.log('[build-chain] office_context_enabled is not true — approval block is a no-op');
+    return { desk: 'architect_approval', skipped: true, reason: 'office_context_disabled' };
+  }
+  const out = { desk: 'architect_approval', queued: 0, produced: 0, drawn: [], deferred: [], skipped: [], errors: [] };
+
+  let rows;
+  try {
+    rows = await readBuildChain(env);
+  } catch (err) {
+    out.errors.push(`the build-chain queue could not be read (${err?.message}) — this block produced nothing because its queue was UNREADABLE, which is not the same fact as empty`);
+    return out;
+  }
+  if (rows === null) { out.errors.push('no D1 binding — queue unreadable'); return out; }
+
+  const q = buildApprovalQueue(rows);
+  out.queued = q.draw.length + q.deferred.length;
+  out.deferred = q.deferred.map((r) => r.slug);
+  out.skipped = q.skipped;
+  if (!q.draw.length) {
+    console.log('[build-chain] architect_approval: queue empty — nothing written, nothing recorded');
+    return out;
+  }
+
+  for (const row of q.draw) {
+    const result = await processArchitectApprovalBlock(env, {
+      taskId: row.task_id, slug: row.slug, reviewSummary: row.finding || null, bypassGate: true,
+    });
+    const next = nextStateAfterApproval(result);
+    if (next.state) {
+      await setBuildChainState(env, {
+        slug: row.slug, state: next.state, finding: next.finding,
+        detail: next.reason, rounds: row.rounds || 0,
+      });
+      out.produced += 1;
+    } else {
+      out.errors.push(`${row.slug}: ${next.reason}`);
+    }
+    out.drawn.push({ slug: row.slug, verdict: result?.verdict || null, next: next.state, why: next.reason });
+  }
+  console.log(`[build-chain] architect_approval: ${out.produced} of ${out.queued} drawn`);
+  return out;
 }
 
 async function processOwnerChannelBlock(env, opts = {}) {
@@ -6296,6 +6484,8 @@ async function runScheduledBlockInner(env, israelTime, dayOfWeek, ctx) {
         toolTask: null, aiExperience: null, standup: null, spareTime: [], weeklySummary: null, versionBumps: [], choreRotation: null,
         guideDraft: null, guideReview: null, guideVerify: null, architectLiaison: null,
         ownerChannel: null, qaInstruments: null, adminDesk: null,
+        // SESSION 33, ITEM B — the build chain's two scheduled blocks.
+        repair: null, architectApproval: null,
       },
     };
   }
@@ -6424,6 +6614,15 @@ async function runScheduledBlockInner(env, israelTime, dayOfWeek, ctx) {
         // inside the handler on `office_context_enabled`, like the guide_*
         // blocks — it has no switch of its own, see processAdminDeskBlock().
         cycle.results.adminDesk = await processAdminDeskBlock(env);
+      } else if (block.type === 'repair') {
+        // SESSION 33, ITEM B. Self-gating inside the handler on
+        // `office_context_enabled`, like the guide_* and admin_desk blocks —
+        // it carries no switch of its own, deliberately: a block whose first
+        // act is to read a queue must be able to report that the queue was
+        // unreadable, and a gate that refuses to enter cannot report anything.
+        cycle.results.repair = await processScheduledRepairBlock(env);
+      } else if (block.type === 'architect_approval') {
+        cycle.results.architectApproval = await processScheduledApprovalBlock(env);
       } else if (block.type === 'owner_channel') {
         // Self-gating inside the handler, like the guide_* blocks and unlike
         // architect_liaison's call-site gate. Deliberate: this block's FIRST act

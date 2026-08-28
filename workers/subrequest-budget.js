@@ -312,6 +312,30 @@ export const BLOCK_COST = {
    * measurement the first time it walks a day that reaches this block.
    */
   admin_desk: 34,         // ARITHMETIC, not measured — see the block above
+  /*
+   * `repair` and `architect_approval` (2026-08-28, Session 33 Item B) are also
+   * sized by ARITHMETIC over the code path rather than by a harness run, and
+   * they say so rather than borrowing a neighbour's number.
+   *
+   * `repair` — worst realistic tick, counted off `processRepairBlock()`:
+   *   1 SPEC.md GET, 2 repair-log GETs (branch then main fallback), 2 branch
+   *   calls (get ref + create ref), 2 artifact GETs (branch then main), 1
+   *   Cerebras call, 2 for the artifact commit (GET sha + PUT), 2 for the log
+   *   commit = 12. Sized at 14 for the retry the provider client may make.
+   *
+   * `architect_approval` — off `processArchitectApprovalBlock()`:
+   *   1 SPEC.md GET, 2 artifact GETs (branch then main), 1 Anthropic call, up
+   *   to 2 merge calls, 1 verify-on-main GET = 7. Sized at 10.
+   *
+   * Both sit on their OWN free tick (11:30 and 13:00 Sun-Thu), so each gets a
+   * full ~38-subrequest usable budget rather than sharing one. That is the
+   * same remedy `closing_qa_review` took on 2026-08-15 and `owner_channel`,
+   * `spare_time` and `guide_review` took on 2026-08-16 — a free tick is its
+   * own invocation budget. `verify-subrequest-budget.js` will replace both
+   * with measurements the first time it walks a day that reaches them.
+   */
+  repair: 14,             // ARITHMETIC, not measured
+  architect_approval: 10, // ARITHMETIC, not measured
 };
 
 /** Conservative default for a block type nobody has measured yet. */
