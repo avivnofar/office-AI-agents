@@ -1,0 +1,119 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# THE SUPERVISED TRIGGER — SESSION 33 (2026-08-28)
+#
+# ── WHY THIS FILE EXISTS ────────────────────────────────────────────────────
+#
+# This Worker has fourteen supervised admin triggers — `admin_desk_block`,
+# `architect_spec_block`, `build_artifact_block`, `repair_block`,
+# `architect_approval_block` and the rest. Every one of them is documented as
+# "SUPERVISED ONLY, run it deliberately", and every one of them needs
+# `ADMIN_TOKEN`, which is a WORKER SECRET and a repository Actions secret and
+# is readable from neither.
+#
+# So in practice they were runnable by exactly one person, from one machine,
+# by hand-typed curl. That is not the same thing as supervised — it is
+# unreachable, and this estate has a name for that shape: `office_context_enabled`
+# shipped with no route to set it and the verifier passed 122/122 that day
+# (§7.5, ARCHITECTURAL-DECISIONS.md). **An operational gap does not stay a gap.
+# It routes whoever needs the capability onto whatever path happens to exist.**
+#
+# `.github/workflows/owner-email.yml` and `weekly-capability-audit.yml` already
+# call the admin API from Actions with `secrets.ADMIN_TOKEN`. This file is the
+# same shape, made general enough to be the supervised path the triggers'
+# own comments assume exists.
+#
+# ── WHY IT IS NOT A GENERAL ADMIN PROXY ─────────────────────────────────────
+#
+# `workflow_dispatch` already requires WRITE access to this repository, so the
+# only people who can run it are the people who could edit this file anyway.
+# That is the real boundary and it is not weakened here.
+#
+# But the trigger surface is wider than the reason this file exists, and a
+# workflow that forwards an arbitrary `type` would be a permanent, convenient
+# route to every one of them — including the ones that spend money and the ones
+# that write to a repository. So `type` is an ALLOW-LIST, not a free string.
+# Adding to it is a deliberate edit somebody makes and a reviewer can see.
+#
+# ── IT PRINTS THE ANSWER, WHICH IS THE ENTIRE POINT ─────────────────────────
+#
+# The result JSON goes to the step summary in full. A trigger you can fire but
+# whose answer you cannot read is a trigger that teaches you nothing — and this
+# Worker's `/api/agents/trigger` response carries `version` (the bundle that
+# actually answered, `[version_metadata]` in wrangler.toml), which is the one
+# thing that distinguishes "the fix is deployed" from "the fix is uploaded and
+# the old bundle is still answering".
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Supervised trigger
+
+on:
+  workflow_dispatch:
+    inputs:
+      type:
+        description: 'Which supervised block to run'
+        required: true
+        type: choice
+        options:
+          - admin_desk_block
+          - repair_block
+          - architect_approval_block
+          - build_artifact_block
+          - architect_spec_block
+          - office_context_status
+      body:
+        description: 'Extra JSON fields, merged into the request body (e.g. {"slug":"x","agentId":6}). Leave as {} for none.'
+        required: false
+        default: '{}'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # One supervised trigger at a time. Several of these blocks commit to a
+  # repository and two overlapping runs would race each other's writes.
+  group: supervised-trigger
+  cancel-in-progress: false
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fire it, and read the answer back
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          TRIGGER_TYPE: ${{ inputs.type }}
+          EXTRA_BODY: ${{ inputs.body }}
+        run: |
+          set -euo pipefail
+          # The extra fields are MERGED, never concatenated: `type` is set by
+          # this job from the allow-listed choice input and must not be
+          # overridable by something pasted into the free-text field.
+          BODY=$(jq -nc --arg t "$TRIGGER_TYPE" --argjson extra "$EXTRA_BODY" '$extra + {type: $t}')
+          echo "Request body: $BODY"
+          HTTP=$(curl -sS -o result.json -w '%{http_code}' \
+            -X POST https://data-center-agents.avivnofar.workers.dev/api/agents/trigger \
+            -H "X-Admin-Token: ${ADMIN_TOKEN}" \
+            -H 'Content-Type: application/json' \
+            -d "$BODY")
+          {
+            echo "## Supervised trigger — \`$TRIGGER_TYPE\`"
+            echo
+            echo "HTTP $HTTP"
+            echo
+            echo '```json'
+            jq . result.json 2>/dev/null || cat result.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          jq . result.json 2>/dev/null || cat result.json
+          # LOUD. A non-200 turns the run red rather than leaving a green tick
+          # over a refusal — the same choice external-check.yml and
+          # owner-email.yml both made and documented.
+          test "$HTTP" = "200"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: trigger-result
+          path: result.json
+          if-no-files-found: warn

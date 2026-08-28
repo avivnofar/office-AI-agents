@@ -185,6 +185,14 @@ import {
   noticeParts,
 } from './owner-notify.js';
 import { improvementLoopEnabled } from './improvement-loop.js';
+// SESSION 33, ITEM C (2026-08-28) - the review queue the owner fills. The one
+// path in this office where nothing is broken: a review is ONE completion, and
+// eleven of them are already filed. It touches no pairing, no warehouse spec
+// and no dispatcher, deliberately - see owner-review.js's header.
+import {
+  TO_REVIEW_DIR, FROM_OFFICE_DIR, DEFAULT_REVIEWER_ID, MAX_OWNER_REVIEWS_PER_TICK,
+  targetFromName, parseTargetFile, filedSlugs, reviewDraw, reviewFilePath, renderReviewFile,
+} from './owner-review.js';
 // SESSION 33, ITEM B (2026-08-28) - the build chain's queue. The two blocks
 // existed and worked; what they had no way to do was remember what they were
 // in the middle of, because a tick has no arguments. See build-chain.js.
@@ -2129,6 +2137,159 @@ async function processAdminDeskBlock(env, opts = {}) {
     incidentDesk.reason = `threw: ${err?.message}`;
   }
   out.desks.push(incidentDesk);
+
+  /* ═══════ Desk 7 — the review queue the OWNER fills (Session 33, Item C) ═══ */
+  /*
+   * The owner names a target in `channel/to-review/`; an agent reviews it and
+   * files the review in `channel/from-office/`, which is his own side of the
+   * channel and a folder he already reads.
+   *
+   * ── WHAT THIS DESK DELIBERATELY DOES NOT TOUCH ───────────────────────────
+   *
+   * The board. The pairing. `dispatch.js`. The warehouse. `build_chain`. Not
+   * one of them, and not by oversight: a review needs none of them, and every
+   * one is currently blocked somewhere (113 board tasks carry zero `Warehouse:`
+   * lines, so dispatch refuses every day by design). Routing the owner's own
+   * request through a broken chain is how the one working path stops working.
+   *
+   * ── AND IT DOES NOT WRITE TO THE LIFECYCLE INBOX ─────────────────────────
+   *
+   * Desk 1 above files into `campus/shared/lifecycle-inbox/`, where
+   * `scripts/lifecycle.mjs` drains it into a deliverable's STATE.json. This
+   * target is not a deliverable and has no lifecycle record, so a file there
+   * would sit forever in a queue that has nothing to apply it to — and, per
+   * Item C, land in a campus folder the owner has never opened.
+   */
+  const ownerReviewDesk = { desk: 'owner_review', agentIds: [], queued: 0, produced: 0, reason: null };
+  try {
+    const [queueDir, filedDir] = await Promise.all([
+      fetchBackOfficeDir(env, TO_REVIEW_DIR),
+      fetchBackOfficeDir(env, FROM_OFFICE_DIR),
+    ]);
+
+    // A 404 on `to-review/` means the folder does not exist yet, which is a
+    // real empty. Anything else is UNREADABLE, and an unreadable queue must
+    // never be reported as an empty one — the distinction this whole file is
+    // built on.
+    if (queueDir.reason && !/HTTP 404/.test(queueDir.reason)) {
+      out.errors.push(`${TO_REVIEW_DIR} unreadable (${queueDir.reason}) — this desk produced nothing because its queue could not be READ, which is not the same fact as empty`);
+      ownerReviewDesk.reason = `queue unreadable: ${queueDir.reason}`;
+    } else if (filedDir.reason && !/HTTP 404/.test(filedDir.reason)) {
+      // Equally load-bearing, and the less obvious half: if the office cannot
+      // see what it has already filed, drawing anyway would re-review the same
+      // target every weekday and each one would look like new work.
+      out.errors.push(`${FROM_OFFICE_DIR} unreadable (${filedDir.reason}) — nothing drawn, because what is already answered could not be checked`);
+      ownerReviewDesk.reason = `filed-set unreadable: ${filedDir.reason}`;
+    } else {
+      const filed = filedSlugs(filedDir.entries || []);
+      const drawn = reviewDraw(queueDir.entries || [], { filed });
+      ownerReviewDesk.queued = drawn.queued;
+      ownerReviewDesk.deferred = drawn.deferred.map((d) => d.slug);
+      ownerReviewDesk.skipped = drawn.skipped;
+
+      for (const target of drawn.draw) {
+        const file = await fetchBackOfficeFile(env, target.path);
+        if (file.reason) {
+          out.errors.push(`${target.path}: could not be read (${file.reason}) — no review filed for it`);
+          continue;
+        }
+        const parsed = parseTargetFile(file.text);
+
+        // The owner may name a path instead of pasting the material. One GET,
+        // back-office only — this desk reads no other repository, and the
+        // Worker could not read the warehouse even if it were asked to.
+        let material = parsed.body;
+        let sourceNote = `the full text of your request file \`${target.path}\`, and nothing else`;
+        if (parsed.targetPath) {
+          const named = await fetchBackOfficeFile(env, parsed.targetPath);
+          if (named.reason) {
+            // NAMED AND NOT SUBSTITUTED. The review still happens, on what
+            // there is, and says at the top what it could not open — silently
+            // reviewing the request note instead of the file he named is the
+            // shape that produced a review claiming it had run a script.
+            sourceNote = `your request file \`${target.path}\`. **The named target \`${parsed.targetPath}\` COULD NOT BE READ (${named.reason})**, so it was NOT reviewed — what follows is judgement over your request text alone.`;
+            material = `[THE NAMED TARGET ${parsed.targetPath} COULD NOT BE READ: ${named.reason}]\n\n${parsed.body}`;
+          } else {
+            material = named.text;
+            sourceNote = `the full text of \`${parsed.targetPath}\` (${named.text.length} characters), which your request file named.`;
+          }
+        }
+
+        const reviewerId = parsed.reviewerId || DEFAULT_REVIEWER_ID;
+        const defaultedReviewer = !parsed.reviewerId;
+        const config = getAgentConfig(reviewerId);
+        const lensQuestion = parsed.lens
+          ? `YOUR QUESTION, IN THE CLIENT'S OWN WORDS — answer THIS, not a question you would rather have been asked: ${parsed.lens}`
+          : reviewerLensQuestion(reviewerId);
+
+        const judged = await adminDeskJudgment(env, {
+          agentId: reviewerId,
+          eventId: `admin-desk:owner-review:${target.slug}`,
+          // 2200, the figure the lifecycle review desk was corrected to on
+          // 2026-08-17 after two live reviews ran out of budget mid-sentence
+          // and neither reached its VERDICT line.
+          maxTokens: 2200,
+          systemPrompt: `You are ${config?.name || `Agent ${reviewerId}`}, ${config?.role || 'an admin'} in an AI office. `
+            + `${config?.personality?.core || ''} Review in character, in English, and be specific.`,
+          prompt: [
+            'THE CLIENT HIMSELF asked for this review. He is the one who will read it, and he named this target personally.',
+            '',
+            lensQuestion,
+            '',
+            // The same standing instruction the lifecycle review desk carries,
+            // and for the same measured reason: on 2026-08-17 a review said it
+            // had run a script and executed CLI flags when it had been handed
+            // one markdown file. A persona asked to "review" narrates the
+            // review it WOULD have done unless it is told what it actually has.
+            'WHAT YOU HAVE, EXACTLY: the one document reproduced below. Nothing else.',
+            'You have NOT run this. You have NOT executed any command, opened any other file, inspected any source, or observed any output.',
+            'Do not write as though you had — no "I ran", no "I executed", no "I tested", no invented results. Where a judgement needs',
+            'something you were not given, SAY SO AND NAME WHAT YOU WOULD NEED. An honest "I cannot tell from this" is a real finding here.',
+            '',
+            'What you were given:',
+            '',
+            material.slice(0, ADMIN_DESK_ARTIFACT_CHARS),
+            material.length > ADMIN_DESK_ARTIFACT_CHARS
+              ? `\n[TRUNCATED at ${ADMIN_DESK_ARTIFACT_CHARS} characters of ${material.length} — say so if what you needed was past the cut.]`
+              : '',
+            '',
+            'Be concise — under 400 words. Say what you checked, what you found, and what you would do about it.',
+            'End with a single line, and leave room for it: VERDICT: approve|revise|abstain',
+          ].filter((l) => l !== '').join('\n'),
+        });
+
+        if (!judged.text) {
+          out.errors.push(`${target.slug}: judgment lane produced nothing (${judged.reason}) — no review filed for the client's own request`);
+          ownerReviewDesk.reason = judged.reason;
+          continue;
+        }
+
+        const path = reviewFilePath(today, target.slug);
+        const markdown = renderReviewFile({
+          today, slug: target.slug, title: parsed.title, reviewerId,
+          reviewerName: config?.name, reviewerRole: config?.role,
+          lens: parsed.lens, targetPath: parsed.targetPath, sourceNote,
+          verdict: parseDecisionWord(judged.text, 'VERDICT', ['approve', 'revise', 'abstain']),
+          text: judged.text, provider: judged.provider, defaultedReviewer,
+        });
+        const commit = await commitFileToRepo(
+          env, BACKOFFICE_REPO_NAME, path, markdown,
+          `office: Agent ${reviewerId} review of ${target.slug} for the client [skip ci]`
+        );
+        if (!commit.committed) {
+          out.errors.push(`${path}: not committed (${commit.reason || 'no reason given'}) — the review exists nowhere`);
+          continue;
+        }
+        ownerReviewDesk.agentIds.push(reviewerId);
+        ownerReviewDesk.produced += 1;
+        out.filed.push({ desk: 'owner_review', slug: target.slug, path, agentId: reviewerId });
+      }
+    }
+  } catch (err) {
+    out.errors.push(`owner review desk threw: ${err?.message}`);
+    ownerReviewDesk.reason = `threw: ${err?.message}`;
+  }
+  out.desks.push(ownerReviewDesk);
 
   out.produced = out.desks.reduce((n, d) => n + (d.produced || 0), 0);
   out.summary = deskSummary(out.desks);
