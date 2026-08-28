@@ -298,8 +298,16 @@ check('the review budget leaves room for the VERDICT line, and says why the numb
  * never reached one. A parser strict enough to drop a decision plainly made is
  * losing, not refusing.
  */
-check('all three decision words go through ONE parser: defined once, called three times',
-  (runner.match(/parseDecisionWord\(/g) || []).length === 4);
+/*
+ * FIVE, not four, since 2026-08-28: Session 33's owner-review desk parses a
+ * verdict too. The number is asserted EXACTLY rather than loosened to `>=`,
+ * because the point of this check is that a new decision site cannot appear
+ * without somebody looking at it — a `>=` would let the next inline parser in
+ * silently, which is the defect this check exists to have caught once already.
+ * 1 definition + 4 call sites (review, probation, approval, owner-review).
+ */
+check('every decision word goes through ONE parser: defined once, called four times',
+  (runner.match(/parseDecisionWord\(/g) || []).length === 5);
 check('...and no decision word is still pulled out by an inline .exec()',
   // Deliberately NOT a search for the old regex TEXT: parseDecisionWord()'s own
   // header quotes it to explain what went wrong, and a check that reads a

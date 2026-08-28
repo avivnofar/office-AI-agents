@@ -143,10 +143,19 @@ check('no ANTHROPIC_API_KEY also refuses, rather than degrading to a routed prov
   (await runArchitectApprovalCall({ DB: overBudgetDb }, { slug: 'x' })).reason === 'anthropic_api_key_not_configured');
 
 // The guard is in ONE place, so a third caller cannot bypass it.
-const approvalBlockSrc = runner.slice(
-  runner.indexOf('async function processArchitectApprovalBlock('),
-  runner.indexOf('async function processOwnerChannelBlock(')
-);
+/*
+ * SLICED TO THE NEXT FUNCTION, not to a distant landmark.
+ *
+ * The first version of this cut from `processArchitectApprovalBlock` to
+ * `processOwnerChannelBlock`, which was correct for exactly one day: Session
+ * 33's brain-audit functions landed between them, and the slice silently grew
+ * to include a `callClaudeMessages()` that belongs to a different feature. The
+ * check went red for the right reason and the wrong cause -- a landmark that is
+ * not the function's own end is a boundary that moves under you.
+ */
+const approvalStart = runner.indexOf('async function processArchitectApprovalBlock(');
+const approvalEnd = runner.indexOf('\nasync function ', approvalStart + 10);
+const approvalBlockSrc = runner.slice(approvalStart, approvalEnd === -1 ? undefined : approvalEnd);
 check('processArchitectApprovalBlock() makes NO Anthropic call of its own — its only model call is runArchitectApprovalCall()',
   /runArchitectApprovalCall\(/.test(approvalBlockSrc) && !/callClaudeMessages\(/.test(approvalBlockSrc));
 check('the scheduled wrapper calls the SAME processArchitectApprovalBlock(), not a parallel copy',

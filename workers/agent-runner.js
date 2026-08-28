@@ -185,6 +185,14 @@ import {
   noticeParts,
 } from './owner-notify.js';
 import { improvementLoopEnabled } from './improvement-loop.js';
+// SESSION 33, ITEM D (2026-08-28) - the brain audit. The office's first real
+// job from the owner, and the actual test in it is whether the Architect can
+// turn ONE large request into five executable pieces. See brain-audit.js.
+import {
+  AUDIT_LENSES, AUDIT_DELIVERABLES, HARVEST_SLICES,
+  sliceHarvest, DECOMPOSE_SYSTEM, buildDecomposePrompt, parseDecomposition,
+  renderDecomposition, buildTaskPrompt, deliverablePath, renderDeliverable,
+} from './brain-audit.js';
 // SESSION 33, ITEM C (2026-08-28) - the review queue the owner fills. The one
 // path in this office where nothing is broken: a review is ONE completion, and
 // eleven of them are already filed. It touches no pairing, no warehouse spec
@@ -3097,6 +3105,174 @@ async function processScheduledApprovalBlock(env, opts = {}) {
   }
   console.log(`[build-chain] architect_approval: ${out.produced} of ${out.queued} drawn`);
   return out;
+}
+
+/* ════════════════ SESSION 33, ITEM D — THE BRAIN AUDIT ════════════════════ */
+
+const HARVEST_PATH = 'campus/brain-export/audit/HARVEST.md';
+const DECOMPOSITION_PATH = 'campus/brain-export/audit/DECOMPOSITION.md';
+
+/**
+ * MODE `decompose` — the Architect turns ONE request into five executable
+ * tasks. His THIRD named Anthropic path, on the same `component:'architect'`
+ * sub-budget as the spec and the approval, for the same reason those two share
+ * one: this is his work on one job, not three kinds of accounting.
+ *
+ * ── THE VALIDATION REFUSES, IT DOES NOT REPAIR ──────────────────────────────
+ *
+ * `parseDecomposition()` rejects a five-task list that reuses a lens, names a
+ * slice that does not exist, or carries an instruction that is a title with a
+ * verb in front of it. It does NOT patch any of those. A decomposition this
+ * code quietly fixed would be filed as his and would not be his — and the
+ * whole point of D3 is finding out what he actually produces.
+ *
+ * The spend is recorded either way, because the call cost money whatever came
+ * back — the same posture `runArchitectSpecCall()` and the guide review take.
+ */
+async function processBrainAuditDecompose(env, opts = {}) {
+  if (!opts.bypassGate && !(await officeContextEnabled(env))) {
+    return { ok: false, skipped: true, reason: 'office_context_disabled' };
+  }
+  const today = opts.today || todayDateStr();
+
+  const digest = await fetchBackOfficeFile(env, HARVEST_PATH);
+  if (digest.reason) {
+    return { ok: false, reason: `the harvest could not be read (${HARVEST_PATH}): ${digest.reason}. Run .github/workflows/harvest-libraries.yml first — nothing here invents a library it could not read.` };
+  }
+
+  const main = sliceHarvest(digest.text, 'templates', { maxChars: 30000 });
+  const std = sliceHarvest(digest.text, 'standard-only', { maxChars: 6000 });
+  if (!main.ok) return { ok: false, reason: main.reason };
+  if (!std.ok) return { ok: false, reason: std.reason };
+
+  if (!env?.ANTHROPIC_API_KEY) return { ok: false, reason: 'anthropic_api_key_not_configured' };
+  const budget = await getClaudeBudgetStatus(env, { component: 'architect' });
+  if (budget.overBudget) {
+    return { ok: false, reason: `architect_budget_exhausted ($${budget.spentUsd.toFixed(2)}/$${budget.capUsd}/mo)`, budget };
+  }
+
+  let result;
+  try {
+    result = await callClaudeMessages({
+      apiKey: env.ANTHROPIC_API_KEY,
+      system: DECOMPOSE_SYSTEM,
+      messages: [{ role: 'user', content: buildDecomposePrompt({
+        harvestSlice: main.text, sliceLabel: main.label, standardSlice: std.text,
+      }) }],
+      maxTokens: 3000,
+      effort: 'medium',
+      disableThinking: true,
+    });
+  } catch (err) {
+    return { ok: false, reason: `anthropic call threw: ${err.message}` };
+  }
+
+  const spend = await recordClaudeSpend(env, {
+    inputTokens: result.inputTokens, outputTokens: result.outputTokens, component: 'architect',
+  });
+
+  const parsed = parseDecomposition(result.text);
+  if (!parsed.ok) {
+    // NOT FILED. A decomposition that failed validation is the answer to D3's
+    // question and it is reported as one, with the raw reply kept so a human
+    // can read what he actually said rather than a summary of it.
+    return {
+      ok: false, reason: `the Architect's decomposition was REFUSED: ${parsed.reason}`,
+      tasks: parsed.tasks || null, raw: result.text, spend,
+      usage: { inputTokens: result.inputTokens, outputTokens: result.outputTokens },
+    };
+  }
+
+  const markdown = renderDecomposition({
+    today, tasks: parsed.tasks, model: CLAUDE_MODEL,
+    usage: { inputTokens: result.inputTokens, outputTokens: result.outputTokens },
+  });
+  const commit = await commitFileToRepo(
+    env, BACKOFFICE_REPO_NAME, DECOMPOSITION_PATH, markdown,
+    `brain-audit: the Architect's decomposition, ${today} [skip ci]`
+  );
+
+  return {
+    ok: true, today, path: DECOMPOSITION_PATH, committed: commit.committed,
+    commitReason: commit.reason || null, tasks: parsed.tasks, spend, budget,
+    usage: { inputTokens: result.inputTokens, outputTokens: result.outputTokens },
+    model: CLAUDE_MODEL,
+  };
+}
+
+/**
+ * MODE `execute` — ONE of the five tasks, run by the agent it was assigned to,
+ * on the routed judgment lane (never Anthropic: the Architect writes the
+ * decomposition, the office writes the deliverables).
+ *
+ * The task is read back OUT of the committed decomposition rather than passed
+ * in. That is deliberate: the thing being executed has to be the thing that was
+ * filed, or the report would be quoting one document and running another.
+ */
+async function processBrainAuditTask(env, opts = {}) {
+  if (!opts.bypassGate && !(await officeContextEnabled(env))) {
+    return { ok: false, skipped: true, reason: 'office_context_disabled' };
+  }
+  const today = opts.today || todayDateStr();
+  const index = Number(opts.index);
+  if (!Number.isInteger(index) || index < 1 || index > AUDIT_LENSES.length) {
+    return { ok: false, reason: `opts.index must be 1..${AUDIT_LENSES.length}` };
+  }
+
+  const doc = await fetchBackOfficeFile(env, DECOMPOSITION_PATH);
+  if (doc.reason) return { ok: false, reason: `the decomposition could not be read (${DECOMPOSITION_PATH}): ${doc.reason}` };
+  const block = /```json\n([\s\S]*?)\n```/.exec(doc.text);
+  if (!block) return { ok: false, reason: 'the decomposition carries no JSON block — it was not written by renderDecomposition()' };
+  let tasks;
+  try { tasks = JSON.parse(block[1]).tasks; } catch (err) { return { ok: false, reason: `the decomposition's JSON block did not parse: ${err.message}` }; }
+  if (!Array.isArray(tasks) || !tasks[index - 1]) return { ok: false, reason: `the decomposition has no task ${index}` };
+  const task = tasks[index - 1];
+
+  const digest = await fetchBackOfficeFile(env, HARVEST_PATH);
+  if (digest.reason) return { ok: false, reason: `the harvest could not be read: ${digest.reason}` };
+  const slice = sliceHarvest(digest.text, task.harvestSlice, { maxChars: 26000 });
+  if (!slice.ok) return { ok: false, reason: slice.reason };
+
+  const lens = AUDIT_LENSES.find((l) => l.key === task.lens);
+  const deliverable = lens?.deliverable ? AUDIT_DELIVERABLES.find((d) => d.n === lens.deliverable) : null;
+  const config = getAgentConfig(task.agentId);
+
+  const judged = await adminDeskJudgment(env, {
+    agentId: task.agentId,
+    eventId: `brain-audit:${task.lens}`,
+    maxTokens: 3000,
+    systemPrompt: `You are ${config?.name || `Agent ${task.agentId}`}, ${config?.role || 'an agent'} in an AI office. `
+      + `${config?.personality?.core || ''} Write in character, in English, and name specific items.`,
+    prompt: buildTaskPrompt({
+      task, sliceText: slice.text, sliceLabel: slice.label,
+      deliverableTitle: deliverable?.title || null,
+    }),
+  });
+  if (!judged.text) {
+    return { ok: false, reason: `judgment lane produced nothing (${judged.reason}) — nothing filed for task ${index}`, task };
+  }
+
+  // A lens with no numbered deliverable (Cyber, IT Chief) still files: its
+  // finding feeds all three, and a finding that exists only in a return value
+  // is a finding nobody reads.
+  const n = lens?.deliverable ?? `${index}-${task.lens}`;
+  const slug = deliverable?.slug || task.lens;
+  const path = deliverablePath(today, slug);
+  const markdown = renderDeliverable({
+    today, n, title: deliverable?.title || `${lens?.agent || `Agent ${task.agentId}`}'s lens: ${lens?.question || task.question}`,
+    lens: task.lens, agentId: task.agentId, agentName: config?.name,
+    question: task.question, sliceLabel: slice.label, truncated: slice.truncated,
+    text: judged.text, provider: judged.provider,
+  });
+  const commit = await commitFileToRepo(
+    env, BACKOFFICE_REPO_NAME, path, markdown,
+    `brain-audit: deliverable ${n} — ${task.lens}, by Agent ${task.agentId} [skip ci]`
+  );
+  return {
+    ok: !!commit.committed, index, task, path, committed: commit.committed,
+    commitReason: commit.reason || null, provider: judged.provider,
+    sliceTruncated: slice.truncated, chars: judged.text.length,
+  };
 }
 
 async function processOwnerChannelBlock(env, opts = {}) {
@@ -8754,6 +8930,22 @@ export default {
             // in the same day draws the NEXT two reviews rather than re-filing
             // the first two.
             result = await processAdminDeskBlock(env, { bypassGate: body.bypassGate !== false });
+            break;
+          case 'brain_audit_decompose':
+            // Session 33, Item D3 — SUPERVISED ONLY. One real Anthropic call on
+            // the component:'architect' sub-budget. Body: { today?, bypassGate? }.
+            result = await processBrainAuditDecompose(env, {
+              today: body.today, bypassGate: body.bypassGate !== false,
+            });
+            break;
+          case 'brain_audit_task':
+            // Session 33, Item D — runs ONE of the five decomposed tasks on the
+            // routed judgment lane. Body: { index: 1..5, today?, bypassGate? }.
+            // The task is read back OUT of the committed decomposition, so what
+            // runs is what was filed.
+            result = await processBrainAuditTask(env, {
+              index: body.index, today: body.today, bypassGate: body.bypassGate !== false,
+            });
             break;
           case 'build_notes_block':
             // Session 30 / OB-146, Desk 5 — SUPERVISED ONLY, deliberately not
