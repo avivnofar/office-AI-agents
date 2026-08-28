@@ -221,8 +221,33 @@ section('§9 the wiring — is the check actually reached');
 
 check('runDailyObligationCheck() exists in agent-runner.js',
   /async function runDailyObligationCheck\(/.test(runner));
-check('it is CALLED from finalizeScheduledDay() — the day\'s last block, not a supervised trigger only',
+check('it is CALLED at the day\'s last block, and not only from a supervised trigger',
   /const obligation = await runDailyObligationCheck\(env, \{/.test(runner));
+/*
+ * ── THE PLACEMENT, AND ITS OWN FIRST LIVE RUN CAUGHT IT ────────────────────
+ *
+ * It was first wired at the END of `finalizeScheduledDay()`. The Friday
+ * 2026-08-28 12:30 tick overflowed the invocation budget (`closing_qa_review`
+ * spent 40.75 of 37 usable), finalize threw at 09:30:48Z, and THE CHECK THAT
+ * EXISTS TO NOTICE A BAD DAY DID NOT RUN ON ONE. A monitor placed downstream
+ * of the thing it monitors inherits its failures.
+ *
+ * These four assertions are that fix, pinned. Move the call back inside
+ * finalize and they go red.
+ */
+const finalizeStart = runner.indexOf('async function finalizeScheduledDay(');
+const finalizeBody = runner.slice(
+  finalizeStart,
+  runner.indexOf('\nasync function ', finalizeStart + 10)
+);
+check('the check is NOT inside finalizeScheduledDay() — it must survive finalize throwing',
+  !/runDailyObligationCheck\(/.test(finalizeBody));
+check('it sits AFTER the try/catch around finalize, in the caller',
+  /blockType: 'finalize'[\s\S]{0,6000}const obligation = await runDailyObligationCheck/.test(runner));
+check('a day that BROKE is distinguishable from a quiet one IN THE ROW, not only by the row being absent',
+  /FINALIZE THREW/.test(runner));
+check('and the check is reachable on demand — a capability with no route to it does not stay a gap',
+  /case 'daily_obligation_check':/.test(runner));
 check('it is skipped on the rest day (A13) rather than recording a designed silence as a failure',
   /rest_day_not_checked/.test(runner));
 check('the D1 row is written even when the notice is gated off — a suppressed alarm stays countable',

@@ -7051,10 +7051,54 @@ async function runScheduledBlockInner(env, israelTime, dayOfWeek, ctx) {
     await logScheduledError(env, { israelTime, dayOfWeek, blockType: 'finalize', error: err });
     finalize = { error: err.message };
   }
+
+  /*
+   * ── SESSION 33, ITEM A — OUTSIDE THE TRY, AND THAT IS THE WHOLE POINT ────
+   *
+   * MOVED HERE 2026-08-28, hours after it was first wired, by its own first
+   * live run. It sat at the END of `finalizeScheduledDay()`, on the reasoning
+   * that a day's output is only a finished fact once the day's last writer has
+   * run. That reasoning is right and the placement was wrong, and the Friday
+   * 12:30 tick showed why within the hour:
+   *
+   *     09:30:42Z  incident  guide_review @ 12:30 — deferred by invocation
+   *                          budget: needs ~12, 0 left of 37 (spent 40.75)
+   *     09:30:48Z  incident  finalize @ 12:30 — Too many subrequests by
+   *                          single Worker invocation
+   *
+   * `closing_qa_review` alone spent 40.75 of 37 usable, `finalizeScheduledDay()`
+   * threw partway, and **the check that exists to notice a bad day did not run
+   * on one** — the daily summary did not commit either, and the only trace was
+   * a missing row.
+   *
+   * That is this estate's most-recorded shape, arriving inside the fix for it:
+   * a monitor placed downstream of the thing it monitors inherits its failures.
+   *
+   * ── WHY THE ROW STILL LANDS ON AN OVERFLOWED TICK ───────────────────────
+   *
+   * The 50-per-invocation cap counts external `fetch()` and Durable Object
+   * calls. **D1 is not counted** — measured, see `subrequest-budget.js`'s
+   * WEIGHTS block. So on a tick that has already overspent, the SELECT and the
+   * INSERT still succeed and the verdict is recorded; only the GitHub POST
+   * fails, and it fails loudly into `notify_detail` rather than silently.
+   *
+   * A recorded failure the owner was not emailed about is much better than no
+   * record at all: the first is a row he can query, the second is an absence
+   * indistinguishable from a day nobody looked at.
+   *
+   * `finalize.error` is carried into `source`, so **a day that BROKE is
+   * distinguishable from a day that was merely quiet, in the row itself** —
+   * not only by the row being missing.
+   */
+  const obligation = await runDailyObligationCheck(env, {
+    date: todayDateStr(), dayOfWeek, schedule, isOffDay,
+    source: finalize?.error ? `lastBlock; FINALIZE THREW: ${finalize.error}` : 'lastBlock',
+  });
+
   await clearCycleState(env);
   return {
     ok: true, day: cycle.day, dayOfWeek, israelTime, blocks: dueBlocks.map((b) => b.type),
-    finalize, budget: cycle.budget, admissions, deferred: summarizeDayDeferrals(cycle).deferred,
+    finalize, obligation, budget: cycle.budget, admissions, deferred: summarizeDayDeferrals(cycle).deferred,
   };
 }
 
@@ -7368,17 +7412,8 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
       `chore(office): year ${newStats.year_number || 1} day ${nextDay} summary [skip ci]`
     );
 
-  // SESSION 33, ITEM A — LAST, deliberately. Everything above has already
-  // committed; a day's output is only a finished fact once the day's last
-  // writer has run, and this must never be able to cost any of it (KFM-14 —
-  // `runDailyObligationCheck()` cannot throw).
-  const obligation = await runDailyObligationCheck(env, {
-    date: todayDateStr(), dayOfWeek, schedule, isOffDay, source: 'finalizeScheduledDay',
-  });
-
   return {
     ...summary, year: newState, standup, sidePlotsStarted: sidePlotStarted, sidePlotUpdates, milestone, milestoneMeeting, monthlyReport, report,
-    obligation,
     schedule: { dayOfWeek, toolTask, aiExperience, spareTime, weeklySummary, versionBumps },
   };
 }
@@ -8930,6 +8965,23 @@ export default {
             // in the same day draws the NEXT two reviews rather than re-filing
             // the first two.
             result = await processAdminDeskBlock(env, { bypassGate: body.bypassGate !== false });
+            break;
+          case 'daily_obligation_check':
+            // Session 33, Item A — runs the day's artifact check on demand and
+            // returns the verdict. SUPERVISED; the scheduled path is the day's
+            // last block. Body: { date?: 'YYYY-MM-DD', dayOfWeek?: 1..7 }.
+            //
+            // It exists because a capability with no route to it does not stay
+            // a gap — it routes whoever needs it onto whatever path happens to
+            // exist (AD §7.5). Costs no model call and, on a day that produced
+            // something, no subrequest at all.
+            result = await runDailyObligationCheck(env, {
+              date: body.date,
+              dayOfWeek: Number(body.dayOfWeek) || undefined,
+              schedule: getDaySchedule(Number(body.dayOfWeek) || israelTimeParts(new Date()).dayOfWeek),
+              isOffDay: false,
+              source: 'supervised trigger',
+            });
             break;
           case 'brain_audit_decompose':
             // Session 33, Item D3 — SUPERVISED ONLY. One real Anthropic call on

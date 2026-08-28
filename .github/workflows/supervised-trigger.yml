@@ -55,6 +55,7 @@ on:
         type: choice
         options:
           - admin_desk_block
+          - daily_obligation_check
           - brain_audit_decompose
           - brain_audit_task
           - repair_block
