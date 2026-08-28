@@ -169,6 +169,12 @@ import { accessConfig, ACCESS_JWT_HEADER, accessKeyCacheState } from './access-j
 import { renderOfficeSite } from './office-site-page.js';
 import {
   ownerChannelEnabled, notifyOwner, selectNotificationItems, recentFailures, OWNER_ISSUE_LABEL,
+  // SESSION 33, ITEM A: the daily-obligation notice files its own Issue rather
+  // than going through notifyOwner(), because that function's body is an
+  // envelope of items and the owner's instruction for this one is "the message
+  // says only ... nothing else". It reuses the LEDGER and the SEQUENCE, which
+  // are the parts that make a lost message visible.
+  nextSequence, recordNotifyAttempt,
   // SESSION 11 (2026-08-23): the three-part gate and the email notice. See
   // owner-notify.js's "three-part notice" and "email notice" headers — the
   // gate is a filter, and this Worker COMPOSES the email but never sends it.
@@ -179,6 +185,16 @@ import {
   noticeParts,
 } from './owner-notify.js';
 import { improvementLoopEnabled } from './improvement-loop.js';
+// SESSION 33, ITEM A (2026-08-28) - the daily obligation. `nextSequence` and
+// `recordNotifyAttempt` come from owner-notify.js above rather than being
+// reimplemented, so a failure notice carries the SAME sequence the rest of the
+// channel does: a notice numbered from its own counter could not tell the owner
+// that a message from the other counter went missing, which is the one thing
+// the sequence exists to do.
+import {
+  countArtifacts, lastArtifactCapableBlock, switchedOffBlockTypes, buildObligationIssue,
+  DAILY_OBLIGATION_TABLE_SQL, OBLIGATION_ISSUE_LABEL,
+} from './daily-obligation.js';
 // The publishing gate (2026-08-16, OB-014, audit finding #17). Deliberately has
 // NO kill switch — see front-gate.js's header. The gate itself is pure and
 // publishes nothing; `runFrontPublish()` below is the only thing that writes,
@@ -6514,6 +6530,147 @@ async function runScheduledBlockInner(env, israelTime, dayOfWeek, ctx) {
  * agentStats/block results from `cycle` (accumulated tick by tick by
  * `runScheduledBlock`) instead of computing everything in one pass.
  */
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ * SESSION 33, ITEM A (2026-08-28) — THE DAILY OBLIGATION.
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * Runs at the DAY'S LAST BLOCK, from `finalizeScheduledDay()`, because that is
+ * the only point in the day where "nothing was produced" is a finished fact
+ * rather than a prediction.
+ *
+ * ── WHAT IT COSTS, AGAINST FINALIZE_RESERVE ──────────────────────────────
+ *
+ * On a day that produced something: ZERO external fetches. Two D1 statements
+ * and one D1 SELECT, none of which the 50-subrequest cap counts (measured —
+ * see `subrequest-budget.js`'s WEIGHTS block). On a day that produced nothing:
+ * one further D1 read for the sequence and ONE GitHub POST. So the alarm costs
+ * one subrequest and the silence costs none, which is the right way round.
+ *
+ * ── SATURDAY IS NOT CHECKED, AND NO ROW IS WRITTEN EITHER ─────────────────
+ *
+ * OFFICE-POLICY A13: the rest day is a day with no automated writing. A
+ * Saturday that produced nothing produced nothing BY DESIGN, and recording it
+ * as a failure would train the owner to ignore the alarm — which is the only
+ * way an alarm like this actually dies. No check, no row, no notice.
+ *
+ * ── IT CANNOT THROW ──────────────────────────────────────────────────────
+ *
+ * KFM-14, the rule every recorder in this codebase follows: a lost measurement
+ * must never cost the thing being measured. This runs AFTER the daily summary
+ * has already been committed and its whole body sits inside one try/catch, so
+ * the worst it can do is return `{ ok: false }`.
+ *
+ * ── THE NOTIFICATION RIDES THE ONE PATH THAT DEMONSTRABLY WORKS ───────────
+ *
+ * `fileGitHubIssue(env, OWNER_NOTIFY_REPO, ...)` — 18 sequenced notifications
+ * delivered, the most recent at 2026-08-28T08:00:49Z with HTTP 201, and
+ * `.github/workflows/owner-email.yml` (public repo) turns that Issue into the
+ * email that reaches his phone. It is gated on `owner_channel_enabled` like
+ * every other path that reaches him, and that is deliberate: a second,
+ * independent route to a person's inbox that ignores the office's one "may we
+ * contact him" switch is worse than the gap it closes.
+ *
+ * **The D1 row is written either way.** Only the notice is gated, so a
+ * suppressed alarm is still a countable fact in `daily_obligation` rather than
+ * a silence indistinguishable from a day that passed.
+ */
+async function runDailyObligationCheck(env, { date, dayOfWeek, schedule, isOffDay, source } = {}) {
+  if (isOffDay) {
+    return { ok: true, skipped: true, reason: 'rest_day_not_checked', policy: 'OFFICE-POLICY.md A13' };
+  }
+  const today = date || todayDateStr();
+  try {
+    if (!env?.DB) return { ok: false, reason: 'no_db_binding' };
+    await env.DB.prepare(REPO_WRITE_TABLE_SQL).run();
+    await env.DB.prepare(DAILY_OBLIGATION_TABLE_SQL).run();
+
+    // `repo_writes` is this Worker's own record of what it committed, and it is
+    // the ONLY readable record of the day's output: nothing here can read the
+    // warehouse back (WAREHOUSE_REPO_TOKEN is deliberately unset), so a check
+    // that tried to list the repositories would be blind to exactly the
+    // artifacts that matter most.
+    const res = await env.DB.prepare(
+      `SELECT repo, path, committed FROM repo_writes WHERE date(created_at) = ? AND committed = 1`
+    ).bind(today).all();
+    const counted = countArtifacts(res?.results || []);
+    // The diagnostic must name a block that COULD have run. `guides_enabled`
+    // was false when this was written, so the naive answer on a Sun-Thu day was
+    // `guide_review` — a gated no-op, and the wrong place to send anyone.
+    const sim = await getSimulationState(env);
+    const lastCapable = lastArtifactCapableBlock(schedule, { disabled: switchedOffBlockTypes(sim) });
+    const met = counted.count > 0;
+
+    let notified = false;
+    let notifyDetail = null;
+    let seq = null;
+
+    if (!met) {
+      if (!(await ownerChannelEnabled(env))) {
+        notifyDetail = 'owner_channel_enabled is not true — the failure is recorded and the owner was NOT told';
+      } else {
+        const seqInfo = await nextSequence(env);
+        seq = seqInfo.seq;
+        const issue = buildObligationIssue({
+          date: today, seq, previous: seqInfo.previous,
+          sequenceReason: seqInfo.reason, lastCapableBlock: lastCapable,
+        });
+        let posted;
+        try {
+          posted = await fileGitHubIssue(env, OWNER_NOTIFY_REPO, {
+            title: issue.title, body: issue.body, labels: [OBLIGATION_ISSUE_LABEL],
+          });
+        } catch (err) {
+          posted = { created: false, status: 0, reason: `threw: ${err?.message || err}` };
+        }
+        notified = !!posted?.created;
+        notifyDetail = notified ? null : (posted?.reason || `HTTP ${posted?.status ?? 'no response'}`);
+        // The SAME ledger every other notification lands in, so a reader
+        // counting what reached him does not have to know this path exists.
+        await recordNotifyAttempt(env, {
+          seq, kind: 'daily_obligation', title: issue.title, ok: notified,
+          status: posted?.status, detail: notifyDetail, issueNumber: posted?.number ?? null,
+        });
+        if (!notified) {
+          console.error(`[daily-obligation] ${today}: NO ARTIFACT, AND THE NOTICE FAILED — ${notifyDetail}. `
+            + 'The office believes it has NOT reached him.');
+        }
+      }
+    }
+
+    await env.DB.prepare(
+      `INSERT OR REPLACE INTO daily_obligation
+        (date, day_of_week, artifact_count, met, artifacts, last_capable_block, notified, notify_detail, source)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(
+      today, dayOfWeek ?? null, counted.count, met ? 1 : 0,
+      JSON.stringify(counted.artifacts.map((a) => `${a.repo}/${a.path}`)),
+      lastCapable ? `${lastCapable.type}@${lastCapable.time}` : null,
+      notified ? 1 : 0, notifyDetail, source || 'finalizeScheduledDay'
+    ).run();
+
+    if (counted.unclassified.length) {
+      // NO SILENT CAPS, applied to a classification: a path nobody has ruled on
+      // is counted as "not an artifact" and NAMED, so the rule list grows from
+      // something somebody read rather than from a default.
+      console.warn(`[daily-obligation] ${today}: ${counted.unclassified.length} write path(s) matched no classification rule and were counted as NOT artifacts: `
+        + counted.unclassified.map((u) => `${u.repo}/${u.path}`).join(', '));
+    }
+    console.log(`[daily-obligation] ${today}: ${counted.count} artifact(s), ${counted.notArtifacts.length} non-artifact write(s), met=${met}, notified=${notified}`);
+
+    return {
+      ok: true, date: today, met, artifactCount: counted.count,
+      artifacts: counted.artifacts, unclassified: counted.unclassified,
+      lastCapableBlock: lastCapable, notified, notifyDetail, seq,
+    };
+  } catch (err) {
+    // KFM-14. Loud, and it does not propagate.
+    console.error(`[daily-obligation] ${today}: the check itself failed — ${err?.message || err}. `
+      + 'NO VERDICT WAS RECORDED for this day, which is NOT the same fact as a day that passed.');
+    return { ok: false, date: today, reason: `check_threw: ${err?.message || err}` };
+  }
+}
+
 async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
   const yearState = await getYearState(env);
   const nextDay = cycle.day;
@@ -6675,8 +6832,17 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
       `chore(office): year ${newStats.year_number || 1} day ${nextDay} summary [skip ci]`
     );
 
+  // SESSION 33, ITEM A — LAST, deliberately. Everything above has already
+  // committed; a day's output is only a finished fact once the day's last
+  // writer has run, and this must never be able to cost any of it (KFM-14 —
+  // `runDailyObligationCheck()` cannot throw).
+  const obligation = await runDailyObligationCheck(env, {
+    date: todayDateStr(), dayOfWeek, schedule, isOffDay, source: 'finalizeScheduledDay',
+  });
+
   return {
     ...summary, year: newState, standup, sidePlotsStarted: sidePlotStarted, sidePlotUpdates, milestone, milestoneMeeting, monthlyReport, report,
+    obligation,
     schedule: { dayOfWeek, toolTask, aiExperience, spareTime, weeklySummary, versionBumps },
   };
 }
