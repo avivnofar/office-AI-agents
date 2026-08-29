@@ -146,6 +146,50 @@ export const HARVEST_SLICES = Object.freeze({
     from: '## The intake standard',
     to: '## The brain\'s packaging templates',
   },
+  /*
+   * ── THE SIXTH SLICE — BODIES, NOT HEADINGS (SESSION 35, ITEM F) ─────────
+   *
+   * Deliverable 3 asks *which of the office's skills are worth exporting to
+   * the brain*, and its first run returned an honest null result: every slice
+   * above carries names and descriptions, and **a writer cannot judge a skill
+   * it has not read.** The partner estate asked for exactly this — *"give the
+   * writers bodies, not headings, for the specific questions that need them."*
+   *
+   * It carries the OFFICE's `SKILL.md` files in full and not the brain's.
+   * ~150 brain skills at full length is several hundred thousand characters
+   * and fits no prompt this office has; the office's own are a bounded set.
+   * That asymmetry is a NAMED gap and is stated inside the section itself.
+   *
+   * ── IT DECLARES ITS OWN CAP, AND THAT IS THE POINT ─────────────────────
+   *
+   * Measured 2026-08-29 by the harvester itself: **15 files, 155,959
+   * characters**. (The session brief
+   * estimated "roughly fourteen files, ~60 KB" — the real figure is 2.5x that,
+   * and it is the measured one that governs.) At the call site's flat 26,000
+   * this slice would arrive **83% truncated**, which is the same failure the
+   * null result already reported, dressed as a fix.
+   *
+   * So a slice may declare `maxChars`, and `sliceHarvest()` prefers it over
+   * the caller's. 170,000 carries today's library with ~8% headroom, and a
+   * library that outgrows it is REPORTED (`truncated: true`, plus an inline
+   * marker naming the cut) rather than silently shortened.
+   *
+   * ── IT FITS, AND THAT WAS CHECKED RATHER THAN ASSUMED ──────────────────
+   *
+   * The judgment lane is Cerebras `gpt-oss-120b`, whose per-request input cap
+   * is a MEASURED 131,000 tokens. `provider-common.js` estimates at chars/2.75
+   * (itself calibrated against a real provider tokenizer), so 170,000 chars is
+   * ~61,800 tokens — under half the cap, before the rest of the prompt. And
+   * `cerebras-client.js` `checkInputWithinCaps()` REFUSES rather than
+   * truncating if that ever stops being true, so an over-cap slice becomes a
+   * visible failure and not a confident summary of the part that fitted.
+   */
+  'office-library-full': {
+    label: 'every skill the OFFICE has packaged, IN FULL — bodies, not headings',
+    from: '## The office\'s own skills, in full',
+    to: '## End of digest',
+    maxChars: 170000,
+  },
 });
 
 /**
@@ -167,7 +211,15 @@ export function sliceHarvest(digest, sliceKey, opts = {}) {
   }
   const endAt = text.indexOf(spec.to, start + spec.from.length);
   let out = endAt === -1 ? text.slice(start) : text.slice(start, endAt);
-  const maxChars = Number.isInteger(opts.maxChars) ? opts.maxChars : 40000;
+  // A SLICE MAY DECLARE ITS OWN CAP, AND IT WINS (Session 35, item F).
+  // The call sites pass one flat number for every slice — 26,000 for a task,
+  // 30,000 for the decomposition — which is right for five slices of headings
+  // and wrong for the one slice of bodies: `office-library-full` is 155,959
+  // characters and would arrive 83% truncated. The per-slice value is the
+  // considered one and the caller's is the default, so the precedence goes
+  // that way round rather than the other.
+  const maxChars = Number.isInteger(spec.maxChars) ? spec.maxChars
+    : Number.isInteger(opts.maxChars) ? opts.maxChars : 40000;
   let truncated = false;
   if (out.length > maxChars) {
     out = `${out.slice(0, maxChars)}\n\n[TRUNCATED at ${maxChars} of ${out.length} characters of this slice — say so if what you needed was past the cut.]`;

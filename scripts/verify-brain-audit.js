@@ -132,6 +132,11 @@ const FAKE = [
   '## `aviv-brain` — skills', 'brain rows', '',
   '## The office\'s own skills (`campus/brain-export/skills/`)', 'office rows', '',
   '## Every request this harvest made to `aviv-brain` (129)', 'log',
+  // SESSION 35, ITEM F — appended LAST in the real digest too, so the fixture
+  // and the artifact have the same shape. `bodies` stands in for ~156,000
+  // characters of SKILL.md text.
+  "## The office's own skills, in full", 'bodies',
+  '## End of digest',
 ].join('\n');
 
 check('the templates slice stops before the governance excerpts',
@@ -150,6 +155,27 @@ check('truncation is applied AND declared, so the writer knows it was cut',
   (() => { const r = sliceHarvest(FAKE, 'templates', { maxChars: 20 }); return r.ok && r.truncated && /TRUNCATED/.test(r.text); })());
 check('every slice key HARVEST_SLICES declares actually resolves against a real harvest shape',
   Object.keys(HARVEST_SLICES).every((k) => sliceHarvest(FAKE, k).ok));
+
+/* ═══ SESSION 35, ITEM F — the sixth slice: bodies, not headings ═══ */
+
+check('[ITEM F] office-library-full carries the bodies and stops at the terminator',
+  (() => { const r = sliceHarvest(FAKE, 'office-library-full'); return r.ok && r.text.includes('bodies') && !r.text.includes('End of digest'); })());
+check('[FALSIFYING] the new section did NOT move the office-library boundary',
+  (() => { const r = sliceHarvest(FAKE, 'office-library'); return r.ok && r.text.includes('office rows') && !r.text.includes('bodies'); })());
+check('[FALSIFYING] nor the brain-library boundary — its `to` still finds the TABLE heading first',
+  (() => { const r = sliceHarvest(FAKE, 'brain-library'); return r.ok && r.text.includes('brain rows') && !r.text.includes('office rows'); })());
+check('a slice DECLARES its own cap and that cap beats the caller\'s',
+  (() => { const r = sliceHarvest(FAKE, 'office-library-full', { maxChars: 5 }); return r.ok && !r.truncated; })(),
+  'the call sites pass a flat 26,000, at which 156,000 chars of bodies would arrive 83% truncated');
+check('[FALSIFYING] a slice with NO declared cap still obeys the caller',
+  (() => { const r = sliceHarvest(FAKE, 'templates', { maxChars: 5 }); return r.ok && r.truncated; })());
+check('office-library-full\'s declared cap clears today\'s measured library (15 files, 155,959 chars)',
+  HARVEST_SLICES['office-library-full'].maxChars > 155959);
+check('...and fits the judgment lane: chars/2.75 is well under the measured 131,000-token input cap',
+  Math.ceil(HARVEST_SLICES['office-library-full'].maxChars / 2.75) < 131000,
+  `~${Math.ceil(HARVEST_SLICES['office-library-full'].maxChars / 2.75)} tokens`);
+check('the cap is a BOUND, not a promise — growth past it is still reported',
+  (() => { const big = FAKE.replace('bodies', 'x'.repeat(200000)); const r = sliceHarvest(big, 'office-library-full'); return r.ok && r.truncated && /TRUNCATED/.test(r.text); })());
 
 /* ═══ §5 — the prompts carry the anti-fabrication instruction ═══ */
 section('§5 the prompts — what the writer has, said in the prompt');
