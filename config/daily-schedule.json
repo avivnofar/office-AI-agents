@@ -34,23 +34,15 @@
     "applies_to_day_of_week": [1, 2, 3, 4, 5],
     "_retimed_2026_08_06": "Three case batches moved into office hours: 02:00 -> 08:00 (share 0.20), 04:30 -> 09:30 (0.15), 07:00 -> 11:00 (0.15). The remaining three moved only to keep the spread even: 09:30 -> 12:00 (0.15), 12:00 -> 13:30 (0.15), 15:00 unchanged (0.20). Six batches before, six after; shares unedited and still summing to 1.00. Non-batch blocks did not move at all.",
     "blocks": [
-      { "time": "08:00", "type": "case_batch", "label": "Opening batch", "case_share": 0.20 },
       { "time": "08:30", "type": "architect_liaison", "label": "Architect liaison: file last night's headless run as a D1 report (gated, SEE architect_liaison_program — SHIPPED OFF 2026-08-07) MOVED OFF THE 08:00 TICK on 2026-08-16 (OB-074): it shared 08:00 with the day's largest case_batch, and under the invocation budget the case floor (cases run first, by design) left too little for it -- verified on a live tick, where it was deferred with 11 of 38 usable subrequests left. A block deferred every single day is a block that never runs, so it gets its own tick instead of a daily refusal.", "ref": "architect_liaison_program" },
-      { "time": "09:30", "type": "case_batch", "label": "Mid-morning batch", "case_share": 0.15 },
       { "time": "10:00", "type": "admin_desk", "label": "Admin desk: the admin tier draws from four real queues — deliverable reviews owed (lifecycle IN-FLIGHT owed_by), the CEO's approval queue, probation decisions due at 20 actions, and the IT Chief's incident triage. ADDED 2026-08-17: agents 5-9 and 11 had no reports row since 2026-08-11, the day in_case_rotation:false correctly removed the admin tier from the case rotation and NOTHING replaced it. An EMPTY QUEUE PRODUCES NOTHING — no file, no row, no model call — which is the whole design; see workers/admin-desk.js. 10:00 is a free tick with nothing else on it, so this block gets its own 50-subrequest invocation budget (OB-074) rather than being deferred off a crowded one.", "ref": "admin_desk_program" },
-      { "time": "11:00", "type": "case_batch", "label": "Late-morning batch", "case_share": 0.15 },
       {"time": "11:30", "type": "repair", "label": "Build chain: ONE repair round against the ONE blocking finding recorded for it (Session 33, Item B). Reads workers/build-chain.js's D1 `build_chain` queue -- rows at AWAITING-REPAIR, oldest first, MAX_REPAIRS_PER_TICK=1. Cerebras only, on the build_artifact lane; the Architect NEVER repairs (Session 31, E1). Repairs land on branch `repair/<slug>`, never on main. 11:30 is a FREE Sun-Thu tick, chosen for the same reason closing_qa_review took 15:30 on 2026-08-15 and owner_channel took 14:00 on 2026-08-16: a free tick is its own ~38-subrequest invocation budget, and this block is sized at 14 (subrequest-budget.js BLOCK_COST). It sits AFTER admin_desk at 10:00 and BEFORE architect_approval at 13:00, so a repair produced this morning is judged the same afternoon. NOT on the Friday schedule -- every Friday tick from 08:00 to 12:30 already carries a block and blocks[last] finalizes the day, which is the same reason admin_desk_program gives for being Sun-Thu only.", "ref": "build_chain_program"},
-      { "time": "12:00", "type": "case_batch", "label": "Midday batch", "case_share": 0.15 },
       { "time": "12:30", "type": "chore_rotation", "label": "Cross-project chore rotation (Notebook-X/data-center/archive-alpha, Gemini-routed, wiring-only)", "ref": "chore-schedule.json" },
       {"time": "13:00", "type": "architect_approval", "label": "Build chain: the Architect's verdict on ONE artifact awaiting it, and on approval the merge (Session 33, Item B). Reads the same `build_chain` queue -- rows at AWAITING-APPROVAL, oldest first, MAX_APPROVALS_PER_TICK=1. His SECOND and LAST touch on a build: he does not repair, and a `block` verdict's reasoning becomes the next repair's finding, which is what makes this queue self-filling. The $1.00/mo component:'architect' Claude sub-budget is checked INSIDE runArchitectApprovalCall(), so this scheduled path and the supervised trigger are guarded by ONE check in ONE place. The cap is 1 because the MONEY, not the subrequests, is what runs out first: two per weekday is ~44 Anthropic calls a month against that sub-budget. 13:00 is a FREE Sun-Thu tick; sized at 10 (subrequest-budget.js BLOCK_COST). NOT on the Friday schedule, for the same reason as `repair` above.", "ref": "build_chain_program"},
-      { "time": "13:30", "type": "case_batch", "label": "Early-afternoon batch", "case_share": 0.15 },
 { "time": "14:00", "type": "owner_channel", "label": "Owner channel: record what was read from channel/from-owner/, then notify the client (gated by owner_channel_enabled — SHIPPED OFF 2026-08-10) MOVED HERE FROM 16:00 on 2026-08-16 (OB-074): the 16:00 tick was measured at 53 subrequests against Cloudflare's 50-per-invocation cap, so blocks on it were being refused by the invocation budget. Same remedy the closing_qa_review move used on 2026-08-15 -- a free tick is its own invocation budget.", "ref": "owner_channel_program" },
 { "time": "14:30", "type": "spare_time", "label": "Spare time: coworker interaction or idle (token-saving) MOVED HERE FROM 16:30 on 2026-08-16 (OB-074): the 16:30 tick was measured at 71 subrequests against Cloudflare's 50-per-invocation cap, so blocks on it were being refused by the invocation budget. Same remedy the closing_qa_review move used on 2026-08-15 -- a free tick is its own invocation budget.", "ref": "spare_time_program" },
-      { "time": "15:00", "type": "case_batch", "label": "Afternoon batch", "case_share": 0.20 },
-      { "time": "15:30", "type": "meeting", "meeting_type": "closing_qa_review", "label": "Closing QA review — QA (6) on work quality, Team Lead (7) on persona/worker-model, backward-looking on today's output only. Wired to the schedule 2026-08-11 (OFFICE-POLICY A12/A3, learning_loop_enabled). MOVED HERE FROM 16:30 on 2026-08-15 (OB-073): it had been grouped with daily_standup, spare_time and guide_review at 16:30, all firing in the same Worker invocation immediately before finalizeScheduledDay() (getOfficeContext + fetchOpenBranches + the summary commit itself) -- the combined subrequest count for that one tick regularly exceeded Cloudflare's 50-per-invocation cap on the Bundled plan (confirmed via `reports` incident rows, 'Too many subrequests by single Worker invocation', starting 2026-08-12, the day after this meeting was wired in), so finalizeScheduledDay() threw before ever reaching commitFileToRepo() and the daily summary silently stopped landing in back-office for three consecutive days. 15:30 is a free tick with nothing else scheduled, giving this meeting its own invocation budget and reducing 16:30's load back toward what it carried before 2026-08-11.", "ref": "closing_qa_review_program" },
+      { "time": "15:30", "type": "meeting", "meeting_type": "closing_qa_review", "label": "Closing QA review — QA (6) on work quality, Team Lead (7) on persona/worker-model, backward-looking on today's output only. Wired to the schedule 2026-08-11 (OFFICE-POLICY A12/A3, learning_loop_enabled). MOVED HERE FROM 16:30 on 2026-08-15 (OB-073): it had been grouped with daily_standup, spare_time and guide_review at 16:30, all firing in the same Worker invocation immediately before finalizeScheduledDay() (getOfficeContext + fetchOpenBranches + the summary commit itself) -- the combined subrequest count for that one tick regularly exceeded Cloudflare's 50-per-invocation cap on the Bundled plan (confirmed via `reports` incident rows, 'Too many subrequests by single Worker invocation', starting 2026-08-12, the day after this meeting was wired in), so finalizeScheduledDay() threw before ever reaching commitFileToRepo() and the daily summary silently stopped landing in back-office for three consecutive days. 15:30 is a free tick with nothing else scheduled, giving this meeting its own invocation budget and reducing 16:30's load back toward what it carried before 2026-08-11.", "_ref_removed_2026_08_29": "This block carried `ref: closing_qa_review_program` and NO SUCH KEY HAS EVER EXISTED in this file — a pointer to nothing. Pre-existing, unrelated to the retirement below. REMOVED rather than invented: the identical closing_qa_review block on friday_schedule has never carried a ref either, and the label above already holds everything a program block would have said. The two blocks now agree. (Session 34, Item B3.)" },
       { "time": "16:00", "type": "report", "label": "Daily AI-experience reports + model-education case studies", "ref": "model_education_program" },
-      { "time": "16:00", "type": "guide_draft", "label": "Guides pipeline: Gemini draft (ordered after 'report' so today's gap digests already exist)", "ref": "guides_program" },
-{ "time": "16:00", "type": "guide_review", "label": "Guides pipeline: Architect (Claude) review + finalize/commit MOVED HERE FROM 16:30 on 2026-08-16 (OB-074): the 16:30 tick was measured at 71 subrequests against Cloudflare's 50-per-invocation cap, so blocks on it were being refused by the invocation budget. Same remedy the closing_qa_review move used on 2026-08-15 -- a free tick is its own invocation budget.", "ref": "guides_program" },
       { "time": "16:30", "type": "meeting", "meeting_type": "daily_standup", "label": "Daily standup (existing meeting-engine.js type)" }
     ]
   },
@@ -60,20 +52,14 @@
     "label": "Short day: reduced case load, weekly executive summary at 12:00",
     "_retimed_2026_08_06": "Two case batches moved into office hours: 02:00 -> 08:00 (share 0.40) and 05:30 -> 09:00 (0.30); the 09:00 batch shifted to 10:00 (0.30) to keep one-hour spacing. Three batches before, three after; shares unedited and still summing to 1.00. Friday stays a SHORT day — the batches finish at 10:00 and the day still closes at 12:00, so its reduced load is preserved rather than stretched across the full window.",
     "blocks": [
-      { "time": "08:00", "type": "case_batch", "label": "Friday opening batch", "case_share": 0.40 },
 { "time": "08:30", "type": "meeting", "meeting_type": "daily_standup", "label": "Daily standup (existing meeting-engine.js type) MOVED HERE FROM 12:00 on 2026-08-16 (OB-074): the Friday 12:00 tick was measured at 89 subrequests against Cloudflare's 50-per-invocation cap, because weekly_summary alone costs ~78 and left nothing for the blocks sharing its invocation. weekly_summary stays at 12:00 and remains a KNOWN single-block overflow (it cannot fit in one invocation and is run rather than refused -- see subrequest-budget.js admitBlock() 'oversize'); these two moved off it so they are not starved by it." },
-      { "time": "09:00", "type": "case_batch", "label": "Friday mid batch", "case_share": 0.30 },
       { "time": "09:30", "type": "qa_instruments", "label": "Weekly QA instruments: the Lead QA's cross-embodiment comparison + the review-the-reviewers rotation. ADDED 2026-08-15 (audit finding #8): both were fully built, marked capability-SUPPLIED, and reachable ONLY by a manual admin trigger, so as far as that audit could tell NEITHER HAD EVER RUN in production. 09:30 is a FREE Friday tick with nothing else on it — chosen for the same reason closing_qa_review was moved to 15:30 on 2026-08-15, and it is before the 12:00 weekly close so the finding exists when the weekly package is built. Rides improvement_loop_enabled; carries NO switch of its own, deliberately — see processQaInstrumentsBlock()'s header. One D1 SELECT, one markdown commit, ZERO model calls.", "ref": "qa_instruments_program" },
-            { "time": "10:00", "type": "case_batch", "label": "Friday late-morning batch", "case_share": 0.30 },
       { "time": "10:30", "type": "report", "label": "Daily AI-experience reports + model-education case studies", "ref": "model_education_program" },
-      { "time": "10:30", "type": "guide_draft", "label": "Guides pipeline: Gemini draft (ordered after the Friday 'report' block)", "ref": "guides_program" },
       { "time": "11:00", "type": "owner_channel", "label": "Owner channel: record what was read from channel/from-owner/, then notify the client (gated by owner_channel_enabled — SHIPPED OFF 2026-08-10)", "ref": "owner_channel_program" },
 { "time": "11:00", "type": "architect_liaison", "label": "Architect liaison: file last night's headless run as a D1 report (gated, SEE architect_liaison_program — SHIPPED OFF 2026-08-07) MOVED OFF THE 08:00 TICK on 2026-08-16 (OB-074): it shared 08:00 with the day's largest case_batch, and under the invocation budget the case floor (cases run first, by design) left too little for it -- verified on a live tick, where it was deferred with 11 of 38 usable subrequests left. A block deferred every single day is a block that never runs, so it gets its own tick instead of a daily refusal.", "ref": "architect_liaison_program" },
-      { "time": "11:30", "type": "guide_verify", "label": "Guides pipeline: weekly verification pass (Claude + web_search, 1-2 queue items). MOVED HERE FROM SATURDAY 08:00 on 2026-08-10 — see saturday_schedule._rest_day_2026_08_10.", "ref": "guides_program" },
 { "time": "11:30", "type": "spare_time", "label": "Spare time: coworker interaction or idle (token-saving) MOVED HERE FROM 12:00 on 2026-08-16 (OB-074): the Friday 12:00 tick was measured at 89 subrequests against Cloudflare's 50-per-invocation cap, because weekly_summary alone costs ~78 and left nothing for the blocks sharing its invocation. weekly_summary stays at 12:00 and remains a KNOWN single-block overflow (it cannot fit in one invocation and is run rather than refused -- see subrequest-budget.js admitBlock() 'oversize'); these two moved off it so they are not starved by it.", "ref": "spare_time_program" },
       { "time": "12:00", "type": "weekly_summary", "label": "Weekly executive summary meeting + PDF/Excel generation", "ref": "weekly_summary_program" },
-      { "time": "12:30", "type": "meeting", "meeting_type": "closing_qa_review", "label": "Closing QA review — same wiring as full_day_schedule's 15:30 entry; Friday is a work day (short) so today's output still gets reviewed before the week closes. MOVED HERE FROM 12:00 on 2026-08-15 (OB-073), for the same reason as the weekday move: it had been grouped with weekly_summary, daily_standup, spare_time AND guide_review all at 12:00 -- the single most crowded tick in either schedule, immediately preceding finalizeScheduledDay(). Split across 12:00 (3 blocks) and 12:30 (2 blocks) instead of 5 at one tick." },
-      { "time": "12:30", "type": "guide_review", "label": "Guides pipeline: Architect (Claude) review + finalize/commit — MOVED HERE FROM 12:00 on 2026-08-15 (OB-073), alongside closing_qa_review, so it stays the day's LAST block (block_order_is_load_bearing above) without the two of them sharing a tick with weekly_summary, daily_standup and spare_time. Friday's finalize now runs 30 minutes later than before.", "ref": "guides_program" }
+      { "time": "12:30", "type": "meeting", "meeting_type": "closing_qa_review", "label": "Closing QA review — same wiring as full_day_schedule's 15:30 entry; Friday is a work day (short) so today's output still gets reviewed before the week closes. MOVED HERE FROM 12:00 on 2026-08-15 (OB-073), for the same reason as the weekday move: it had been grouped with weekly_summary, daily_standup, spare_time AND guide_review all at 12:00 -- the single most crowded tick in either schedule, immediately preceding finalizeScheduledDay(). Split across 12:00 (3 blocks) and 12:30 (2 blocks) instead of 5 at one tick." }
     ]
   },
 
@@ -240,5 +226,119 @@
     "why_a_GitHub_Issue_does_not_contradict_the_no-Issues_rule": "The 2026-07-18 Q&A rebuild set a hard rule that capability-gap digests are NEVER a GitHub Issue, for either project. That rule is about GAP REPORTS — machine-generated findings produced at a rate that would turn the tracker into a log file. An owner-communication Issue is addressed to a PERSON, is rate-limited by the office's actual decisions, and exists because the owner already gets GitHub notifications on his phone (OB-023 criterion 1: he must not have to acquire a new habit). Different thing, owner-approved, and labelled `owner-channel` so the two can never be confused.",
     "how_it_fails_loudly": "OB-023 criterion 2. THE SENDER LEARNS: every attempt is recorded in D1 owner_notifications with its HTTP status, successes and failures alike, and a failure is surfaced in the daily report, in office-context's errors section (so it rides in EVERY agent prompt until it clears) and in the status trigger. THE RECEIVER LEARNS A MESSAGE WAS LOST: every notification carries a sequence number and names the previous one, so a gap is visible in the message that DID arrive. THE RECEIVER LEARNS NOTHING ARRIVED AT ALL: the Sunday heartbeat is sent even when there is nothing to report, which is the only mechanism that can answer the owner's own disqualifier — 'an option whose only failure signal is my eventually noticing nothing arrived is indistinguishable from a quiet week'. Once the channel always speaks, a quiet week still produces a message.",
     "the_residual": "If the Worker itself stops running, no heartbeat is sent and nothing here notices. That is OFFICE-POLICY A16's class of failure — 'he cannot catch a failure that stops him from running' — and its answer is an external check from a different machine. Wiring the heartbeat's absence into the midnight run is BOARDED, not built. A session that reads this program and concludes the channel cannot drop anything has read it wrong."
+  },
+  "_blocks_retired_2026_08_29": {
+    "_session": "SESSION 34, ITEM B — Claude Code, unsupervised, 2026-08-29.",
+    "what_this_is": "A RETIREMENT, NOT AN OMISSION. Nine `case_batch` blocks and five `guide_*` blocks were removed from the schedules above on 2026-08-29. NOTHING WAS DELETED FROM THE CODE: workers/qa-engine.js, workers/qa-topics.js, workers/gap-reports.js, workers/gemini-pacer.js, workers/guide-engine.js, workers/claude-client.js, every one of the block handlers in workers/agent-runner.js, and BOTH kill switches (`cases_enabled`, `guides_enabled`) are exactly where they were. Only the SCHEDULE ENTRIES are gone. The verbatim JSON of every removed block is preserved in `removed_blocks` below, so restoring one is a copy-paste and not a reconstruction.",
+    "why": "Both features were already switched OFF, and the schedule went on admitting them anyway — four to six blocks a day entering the invocation budget, taking their turn in the admission loop, and producing nothing. Measured in D1 `block_admissions`: EVERY `case_batch` from 2026-08-24 onward has `actual: 0` (the last non-zero was 2026-08-23, the day the switch was thrown), and every `guide_*` run from 2026-08-21 onward has `actual: 0`. Two of them were also DEFERRED on 2026-08-28 — the office was spending admission decisions to refuse blocks that would have done nothing had they been admitted.",
+    "the_two_switches_this_follows": {
+      "cases_enabled": "Case work (the Q&A engine) was RETIRED BY THE OWNER on 2026-08-23 — see back-office-AI-agents/docs/decisions/RETIRED-CAPABILITIES.md R-001, enforced the same day by SESSION 10, and `cases_enabled` reads back FALSE from live SIM_KV. R-001 records in its own text that the six weekday `case_batch` blocks were deliberately LEFT IN PLACE at the time, because no switch existed yet. The switch exists now. This is the later, dated note that removes them.",
+      "guides_enabled": "The guides pipeline has read FALSE in live SIM_KV since 2026-08-20. Its kill switch is untouched and still works in both directions."
+    },
+    "how_to_restore": "Paste the block back into the `blocks` array of the named schedule, in `time` order, AND flip the matching switch back on (`POST /api/agents/trigger {\"type\":\"cases_toggle\"|\"guides_toggle\",\"enabled\":true}`). BOTH halves are required and neither works alone: a schedule entry with the switch off is precisely what this retirement removed, and a switch with no schedule entry has nothing to fire it. For `case_batch` specifically, restore ALL of a schedule's entries together — `case_share` is a proportion of the day's total and the values below sum to exactly 1.0 per schedule, so restoring a subset silently drops that fraction of the day's questions with no error.",
+    "case_share_sums": {
+      "full_day_schedule": "0.20 + 0.15 + 0.15 + 0.15 + 0.15 + 0.20 = 1.00 (6 blocks)",
+      "friday_schedule": "0.40 + 0.30 + 0.30 = 1.00 (3 blocks)"
+    },
+    "block_counts": {
+      "full_day_schedule": "18 -> 10",
+      "friday_schedule": "14 -> 8",
+      "saturday_schedule": "1 -> 1 (unchanged — the rest day carries one force_idle spare_time block and nothing else)",
+      "total": "33 -> 19"
+    },
+    "a_side_effect_worth_knowing": "With no `case_batch` left on any schedule, `casesDue` is now false on every tick. That changes two things in workers/subrequest-budget.js, both in the right direction and neither by editing a limit: the tail reserve drops from TICK_TAIL_RESERVE (6) to TICK_TAIL_RESERVE_NO_CASES (3), and the 60% case floor becomes 0. Usable budget per tick therefore goes from 44 (of which only 18 was available to non-case work) to 47, all of it. That is the real budget this item frees — not the estimates the dead blocks were claiming, which cost nothing because the blocks spent nothing.",
+    "what_this_did_NOT_fix": "The 2026-08-28 `architect_liaison` deferral is NOT solved by this item, and that was CHECKED rather than assumed. That block shares the Friday 11:00 tick with `owner_channel`, and neither is removed here; it was starved by a wrong ESTIMATE (14 declared against a measured 2), which is Session 34 Item A. Removing dead blocks freed schedule slots and ticks; it freed almost no measured subrequests, because every block removed was already spending zero. Recorded plainly so a future reader does not credit this item with Item A's fix.",
+    "also_checked_and_deliberately_left": "D1 `block_admissions` was queried for every block whose `actual` has been 0 on every run in the last fourteen days. The four types removed here are the COMPLETE list; no other block came back. `architect_liaison` has a single 0 row and it is the 2026-08-28 `defer` — a block that never ran, not a block that ran and did nothing — so it was left alone. A block producing zero may be broken rather than retired, and removing it would hide that.",
+    "removed_blocks": {
+      "full_day_schedule": [
+        {
+          "time": "08:00",
+          "type": "case_batch",
+          "label": "Opening batch",
+          "case_share": 0.2
+        },
+        {
+          "time": "09:30",
+          "type": "case_batch",
+          "label": "Mid-morning batch",
+          "case_share": 0.15
+        },
+        {
+          "time": "11:00",
+          "type": "case_batch",
+          "label": "Late-morning batch",
+          "case_share": 0.15
+        },
+        {
+          "time": "12:00",
+          "type": "case_batch",
+          "label": "Midday batch",
+          "case_share": 0.15
+        },
+        {
+          "time": "13:30",
+          "type": "case_batch",
+          "label": "Early-afternoon batch",
+          "case_share": 0.15
+        },
+        {
+          "time": "15:00",
+          "type": "case_batch",
+          "label": "Afternoon batch",
+          "case_share": 0.2
+        },
+        {
+          "time": "16:00",
+          "type": "guide_draft",
+          "label": "Guides pipeline: Gemini draft (ordered after 'report' so today's gap digests already exist)",
+          "ref": "guides_program"
+        },
+        {
+          "time": "16:00",
+          "type": "guide_review",
+          "label": "Guides pipeline: Architect (Claude) review + finalize/commit MOVED HERE FROM 16:30 on 2026-08-16 (OB-074): the 16:30 tick was measured at 71 subrequests against Cloudflare's 50-per-invocation cap, so blocks on it were being refused by the invocation budget. Same remedy the closing_qa_review move used on 2026-08-15 -- a free tick is its own invocation budget.",
+          "ref": "guides_program"
+        }
+      ],
+      "friday_schedule": [
+        {
+          "time": "08:00",
+          "type": "case_batch",
+          "label": "Friday opening batch",
+          "case_share": 0.4
+        },
+        {
+          "time": "09:00",
+          "type": "case_batch",
+          "label": "Friday mid batch",
+          "case_share": 0.3
+        },
+        {
+          "time": "10:00",
+          "type": "case_batch",
+          "label": "Friday late-morning batch",
+          "case_share": 0.3
+        },
+        {
+          "time": "10:30",
+          "type": "guide_draft",
+          "label": "Guides pipeline: Gemini draft (ordered after the Friday 'report' block)",
+          "ref": "guides_program"
+        },
+        {
+          "time": "11:30",
+          "type": "guide_verify",
+          "label": "Guides pipeline: weekly verification pass (Claude + web_search, 1-2 queue items). MOVED HERE FROM SATURDAY 08:00 on 2026-08-10 — see saturday_schedule._rest_day_2026_08_10.",
+          "ref": "guides_program"
+        },
+        {
+          "time": "12:30",
+          "type": "guide_review",
+          "label": "Guides pipeline: Architect (Claude) review + finalize/commit — MOVED HERE FROM 12:00 on 2026-08-15 (OB-073), alongside closing_qa_review, so it stays the day's LAST block (block_order_is_load_bearing above) without the two of them sharing a tick with weekly_summary, daily_standup and spare_time. Friday's finalize now runs 30 minutes later than before.",
+          "ref": "guides_program"
+        }
+      ],
+      "saturday_schedule": []
+    }
   }
 }

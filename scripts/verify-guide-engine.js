@@ -216,41 +216,51 @@ function hasBlock(schedule, time, type) {
   return schedule.blocks.some((b) => b.time === time && b.type === type);
 }
 
-check('Sun-Thu: guide_draft at 16:00', hasBlock(dailySchedule.full_day_schedule, '16:00', 'guide_draft'));
-check('Sun-Thu: guide_draft is ordered AFTER the 16:00 report block',
-  dailySchedule.full_day_schedule.blocks.findIndex((b) => b.time === '16:00' && b.type === 'report') <
-  dailySchedule.full_day_schedule.blocks.findIndex((b) => b.time === '16:00' && b.type === 'guide_draft'));
-// 16:30 -> 16:00 on 2026-08-16 (OB-074). The 16:30 tick measured 71 subrequests
-// against Cloudflare's 50-per-invocation cap, so guide_review was being refused
-// by the invocation budget every Sun-Thu — a block deferred every single day is
-// a block that never runs. Moving it onto guide_draft's own tick is safe
-// because processGuideReviewBlock() is already self-healing: it checks D1 for
-// today's draft and generates it in the same invocation when missing, so
-// draft-then-review inside one tick is a path the pipeline was built for.
-//
-// The PROPERTY this check protects is "review never runs before draft", not
-// any particular clock time. Asserted directly below so it survives the next
-// move, the way the Friday pair already does.
-check('Sun-Thu: guide_review at 16:00 (moved off the crowded 16:30 tick, OB-074)',
-  hasBlock(dailySchedule.full_day_schedule, '16:00', 'guide_review'));
-check('Sun-Thu: guide_review is ordered AFTER guide_draft',
-  dailySchedule.full_day_schedule.blocks.findIndex((b) => b.type === 'guide_draft') <
-  dailySchedule.full_day_schedule.blocks.findIndex((b) => b.type === 'guide_review'));
+/*
+ * ── THE GUIDE BLOCKS LEFT THE SCHEDULE, 2026-08-29 (SESSION 34, ITEM B) ──
+ *
+ * These checks previously asserted guide_draft/guide_review/guide_verify at
+ * their clock times on Sun-Thu and Friday, and the ordering between them.
+ * `guides_enabled` has read FALSE in live SIM_KV since 2026-08-20, and every
+ * `guide_*` admission since 2026-08-21 recorded `actual: 0` — five blocks a
+ * week entering the invocation budget to produce nothing, two of them
+ * DEFERRED on 2026-08-28 by an admission decision spent refusing a no-op.
+ *
+ * The assertions are INVERTED rather than deleted, exactly as the guide_verify
+ * block below already did when it left Saturday: a check that merely stopped
+ * looking would let these drift back onto the schedule with the switch still
+ * off, which is the condition Item B removed. What is asserted now is the
+ * pair of facts that make this a RETIREMENT and not a deletion — the blocks
+ * are off the schedule, and everything needed to put them back is intact.
+ *
+ * THE PIPELINE ITSELF IS UNTOUCHED. Every check in this file above this
+ * point — topic selection, the ABSOLUTE ZERO blocklist, prompt building,
+ * decision parsing, the budget component split — still runs against the real
+ * workers/guide-engine.js and still passes. Only the scheduling changed.
+ */
+const retiredG = dailySchedule._blocks_retired_2026_08_29 || {};
+const retiredGuideBlocks = [
+  ...(retiredG.removed_blocks?.full_day_schedule || []),
+  ...(retiredG.removed_blocks?.friday_schedule || []),
+].filter((b) => String(b.type).startsWith('guide_'));
 
-check('Friday: guide_draft at 10:30 (after the Friday report block)',
-  hasBlock(dailySchedule.friday_schedule, '10:30', 'guide_draft') &&
-  dailySchedule.friday_schedule.blocks.findIndex((b) => b.time === '10:30' && b.type === 'report') <
-  dailySchedule.friday_schedule.blocks.findIndex((b) => b.time === '10:30' && b.type === 'guide_draft'));
-// 12:00 -> 12:30 on 2026-08-15 (OB-073). What this check is really protecting
-// is that guide_review stays the day's LAST block, not that it sits at any
-// particular clock time — so assert the ordering property, which survives the
-// next move, alongside the time itself.
-check('Friday: guide_review at 12:30 (moved off the crowded 12:00 tick, OB-073)',
-  hasBlock(dailySchedule.friday_schedule, '12:30', 'guide_review'));
-check('Friday: guide_review is still the LAST block of the day',
-  dailySchedule.friday_schedule.blocks
-    .filter((b) => b.type === 'guide_review')
-    .every((b) => dailySchedule.friday_schedule.blocks.every((o) => o.time <= b.time)));
+for (const [name, sched] of [['Sun-Thu', dailySchedule.full_day_schedule], ['Friday', dailySchedule.friday_schedule], ['Saturday', dailySchedule.saturday_schedule]]) {
+  check(`${name}: NO guide_* block remains — the pipeline is switched off and no longer scheduled`,
+    !sched.blocks.some((b) => String(b.type).startsWith('guide_')),
+    sched.blocks.filter((b) => String(b.type).startsWith('guide_')).map((b) => `${b.time} ${b.type}`).join(', '));
+}
+
+check('all five retired guide blocks are preserved VERBATIM, so restoring one is a copy-paste',
+  retiredGuideBlocks.length === 5, `found ${retiredGuideBlocks.length}`);
+check('...and each still carries its time, type and ref, not just its name',
+  retiredGuideBlocks.every((b) => b.time && b.type && b.ref === 'guides_program'));
+check('the retirement record names BOTH halves of a restore — the schedule entry AND the switch',
+  /guides_toggle/.test(retiredG.how_to_restore || '') && /guides_enabled/.test(JSON.stringify(retiredG)));
+check('[NOTHING DELETED] guides_program is still in daily-schedule.json for the restored blocks to point at',
+  Boolean(dailySchedule.guides_program?.guide_draft && dailySchedule.guides_program?.guide_review));
+check('[NOTHING DELETED] all three guide block handlers are still wired in agent-runner.js',
+  ['processGuideDraftBlock', 'processGuideReviewBlock', 'processGuideVerifyBlock']
+    .every((fn) => readFileSync(new URL('../workers/agent-runner.js', import.meta.url), 'utf8').includes(fn)));
 
 /*
  * ── guide_verify MOVED OFF SATURDAY, 2026-08-10 ──────────────────────────
@@ -268,9 +278,12 @@ check('Friday: guide_review is still the LAST block of the day',
  */
 check('Saturday: NO guide_verify — A13 makes it a rest day with no automated writing',
   !dailySchedule.saturday_schedule.blocks.some((b) => b.type === 'guide_verify'));
-check('Friday: guide_verify at 11:30 — still weekly, still one run, only the day moved',
-  hasBlock(dailySchedule.friday_schedule, '11:30', 'guide_verify')
-  && dailySchedule.friday_schedule.blocks.filter((b) => b.type === 'guide_verify').length === 1);
+// Was: 'Friday: guide_verify at 11:30'. Retired from the schedule 2026-08-29
+// with guide_draft and guide_review — see the inverted block above. Saturday
+// is still asserted separately, because A13's rest-day rule outlives this
+// retirement and must keep holding if the blocks are ever restored.
+check('Friday: NO guide_verify either — the weekly pass is retired with the rest of the pipeline',
+  !dailySchedule.friday_schedule.blocks.some((b) => b.type === 'guide_verify'));
 check('Saturday schedule label now claims a REST day, and says zero-write',
   /rest day/i.test(dailySchedule.saturday_schedule.label) && /zero-write/i.test(dailySchedule.saturday_schedule.label));
 check('…and records the move rather than silently relabelling',

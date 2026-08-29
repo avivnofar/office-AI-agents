@@ -682,8 +682,22 @@ section('§8 A13 — Saturday is genuinely zero-write');
   check('…no case batches, meetings, reports or guide blocks of any kind',
     !sat.some((b) => /case_batch|meeting|report|guide_|weekly_summary|chore_rotation|tool_task_window|architect_liaison/.test(b.type)));
   check('…only the forced-idle block, which makes no model call', sat.length === 1 && sat[0].type === 'spare_time' && sat[0].force_idle === true);
-  check('guide_verify moved to Friday and is still weekly (one run, one day)',
-    schedule.friday_schedule.blocks.filter((b) => b.type === 'guide_verify').length === 1);
+  // Was: 'guide_verify moved to Friday and is still weekly (one run, one day)'.
+  // Retired from the schedule entirely on 2026-08-29 (Session 34, Item B) —
+  // `guides_enabled` has read false in live SIM_KV since 2026-08-20 and every
+  // guide_* admission since 2026-08-21 recorded actual: 0. INVERTED rather than
+  // deleted, like the Saturday checks above it.
+  //
+  // What §8 is really protecting is unchanged and still asserted: A13 says
+  // Saturday writes nothing. The retirement makes that MORE true, not less, so
+  // this check now guards the stronger property — the block is nowhere at all,
+  // and cannot drift back onto Saturday from Friday either.
+  check('guide_verify is retired from every schedule, Friday included',
+    ['full_day_schedule', 'friday_schedule', 'saturday_schedule']
+      .every((s) => !schedule[s].blocks.some((b) => b.type === 'guide_verify')));
+  check('…and it is preserved verbatim in the retirement record, so A13 still binds if it is ever restored',
+    (schedule._blocks_retired_2026_08_29?.removed_blocks?.friday_schedule || [])
+      .some((b) => b.type === 'guide_verify' && b.time === '11:30'));
 
   const guards = runner.match(/rest_day_zero_write/g) || [];
   check('the daily-summary commit is guarded on isOffDay in BOTH day paths (a rule on one path comes back on the other)',

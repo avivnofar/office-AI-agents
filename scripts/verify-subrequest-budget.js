@@ -338,13 +338,31 @@ for (const t of sunThu) {
   check(`Sun-Thu ${t.time} did not throw`, !t.threw, String(t.threw));
 }
 
-// The six case_batch ticks are the ones OB-074 is about. Called out separately
-// so a regression there is unmistakable in the output.
+// ── THE SIX CASE TICKS ARE GONE — SESSION 34, ITEM B, 2026-08-29 ─────────
+//
+// These two checks previously asserted that all six Sun-Thu `case_batch`
+// ticks EXIST, because OB-074 was about them overflowing the cap. Case work
+// was retired by the owner on 2026-08-23 (RETIRED-CAPABILITIES.md R-001,
+// `cases_enabled` reads false in live SIM_KV) and the schedule entries were
+// removed on 2026-08-29 after twelve days of `actual: 0`.
+//
+// INVERTED rather than deleted, following the precedent this repo already
+// set in verify-guide-engine.js when guide_verify left Saturday: a check
+// that merely stopped counting case ticks would let them drift back in
+// with the switch still off, which is the exact condition Item B removed.
 const caseTicks = sunThu.filter((t) => t.types.includes('case_batch'));
-check('all six Sun-Thu case_batch ticks exist', caseTicks.length === 6, `found ${caseTicks.length}`);
-check('NO case_batch tick exceeds the cap',
-  caseTicks.every((t) => t.outbound <= SUBREQUEST_CEILING && t.doCalls <= DO_CALL_CEILING),
-  caseTicks.map((t) => `${t.time}: fetch+svc=${t.outbound} do=${t.doCalls}`).join('  '));
+check('NO Sun-Thu case_batch tick remains — case work is retired (R-001), not merely switched off',
+  caseTicks.length === 0, `found ${caseTicks.length}`);
+check('the six case_batch blocks are preserved VERBATIM so the retirement is reversible',
+  (dailySchedule._blocks_retired_2026_08_29?.removed_blocks?.full_day_schedule || [])
+    .filter((b) => b.type === 'case_batch').length === 6);
+check('...and their case_share still sums to 1.0, so a restore cannot silently drop a fraction of the day',
+  Math.abs((dailySchedule._blocks_retired_2026_08_29?.removed_blocks?.full_day_schedule || [])
+    .filter((b) => b.type === 'case_batch')
+    .reduce((s, b) => s + b.case_share, 0) - 1) < 1e-9);
+check('[NOTHING DELETED] the case_batch handler is still in agent-runner.js, ready for the switch',
+  readFileSync(new URL('../workers/agent-runner.js', import.meta.url), 'utf8')
+    .includes("block.type === 'case_batch'"));
 
 const friday = await walkDay(6);
 for (const t of friday) {
@@ -504,9 +522,21 @@ section('§6b  The Durable Object case path ships OFF');
     return { fetch: (url, init) => { if (String(url).includes('/run-case-batch')) caseRoutePings += 1; return stub.fetch(url, init); } };
   };
   resetTally();
-  await runner.runScheduledBlock(env, '08:00', 1);
-  check('a real case_batch tick with the flag absent never calls the DO case route',
+  // 08:00 Sun-Thu carried the day's largest case_batch until 2026-08-29.
+  // Run it anyway: proving the retirement through the REAL scheduled path is
+  // stronger than reading it out of the config.
+  const retiredTick = await runner.runScheduledBlock(env, '08:00', 1);
+  check('[SESSION 34 ITEM B] the retired 08:00 case tick is now a no-op on the real path',
+    retiredTick?.skipped === true && retiredTick?.reason === 'no_block_at_time',
+    JSON.stringify(retiredTick));
+
+  // The DO-inertness proof still needs a tick that DOES work, or 'never
+  // called the DO case route' passes for the trivial reason that nothing ran.
+  resetTally();
+  await runner.runScheduledBlock(env, '16:00', 1);
+  check('a real scheduled tick with the flag absent never calls the DO case route',
     caseRoutePings === 0, `pings=${caseRoutePings}`);
+  check('...and it still did the work on the Worker path', tally.d1 > 0);
   check('...and it still did the work on the Worker path', tally.d1 > 0);
 }
 
