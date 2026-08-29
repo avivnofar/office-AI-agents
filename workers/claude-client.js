@@ -107,6 +107,54 @@ const MAX_PAUSE_TURN_RESUMES = 3;
  * signature is observable. `recordClaudeSpend()` charges them at the
  * multipliers above, so a cache that misses shows up as a HIGHER recorded cost
  * — which is the honest outcome and the one worth finding out about.
+ *
+ * ── MEASURED ON TWO REAL ARCHITECT CALLS, 2026-08-29. IT DOES NOT PAY. ─────
+ *
+ * Not argued from the documentation — run. Two live `architect_spec_block`
+ * calls against the deployed Worker, back to back, identical task, the only
+ * difference being the breakpoint:
+ *
+ *   caching OFF  input 2,227  output 1,082  cache_write 0  cache_read 0  $0.015274
+ *   caching ON   input 2,227  output 1,157  cache_write 0  cache_read 0  $0.016024
+ *
+ * `input_tokens` is IDENTICAL and `cache_creation_input_tokens` is ZERO. The
+ * breakpoint did nothing at all, exactly as fact (1) above predicts:
+ * `ARCHITECT_SPEC_SYSTEM` is ~771 tokens against a 1,024-token minimum. The
+ * cost difference is 75 more output tokens, which is run-to-run variation and
+ * not an effect of caching. (Both costs are in D1 `claude_budget_usage`, month
+ * `2026-08#architect`: $0.150008/7 calls before, $0.181306/9 calls after.)
+ *
+ * ── AND EVEN A CACHEABLE PREFIX WOULD BARELY HELP: OUTPUT DOMINATES ────────
+ *
+ * The same measurement settles the bigger question. At $2/M input and $10/M
+ * output, that call is:
+ *
+ *   input   2,227 x $2/M  = $0.004454   —  29% of the call
+ *   output  1,082 x $10/M = $0.010820   —  71% of the call
+ *
+ * Caching only ever reduces INPUT. Perfect caching of every input token on this
+ * path — impossible, since the task text varies — would still leave 71% of the
+ * bill untouched. The lever on the Architect's cost is output length, not the
+ * prompt.
+ *
+ * This also corrects the premise this work started from, which held that the
+ * Architect's calls run "roughly 15,000 input tokens against ~1,200 output"
+ * with a near-identical office-context block between them. Measured: 2,227
+ * input, and NO Architect prompt carries an office-context block —
+ * `buildArchitectSpecUserPrompt()` and `buildArchitectApprovalUserPrompt()` are
+ * task text, spec, artifact and review summary, every one of them varying.
+ *
+ * ── SO CACHING IS BUILT, MEASURED, AND LEFT OFF ───────────────────────────
+ *
+ * `cacheSystem` and `cachePrefix` default false and NOTHING sets them on the
+ * scheduled path. The mechanism stays because the measurement is worth being
+ * able to repeat and because one candidate genuinely qualifies and has simply
+ * not been tried: the brain audit's harvest slice (`sliceHarvest()`, up to
+ * 30,000 chars ~ 8,300 tokens, byte-identical across the five lens calls of a
+ * single run). That is the ONLY prompt in this office that clears both bars —
+ * over the 1,024-token minimum, and re-read within the 5-minute TTL by calls
+ * in the same run. It is named here rather than switched on, because nobody has
+ * measured it and this block exists to stop the next person assuming.
  * ═════════════════════════════════════════════════════════════════════════ */
 export async function callClaudeMessages({
   apiKey,

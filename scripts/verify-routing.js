@@ -1176,6 +1176,27 @@ check('this verifier made ZERO network calls end to end', NETWORK_TRIPWIRE.lengt
     /model: 'claude-sonnet-5'/.test(routerSrc));
   check('the withdrawal is written down where the next reader will hit it',
     /will not occur/.test(routerSrc));
+
+  // ── THE CACHING MEASUREMENT MUST NOT BE QUIETLY LOST ──────────────────
+  //
+  // Session 34 spent two real Anthropic calls establishing that prompt
+  // caching does NOT reduce the Architect's cost. That result is only worth
+  // what it cost if the next session finds it instead of re-deriving it — and
+  // the likeliest way to lose it is for someone to "enable the caching that
+  // was built but never turned on", which is exactly what the measurement
+  // says not to do.
+  const clientSrc = readFileSync(new URL('../workers/claude-client.js', import.meta.url), 'utf8');
+  check('callClaudeMessages() exposes an OPT-IN cache breakpoint, off by default',
+    /cacheSystem = false,/.test(clientSrc) && /cachePrefix = null,/.test(clientSrc));
+  check('…and returns the cache usage, so a miss is observable rather than silent',
+    /cacheWriteTokens: totalCacheWriteTokens/.test(clientSrc)
+    && /cacheReadTokens: totalCacheReadTokens/.test(clientSrc));
+  check('[THE MEASUREMENT] the live before/after figures are recorded in the source',
+    /caching OFF\s+input 2,227/.test(clientSrc) && /caching ON\s+input 2,227/.test(clientSrc));
+  check('…including WHY it cannot help — the 1,024-token minimum and output dominance',
+    /1,024-token minimum/.test(clientSrc) && /71% of the call/.test(clientSrc));
+  check('[FALSIFYING] no scheduled path turns caching on — a default that changed would break this',
+    !/cacheSystem: true/.test(readFileSync(new URL('../workers/agent-runner.js', import.meta.url), 'utf8')));
 }
 
 // Restore the real invoke functions so nothing leaks between runs.

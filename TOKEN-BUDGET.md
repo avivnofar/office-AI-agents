@@ -6,6 +6,81 @@ priorities. See `CLAUDE.md` for the current architecture and framing
 (`STRATEGY.md`, referenced here in older entries, was deleted in the
 2026-07-16 repo-cleanup session — superseded by CLAUDE.md).
 
+## Anthropic pricing correction + the caching measurement (2026-08-29, SESSION 34 ITEM C)
+
+**The price did NOT change on 2026-09-01, and the office was ready for a
+change that was withdrawn.** `workers/model-router.js` carried a
+date-conditional (`PRICING_CHANGE_DATE = '2026-08-31'`) that would have
+started charging every Claude call at $3/$15 per million on 2026-09-01, and
+`scripts/verify-routing.js` carried a deliberate time bomb set to go red two
+days beforehand. **The time bomb worked.** It fired, the published price was
+re-read on 2026-08-29, and Anthropic's pricing page now says in its own words:
+
+> The $2/$10 per million input/output token pricing for Claude Sonnet 5,
+> announced at launch as introductory pricing through August 31, 2026, is now
+> the standard price. The previously scheduled increase to $3/$15 per million
+> input/output tokens on September 1, 2026 will not occur.
+
+The conditional was **deleted rather than re-pointed** — a branch guarding a
+transition that no longer exists is dead machinery. `PRICING_VERIFIED_ON` is
+kept and moved to 2026-08-29; that date, not the branch, was ever the point
+of KFM-19. Note that $3/$15 is not wrong knowledge, it is simply a different
+model's price: Sonnet 4.6 and 4.5 are published at that rate today.
+
+### Prompt caching: built, measured on live calls, and left OFF
+
+Two real `architect_spec_block` calls against the deployed Worker, back to
+back, same task, the only difference being an explicit `cache_control`
+breakpoint on the system prompt:
+
+| | input | output | cache write | cache read | cost |
+|---|---:|---:|---:|---:|---:|
+| caching OFF | 2,227 | 1,082 | 0 | 0 | **$0.015274** |
+| caching ON | 2,227 | 1,157 | 0 | 0 | **$0.016024** |
+
+`claude_budget_usage` month `2026-08#architect`: **$0.150008 over 7 calls
+before, $0.181306 over 9 calls after** — the two calls above, exactly.
+
+**Caching does not reduce the Architect's cost, for two independent reasons,**
+both established by measurement rather than argument:
+
+1. **Nothing on the Architect's paths is large enough to cache.** Sonnet 5's
+   minimum cacheable prefix is 1,024 tokens. `ARCHITECT_APPROVAL_SYSTEM` is
+   ~165, `DECOMPOSE_SYSTEM` ~415, `ARCHITECT_SPEC_SYSTEM` ~771. A breakpoint
+   below the minimum does not error — it returns
+   `cache_creation_input_tokens: 0`, which is exactly what the ON call did.
+2. **Output dominates the bill, and caching never touches output.** That call
+   is $0.004454 of input (29%) against $0.010820 of output (71%). Perfect
+   caching of every input token would leave 71% of the cost untouched.
+
+This also corrects the premise the work started from, which held the
+Architect's calls ran *"roughly 15,000 input tokens against ~1,200 output"*
+with a near-identical office-context block between them. Measured: **2,227
+input**, and **no Architect prompt contains an office-context block at all** —
+every one of them is task text, spec, artifact and review summary, all
+varying. There was no shared prefix to cache.
+
+The mechanism is kept (`cacheSystem` / `cachePrefix`, both defaulting false,
+set by nothing on the scheduled path) because ONE candidate genuinely
+qualifies and has not been tried: the brain audit's harvest slice (~8,300
+tokens, byte-identical across the five lens calls of a single run). Named in
+`workers/claude-client.js`'s CACHING block rather than switched on, because
+nobody has measured it.
+
+### What DID change about the money
+
+**The spend arithmetic was incomplete and would have gone wrong the moment
+caching was enabled.** Anthropic's `usage.input_tokens` is the *uncached
+remainder* — cache writes (1.25x) and reads (0.1x) are billed separately and
+were being recorded as **zero**. `estimateClaudeCostUsd()` and
+`recordClaudeSpend()` now charge them; every call site passes them through,
+including both guides paths, because the `web_search` server tool inserts a
+cache write of its own after tool results. **No threshold moved** — the
+$4.50/$4.50/$1.00 sub-budgets and the account's $5 ceiling are untouched.
+Only the arithmetic feeding the guard is now complete.
+
+**Month to date across all three sub-budgets: $1.90 of $5.**
+
 ## ⏳ Next
 
 - Review office-AI-agents' newly staged Architect suggestions
