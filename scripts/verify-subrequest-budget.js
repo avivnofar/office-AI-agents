@@ -47,6 +47,9 @@ import {
   SUBREQUEST_CEILING, TICK_TAIL_RESERVE, TICK_TAIL_RESERVE_NO_CASES, FINALIZE_RESERVE,
   CASE_FLOOR_FRACTION, CASE_LOOKAHEAD, CASE_COST_MAX, BLOCK_COST, LANE_CASES,
   DO_CALL_CEILING, WEIGHTS, meterGlobalFetch, recordAdmissions, ADMISSIONS_TABLE_SQL,
+  // Session 34, Item A — the derived estimates.
+  deriveBlockEstimates, refreshBlockEstimates, loadBlockEstimates,
+  ESTIMATE_MARGIN, MIN_MEASURED_RUNS, USABLE_MAX, ESTIMATES_KV_KEY,
 } from '../workers/subrequest-budget.js';
 
 const require = createRequire(import.meta.url);
@@ -555,6 +558,146 @@ section('§6c  Admissions are recorded durably, and recording cannot cost the ti
   const empty = await recordAdmissions({ DB: fakeDb }, 'd', []);
   check('an empty tick records nothing and says why, rather than writing a blank row',
     empty.recorded === 0 && empty.reason === 'nothing_to_record');
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * §8  THE ESTIMATES ARE DERIVED FROM MEASUREMENT — SESSION 34, ITEM A
+ *
+ * `BLOCK_COST` was twelve constants scaled off a stubbed harness in August and
+ * never reconciled, while `block_admissions` accumulated the real numbers
+ * underneath them. These checks pin the arithmetic that replaces them, using
+ * FABRICATED rows so the assertions are exact and no network is touched.
+ *
+ * The rows below are the SHAPES that actually occurred in production, not
+ * invented ones: an over-estimated block (architect_liaison, 14 vs 2), an
+ * under-estimated block (owner_channel, 14 vs 41), a defer row whose 0 must
+ * not become a sample, and a block measured above the whole usable budget
+ * (weekly_summary).
+ * ═════════════════════════════════════════════════════════════════════════ */
+section('§8  Estimates derived from block_admissions, not declared');
+
+{
+  const rows = [
+    // architect_liaison: ten runs at 2, then the 2026-08-28 DEFER at 0.
+    ...Array.from({ length: 10 }, () => ({ block: 'architect_liaison', decision: 'run', actual: 2 })),
+    { block: 'architect_liaison', decision: 'defer', actual: 0 },
+    // owner_channel: the real 2026-08-17..28 spread, worst 41.
+    ...[11, 12, 12, 12, 12, 14, 17, 18, 26, 40, 41].map((a) => ({ block: 'owner_channel', decision: 'run', actual: a })),
+    // guide_verify: two runs, both an empty-queue no-op.
+    { block: 'guide_verify', decision: 'run', actual: 0 },
+    { block: 'guide_verify', decision: 'run', actual: 0 },
+    // weekly_summary: two runs, both above USABLE_MAX.
+    { block: 'weekly_summary', decision: 'oversize', actual: 48 },
+    { block: 'weekly_summary', decision: 'oversize', actual: 53.25 },
+  ];
+
+  const { estimates, detail, unmeasured } = deriveBlockEstimates(rows);
+
+  // ── the over-estimate that starved a real block ───────────────────────
+  check('architect_liaison is derived from its ten measured runs, not its constant',
+    detail.architect_liaison.source === 'measured' && detail.architect_liaison.measuredRuns === 10,
+    JSON.stringify(detail.architect_liaison));
+  check(`[FALSIFYING] the DEFER row is NOT a sample — its max stays 2, not 0`,
+    detail.architect_liaison.max === 2 && detail.architect_liaison.runs === 10,
+    `runs ${detail.architect_liaison.runs}, max ${detail.architect_liaison.max}`);
+  check('architect_liaison drops from a constant of 14 to p90 2 + margin = 4',
+    estimates.architect_liaison === 2 + ESTIMATE_MARGIN, String(estimates.architect_liaison));
+
+  // The whole point, restated as the live incident: on 2026-08-28 this block
+  // was refused with 6 subrequests left. Under the derived estimate it fits.
+  check('[THE 2026-08-28 DEFER] architect_liaison now fits in the 6 that were left',
+    estimates.architect_liaison <= 6, `needs ${estimates.architect_liaison} of 6`);
+
+  // ── the under-estimate that spent the budget ──────────────────────────
+  check('owner_channel rises from a constant of 14 toward what it really spends',
+    estimates.owner_channel > 14 && estimates.owner_channel >= 40,
+    String(estimates.owner_channel));
+  check('[FALSIFYING] a MEAN would have been beaten — owner_channel averages ~19.5 and has twice spent 40+',
+    estimates.owner_channel > 20, String(estimates.owner_channel));
+
+  // ── a block with no usable history keeps its constant, visibly ────────
+  check('guide_verify is UNMEASURED — two runs, both zero, is not a measurement',
+    unmeasured.includes('guide_verify') && detail.guide_verify.source === 'constant',
+    JSON.stringify(detail.guide_verify));
+  check('an unmeasured block gets NO override, so blockCost() falls back to its constant',
+    !('guide_verify' in estimates) && blockCost('guide_verify', estimates) === blockCost('guide_verify'),
+    String(blockCost('guide_verify', estimates)));
+  check('a block with no rows at all is unmeasured too, not invented',
+    unmeasured.includes('repair') && unmeasured.includes('architect_approval'));
+
+  // ── the cap: the margin may never manufacture an 'oversize' ───────────
+  check('weekly_summary is derived down from 120 to its measured p90',
+    estimates.weekly_summary === Math.ceil(53.25), String(estimates.weekly_summary));
+  check('[THE FINDING] weekly_summary STILL exceeds the usable budget on real measurement',
+    estimates.weekly_summary > USABLE_MAX,
+    `${estimates.weekly_summary} > ${USABLE_MAX} — the ceiling, not the estimate, is what refuses it`);
+  check('no derived estimate is pushed OVER usable by the margin alone',
+    Object.entries(estimates).every(([b, v]) => v <= USABLE_MAX || Math.ceil(detail[b].p90) > USABLE_MAX));
+
+  // ── the override plumbing ─────────────────────────────────────────────
+  check('blockCost() with no overrides is byte-identical to the pre-Session-34 behaviour',
+    blockCost('meeting') === 34 && blockCost('report') === 40);
+  check('blockCost() prefers a derived estimate when one exists',
+    blockCost('owner_channel', estimates) === estimates.owner_channel);
+  check('[FALSIFYING] a junk override is ignored rather than trusted',
+    blockCost('report', { report: 0 }) === 40 && blockCost('report', { report: 'lots' }) === 40);
+
+  const b = createTickBudget({ casesDue: false });
+  check('admitBlock() admits architect_liaison on the derived estimate',
+    admitBlock(b, 'architect_liaison', estimates).cost === estimates.architect_liaison);
+}
+
+/* ── the refresh cannot cost the tick (KFM-14), and degrades to constants ── */
+{
+  const kv = new Map();
+  const fakeKv = {
+    async get(k, t) { const v = kv.get(k); return v == null ? null : (t === 'json' ? JSON.parse(v) : v); },
+    async put(k, v) { kv.set(k, v); },
+  };
+  const rowsOut = [
+    ...Array.from({ length: 10 }, () => ({ block: 'architect_liaison', decision: 'run', actual: 2 })),
+  ];
+  const fakeDb = {
+    prepare() {
+      return {
+        bind() { return this; },
+        async run() { return { success: true }; },
+        async all() { return { results: rowsOut }; },
+      };
+    },
+  };
+
+  const first = await refreshBlockEstimates({ DB: fakeDb, SIM_KV: fakeKv }, { today: '2026-08-29' });
+  check('the first tick of a day recomputes from D1', first.refreshed === true, JSON.stringify(first));
+  check('the recompute is stored under the documented KV key', kv.has(ESTIMATES_KV_KEY));
+
+  const second = await refreshBlockEstimates({ DB: fakeDb, SIM_KV: fakeKv }, { today: '2026-08-29' });
+  check('every LATER tick that day is a no-op — one derivation per day, not per tick',
+    second.refreshed === false && second.reason === 'already_computed_today');
+
+  const nextDay = await refreshBlockEstimates({ DB: fakeDb, SIM_KV: fakeKv }, { today: '2026-08-30' });
+  check('[THE RECOMPUTE] tomorrow it derives again — this is not a one-time fix',
+    nextDay.refreshed === true, JSON.stringify(nextDay));
+
+  const loaded = await loadBlockEstimates({ SIM_KV: fakeKv });
+  check('the tick reads back exactly what the refresh wrote',
+    loaded.architect_liaison === 2 + ESTIMATE_MARGIN, JSON.stringify(loaded));
+
+  const throwingKv = { async get() { throw new Error('KV unavailable'); }, async put() { throw new Error('KV unavailable'); } };
+  let threw = false;
+  let out = null;
+  try { out = await refreshBlockEstimates({ DB: fakeDb, SIM_KV: throwingKv }, { today: '2026-08-29' }); } catch { threw = true; }
+  check('[FALSIFYING] a KV failure never throws — the day\'s work is not the price of measuring it (KFM-14)',
+    !threw && out?.refreshed === false, JSON.stringify(out));
+
+  let loadThrew = false;
+  let fallback = null;
+  try { fallback = await loadBlockEstimates({ SIM_KV: throwingKv }); } catch { loadThrew = true; }
+  check('[FALSIFYING] an unreadable estimate table degrades to the CONSTANTS, never to no admission control',
+    !loadThrew && fallback && Object.keys(fallback).length === 0 && blockCost('meeting', fallback) === 34);
+
+  check('MIN_MEASURED_RUNS is declared, so "unmeasured" is a rule rather than a judgement call',
+    MIN_MEASURED_RUNS >= 2);
 }
 
 /* ══════════════════════════════════════════════════════════════════════════

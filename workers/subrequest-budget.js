@@ -341,6 +341,273 @@ export const BLOCK_COST = {
 /** Conservative default for a block type nobody has measured yet. */
 export const UNMEASURED_BLOCK_COST = 20;
 
+/* ══════════════════════════════════════════════════════════════════════════
+ * SESSION 34, ITEM A — THE ESTIMATES ARE NOW DERIVED, NOT DECLARED
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * Everything in `BLOCK_COST` above is a CONSTANT. It was set once (2026-08-16,
+ * scaled off a stubbed harness run) and never reconciled against what blocks
+ * actually consumed — even after `recordAdmissions()` began writing that exact
+ * measurement to D1 on the very same day. Twelve days of `block_admissions`
+ * accumulated underneath a table nothing read back.
+ *
+ * ── WHAT THAT COST, MEASURED FROM `block_admissions` ON 2026-08-29 ─────────
+ *
+ *   report             estimate 40, worst measured 10.25   —  4x OVER
+ *   spare_time         estimate 34, worst measured 11.75   —  3x OVER
+ *   chore_rotation     estimate  6, worst measured  1      —  6x OVER
+ *   architect_liaison  estimate 14, worst measured  2      —  7x OVER
+ *   owner_channel      estimate 14, worst measured 41      —  3x UNDER
+ *   meeting            estimate 34, worst measured 41.25   —     UNDER
+ *
+ * Both directions do damage, and on 2026-08-28 they did it on the SAME TICK.
+ * Friday 11:00: `owner_channel` (estimated 14) really spent 41, and
+ * `architect_liaison` — which has never once cost more than 2 — was refused
+ * with *"needs ~14, 6 left of 47"*. An under-estimate spent the budget and an
+ * over-estimate then refused the block that had ample room for what it does.
+ * The office lost the block connecting it to its Architect, to arithmetic,
+ * in both directions at once.
+ *
+ * ── THE STATISTIC, AND WHY ─────────────────────────────────────────────────
+ *
+ *   p90 by nearest rank, + ESTIMATE_MARGIN, capped so the margin alone can
+ *   never turn a block that fits into an 'oversize' one.
+ *
+ * A MEAN is wrong here and the data says why: `owner_channel` averages 19.5
+ * and has twice measured above 40. An estimate exists to decide whether a
+ * block may START, so it must sit above what the block usually does, not at
+ * it — a mean is beaten roughly half the time by construction.
+ *
+ * On these sample sizes (2–22 runs) a nearest-rank p90 lands at, or one place
+ * below, the observed maximum. That is the intent, not an accident of small n:
+ * the worst thing a block has ever really cost is the number an admission
+ * decision should respect. ESTIMATE_MARGIN then covers a day when it does
+ * slightly more than any day yet seen.
+ *
+ * The CAP is not cosmetic. `admitBlock()` classifies `cost > usable` as
+ * 'oversize', and an oversize block RUNS ANYWAY — it bypasses `canAfford()`
+ * entirely. So an estimate inflated past `usable` does not make a block safer,
+ * it makes it unstoppable. The margin must never be the thing that puts it
+ * there. A block whose p90 already exceeds `USABLE_MAX` keeps that p90: that
+ * is a finding about the block, not something to round away.
+ *
+ * ── A BLOCK WITH NO HISTORY KEEPS ITS CONSTANT, AND SAYS SO ────────────────
+ *
+ * Derivation requires `MIN_MEASURED_RUNS` runs that actually spent something.
+ * A block whose only rows are zeros has not been measured — it has been
+ * observed declining to work, which is a different fact. `guide_verify` (2
+ * runs, both 0, empty queue) and `tool_task_window` (1 run, and not a
+ * tool-task day) are exactly that case, and the BLOCK_COST header above
+ * already warns that sizing to a self-gated no-op is sizing to the cheapest
+ * possible day. They keep their constants and are returned in `unmeasured`,
+ * so the gap is VISIBLE rather than silently invented. `repair` and
+ * `architect_approval` have no rows at all and keep theirs the same way.
+ *
+ * A `defer` row is never a sample. A deferred block spent 0 because it never
+ * ran, and counting that as "it costs nothing" is how a bad estimate would
+ * make itself permanent: the block gets deferred, records a 0, and the 0 then
+ * argues for the very estimate that deferred it. That loop is closed here.
+ *
+ * ── IT RECOMPUTES. IT IS NOT COMPUTED. ─────────────────────────────────────
+ *
+ * A constant fixed today is the same defect a month from now, so this is
+ * wired to run DAILY: `refreshBlockEstimates()` is called from
+ * `agent-runner.js` immediately after `recordAdmissions()`, on every tick, and
+ * does real work only on the first tick of a new day (`computedOn` guards the
+ * rest). It costs one D1 aggregate read and one KV put — both weighted ZERO
+ * by `WEIGHTS`, so the fix to the accounting cannot itself consume the budget
+ * it is accounting for.
+ *
+ * Like `recordAdmissions()`, it CANNOT THROW (KFM-14). A tick whose refresh
+ * fails falls back to the constants and runs. The day's work must never be
+ * the price of measuring the day's work.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+/** Nearest-rank percentile used to derive an estimate. See the block above. */
+export const ESTIMATE_PERCENTILE = 0.9;
+
+/** Fixed headroom added on top of the p90, capped by `USABLE_MAX`. */
+export const ESTIMATE_MARGIN = 2;
+
+/**
+ * Runs with NON-ZERO measured spend needed before a block is derived rather
+ * than left on its constant. Two, not three: `weekly_summary` has exactly two
+ * runs (48 and 53.25) and they agree closely, and refusing to derive from them
+ * would leave the single most wrong constant in this file (120) standing for
+ * another five weeks.
+ */
+export const MIN_MEASURED_RUNS = 2;
+
+/**
+ * The largest `usable` any tick ever has: the ceiling less the SMALLEST tail
+ * reserve (a tick with no cases due). The margin is capped against this rather
+ * than against the current tick's usable, because the estimate is computed
+ * once a day and then consulted on every kind of tick.
+ */
+export const USABLE_MAX = SUBREQUEST_CEILING - TICK_TAIL_RESERVE_NO_CASES;
+
+/** How far back the derivation looks. Older rows describe an older office. */
+export const ESTIMATE_HISTORY_DAYS = 30;
+
+/** SIM_KV key holding the derived estimates. */
+export const ESTIMATES_KV_KEY = 'block-cost-estimates';
+
+/** Nearest-rank percentile of a numeric array. Null for an empty one. */
+function nearestRank(values, p) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const rank = Math.max(1, Math.min(sorted.length, Math.ceil(p * sorted.length)));
+  return sorted[rank - 1];
+}
+
+/**
+ * Derives one estimate per block from measured admissions. PURE — no env, no
+ * D1, no KV — so `scripts/verify-subrequest-budget.js` can call it with
+ * fabricated rows and assert the arithmetic without touching the network.
+ *
+ * @param {Array<{block: string, decision: string, actual: number}>} rows
+ * @returns {{estimates: object, detail: object, unmeasured: string[]}}
+ */
+export function deriveBlockEstimates(rows) {
+  const byBlock = new Map();
+  for (const r of rows || []) {
+    if (!r || typeof r.block !== 'string') continue;
+    // A deferred block never ran; its 0 is not a measurement. See the header.
+    if (r.decision === 'defer') continue;
+    const actual = num(r.actual, NaN);
+    if (!Number.isFinite(actual) || actual < 0) continue;
+    if (!byBlock.has(r.block)) byBlock.set(r.block, []);
+    byBlock.get(r.block).push(actual);
+  }
+
+  const estimates = {};
+  const detail = {};
+  const unmeasured = [];
+
+  // Every block that HAS a constant is reported, so a reader sees the ones
+  // left alone beside the ones that moved.
+  const names = new Set([...Object.keys(BLOCK_COST), ...byBlock.keys()]);
+  for (const block of [...names].sort()) {
+    const all = byBlock.get(block) || [];
+    const measured = all.filter((v) => v > 0);
+    const constant = blockCost(block);
+
+    if (measured.length < MIN_MEASURED_RUNS) {
+      unmeasured.push(block);
+      detail[block] = {
+        block, constant, estimate: constant, source: 'constant',
+        runs: all.length, measuredRuns: measured.length,
+        p90: null, max: all.length ? Math.max(...all) : null,
+        reason: all.length
+          ? `${measured.length} run(s) with non-zero spend, need ${MIN_MEASURED_RUNS} — UNMEASURED, kept its constant`
+          : 'no admissions recorded — UNMEASURED, kept its constant',
+      };
+      continue;
+    }
+
+    const p90 = nearestRank(all, ESTIMATE_PERCENTILE);
+    const base = Math.ceil(p90);
+    const estimate = base > USABLE_MAX ? base : Math.min(base + ESTIMATE_MARGIN, USABLE_MAX);
+
+    estimates[block] = estimate;
+    detail[block] = {
+      block, constant, estimate, source: 'measured',
+      runs: all.length, measuredRuns: measured.length,
+      p90, max: Math.max(...all),
+      overCeiling: estimate > USABLE_MAX,
+    };
+  }
+
+  return { estimates, detail, unmeasured };
+}
+
+/**
+ * Reads the last `ESTIMATE_HISTORY_DAYS` of admissions and derives estimates.
+ * Cannot throw — returns `{ ok: false, reason }` instead.
+ */
+export async function computeEstimatesFromHistory(env, opts = {}) {
+  try {
+    if (!env?.DB) return { ok: false, reason: 'no_db_binding' };
+    const days = Math.max(1, num(opts.days, ESTIMATE_HISTORY_DAYS));
+    await env.DB.prepare(ADMISSIONS_TABLE_SQL).run();
+    const res = await env.DB.prepare(
+      `SELECT block, decision, actual FROM block_admissions
+        WHERE actual IS NOT NULL AND created_at >= datetime('now', ?)`
+    ).bind(`-${days} days`).all();
+    const rows = res?.results || [];
+    if (!rows.length) return { ok: false, reason: 'no_history' };
+    return { ok: true, rows: rows.length, ...deriveBlockEstimates(rows) };
+  } catch (err) {
+    console.warn(`[subrequest-budget] could not derive estimates, constants stand: ${err?.message || err}`);
+    return { ok: false, reason: 'derive_error' };
+  }
+}
+
+/**
+ * The estimates in force for this tick, read from SIM_KV. A KV get is weighted
+ * ZERO, so consulting them is free. Returns `{}` — meaning "use the constants"
+ * — on absence or any failure, which is the safe direction: the office keeps
+ * the behaviour it has had since 2026-08-16 rather than losing admission
+ * control altogether.
+ */
+export async function loadBlockEstimates(env) {
+  try {
+    if (!env?.SIM_KV) return {};
+    const raw = await env.SIM_KV.get(ESTIMATES_KV_KEY, 'json');
+    const est = raw?.estimates;
+    if (!est || typeof est !== 'object') return {};
+    const out = {};
+    for (const [k, v] of Object.entries(est)) {
+      if (typeof k === 'string' && Number.isFinite(v) && v > 0) out[k] = v;
+    }
+    return out;
+  } catch (err) {
+    console.warn(`[subrequest-budget] could not read derived estimates, constants stand: ${err?.message || err}`);
+    return {};
+  }
+}
+
+/**
+ * Recomputes the estimates at most once per calendar day. Called on every tick
+ * from `agent-runner.js` right after `recordAdmissions()`; on all but the
+ * day's first tick it is one KV read and a date comparison.
+ *
+ * CANNOT THROW (KFM-14) — a lost recompute costs estimate freshness, never the
+ * tick.
+ */
+export async function refreshBlockEstimates(env, opts = {}) {
+  try {
+    if (!env?.SIM_KV) return { refreshed: false, reason: 'no_kv_binding' };
+    const today = opts.today || new Date().toISOString().slice(0, 10);
+    if (!opts.force) {
+      const existing = await env.SIM_KV.get(ESTIMATES_KV_KEY, 'json').catch(() => null);
+      if (existing?.computedOn === today) {
+        return { refreshed: false, reason: 'already_computed_today', computedOn: today };
+      }
+    }
+    const derived = await computeEstimatesFromHistory(env, opts);
+    if (!derived.ok) return { refreshed: false, reason: derived.reason };
+    await env.SIM_KV.put(ESTIMATES_KV_KEY, JSON.stringify({
+      computedOn: today,
+      statistic: `p90 nearest-rank + ${ESTIMATE_MARGIN}, capped at usable ${USABLE_MAX}`,
+      historyDays: num(opts.days, ESTIMATE_HISTORY_DAYS),
+      rows: derived.rows,
+      estimates: derived.estimates,
+      unmeasured: derived.unmeasured,
+      detail: derived.detail,
+    }));
+    return {
+      refreshed: true, computedOn: today, rows: derived.rows,
+      blocks: Object.keys(derived.estimates).length,
+      unmeasured: derived.unmeasured,
+    };
+  } catch (err) {
+    console.warn(`[subrequest-budget] could not refresh estimates, constants stand: ${err?.message || err}`);
+    return { refreshed: false, reason: 'refresh_error' };
+  }
+}
+
+
 /* ── OB-098: THE MEASUREMENT WAS BEING TAKEN AND THROWN AWAY ────────────────
  *
  * `OB-098` asks for every constant above to be replaced by a figure read from
@@ -413,7 +680,19 @@ export async function recordAdmissions(env, day, admissions) {
   }
 }
 
-export function blockCost(type) {
+/**
+ * What a block is estimated to cost.
+ *
+ * `overrides` (Session 34, Item A) is the DERIVED table, read once per tick
+ * from SIM_KV by `loadBlockEstimates()`. It wins over the constant when it
+ * carries a number for this block, and is absent for a block the derivation
+ * declined to measure — so the constants below remain the fallback rather than
+ * dead code. Omitting the argument entirely reproduces the pre-Session-34
+ * behaviour exactly, which is what every existing caller and verifier does.
+ */
+export function blockCost(type, overrides) {
+  const derived = overrides?.[type];
+  if (Number.isFinite(derived) && derived > 0) return derived;
   return typeof BLOCK_COST[type] === 'number' ? BLOCK_COST[type] : UNMEASURED_BLOCK_COST;
 }
 
@@ -433,8 +712,8 @@ export function blockCost(type) {
  *                 report, which is a worse failure and not one to introduce
  *                 while fixing another. It is reported, not suppressed.
  */
-export function admitBlock(ledger, type) {
-  const cost = blockCost(type);
+export function admitBlock(ledger, type, overrides) {
+  const cost = blockCost(type, overrides);
   if (cost > ledger.usable) return { decision: 'oversize', cost };
   if (ledger.canAfford(cost, type)) return { decision: 'run', cost };
   return { decision: 'defer', cost };

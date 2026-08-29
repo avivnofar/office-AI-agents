@@ -249,6 +249,9 @@ import {
   isSameBlock, LANE_CASES, SUBREQUEST_CEILING, admitBlock, blockCost,
   meterEnv, meterGlobalFetch, CASE_LOOKAHEAD, EXTERNAL_FETCH_ALLOWANCE_PER_CASE,
   TICK_TAIL_RESERVE, TICK_TAIL_RESERVE_NO_CASES, FINALIZE_RESERVE, recordAdmissions,
+  // Session 34, Item A — the estimates are derived from block_admissions
+  // instead of declared. See that file's "DERIVED, NOT DECLARED" block.
+  loadBlockEstimates, refreshBlockEstimates,
 } from './subrequest-budget.js';
 import { checkGeminiPacingSlot } from './gemini-pacer.js';
 import { callClaudeMessages, CLAUDE_MODEL } from './claude-client.js';
@@ -6862,6 +6865,16 @@ async function runScheduledBlockInner(env, israelTime, dayOfWeek, ctx) {
 
   const admissions = [];
 
+  // ── SESSION 34, ITEM A: the estimates this tick admits against ───────────
+  //
+  // Derived from this block's OWN history in `block_admissions` (p90 + margin),
+  // refreshed once a day at the bottom of this function. A KV read is weighted
+  // ZERO, so knowing what a block really costs is free. An empty object — the
+  // shape returned on absence or on any failure — means every `admitBlock()`
+  // call below falls back to `BLOCK_COST`'s constants, i.e. exactly the
+  // behaviour this tick had before the derivation existed.
+  const blockEstimates = await loadBlockEstimates(env);
+
   for (const block of orderedBlocks) {
     // Real spend for THIS block, from the meter. Recorded so `BLOCK_COST`'s
     // estimates can be checked against what blocks actually cost instead of
@@ -6875,7 +6888,7 @@ async function runScheduledBlockInner(env, israelTime, dayOfWeek, ctx) {
       // that does not fit is DEFERRED and said so — never run half-way and
       // never silently skipped. `oversize` runs anyway; see admitBlock().
       if (block.type !== 'case_batch') {
-        const admit = admitBlock(budget, block.type);
+        const admit = admitBlock(budget, block.type, blockEstimates);
         decision = admit.decision;
         estimate = admit.cost;
         if (admit.decision === 'defer') {
@@ -7006,6 +7019,21 @@ async function runScheduledBlockInner(env, israelTime, dayOfWeek, ctx) {
   // measurements. It cannot throw (KFM-14) and is deliberately NOT awaited
   // for its result — a lost row costs trend resolution, never the tick.
   await recordAdmissions(env, cycle.day, admissions);
+
+  // ── SESSION 34, ITEM A: the recompute, not a compute ─────────────────────
+  //
+  // Immediately after the measurement is written, the estimates are re-derived
+  // from it — but only on the first tick of a calendar day; every other tick
+  // this is one KV read and a date comparison. Placed HERE, and not inside
+  // `recordAdmissions()`, so the function named "record" only records: reading
+  // the table back is a separate act and says so at the call site.
+  //
+  // Deliberately NOT in `finalizeScheduledDay()`. Session 33 Item A moved the
+  // daily check out of finalize for exactly this reason — work that must happen
+  // every day must not hang off the one tick most likely to run out of budget.
+  // This costs zero weighted subrequests (D1 and KV are both weight 0) and
+  // cannot throw, so it is safe on every tick including that one.
+  await refreshBlockEstimates(env);
 
   if (!isLastBlock) {
     // ── THE WRITE THAT WAS BEING LOST (OB-074, 2026-08-16) ─────────────────

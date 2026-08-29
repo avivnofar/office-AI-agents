@@ -1,0 +1,19 @@
+[
+  {"_comment": "SESSION 34, ITEM A. Export of D1 `block_admissions`, taken 2026-08-29 against the live data-center-db (uuid 0819c65e-fa93-40cb-9894-c8dae0906f09), covering the 30 days ending that date — which is every row the table has ever held, since recordAdmissions() first ran 2026-08-17. `vals` is group_concat(actual) for that block/decision pair. Kept as an export rather than a live query so scripts/block-estimates.mjs proves it made no network call, the way every other verifier in this directory does. Refresh it with the wrangler command in that file's header."},
+  {"block": "admin_desk", "decision": "run", "vals": "23,22,20,20,17,17,29,30"},
+  {"block": "architect_liaison", "decision": "defer", "vals": "0"},
+  {"block": "architect_liaison", "decision": "run", "vals": "2,2,2,2,2,2,2,2,2,2"},
+  {"block": "case_batch", "decision": "ran", "vals": "39.5,39.25,42.5,41,44,43,39,39.5,44.25,41.75,43,43,40.75,42,40.75,43.25,40.75,39.75,42.5,39.5,43,41.75,41.75,42.75,40,39.25,43.25,40.75,40.25,43,39.5,41.75,42,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0"},
+  {"block": "chore_rotation", "decision": "run", "vals": "1,1,1,1,1,1,1,1,1"},
+  {"block": "guide_draft", "decision": "run", "vals": "2.25,1.25,1.25,1.25,0,0,0,0,0,0,0"},
+  {"block": "guide_review", "decision": "defer", "vals": "0"},
+  {"block": "guide_review", "decision": "run", "vals": "4,4,4,4,0,0,0,0,0,0"},
+  {"block": "guide_verify", "decision": "run", "vals": "0,0"},
+  {"block": "meeting", "decision": "run", "vals": "22,22,25.5,23,29.5,23,23,23,24.25,13,13,24,29.75,25,16,13,37,26,41.25,15.75,40.75,40.75"},
+  {"block": "owner_channel", "decision": "run", "vals": "11,12,12,12,12,14,17,26,40,18,41"},
+  {"block": "qa_instruments", "decision": "run", "vals": "2,2"},
+  {"block": "report", "decision": "run", "vals": "8.25,10.25,10.25,10.25,8.25,8.25,3.25,3.25,3.25,3.25,3.25"},
+  {"block": "spare_time", "decision": "run", "vals": "9.5,8.25,3.25,9.5,5.75,3.25,7,4.25,5.25,11.75,4.25,9,3.25"},
+  {"block": "tool_task_window", "decision": "run", "vals": "1"},
+  {"block": "weekly_summary", "decision": "oversize", "vals": "53.25,48"}
+]
