@@ -254,6 +254,7 @@ import {
   loadBlockEstimates, refreshBlockEstimates,
 } from './subrequest-budget.js';
 import { checkGeminiPacingSlot } from './gemini-pacer.js';
+import { israelDateStr, alreadyAdvancedToday, recordDayAdvance } from './day-advance-guard.js';
 import { callClaudeMessages, CLAUDE_MODEL } from './claude-client.js';
 // ── THE WEEKLY MODEL-RETIREMENT CHECK (2026-08-23, Session 14 ITEM C) ──────
 // Five model identifiers have been retired out from under this project and
@@ -6929,8 +6930,22 @@ async function runScheduledBlockInner(env, israelTime, dayOfWeek, ctx) {
 
   let cycle = await getCycleState(env);
   if (isFirstBlock || !cycle || cycle.dayOfWeek !== dayOfWeek) {
+    // ── SESSION 37, ITEM 1: THE DAY-ADVANCE GUARD ────────────────────────
+    // See workers/day-advance-guard.js's header for the live evidence this
+    // is fixing. `dayOfWeek` repeats every 7 days and the cycle this branch
+    // is about to replace may already be gone (finalized and cleared, or
+    // never persisted) — neither tells this tick "a day was already opened
+    // today". The calendar date, recorded OUTSIDE the cycle so it survives
+    // the cycle being cleared, does.
+    const todayDate = israelDateStr(new Date(), ISRAEL_UTC_OFFSET_HOURS);
+    if (await alreadyAdvancedToday(env, todayDate)) {
+      return {
+        skipped: true, reason: 'day_already_advanced_today', todayDate, israelTime, dayOfWeek,
+      };
+    }
     const yearState = await getYearState(env);
     const nextDay = (yearState.current_day || 0) + 1;
+    await recordDayAdvance(env, todayDate, nextDay);
 
     // R-001 (2026-08-23): cases retired. Zero here is the whole gate —
     // generateAssignedDailyBatch() returns [] on a zero total (qa-engine.js
