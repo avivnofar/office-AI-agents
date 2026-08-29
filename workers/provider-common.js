@@ -217,6 +217,35 @@ export function normalizeOpenAiChat({ data, res, source }) {
           inputTokens: data.usage.prompt_tokens ?? null,
           outputTokens: data.usage.completion_tokens ?? null,
           totalTokens: data.usage.total_tokens ?? null,
+          /*
+           * ── SESSION 35, ITEM E — READ, NOT ENABLED (2026-08-29) ──────────
+           *
+           * How many of `inputTokens` the provider served from ITS OWN prompt
+           * cache. `null` on a provider that does not report it, which is not
+           * the same fact as zero and must not be rendered as one.
+           *
+           * **Cerebras' prompt caching is on by default on `gpt-oss-120b` and
+           * has no toggle** (verified against inference-docs.cerebras.ai/
+           * capabilities/prompt-caching, 2026-08-29): it matches in 128-token
+           * blocks, it is scoped to this organisation, **it carries no extra
+           * fee and input is billed identically whether cached or not**, and
+           * `usage.prompt_tokens_details.cached_tokens` is the only way to see
+           * it working. So there was nothing to switch on — the office was
+           * already paying (nothing) for it and simply could not observe it.
+           *
+           * That distinction matters for the brain audit specifically: its
+           * five lens calls send a byte-identical harvest slice, which is the
+           * one prompt in this office that should hit. Whether it DOES is now
+           * a number rather than an expectation.
+           *
+           * Nothing acts on this field. It is a measurement, and the last
+           * caching attempt in this repo (Session 34, items C3/C4, against the
+           * office's one paid-model client — deliberately not named here, see
+           * verify-providers.js: no module in this set may mention that
+           * provider) was reasoned correctly and measured to zero effect.
+           * Which is exactly why this one is read before it is believed.
+           */
+          cachedInputTokens: data.usage.prompt_tokens_details?.cached_tokens ?? null,
         }
       : null,
     rateLimit: parseRateLimitHeaders(res),

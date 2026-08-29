@@ -155,6 +155,36 @@ const MAX_PAUSE_TURN_RESUMES = 3;
  * over the 1,024-token minimum, and re-read within the 5-minute TTL by calls
  * in the same run. It is named here rather than switched on, because nobody has
  * measured it and this block exists to stop the next person assuming.
+ *
+ * ── MEASURED 2026-08-29 (SESSION 35, ITEM E), AND THE ANSWER IS ELSEWHERE ──
+ *
+ * **The harvest slice is not this client's traffic.** The five lens calls it
+ * names run through `adminDeskJudgment()` on the ROUTED JUDGMENT LANE — this
+ * client is only the Architect's decomposition, one call per run. The slice is
+ * byte-identical across five calls that never reach this file.
+ *
+ * So the candidate was measured where it actually runs, against Cerebras
+ * `gpt-oss-120b`, and three facts settle it:
+ *
+ *   1. **That provider's prompt caching is ON BY DEFAULT and has no toggle.**
+ *      There was never anything to switch on. The office was already getting
+ *      it and simply could not see it.
+ *   2. **It works, and the slice hits hard.** Two live calls, 2026-08-29, on a
+ *      26,000-char slice of the real HARVEST.md:
+ *        warm (a repeat of an identical prefix): input 6,632, cached **6,528**
+ *        cold (one unique nonce prepended):      input 6,652, cached **0**
+ *      98.4% of the input served from cache, and 0% once the prefix is broken
+ *      — which is the falsifying half, not the confirming one.
+ *   3. **It saves no money.** That provider charges no premium for a cached
+ *      token and bills input identically either way, and this office is on its
+ *      free tier. What it buys is latency and TPM headroom, not spend.
+ *
+ * `provider-common.js` `normalizeOpenAiChat()` now returns
+ * `usage.cachedInputTokens` so that stays observable rather than being a claim
+ * in a comment. **Nothing about THIS file changed** and `cacheSystem` /
+ * `cachePrefix` are still off on every scheduled path — the 2026-08-29
+ * measurement is about the other provider, and the arithmetic above, which says
+ * a breakpoint here buys nothing at one call per tick, is untouched.
  * ═════════════════════════════════════════════════════════════════════════ */
 export async function callClaudeMessages({
   apiKey,
