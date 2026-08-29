@@ -175,14 +175,54 @@ export const REPO_WRITE_TABLE_SQL = `CREATE TABLE IF NOT EXISTS repo_writes (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )`;
 
-export async function recordRepoWrite(env, { repo, projectKey, path, committed, status, redirected }) {
+/*
+ * ── `mechanism` (session 36, Item C) ──────────────────────────────────────
+ *
+ * Session 36 found that `repo_writes` — the one queryable, structured record
+ * of an office write — had no field saying WHICH office mechanism produced a
+ * given warehouse/channel artifact. Attribution existed only as free text in
+ * each call site's own commit message ("office: Agent 7 build artifact for
+ * OB-103"), which is readable by a human scrolling git log but not
+ * queryable, and not distinguishable from a session hand-writing the same
+ * message convention into a commit made outside the Worker entirely.
+ *
+ * This is the smallest fix: one nullable column, populated ONLY by the
+ * office's build-chain / own-build mechanisms (`processArchitectSpecBlock`,
+ * `processBuildNotesBlock`, `processBuildArtifactBlock`, `processRepairBlock`
+ * in agent-runner.js) via `opts.mechanism` on `commitFileToRepo()`. Every
+ * other call site is unaffected and keeps writing `mechanism: null` — this
+ * is deliberately NOT a general audit of all ~40 commitFileToRepo() sites.
+ * Shape is free text, `"<block>:agent<N>:<provider>"`, matching the existing
+ * commit-message convention rather than inventing a second taxonomy.
+ *
+ * Retrofitted onto a table that already exists in production, so
+ * `CREATE TABLE IF NOT EXISTS` above does not add it to the live table (same
+ * caveat CLAUDE.md documents for `cases.project` and `guide_pipeline`'s
+ * siblings) — see this session's own manual `ALTER TABLE` migration note.
+ * `ADD COLUMN` is attempted here too, wrapped so an already-migrated table
+ * (or a brand-new one where the CREATE above already included it) does not
+ * throw.
+ */
+async function ensureMechanismColumn(env) {
+  try {
+    await env.DB.prepare('ALTER TABLE repo_writes ADD COLUMN mechanism TEXT').run();
+  } catch (err) {
+    // Already present — the expected steady-state outcome, not a failure.
+    if (!/duplicate column/i.test(err?.message || '')) {
+      console.warn(`[repo-write] mechanism column migration check: ${err?.message || err}`);
+    }
+  }
+}
+
+export async function recordRepoWrite(env, { repo, projectKey, path, committed, status, redirected, mechanism }) {
   try {
     if (!env?.DB) return { recorded: false, reason: 'no_db_binding' };
     await env.DB.prepare(REPO_WRITE_TABLE_SQL).run();
+    await ensureMechanismColumn(env);
     await env.DB.prepare(
-      `INSERT INTO repo_writes (id, repo, project_key, path, committed, status, redirected)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    ).bind(crypto.randomUUID(), repo, projectKey || null, path, committed ? 1 : 0, status ?? null, redirected ? 1 : 0).run();
+      `INSERT INTO repo_writes (id, repo, project_key, path, committed, status, redirected, mechanism)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(crypto.randomUUID(), repo, projectKey || null, path, committed ? 1 : 0, status ?? null, redirected ? 1 : 0, mechanism || null).run();
     return { recorded: true };
   } catch (err) {
     // Swallowed on purpose. Same posture recordOfficeEvent() takes: a capture
@@ -274,7 +314,7 @@ export async function commitFileToRepo(env, repoName, path, content, message, op
     const reason = `binary_write_to_public_repo_refused: "${path}" is base64 content bound for ${REPO_NAME}, and A10's pre-publication scan is a TEXT scan that cannot read it. Refused rather than passed through unscanned. Assets belong in back-office; publishing one to the Front is the publishing gate's decision (OB-014).`;
     console.warn(`[repo-write] ${reason}`);
     await recordRepoWrite(env, {
-      repo: repoName, projectKey: verdict.projectKey, path, committed: false, status: null, redirected: !!verdict.redirected,
+      repo: repoName, projectKey: verdict.projectKey, path, committed: false, status: null, redirected: !!verdict.redirected, mechanism: opts.mechanism || null,
     });
     return { committed: false, reason: 'binary_write_to_public_repo_refused', message: reason };
   }
@@ -288,7 +328,7 @@ export async function commitFileToRepo(env, repoName, path, content, message, op
       // refusal that leaves no row is a control nobody can audit, and A10's
       // whole argument is that unaudited security posture is the problem.
       await recordRepoWrite(env, {
-        repo: repoName, projectKey: verdict.projectKey, path, committed: false, status: null, redirected: !!verdict.redirected,
+        repo: repoName, projectKey: verdict.projectKey, path, committed: false, status: null, redirected: !!verdict.redirected, mechanism: opts.mechanism || null,
       });
       return { committed: false, reason: 'security_scan_refused', securityHits: scanned.hits, message: reason };
     }
@@ -376,6 +416,7 @@ export async function commitFileToRepo(env, repoName, path, content, message, op
     committed: res.ok,
     status: res.status,
     redirected: !!verdict.redirected,
+    mechanism: opts.mechanism || null,
   });
 
   // A conflict is NAMED rather than left as a bare status, so a caller that

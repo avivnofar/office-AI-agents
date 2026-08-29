@@ -2419,7 +2419,11 @@ async function processArchitectSpecBlock(env, opts = {}) {
   try {
     commit = await commitFileToRepo(
       env, WAREHOUSE_REPO_NAME, path, spec.markdown,
-      `office: Architect spec for ${taskId} -> ${slug} [skip ci]`
+      `office: Architect spec for ${taskId} -> ${slug} [skip ci]`,
+      // Session 36, Item C — see repo-write.js's `mechanism` note. The
+      // Architect is never routed (CLAUDE.md: "Anthropic — never routed,
+      // never shuffled"), so the provider is a constant here, not a read.
+      { mechanism: `architect_spec:agent10:anthropic` }
     );
   } catch (err) {
     return { ...spec, committed: false, commitError: err.message, path };
@@ -2522,7 +2526,9 @@ async function processBuildNotesBlock(env, opts = {}) {
     try {
       commit = await commitFileToRepo(
         env, WAREHOUSE_REPO_NAME, path, content,
-        `office: Agent ${item.agentId} progress note on ${item.taskId} [skip ci]`
+        `office: Agent ${item.agentId} progress note on ${item.taskId} [skip ci]`,
+        // Session 36, Item C — see repo-write.js's `mechanism` note.
+        { mechanism: `build_note:agent${item.agentId}:${judged.provider || 'unrecorded'}` }
       );
     } catch (err) {
       out.errors.push(`${path}: commit threw — ${err?.message}`);
@@ -2694,7 +2700,9 @@ async function processBuildArtifactBlock(env, opts = {}) {
     try {
       commit = await commitFileToRepo(
         env, WAREHOUSE_REPO_NAME, item.targetPath, content,
-        `office: Agent ${item.agentId} build artifact for ${item.taskId} [skip ci]`
+        `office: Agent ${item.agentId} build artifact for ${item.taskId} [skip ci]`,
+        // Session 36, Item C — see repo-write.js's `mechanism` note.
+        { mechanism: `build_artifact:agent${item.agentId}:${routed.provider || 'unrecorded'}` }
       );
     } catch (err) {
       out.errors.push(`${item.targetPath}: commit threw — ${err?.message}`);
@@ -2862,10 +2870,12 @@ async function processRepairBlock(env, opts = {}) {
   }
   const content = String(text).trim().replace(/^```[\w-]*\n/, '').replace(/\n```\s*$/, '');
 
+  // Session 36, Item C — see repo-write.js's `mechanism` note.
+  const repairMechanism = `repair:agent${agentId}:${routed.provider || 'unrecorded'}`;
   const commit = await commitFileToRepo(
     env, WAREHOUSE_REPO_NAME, target.targetPath, content,
     `office: repair round ${decision.strikeCount} for ${taskId || slug} (finding ${decision.fingerprint}) [skip ci]`,
-    { branch: branchName }
+    { branch: branchName, mechanism: repairMechanism }
   );
   if (!commit.committed) return { ok: false, reason: `repair commit failed: ${commit.reason || 'no reason given'}` };
 
@@ -2873,7 +2883,7 @@ async function processRepairBlock(env, opts = {}) {
   const logCommit = await commitFileToRepo(
     env, WAREHOUSE_REPO_NAME, logPath, `${JSON.stringify(repairLog, null, 2)}\n`,
     `office: repair log for ${taskId || slug}, round ${decision.strikeCount} [skip ci]`,
-    { branch: branchName }
+    { branch: branchName, mechanism: repairMechanism }
   );
 
   return {
