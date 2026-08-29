@@ -122,7 +122,7 @@ export function parseArchitectAnswers(text) {
  *   a caller that pins the date, same reason buildSpec() itself takes one.
  * @returns {Promise<object>}
  */
-export async function runArchitectSpecCall(env, task, { date } = {}) {
+export async function runArchitectSpecCall(env, task, { date, cacheSystem = false } = {}) {
   const asOfDate = date || new Date().toISOString().slice(0, 10);
 
   if (!env?.ANTHROPIC_API_KEY) {
@@ -143,6 +143,15 @@ export async function runArchitectSpecCall(env, task, { date } = {}) {
       maxTokens: 3000,
       effort: 'medium',
       disableThinking: true,
+      // SUPERVISED MEASUREMENT ONLY — Session 34, C4. Defaults false, and the
+      // scheduled path never sets it. It exists so a session can put a real
+      // cache breakpoint on a real call and read the answer out of
+      // `usage.cache_creation_input_tokens` instead of arguing from the docs.
+      //
+      // The answer, measured 2026-08-29: ZERO. ARCHITECT_SPEC_SYSTEM is ~771
+      // tokens and Sonnet 5's minimum cacheable prefix is 1,024, so the
+      // breakpoint is a silent no-op. See callClaudeMessages()'s CACHING block.
+      cacheSystem,
     });
   } catch (err) {
     return { ok: false, reason: `anthropic call threw: ${err.message}` };
@@ -153,6 +162,10 @@ export async function runArchitectSpecCall(env, task, { date } = {}) {
   // guide review takes (it records spend on REVISE/REJECT, not only APPROVE).
   const spend = await recordClaudeSpend(env, {
     inputTokens: result.inputTokens, outputTokens: result.outputTokens, component: 'architect',
+    // Session 34, C3/C5: cache tokens are billed (1.25x write, 0.1x read) and
+    // are NOT in result.inputTokens. Passing them keeps the spend guard exact
+    // whether or not a breakpoint was set on this call.
+    cacheWriteTokens: result.cacheWriteTokens, cacheReadTokens: result.cacheReadTokens,
   });
 
   const parsed = parseArchitectAnswers(result.text);
@@ -253,6 +266,10 @@ export async function runArchitectApprovalCall(env, task) {
 
   const spend = await recordClaudeSpend(env, {
     inputTokens: result.inputTokens, outputTokens: result.outputTokens, component: 'architect',
+    // Session 34, C3/C5: cache tokens are billed (1.25x write, 0.1x read) and
+    // are NOT in result.inputTokens. Passing them keeps the spend guard exact
+    // whether or not a breakpoint was set on this call.
+    cacheWriteTokens: result.cacheWriteTokens, cacheReadTokens: result.cacheReadTokens,
   });
 
   const parsed = parseArchitectVerdict(result.text);

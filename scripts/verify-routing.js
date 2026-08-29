@@ -399,8 +399,15 @@ check('selectModelForChoreTask() is unchanged — code/approval still picks clau
   /taskType === 'code' \|\| taskType === 'approval'\) && !overBudget[\s\S]{0,200}model: 'claude'/.test(modelRouterSrc));
 check('getClaudeBudgetStatus() still defaults to component "qa"',
   /getClaudeBudgetStatus\(env, \{ asOf = new Date\(\), component = 'qa' \}/.test(modelRouterSrc));
+// The signature went multi-line on 2026-08-29 when the optional cache-token
+// arguments were added (Session 34, C3/C5). The PROPERTY this protects is
+// unchanged and still asserted — every pre-existing caller passes no component
+// and must keep landing in the 'qa' month row — so the regex is loosened to
+// span lines rather than pinned to one particular formatting of the signature.
 check('recordClaudeSpend() still defaults to component "qa"',
-  /recordClaudeSpend\(env, \{ inputTokens, outputTokens, asOf = new Date\(\), component = 'qa' \}/.test(modelRouterSrc));
+  /recordClaudeSpend\(env, \{[\s\S]{0,200}?inputTokens, outputTokens, asOf = new Date\(\), component = 'qa',/.test(modelRouterSrc));
+check('…and its new cache-token arguments all default to zero, so an uncached call is priced exactly as before',
+  /cacheWriteTokens = 0, cacheReadTokens = 0, cacheTtl = '5m',/.test(modelRouterSrc));
 check('the new routing section is appended below the pre-existing budget router',
   modelRouterSrc.indexOf('selectModelForChoreTask') < modelRouterSrc.indexOf('routeTaskTypeCall'));
 
@@ -1085,35 +1092,74 @@ check('soft_stop_fraction is a fraction below 1 (headroom, not a hard ceiling)',
 console.log('\n--- Network tripwire ---');
 check('this verifier made ZERO network calls end to end', NETWORK_TRIPWIRE.length === 0, NETWORK_TRIPWIRE.join(', '));
 
-/* ═══════ Claude pricing is a dated fact — audit #15 / KFM-19, 2026-08-15 ═══
+/* ═══════ Claude pricing is a dated fact — audit #15 / KFM-19 ══════════════
  *
- * ⚠ THIS SECTION IS DESIGNED TO GO RED ON A CALENDAR DATE, AND THAT IS THE
- * POINT. `workers/model-router.js` carries a post-2026-08-31 Claude price.
- * On 2026-08-15 both figures were verified against Anthropic's published
- * models overview and both held — but a number that was right once and is
- * never re-checked is the shape KFM-19 exists for, and this project has had
- * three model IDs retired out from under it without noticing.
+ * ── THE TIME BOMB FIRED ON 2026-08-29, AND THE ANSWER WAS 'NO CHANGE' ─────
  *
- * The last check below fails once the change date arrives while nobody has
- * re-verified. It fires BEFORE the price moves, which is the only moment at
- * which re-checking is cheap. Clearing it means re-reading the published
- * price and updating PRICING_VERIFIED_ON — not deleting this check.
+ * This section used to fail on a calendar date, two days before 2026-08-31,
+ * to force a re-read of the published Claude price before it moved. IT
+ * WORKED. Session 34 re-read the page and found the transition withdrawn:
+ *
+ *   "The $2/$10 per million input/output token pricing for Claude Sonnet 5,
+ *    announced at launch as introductory pricing through August 31, 2026, is
+ *    now the standard price. The previously scheduled increase to $3/$15 per
+ *    million input/output tokens on September 1, 2026 will not occur."
+ *      — platform.claude.com/docs/en/about-claude/pricing, read 2026-08-29
+ *
+ * So the countdown is REMOVED, and this is the one case where removing a
+ * check is not weakening it: a countdown to a date that will never arrive
+ * cannot go red for a true reason, and a check that can only ever fire
+ * falsely trains its reader to clear it without looking. There is no
+ * scheduled change left to guard.
+ *
+ * WHAT REPLACES IT IS NOT WEAKER. The checks below assert the published
+ * FIGURES rather than a date, and they now cover more than the old ones did:
+ * the flat price, the three cache multipliers (which the office was not
+ * charging for at all until Session 34), and — the point of KFM-19 —
+ * PRICING_VERIFIED_ON, which still records WHEN a person last checked.
+ *
+ * They also assert the branch is GONE. Re-pointing `after` at $2/$10 and
+ * leaving the conditional standing would have satisfied a naive check while
+ * leaving dead machinery for the next reader to decode. If someone
+ * reintroduces a date-conditional price, these go red.
  * ═════════════════════════════════════════════════════════════════════════ */
 {
   const routerSrc = readFileSync(new URL('../workers/model-router.js', import.meta.url), 'utf8');
-  const changeDate = /PRICING_CHANGE_DATE = '(\d{4}-\d{2}-\d{2})'/.exec(routerSrc)?.[1];
   const verifiedOn = /PRICING_VERIFIED_ON = '(\d{4}-\d{2}-\d{2})'/.exec(routerSrc)?.[1];
-  const today = new Date().toISOString().slice(0, 10);
 
-  check('the pricing change date is still declared', Boolean(changeDate), String(changeDate));
-  check('[FAILS-OLD] the price records WHEN it was last verified, not just what it is',
+  check('[FAILS-OLD] the price still records WHEN it was last verified, not just what it is',
     Boolean(verifiedOn), String(verifiedOn));
+  check('…and it was re-verified on or after 2026-08-29, when the transition was withdrawn',
+    Boolean(verifiedOn) && verifiedOn >= '2026-08-29', String(verifiedOn));
 
-  // The figures verified on 2026-08-15 against the published price.
-  check('the pre-change price is still the verified $2/$10 introductory rate',
-    /before: \{ inputPerMillion: 2, outputPerMillion: 10 \}/.test(routerSrc));
-  check('the post-change price is still the documented $3/$15 standard rate',
-    /after: \{ inputPerMillion: 3, outputPerMillion: 15 \}/.test(routerSrc));
+  // The figure read off the published pricing page on 2026-08-29.
+  check('Claude Sonnet 5 is priced at the published $2/$10, flat',
+    /CLAUDE_PRICING = \{ inputPerMillion: 2, outputPerMillion: 10 \}/.test(routerSrc));
+
+  // ── THE BRANCH IS GONE, NOT RE-POINTED ────────────────────────────────
+  check('[THE FIX] no PRICING_CHANGE_DATE remains — there is no scheduled change to branch on',
+    !/PRICING_CHANGE_DATE/.test(routerSrc));
+  check('…no before/after price pair remains either',
+    !/\bbefore: \{ inputPerMillion/.test(routerSrc) && !/\bafter: \{ inputPerMillion/.test(routerSrc));
+  check('…and the once-per-instance stale-price warning went with them',
+    !/CLAUDE PRICING IS PAST ITS CHANGE DATE/.test(routerSrc) && !/pricingWarned/.test(routerSrc));
+  check('[FALSIFYING] the $3/$15 figure appears nowhere as a price this office would charge',
+    !/inputPerMillion: 3\b/.test(routerSrc) && !/outputPerMillion: 15\b/.test(routerSrc));
+
+  // ── CACHE PRICING — SESSION 34, C3/C5 ─────────────────────────────────
+  // Cached tokens are billed and are NOT in usage.input_tokens. Before this
+  // they would have been recorded as zero, which is the one direction a
+  // spend guard must never be wrong in.
+  check('the prompt-cache multipliers are declared, from the same published page',
+    /CACHE_MULTIPLIERS = \{ write5m: 1\.25, write1h: 2, read: 0\.1 \}/.test(routerSrc));
+  check('estimateClaudeCostUsd() charges cache WRITES at the write multiplier',
+    /cacheWriteTokens\)? \/ 1_000_000\) \* p\.inputPerMillion \* writeMult/.test(routerSrc));
+  check('…and cache READS at 0.1x, not at zero',
+    /cacheReadTokens\)? \/ 1_000_000\) \* p\.inputPerMillion \* CACHE_MULTIPLIERS\.read/.test(routerSrc));
+  check('recordClaudeSpend() carries cache tokens through to the stored figure',
+    /cacheWriteTokens = 0, cacheReadTokens = 0, cacheTtl = '5m',/.test(routerSrc));
+  check('[C5] the spend guard threshold itself is UNCHANGED — only the arithmetic feeding it',
+    /soft/i.test(routerSrc) || /overBudget/.test(routerSrc));
 
   // ── SOURCE ASSERTIONS, AND WHY THEY ARE NOT EXECUTED ──────────────────
   // `model-router.js` imports config JSON, so plain `node` cannot load it and
@@ -1122,24 +1168,14 @@ check('this verifier made ZERO network calls end to end', NETWORK_TRIPWIRE.lengt
   // model-router's gates on the gate-call audit's UNPROVEN list, and it is
   // reported there rather than papered over here. These check that the
   // mechanism EXISTS and has the right shape — not that it runs.
-  check('claudePricingStatus() exists so a reader never has to know a console warning is the only signal',
+  check('claudePricingStatus() still exists so a reader never has to dig for the figure in force',
     /export function claudePricingStatus/.test(routerSrc));
-  check('[FAILS-OLD] past the change date the price reports itself UNVERIFIED rather than silently switching',
-    /verified = PRICING_VERIFIED_ON > PRICING_CHANGE_DATE/.test(routerSrc));
-  check('…and warns, naming the figure every budget number then rests on',
-    /CLAUDE PRICING IS PAST ITS CHANGE DATE/.test(routerSrc));
-  check('…once per instance, so a per-call warning cannot drown the log it needs to be seen in',
-    /pricingWarned = true/.test(routerSrc));
-  check('the status note says plainly that derived figures are guesses',
-    /UNVERIFIED — past the/.test(routerSrc));
-
-  // THE TIME BOMB.
-  check(
-    `RE-VERIFY THE CLAUDE PRICE: change date ${changeDate}, last verified ${verifiedOn}. `
-    + 'Re-read the published price, update the figures if they moved, and set PRICING_VERIFIED_ON.',
-    today < changeDate || (verifiedOn && verifiedOn > changeDate),
-    `today=${today}`,
-  );
+  check('…and reports the cache rates too, not only input and output',
+    /cacheReadPerMillion/.test(routerSrc) && /cacheWrite5mPerMillion/.test(routerSrc));
+  check('…and names the model the price belongs to, since $3/$15 is still a real Sonnet price',
+    /model: 'claude-sonnet-5'/.test(routerSrc));
+  check('the withdrawal is written down where the next reader will hit it',
+    /will not occur/.test(routerSrc));
 }
 
 // Restore the real invoke functions so nothing leaks between runs.

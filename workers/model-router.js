@@ -101,33 +101,80 @@ const CHORE = tokenEconomy.chore_automation;
  *
  * **To clear it:** re-read the published price, update the figures if they
  * moved, and set `PRICING_VERIFIED_ON` to the date you checked.
+ *
+ * ══════════════════════════════════════════════════════════════════════════
+ * ── THE TIME BOMB WENT OFF, AND THE ANSWER WAS "NO CHANGE" (2026-08-29) ────
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * SESSION 34, ITEM C. It fired two days early, exactly as designed, and the
+ * re-check found the price is NOT moving:
+ *
+ *   > "The $2/$10 per million input/output token pricing for Claude Sonnet 5,
+ *   >  announced at launch as introductory pricing through August 31, 2026, is
+ *   >  now the standard price. The previously scheduled increase to $3/$15 per
+ *   >  million input/output tokens on September 1, 2026 will not occur."
+ *   > — platform.claude.com/docs/en/about-claude/pricing, read 2026-08-29
+ *
+ * $2/$10 is permanent. **THE `after` BRANCH IS DELETED, NOT CORRECTED**, and
+ * that distinction is the whole of this change. Setting `after` to $2/$10 and
+ * leaving the conditional standing would have left a date comparison, a warning
+ * path and a verifier time bomb all guarding a transition that no longer
+ * exists — dead machinery that the next reader has to decode before they can
+ * trust the number. A stale conditional is what makes this recur.
+ *
+ * The $3/$15 figure was never wrong; it is now simply about a different model.
+ * Sonnet 4.6 and 4.5 are the models published at $3/$15 today, and Sonnet 5 —
+ * the one this office calls — is $2/$10 for good.
+ *
+ * ── WHAT IS KEPT, AND WHY ─────────────────────────────────────────────────
+ *
+ * `PRICING_VERIFIED_ON` STAYS. KFM-19's finding was never that the numbers were
+ * wrong — it was that nothing distinguished a checked number from an invented
+ * one. Removing the date because today's answer happens to be "no change" would
+ * throw away the only part of this that was ever the point. A permanent price
+ * is still an external fact about someone else's business, and the next time it
+ * moves the office should find out by reading, not by being billed.
+ *
+ * What is gone is only the SCHEDULED transition: there is no future date to
+ * count down to any more, so there is nothing for a countdown to guard.
+ * `scripts/verify-routing.js` re-verifies against the published figures instead
+ * of against a calendar.
+ * ═════════════════════════════════════════════════════════════════════════ */
+
+/**
+ * The date a person last checked these figures against Anthropic's published
+ * price. A date, not a boolean — "verified" with no date is the claim that goes
+ * stale. See the block above for what was read on 2026-08-29.
  */
-const PRICING_CHANGE_DATE = '2026-08-31';
-/** The date a person last checked these figures against the published price. */
-const PRICING_VERIFIED_ON = '2026-08-15';
-const CLAUDE_PRICING = {
-  before: { inputPerMillion: 2, outputPerMillion: 10 },
-  after: { inputPerMillion: 3, outputPerMillion: 15 },
-};
+const PRICING_VERIFIED_ON = '2026-08-29';
 
-let pricingWarned = false;
+/**
+ * Claude Sonnet 5, first-party Claude API, USD per million tokens.
+ *
+ * FLAT, not `{ before, after }`. There is no scheduled change to branch on —
+ * the 2026-09-01 increase was withdrawn (see above), and a conditional kept
+ * "just in case" would be a second thing to keep true.
+ */
+const CLAUDE_PRICING = { inputPerMillion: 2, outputPerMillion: 10 };
 
-function currentClaudePricing(asOf = new Date()) {
-  const today = asOf.toISOString().slice(0, 10);
-  const past = today > PRICING_CHANGE_DATE;
-  if (!past) return { ...CLAUDE_PRICING.before, verified: true, verifiedOn: PRICING_VERIFIED_ON };
+/**
+ * Prompt-caching multipliers, relative to `inputPerMillion` (Session 34, C3).
+ *
+ * Read from the same published pricing page on 2026-08-29 and cross-checked
+ * against its Sonnet 5 row in dollars: base input $2, 5m cache write $2.50
+ * (1.25x), 1h cache write $4 (2x), cache hit $0.20 (0.1x).
+ *
+ * These exist so `recordClaudeSpend()` can charge cache tokens at what they
+ * ACTUALLY cost. Before this, a cached call would have been under-recorded:
+ * `usage.input_tokens` excludes cached tokens entirely, so cache reads and
+ * cache writes would both have been billed by Anthropic and counted as zero
+ * here. Enabling caching without this would have made the spend guard blind in
+ * the one direction a spend guard must never be blind.
+ */
+const CACHE_MULTIPLIERS = { write5m: 1.25, write1h: 2, read: 0.1 };
 
-  const verified = PRICING_VERIFIED_ON > PRICING_CHANGE_DATE;
-  if (!verified && !pricingWarned) {
-    pricingWarned = true;
-    console.warn(
-      `[model-router] CLAUDE PRICING IS PAST ITS CHANGE DATE (${PRICING_CHANGE_DATE}) AND UNVERIFIED. `
-      + `Using $${CLAUDE_PRICING.after.inputPerMillion}/M input, $${CLAUDE_PRICING.after.outputPerMillion}/M output, `
-      + `last checked ${PRICING_VERIFIED_ON}. Every budget figure below rests on this. `
-      + 'Re-read the published price and update PRICING_VERIFIED_ON.',
-    );
-  }
-  return { ...CLAUDE_PRICING.after, verified, verifiedOn: PRICING_VERIFIED_ON };
+function currentClaudePricing() {
+  return { ...CLAUDE_PRICING, verified: true, verifiedOn: PRICING_VERIFIED_ON };
 }
 
 /**
@@ -136,25 +183,62 @@ function currentClaudePricing(asOf = new Date()) {
  * Exported so a status endpoint or a report can say so out loud rather than
  * a reader having to know that a console warning exists. Makes no model call.
  */
-export function claudePricingStatus(asOf = new Date()) {
-  const p = currentClaudePricing(asOf);
+export function claudePricingStatus() {
+  const p = currentClaudePricing();
   return {
     inputPerMillion: p.inputPerMillion,
     outputPerMillion: p.outputPerMillion,
+    cacheWrite5mPerMillion: p.inputPerMillion * CACHE_MULTIPLIERS.write5m,
+    cacheWrite1hPerMillion: p.inputPerMillion * CACHE_MULTIPLIERS.write1h,
+    cacheReadPerMillion: p.inputPerMillion * CACHE_MULTIPLIERS.read,
     verified: p.verified,
     verifiedOn: PRICING_VERIFIED_ON,
-    changeDate: PRICING_CHANGE_DATE,
-    note: p.verified
-      ? `verified against the published price on ${PRICING_VERIFIED_ON}`
-      : `UNVERIFIED — past the ${PRICING_CHANGE_DATE} change date and last checked ${PRICING_VERIFIED_ON}. Every cost figure derived from this is a guess.`,
+    // `changeDate` is deliberately gone rather than nulled: there is no
+    // scheduled change to report. A field reading `null` invites the reading
+    // "we do not know when it changes"; its absence says "it does not".
+    model: 'claude-sonnet-5',
+    note: `Claude Sonnet 5 at $${p.inputPerMillion}/M input, $${p.outputPerMillion}/M output — `
+      + `verified against Anthropic's published pricing page on ${PRICING_VERIFIED_ON}, which states that `
+      + 'this is now the STANDARD price and the 2026-09-01 increase to $3/$15 will not occur. '
+      + 'No scheduled change remains to count down to.',
   };
 }
 
-/** Estimated USD cost for a Claude call at current (date-aware) pricing.
- *  Return shape unchanged — a number — so no caller had to change. */
-export function estimateClaudeCostUsd(inputTokens, outputTokens, asOf = new Date()) {
-  const pricing = currentClaudePricing(asOf);
-  return (inputTokens / 1_000_000) * pricing.inputPerMillion + (outputTokens / 1_000_000) * pricing.outputPerMillion;
+/**
+ * Estimated USD cost for one Claude call.
+ *
+ * Return shape unchanged — a number — so no existing caller had to change, and
+ * the two extra arguments are optional for the same reason: a call that passes
+ * neither is priced exactly as it was before Session 34.
+ *
+ * ── WHY CACHE TOKENS ARE A SEPARATE ARGUMENT (Session 34, C3/C5) ──────────
+ *
+ * Anthropic's `usage.input_tokens` is the UNCACHED REMAINDER only. Total prompt
+ * size is `input_tokens + cache_creation_input_tokens + cache_read_input_tokens`.
+ * So the moment any call carries `cache_control`, pricing it from
+ * `input_tokens` alone silently under-charges the office for tokens it was
+ * really billed for — and a spend guard that under-counts is worse than no
+ * guard, because it still looks like one.
+ *
+ * The guard's threshold is untouched. Only the arithmetic feeding it is now
+ * complete.
+ *
+ * @param {number} inputTokens  usage.input_tokens — the UNCACHED remainder
+ * @param {number} outputTokens usage.output_tokens
+ * @param {number} [cacheWriteTokens] usage.cache_creation_input_tokens
+ * @param {number} [cacheReadTokens]  usage.cache_read_input_tokens
+ * @param {'5m'|'1h'} [cacheTtl] which write multiplier applies (default '5m')
+ */
+export function estimateClaudeCostUsd(inputTokens, outputTokens, cacheWriteTokens = 0, cacheReadTokens = 0, cacheTtl = '5m') {
+  const p = currentClaudePricing();
+  const n = (v) => (Number.isFinite(v) && v > 0 ? v : 0);
+  const writeMult = cacheTtl === '1h' ? CACHE_MULTIPLIERS.write1h : CACHE_MULTIPLIERS.write5m;
+  return (
+    (n(inputTokens) / 1_000_000) * p.inputPerMillion
+    + (n(outputTokens) / 1_000_000) * p.outputPerMillion
+    + (n(cacheWriteTokens) / 1_000_000) * p.inputPerMillion * writeMult
+    + (n(cacheReadTokens) / 1_000_000) * p.inputPerMillion * CACHE_MULTIPLIERS.read
+  );
 }
 
 const BUDGET_TABLE_SQL = `CREATE TABLE IF NOT EXISTS claude_budget_usage (
@@ -227,11 +311,21 @@ export const CLAUDE_MAX_CALLS_PER_DAY = tokenEconomy.shared_claude_budget?.max_c
 
 /** Records a Claude call's cost against this month's soft cap for the given
  * component ('qa' default, or 'guides'). No-ops without env.DB. */
-export async function recordClaudeSpend(env, { inputTokens, outputTokens, asOf = new Date(), component = 'qa' }) {
+export async function recordClaudeSpend(env, {
+  inputTokens, outputTokens, asOf = new Date(), component = 'qa',
+  // Session 34, C3/C5. Absent on every pre-existing caller, which is why they
+  // did not have to change: a call with no cache tokens costs exactly what it
+  // cost before. `asOf` was previously passed to estimateClaudeCostUsd() as a
+  // third positional argument for date-aware pricing; there is no longer a date
+  // to be aware of (see CLAUDE_PRICING), so it is used only for the month key.
+  cacheWriteTokens = 0, cacheReadTokens = 0, cacheTtl = '5m',
+}) {
   if (!env?.DB) return { recorded: false, reason: 'no DB binding' };
 
   const month = currentMonthKey(asOf, component);
-  const costUsd = estimateClaudeCostUsd(inputTokens, outputTokens, asOf);
+  const costUsd = estimateClaudeCostUsd(
+    inputTokens, outputTokens, cacheWriteTokens, cacheReadTokens, cacheTtl
+  );
 
   await env.DB.prepare(BUDGET_TABLE_SQL).run();
   await env.DB.prepare(
@@ -243,7 +337,15 @@ export async function recordClaudeSpend(env, { inputTokens, outputTokens, asOf =
        updated_at = CURRENT_TIMESTAMP`
   ).bind(month, costUsd).run();
 
-  return { recorded: true, month, costUsd };
+  return {
+    recorded: true, month, costUsd,
+    // Surfaced so a caller (and SESSION-34's C4 measurement) can see whether a
+    // cache breakpoint actually HIT, rather than inferring it from the total.
+    // A write with no matching read on the next call is the signature of a
+    // cache that costs 1.25x and returns nothing.
+    cacheWriteTokens: cacheWriteTokens || 0,
+    cacheReadTokens: cacheReadTokens || 0,
+  };
 }
 
 /**

@@ -2405,7 +2405,13 @@ async function processArchitectSpecBlock(env, opts = {}) {
   const end = at + 1 < starts.length ? starts[at + 1].index : boardFile.text.length;
   const taskText = boardFile.text.slice(starts[at].index, end).trim();
 
-  const spec = await runArchitectSpecCall(env, { taskId, title: starts[at].title, taskText, slug });
+  // `cacheSystem` is a SUPERVISED MEASUREMENT switch only (Session 34, C4);
+  // it is absent from the scheduled path and defaults false.
+  const spec = await runArchitectSpecCall(
+    env,
+    { taskId, title: starts[at].title, taskText, slug },
+    { cacheSystem: opts.cacheSystem === true },
+  );
   if (!spec.ok) return spec;
 
   const path = `tasks/${slug}/SPEC.md`;
@@ -3172,6 +3178,10 @@ async function processBrainAuditDecompose(env, opts = {}) {
 
   const spend = await recordClaudeSpend(env, {
     inputTokens: result.inputTokens, outputTokens: result.outputTokens, component: 'architect',
+    // Session 34, C3/C5: cache tokens are billed (1.25x write, 0.1x read) and
+    // are NOT in result.inputTokens. Passing them keeps the spend guard exact
+    // whether or not a breakpoint was set on this call.
+    cacheWriteTokens: result.cacheWriteTokens, cacheReadTokens: result.cacheReadTokens,
   });
 
   const parsed = parseDecomposition(result.text);
@@ -4011,7 +4021,14 @@ async function processGuideReviewBlock(env, dateStr, opts = {}) {
       effort: 'medium',
       disableThinking: true,
     });
-    await recordClaudeSpend(env, { inputTokens: result.inputTokens, outputTokens: result.outputTokens, component: 'guides' });
+    // Session 34, C5: the weekly verify pass declares the web_search server
+    // tool, which inserts a cache write of its own after tool results. That is
+    // billed at 1.25x and was going unrecorded. Same correction as the three
+    // architect sites; the guides budget threshold is unchanged.
+    await recordClaudeSpend(env, {
+      inputTokens: result.inputTokens, outputTokens: result.outputTokens, component: 'guides',
+      cacheWriteTokens: result.cacheWriteTokens, cacheReadTokens: result.cacheReadTokens,
+    });
     if (result.stopReason === 'max_tokens') {
       // A truncated response is not an authoritative decision — its tail
       // (the guide body, or part of it) is missing. Spend is recorded above;
@@ -4165,7 +4182,10 @@ async function processGuideVerifyBlock(env, opts = {}) {
         maxTokens: 2048,
         webSearch: true,
       });
-      await recordClaudeSpend(env, { inputTokens: claudeResult.inputTokens, outputTokens: claudeResult.outputTokens, component: 'guides' });
+      await recordClaudeSpend(env, {
+        inputTokens: claudeResult.inputTokens, outputTokens: claudeResult.outputTokens, component: 'guides',
+        cacheWriteTokens: claudeResult.cacheWriteTokens, cacheReadTokens: claudeResult.cacheReadTokens,
+      });
       if (claudeResult.stopReason === 'max_tokens') {
         // Truncated verification = possibly half a rewritten section — never
         // splice that into a published guide. Entry stays queued for next week.
@@ -9045,6 +9065,8 @@ export default {
             // Anthropic call against the new component:'architect' sub-budget.
             result = await processArchitectSpecBlock(env, {
               taskId: body.taskId, slug: body.slug, bypassGate: body.bypassGate !== false,
+              // Session 34, C4 — supervised cache measurement. Off unless asked.
+              cacheSystem: body.cacheSystem === true,
             });
             break;
           case 'build_artifact_block':

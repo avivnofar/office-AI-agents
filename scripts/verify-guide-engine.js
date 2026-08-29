@@ -196,9 +196,13 @@ check('app_search_model no longer claims the stale claude-sonnet-4-6', tokenEcon
 check('app_search_model is Sonnet 5', tokenEconomy.app_search_model === 'anthropic/claude-sonnet-5');
 
 const modelRouterSrc = readFileSync(new URL('../workers/model-router.js', import.meta.url), 'utf8');
+// recordClaudeSpend()'s signature went multi-line on 2026-08-29 with the
+// optional cache-token arguments (Session 34, C3/C5). The property asserted
+// here — both functions take a `component` defaulting to 'qa', which is what
+// keeps the guides sub-budget separate from the Q&A one — is unchanged.
 check('model-router.js getClaudeBudgetStatus/recordClaudeSpend accept a component option',
   /getClaudeBudgetStatus\(env, \{ asOf = new Date\(\), component = 'qa' \}/.test(modelRouterSrc) &&
-  /recordClaudeSpend\(env, \{ inputTokens, outputTokens, asOf = new Date\(\), component = 'qa' \}/.test(modelRouterSrc));
+  /recordClaudeSpend\(env, \{[\s\S]{0,200}?inputTokens, outputTokens, asOf = new Date\(\), component = 'qa',/.test(modelRouterSrc));
 check('model-router.js month key branches on component (qa vs guides)',
   /component === 'guides'.*#guides/s.test(modelRouterSrc) || modelRouterSrc.includes("`${base}#guides`"));
 
