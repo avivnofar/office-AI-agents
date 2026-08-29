@@ -2975,22 +2975,44 @@ async function processArchitectApprovalBlock(env, opts = {}) {
  * It cannot throw (KFM-14): a lost queue update costs the next round, never
  * the artifact that was just committed.
  */
-async function setBuildChainState(env, { slug, taskId, agentId, state, finding, rounds, detail }) {
+async function setBuildChainState(env, opts) {
+  const { slug, taskId, agentId, state, rounds, detail } = opts || {};
   try {
     if (!env?.DB || !slug || !state) return { recorded: false, reason: 'no_db_or_no_slug_or_no_state' };
     await env.DB.prepare(BUILD_CHAIN_TABLE_SQL).run();
-    const prior = await env.DB.prepare('SELECT task_id, agent_id, rounds FROM build_chain WHERE slug = ?').bind(slug).first();
+    // SESSION 38, ITEM C. `prior` used to read only the three columns a caller
+    // might omit and want preserved (task_id, agent_id, rounds) — but the
+    // INSERT OR REPLACE below writes eight, and INSERT OR REPLACE is a
+    // delete+reinsert: any column not in this SELECT, and not explicitly
+    // re-supplied, is gone. `finding` was the serious loss — admin-desk.js
+    // `fingerprintFinding()` hashes it for the three-strike count, so a
+    // transition that omitted it (silently, via `finding ?? null`) NULLed the
+    // prior round's finding and reset the strike count. `created_at` was the
+    // quiet loss — omitted from the column list entirely, so every state
+    // change reset a row's real creation time to now.
+    const prior = await env.DB.prepare(
+      'SELECT task_id, agent_id, rounds, finding, created_at FROM build_chain WHERE slug = ?'
+    ).bind(slug).first();
+    // `finding` needs three-way handling, not two: an explicit `null` (every
+    // real caller clears it deliberately on merge/approve/repair-success —
+    // see nextStateAfterApproval/nextStateAfterRepair in build-chain.js) must
+    // still clear it, while an OMITTED `finding` key must preserve the prior
+    // value. `??` cannot tell those apart (it treats null and undefined the
+    // same), so the omitted case is detected by key presence instead.
+    const hasFinding = Object.prototype.hasOwnProperty.call(opts || {}, 'finding');
+    const finding = hasFinding ? (opts.finding ?? null) : (prior?.finding ?? null);
     await env.DB.prepare(
-      `INSERT OR REPLACE INTO build_chain (slug, task_id, agent_id, state, finding, rounds, last_detail, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)`
+      `INSERT OR REPLACE INTO build_chain (slug, task_id, agent_id, state, finding, rounds, last_detail, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP)`
     ).bind(
       slug,
       taskId ?? prior?.task_id ?? null,
       agentId ?? prior?.agent_id ?? null,
       state,
-      finding ?? null,
+      finding,
       rounds ?? ((prior?.rounds || 0) + 1),
-      detail || null
+      detail || null,
+      prior?.created_at ?? null
     ).run();
     return { recorded: true };
   } catch (err) {
@@ -3379,6 +3401,36 @@ async function processOwnerChannelBlock(env, opts = {}) {
   const issueReadback = await readBackOwnerIssues(env, today);
   out.issueReadback = issueReadback;
 
+  // SESSION 38, ITEM A2 (2026-08-30). `issueReadback` spans BOTH repos (see
+  // OWNER_ISSUE_READ_REPOS's own comment: "a TRANSITION, not a permanent
+  // second channel... when the owner closes the twelve public Issues, this
+  // list drops back to one"). He has not closed all twelve — seven of the
+  // pre-migration public-repo Issues (#36, #41-46) are still open — and
+  // nothing here ever expected that to be permanent, so those seven have
+  // been re-escalating as fresh "Issue #N" notification items every day
+  // since, alongside whatever the live back-office channel already
+  // resolved. That is the repeat the owner saw: a public-repo Issue
+  // discussing the same ground Issue #47 (public repo, closed 2026-08-25
+  // with his decision) already closed. Confirmed live 2026-08-30 — back-office
+  // has all six of its own owner-channel Issues closed; the public repo
+  // still has #36, #41, #42, #43, #44, #45, #46 open.
+  //
+  // A closed Issue already counts as answered (classifyOwnerIssueReadback:
+  // `hasReply = comments>0 || state==='closed'`) — that part was never
+  // broken. The break is that the TRANSITION repo's still-open Issues keep
+  // being treated as live notification content indefinitely, with no
+  // expiry tied to the migration itself.
+  //
+  // Scoped to notification-item GENERATION only: `liveIssueReadback` feeds
+  // `selectNotificationItems()` below (and the email-notice path), so a
+  // stale public-repo Issue can no longer become a new "Issue #N" item.
+  // Reply DETECTION keeps reading both repos unchanged — `issueComments`,
+  // `buildOwnerReplies()` and `recordIssueReplies()` below still use the
+  // full `issueReadback`, because a reply on a legacy Issue (like the one
+  // that motivated reading the public repo in the first place) must still
+  // be read and must still suppress repetition of the item it names.
+  const liveIssueReadback = issueReadback.filter((ir) => ir.repo === OWNER_NOTIFY_REPO);
+
   // A REPLY STOPS THE REPEAT (2026-08-24). Read his comments ONCE — the
   // record-keeping below reuses this same map rather than fetching again.
   const issueComments = await readOwnerIssueComments(env, issueReadback)
@@ -3409,7 +3461,7 @@ async function processOwnerChannelBlock(env, opts = {}) {
   const items = selectNotificationItems({
     submissions: snapshot.submissions?.submissions || [],
     questions: ageQuestions(snapshot.questions?.questions || [], today),
-    issueReadback,
+    issueReadback: liveIssueReadback,
     ownerReplies,
     // 2026-08-23. A refused owner message used to reach only agent prompts,
     // where nobody could act on it (the folder is his, not theirs) and nobody
@@ -5664,11 +5716,33 @@ async function handleTraineePanic(env, event) {
 
 /* ─────────────────────────── Daily schedule (Phase 2) ──────────────────── */
 
-/** Returns the day-type schedule block for a 1-7 dayOfWeek (1=Sun..7=Sat), per daily-schedule.json week_mapping. */
+/**
+ * Returns the day-type schedule block for a 1-7 dayOfWeek (1=Sun..7=Sat), per
+ * daily-schedule.json week_mapping.
+ *
+ * SESSION 38, ITEM B. Used to `return dailyScheduleConfig.full_day_schedule`
+ * for ANY value outside 1-7 (0, 8, NaN, undefined, a string) — a full
+ * Sun-Thu working day handed out for input that was never a valid day. That
+ * is what let the Session 37 phantom-day cycle (`day: 67, dayOfWeek: 1`)
+ * pick a working-day schedule on what should have been a rest day.
+ *
+ * Throws instead. This is safe on every real call path: the two internal
+ * callers (`runWorkDayCycle`, `finalizeScheduledDay`) always derive
+ * dayOfWeek as `((nextDay - 1) % 7) + 1`, which is 1-7 for any integer
+ * nextDay >= 1; the cron entry point derives it as
+ * `israelTimeParts(new Date(event.scheduledTime)).dayOfWeek`, i.e.
+ * `Date#getUTCDay() + 1`, which JS guarantees is 1-7. Only the two
+ * supervised HTTP debug triggers (`{"type":"block"}` and
+ * `daily_obligation_check`) can pass an out-of-range value, and both sit
+ * inside `fetch()`'s top-level try/catch, so a throw there becomes an error
+ * JSON response, not a crashed request. An invalid dayOfWeek is a bug in the
+ * caller and must surface as one, not as a silently wrong schedule.
+ */
 function getDaySchedule(dayOfWeek) {
   if (dailyScheduleConfig.friday_schedule.applies_to_day_of_week.includes(dayOfWeek)) return dailyScheduleConfig.friday_schedule;
   if (dailyScheduleConfig.saturday_schedule.applies_to_day_of_week.includes(dayOfWeek)) return dailyScheduleConfig.saturday_schedule;
-  return dailyScheduleConfig.full_day_schedule;
+  if (dailyScheduleConfig.full_day_schedule.applies_to_day_of_week.includes(dayOfWeek)) return dailyScheduleConfig.full_day_schedule;
+  throw new Error(`getDaySchedule: invalid dayOfWeek ${JSON.stringify(dayOfWeek)} — expected an integer 1-7`);
 }
 
 /** Splits `cases` (in original order) across the schedule's `case_batch` blocks per their case_share; the last batch absorbs any rounding remainder. */
@@ -8816,6 +8890,32 @@ export default {
             // Read-only against the office: no Issue, no D1 write, no KV write.
             // ONE Gemini call, and a failure there degrades to the English
             // skeleton rather than to silence.
+            //
+            // SESSION 38, ITEM A1 (2026-08-30). This handler used to check
+            // ONLY `isHeartbeatDay` below — nothing here checked the calendar
+            // at all, deliberately, per .github/workflows/owner-email.yml's own
+            // header ("NOTHING IN THIS JOB CHECKS THE CLOCK") — a choice made
+            // to dodge the scheduling-jitter gate that broke the Architect's
+            // email once already. That went too far: it left NO rest-day gate
+            // anywhere in the path, and the workflow's daily 12:30 UTC cron
+            // fired on Saturday 2026-08-29 (confirmed live, 16:50:44Z),
+            // composing and sending a notice that repeated an already-closed
+            // item. The gate belongs here, not in the workflow: the Worker
+            // already knows what a rest day is (`getDaySchedule`,
+            // `dailyScheduleConfig.saturday_schedule`), and putting a clock
+            // check back in the workflow would reopen the exact defect that
+            // comment is there to prevent. Same reason string and
+            // OFFICE-POLICY.md A13 convention as `finalizeScheduledDay()`
+            // and `runWorkDayCycle()`'s report-commit gates, below.
+            const { dayOfWeek: todayDayOfWeek } = israelTimeParts(new Date());
+            if (getDaySchedule(todayDayOfWeek) === dailyScheduleConfig.saturday_schedule) {
+              result = {
+                send: false,
+                reason: 'rest_day_zero_write',
+                policy: 'OFFICE-POLICY.md A13',
+              };
+              break;
+            }
             const snapshot = await getOfficeSnapshot(env, { allowFetch: true });
             const today = todayDateStr();
             const aged = ageQuestions(snapshot?.questions?.questions || [], today);
@@ -8832,7 +8932,13 @@ export default {
             const selected = selectNotificationItems({
               submissions: snapshot?.submissions?.submissions || [],
               questions: aged,
-              issueReadback: emailReadback,
+              // SESSION 38, ITEM A2 — same scoping as the owner_channel block's
+              // `liveIssueReadback`: notification-item generation reads only the
+              // live channel repo, so a still-open pre-migration public-repo
+              // Issue cannot resurface as a fresh item here either. Reply
+              // detection above (`emailComments`, `emailOwnerReplies`) keeps
+              // reading both repos unchanged.
+              issueReadback: emailReadback.filter((ir) => ir.repo === OWNER_NOTIFY_REPO),
               refusedMessages: snapshot?.owner?.malformed || [],
               ownerReplies: emailOwnerReplies,
             });

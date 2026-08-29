@@ -702,8 +702,17 @@ section('§8 A13 — Saturday is genuinely zero-write');
       .some((b) => b.type === 'guide_verify' && b.time === '11:30'));
 
   const guards = runner.match(/rest_day_zero_write/g) || [];
-  check('the daily-summary commit is guarded on isOffDay in BOTH day paths (a rule on one path comes back on the other)',
-    guards.length === 2);
+  // SESSION 38, ITEM A1 (2026-08-30): a THIRD occurrence, in the
+  // `owner_email_notice` trigger — until then nothing in that path checked
+  // the calendar at all (deliberately, per owner-email.yml's own header),
+  // which is what let it fire and repeat a closed item on Saturday
+  // 2026-08-29. It answers `{ send: false, reason: 'rest_day_zero_write' }`
+  // rather than `{ committed: false, skipped: true, ... }` — a different
+  // shape from the two commit-gates below, because this trigger's result
+  // contract is `send`/`reason`, not `committed`. The literal-count check
+  // still catches a guard that goes missing; it just expects three now.
+  check('the daily-summary commit is guarded on isOffDay in BOTH day paths, and the owner-email trigger carries its own rest-day gate (three, not two)',
+    guards.length === 3);
   check('…and the guard is on the COMMIT, not on the render (the off-day path still exercises the renderer)',
     /isOffDay\s*\n?\s*\? \{ committed: false, skipped: true, reason: 'rest_day_zero_write'/.test(runner));
   check('the day counter still advances on a rest day (Sunday must not open stale)',
