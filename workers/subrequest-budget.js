@@ -284,7 +284,54 @@ export const BLOCK_COST = {
   meeting: 34,            // LIVE 31 (real tick, 2026-08-16) — harness said 12
   report: 40,             // harness 22, scaled by the live/harness ratio
   spare_time: 34,         // harness 15, scaled
-  weekly_summary: 120,    // harness 78 — exceeds `usable` either way: always 'oversize'
+  /*
+   * ── SESSION 35, ITEM D — `weekly_summary` WAS SPLIT, NOT ENLARGED ────────
+   *
+   * It used to read `weekly_summary: 120, // harness 78 — exceeds usable
+   * either way: always 'oversize'`, and that was true: D1 `block_admissions`
+   * holds its only two real runs at **53.25 and 48 against a usable 47**, the
+   * first over Cloudflare's platform limit outright.
+   *
+   * `admitBlock()` calls that `oversize`, which in this file's contract means
+   * IT RUNS ANYWAY — deliberately, because a silently missing weekly report is
+   * a worse failure than a known overflow. So the overflow was a standing bet
+   * that the cheap part of the block happened to run before the cap hit.
+   *
+   * **The ceiling was not raised.** The block was split along its own seams
+   * into three, one per Friday tick (`config/daily-schedule.json`):
+   *
+   *   12:00 `weekly_summary`  the template trio + product version bumps
+   *   12:30 `weekly_meeting`  runMeeting('weekly')
+   *   13:00 `weekly_report`   runReportPipeline('weekly')
+   *
+   * Sizing, and each number says where it came from:
+   *
+   *   `weekly_summary` 16 — ARITHMETIC over what remains: 1 asset-board GET,
+   *     13 agent DO loads (3.25), ~3 office-context GETs, 3 commits x (GET sha
+   *     + PUT) = 6, plus the version-bump board read. ~13, sized at 16.
+   *   `weekly_meeting` 34 — it is the SAME call as a `meeting` block, so it
+   *     takes that block's live measurement rather than a fresh guess.
+   *   `weekly_report` 16 — ARITHMETIC: 53.25 live, less the meeting's live 31,
+   *     less part 1's ~13, leaves ~9; plus the 13 DO loads (3.25) and one board
+   *     GET the split adds by recomputing rather than carrying state. ~13,
+   *     sized at 16.
+   *
+   * **The three parts sum to more than the whole did, and that is the cost of
+   * the split, stated rather than hidden**: `agentRows` is now built three
+   * times instead of once (13 DO calls = 3.25 weighted each). Carrying it
+   * across ticks would mean the KV day cycle, which is the very thing an
+   * overflowing tick was already failing to persist — see this file's header.
+   * Paying 6.5 weighted subrequests to not build on that fault is the trade.
+   *
+   * All three are UNDER `USABLE_MAX`, so none is `oversize` and all three go
+   * through `canAfford()` like every other block. `verify-subrequest-budget.js`
+   * walks all four Friday ticks and will replace these with measurements; the
+   * derived-estimate path (§8) will replace them again from `block_admissions`
+   * once each has MIN_MEASURED_RUNS real runs.
+   */
+  weekly_summary: 16,     // ARITHMETIC — see the block above
+  weekly_meeting: 34,     // the same call as `meeting`, which measured LIVE 31
+  weekly_report: 16,      // ARITHMETIC — see the block above
   guide_draft: 12,        // harness 3
   guide_review: 12,       // harness 5
   guide_verify: 8,        // harness 0 (empty queue on the measured day)
@@ -449,6 +496,34 @@ export const USABLE_MAX = SUBREQUEST_CEILING - TICK_TAIL_RESERVE_NO_CASES;
 /** How far back the derivation looks. Older rows describe an older office. */
 export const ESTIMATE_HISTORY_DAYS = 30;
 
+/**
+ * ── A BLOCK WHOSE DEFINITION CHANGED HAS NO USABLE HISTORY (2026-08-29) ────
+ *
+ * `block -> the date its definition changed`. Admissions recorded BEFORE that
+ * date measured a different piece of work under the same name, and feeding
+ * them to the derivation produces a confident number for something that no
+ * longer exists.
+ *
+ * This is not hypothetical. SESSION 35 item D split `weekly_summary` into
+ * three blocks; its two historical rows (48 and 53.25) measured the COMBINED
+ * work. Without this map the derivation would keep pinning the new, much
+ * smaller block at 54 — over `USABLE_MAX`, so `admitBlock()` would keep
+ * calling it `oversize` and keep bypassing `canAfford()` for a block that now
+ * fits comfortably. The fix would have been invisible in the one place that
+ * measures it.
+ *
+ * **A row with no `created_at` is discarded for a redefined block**, because
+ * an undated row cannot be shown to be after the change. That is the
+ * fail-closed direction: the block falls back to its constant, which is the
+ * behaviour this whole mechanism degrades to everywhere else.
+ *
+ * Removing an entry once enough post-change runs exist is safe and unnecessary
+ * — the `created_at` filter simply stops excluding anything.
+ */
+export const REDEFINED_BLOCKS = Object.freeze({
+  weekly_summary: '2026-08-29', // split into weekly_summary + weekly_meeting + weekly_report
+});
+
 /** SIM_KV key holding the derived estimates. */
 export const ESTIMATES_KV_KEY = 'block-cost-estimates';
 
@@ -474,6 +549,11 @@ export function deriveBlockEstimates(rows) {
     if (!r || typeof r.block !== 'string') continue;
     // A deferred block never ran; its 0 is not a measurement. See the header.
     if (r.decision === 'defer') continue;
+    // A block whose definition changed has no usable history before the change.
+    // An undated row cannot be shown to be after it, so it is discarded too —
+    // fail closed to the constant. See REDEFINED_BLOCKS.
+    const redefinedAt = REDEFINED_BLOCKS[r.block];
+    if (redefinedAt && !(typeof r.created_at === 'string' && r.created_at.slice(0, 10) >= redefinedAt)) continue;
     const actual = num(r.actual, NaN);
     if (!Number.isFinite(actual) || actual < 0) continue;
     if (!byBlock.has(r.block)) byBlock.set(r.block, []);
@@ -531,7 +611,10 @@ export async function computeEstimatesFromHistory(env, opts = {}) {
     const days = Math.max(1, num(opts.days, ESTIMATE_HISTORY_DAYS));
     await env.DB.prepare(ADMISSIONS_TABLE_SQL).run();
     const res = await env.DB.prepare(
-      `SELECT block, decision, actual FROM block_admissions
+      // `created_at` is selected, not only filtered on, because
+      // REDEFINED_BLOCKS needs the per-row date to discard measurements of a
+      // block's previous definition. Without it every row looks equally old.
+      `SELECT block, decision, actual, created_at FROM block_admissions
         WHERE actual IS NOT NULL AND created_at >= datetime('now', ?)`
     ).bind(`-${days} days`).all();
     const rows = res?.results || [];

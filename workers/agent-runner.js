@@ -6011,10 +6011,59 @@ async function maybeOpenAssetTask(env, dayOfWeek, nextDay) {
 }
 
 /**
- * Friday 'weekly_summary' block: generates the 10-section executive markdown
- * ("PDF" — print-ready, see CLAUDE.md PDF Export convention), a per-agent CSV
- * ("Excel"), and a short public excerpt, all under reports/weekly/.
- * Also runs the existing 'weekly' meeting type.
+ * ══════════════════════════════════════════════════════════════════════════
+ * THE WEEKLY PACKAGE, IN THREE BLOCKS (SESSION 35, ITEM D — 2026-08-29)
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * This used to be ONE function on ONE Friday tick, and it did not fit.
+ *
+ * ── THE MEASUREMENT ───────────────────────────────────────────────────────
+ *
+ * D1 `block_admissions` holds two real runs of `weekly_summary`: **53.25 and
+ * 48 weighted subrequests, against a usable 47** (`SUBREQUEST_CEILING` 50 less
+ * `TICK_TAIL_RESERVE_NO_CASES` 3). The first EXCEEDED CLOUDFLARE'S PLATFORM
+ * LIMIT OUTRIGHT. `admitBlock()` classifies it `oversize`, which in this
+ * estate's contract means **it runs anyway, deliberately** — a silently
+ * missing weekly report is a worse failure than a known overflow — so the
+ * overflow was a standing bet that the expensive half happened to come first.
+ *
+ * ── WHERE THE SUBREQUESTS ACTUALLY GO ─────────────────────────────────────
+ *
+ * Counted off this code path, weighted the way `subrequest-budget.js` measured
+ * the platform (external fetch = 1, Durable Object call = 0.25, D1 and KV = 0):
+ *
+ *   PART 1 — the template trio          ~13   1 asset-board GET, 13 agent DO
+ *     loads (3.25), ~3 office-context GETs, 3 commits x (GET sha + PUT) = 6.
+ *   PART 2 — runMeeting('weekly')       ~31   measured live on a real tick;
+ *     `BLOCK_COST.meeting` is 34 and is the same call.
+ *   PART 3 — runReportPipeline()        ~13-40  fact pack, a draft call, a
+ *     review call on the judgment lane, and the commit. `BLOCK_COST.report`
+ *     is 40 for the daily report, which is the same pipeline.
+ *
+ * **The split follows that boundary, not an arbitrary halving.** Each part is
+ * a different KIND of work with a different failure mode: part 1 is pure
+ * string templating over state, part 2 is a meeting, part 3 is a reviewed
+ * report. They were adjacent in one function for no reason except that one
+ * function had grown.
+ *
+ * ── WHAT IS NOT CHANGED ───────────────────────────────────────────────────
+ *
+ * **The weekly report's content.** Same three template files at the same
+ * paths, same meeting, same pipeline, same arguments. Every part recomputes
+ * the small inputs it needs (13 DO loads at 0.25 = 3.25, one board GET)
+ * rather than carrying state across ticks, because KV cycle state is the one
+ * thing an overflow was already destroying and a split that leaned on it
+ * would be building on the fault it exists to remove.
+ *
+ * **The ceiling.** Nothing here raises `SUBREQUEST_CEILING`, the Anthropic
+ * cap, or any sub-budget.
+ *
+ * ── PART 1 ────────────────────────────────────────────────────────────────
+ *
+ * Friday `weekly_summary`: the 10-section executive markdown ("PDF" —
+ * print-ready, see CLAUDE.md's PDF Export convention), a per-agent CSV
+ * ("Excel"), and a short public excerpt. It no longer runs the meeting or the
+ * report pipeline; `weekly_meeting` and `weekly_report` do, on their own ticks.
  */
 async function generateWeeklySummary(env, yearState, weekNumber) {
   const board = await fetchAssetBoard(env);
@@ -6142,32 +6191,82 @@ diagnostics. No customer-facing issues to report.
     public: await commitFileToRepo(env, BACKOFFICE_REPO_NAME, `${base}/${stem}-public-summary.md`, publicMd, `chore(office): week ${weekNumber} public summary [skip ci]`),
   };
 
-  let weeklyMeeting = null;
-  try {
-    weeklyMeeting = await runMeeting('weekly', env);
-  } catch (err) {
-    weeklyMeeting = { error: err.message };
-  }
+  // SESSION 35, ITEM D: `runMeeting('weekly')` and `runReportPipeline()` used
+  // to run here, in this same invocation. They are now `weekly_meeting` and
+  // `weekly_report`, two blocks on their own Friday ticks. Same calls, same
+  // arguments, same order — a later tick is still after this one.
+  return { weekNumber, files, agentRows, pipelineLines };
+}
 
-  // ── The written report (2026-08-08, behind report_pipeline_enabled) ────
-  //
-  // ADDITIVE, deliberately. The three template files above are committed
-  // exactly as before and are byte-unchanged whether the pipeline runs or
-  // not; the written report is a FOURTH file at a new path. Two reasons:
-  //
-  //   1. It makes the switch honest. "Off" has to mean the current output,
-  //      unchanged — not "the current output, mostly".
-  //   2. It is the shape plan item 0.4 needs. The template output IS the raw
-  //      agent output the publishing split moves to back-office; the reviewed
-  //      report is what keeps publishing here. Phase 3 changes a destination,
-  //      not a pipeline.
-  //
-  // Never throws: a report that cannot be produced is a logged skip. The
-  // weekly summary block must not fail because a provider was slow.
-  let writtenReport = { ran: false, reason: 'not_attempted' };
+/**
+ * ── PART 2 — Friday `weekly_meeting` ──────────────────────────────────────
+ *
+ * `runMeeting('weekly')`, and nothing else. This is the expensive third of the
+ * old block: `BLOCK_COST.meeting` is 34 against a usable 47, measured live at
+ * 31 on a real tick, and it was sharing an invocation with two other pieces of
+ * work of comparable size.
+ *
+ * Same never-throws posture the combined function had: a meeting that fails is
+ * a recorded error, not a thrown one, because the weekly package must not lose
+ * its report because a provider was slow.
+ */
+async function runWeeklyMeetingBlock(env) {
+  try {
+    return { ran: true, meeting: await runMeeting('weekly', env) };
+  } catch (err) {
+    return { ran: false, error: err.message };
+  }
+}
+
+/**
+ * ── PART 3 — Friday `weekly_report` ───────────────────────────────────────
+ *
+ * The written report (2026-08-08, behind `report_pipeline_enabled`).
+ *
+ * ADDITIVE, deliberately, and that was true before this split and is still
+ * true: the three template files part 1 commits are byte-unchanged whether
+ * this runs or not, and the written report is a FOURTH file at a new path.
+ * Two reasons, unchanged:
+ *
+ *   1. It makes the switch honest. "Off" has to mean the current output,
+ *      unchanged — not "the current output, mostly".
+ *   2. It is the shape plan item 0.4 needs. The template output IS the raw
+ *      agent output the publishing split moves to back-office; the reviewed
+ *      report is what keeps publishing here. Phase 3 changes a destination,
+ *      not a pipeline.
+ *
+ * **It recomputes `agentRows` and the pipeline summary rather than receiving
+ * them from part 1.** Three ticks ago is a different invocation, and the only
+ * way to carry them would be the KV day cycle — the very thing an overflowing
+ * tick was already failing to persist (see `subrequest-budget.js`'s header:
+ * the batch restarted from the head of the list all day because the cycle was
+ * never written). A split that leaned on that would be built on the fault it
+ * exists to remove. The recomputation costs 13 DO loads (3.25 weighted) and
+ * one asset-board GET, and it reads the same D1 rows, so the report's content
+ * is unchanged.
+ *
+ * Never throws: a report that cannot be produced is a logged skip.
+ */
+async function runWeeklyReportBlock(env, yearState, weekNumber) {
+  const agentRows = [];
+  for (const config of agentsConfig.agents) {
+    const agent = instantiateAgent(config.id, env);
+    await agent.loadState();
+    agentRows.push({
+      agentId: config.id, name: agent.name,
+      weeklyCases: await getWeeklyCasesHandled(env, config.id),
+      cases7d: await getCasesHandledOverDays(env, config.id, 7),
+      mood: agent.mood, irritation: agent.irritation,
+    });
+  }
+  const board = await fetchAssetBoard(env);
+  const pipelineLines = (board.items || [])
+    .map((i) => `- **${i.title}** (\`${i.id}\`): stage=${i.stage}${typeof i.version === 'number' ? `, v${i.version.toFixed(2)}` : ''}`)
+    .join('\n') || '_No pipeline items._';
+
   try {
     const weeklyYear = yearState?.stats?.year_number || 1;
-    writtenReport = await runReportPipeline(env, {
+    return await runReportPipeline(env, {
       reportType: 'weekly',
       periodLabel: periodLabelFor('weekly', weekNumber, weeklyYear),
       // OB-086: year 1 also published under the yearless `week-NN`.
@@ -6179,10 +6278,8 @@ diagnostics. No customer-facing issues to report.
     });
   } catch (err) {
     console.warn(`[report-pipeline] weekly report failed: ${err.message}`);
-    writtenReport = { ran: false, reason: `error: ${err.message}` };
+    return { ran: false, reason: `error: ${err.message}` };
   }
-
-  return { weekNumber, files, agentRows, weeklyMeeting, writtenReport };
 }
 
 /**
@@ -6412,6 +6509,9 @@ export async function runWorkDayCycle(env) {
   const spareTime = [];
   let weeklySummary = null;
   let versionBumps = [];
+  // SESSION 35, ITEM D: the two blocks split off weekly_summary.
+  let weeklyMeetingResult = null;
+  let weeklyReportResult = null;
 
   for (const block of schedule.blocks) {
     if (block.type === 'tool_task_window') {
@@ -6425,6 +6525,15 @@ export async function runWorkDayCycle(env) {
     } else if (block.type === 'weekly_summary') {
       weeklySummary = await generateWeeklySummary(env, yearState, yearState.current_week || 1);
       versionBumps = await checkProductVersionBumps(env, yearState, nextDay);
+    } else if (block.type === 'weekly_meeting') {
+      // SESSION 35, ITEM D. The whole-day path runs all three parts in the
+      // schedule's own order, so this path's output is unchanged by the split.
+      // (It remains NON-FUNCTIONAL for a real day — a whole day in one
+      // invocation exceeds the subrequest cap, which is what this item is
+      // about. See CLAUDE.md, "How to run a simulation day manually".)
+      weeklyMeetingResult = await runWeeklyMeetingBlock(env);
+    } else if (block.type === 'weekly_report') {
+      weeklyReportResult = await runWeeklyReportBlock(env, yearState, yearState.current_week || 1);
     }
   }
 
@@ -6506,7 +6615,7 @@ export async function runWorkDayCycle(env) {
     current_quarter: Math.ceil(nextDay / 91),
     stats: newStats,
   };
-  const scheduleInfo = { schedule, dayOfWeek, batches, toolTask, aiExperience, spareTime, weeklySummary, versionBumps };
+  const scheduleInfo = { schedule, dayOfWeek, batches, toolTask, aiExperience, spareTime, weeklySummary, versionBumps, weeklyMeetingResult, weeklyReportResult };
   // A13 rest-day guard — see the fuller comment on the same guard in
   // finalizeScheduledDay(). Applied HERE TOO even though this whole function is
   // the documented-non-functional {"type":"day"} path: a rule enforced on one of
@@ -6959,6 +7068,14 @@ async function runScheduledBlockInner(env, israelTime, dayOfWeek, ctx) {
         const yearState = await getYearState(env);
         cycle.results.weeklySummary = await generateWeeklySummary(env, yearState, yearState.current_week || 1);
         cycle.results.versionBumps = await checkProductVersionBumps(env, yearState, cycle.day);
+      } else if (block.type === 'weekly_meeting') {
+        // SESSION 35, ITEM D. Split off `weekly_summary`, which measured 53.25
+        // and 48 weighted subrequests against a usable 47 — the first over
+        // Cloudflare's platform limit outright. Its own tick, its own budget.
+        cycle.results.weeklyMeeting = await runWeeklyMeetingBlock(env);
+      } else if (block.type === 'weekly_report') {
+        const yearState = await getYearState(env);
+        cycle.results.weeklyReport = await runWeeklyReportBlock(env, yearState, yearState.current_week || 1);
       } else if (block.type === 'chore_rotation') {
         // Cross-project chore rotation (Notebook-X/data-center/archive-alpha),
         // see config/chore-schedule.json + workers/chore-runner.js. Reuses

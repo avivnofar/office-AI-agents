@@ -680,7 +680,9 @@ section('§8 A13 — Saturday is genuinely zero-write');
 
   check('Saturday has no guide_verify block', !sat.some((b) => b.type === 'guide_verify'));
   check('…no case batches, meetings, reports or guide blocks of any kind',
-    !sat.some((b) => /case_batch|meeting|report|guide_|weekly_summary|chore_rotation|tool_task_window|architect_liaison/.test(b.type)));
+    // SESSION 35, ITEM D added `weekly_meeting` and `weekly_report`; `weekly_`
+    // covers all three, so a fourth weekly block cannot slip onto Saturday.
+    !sat.some((b) => /case_batch|meeting|report|guide_|weekly_|chore_rotation|tool_task_window|architect_liaison/.test(b.type)));
   check('…only the forced-idle block, which makes no model call', sat.length === 1 && sat[0].type === 'spare_time' && sat[0].force_idle === true);
   // Was: 'guide_verify moved to Friday and is still weekly (one run, one day)'.
   // Retired from the schedule entirely on 2026-08-29 (Session 34, Item B) —

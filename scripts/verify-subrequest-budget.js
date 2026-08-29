@@ -50,6 +50,8 @@ import {
   // Session 34, Item A — the derived estimates.
   deriveBlockEstimates, refreshBlockEstimates, loadBlockEstimates,
   ESTIMATE_MARGIN, MIN_MEASURED_RUNS, USABLE_MAX, ESTIMATES_KV_KEY,
+  // Session 35, Item D — a redefined block has no usable history.
+  REDEFINED_BLOCKS,
 } from '../workers/subrequest-budget.js';
 
 const require = createRequire(import.meta.url);
@@ -208,11 +210,25 @@ section('§4  Block admission, and the oversize escape hatch');
   check('a cheap block is admitted', admitBlock(b, 'chore_rotation').decision === 'run');
 
   // A block bigger than the entire usable budget must RUN, not be refused
-  // forever. weekly_summary is the live instance.
-  check('weekly_summary is oversize against a single invocation',
-    BLOCK_COST.weekly_summary > b.usable, `${BLOCK_COST.weekly_summary} vs ${b.usable}`);
+  // forever. `weekly_summary` USED TO BE the live instance and is not any more:
+  // SESSION 35 item D split it into three, and all three fit.
+  //
+  // INVERTED rather than deleted, the same way the retired case ticks were —
+  // a check that merely stopped naming weekly_summary would let the oversize
+  // condition come back unnoticed. The `oversize` PATH is still proved, on a
+  // fabricated block, because the path is what must keep working.
+  check('[THE FIX] weekly_summary is no longer oversize — it fits a single invocation',
+    BLOCK_COST.weekly_summary <= b.usable, `${BLOCK_COST.weekly_summary} vs ${b.usable}`);
+  check('...and neither is either half it was split into',
+    BLOCK_COST.weekly_meeting <= b.usable && BLOCK_COST.weekly_report <= b.usable,
+    `${BLOCK_COST.weekly_meeting} / ${BLOCK_COST.weekly_report} vs ${b.usable}`);
+  check('NO block in the table is oversize any more',
+    Object.entries(BLOCK_COST).filter(([, v]) => v > b.usable).length === 0,
+    JSON.stringify(Object.entries(BLOCK_COST).filter(([, v]) => v > b.usable)));
+  check('the oversize PATH still works, proved on a fabricated cost',
+    admitBlock(b, 'weekly_summary', { weekly_summary: b.usable + 1 }).decision === 'oversize');
   check('an oversize block runs rather than never running at all',
-    admitBlock(b, 'weekly_summary').decision === 'oversize');
+    admitBlock(b, 'weekly_summary', { weekly_summary: b.usable + 1 }).cost === b.usable + 1);
 
   const drained = createTickBudget({ casesDue: false });
   drained.charge(drained.usable, 'report');
@@ -655,12 +671,45 @@ section('§8  Estimates derived from block_admissions, not declared');
   check('a block with no rows at all is unmeasured too, not invented',
     unmeasured.includes('repair') && unmeasured.includes('architect_approval'));
 
-  // ── the cap: the margin may never manufacture an 'oversize' ───────────
-  check('weekly_summary is derived down from 120 to its measured p90',
-    estimates.weekly_summary === Math.ceil(53.25), String(estimates.weekly_summary));
-  check('[THE FINDING] weekly_summary STILL exceeds the usable budget on real measurement',
-    estimates.weekly_summary > USABLE_MAX,
-    `${estimates.weekly_summary} > ${USABLE_MAX} — the ceiling, not the estimate, is what refuses it`);
+  // ── SESSION 35, ITEM D: a redefined block has no usable history ────────
+  //
+  // These two checks used to read *"weekly_summary is derived down from 120 to
+  // its measured p90"* and *"[THE FINDING] weekly_summary STILL exceeds the
+  // usable budget on real measurement"*. Both were true and both measured the
+  // COMBINED block — the template trio plus the meeting plus the report
+  // pipeline — which no longer exists.
+  //
+  // Its two historical rows (48, 53.25) must NOT be derived from, or the
+  // derivation would keep pinning the new, much smaller block at 54 and
+  // `admitBlock()` would keep calling it oversize. `REDEFINED_BLOCKS` discards
+  // them, and an UNDATED row is discarded too because it cannot be shown to be
+  // after the change — the fail-closed direction.
+  check('[SESSION 35 ITEM D] the pre-split weekly_summary rows are DISCARDED, not derived from',
+    !('weekly_summary' in estimates) && unmeasured.includes('weekly_summary'),
+    JSON.stringify(detail.weekly_summary));
+  check('...so weekly_summary falls back to its constant, which now fits',
+    blockCost('weekly_summary', estimates) === BLOCK_COST.weekly_summary
+    && BLOCK_COST.weekly_summary <= USABLE_MAX);
+  check('[FALSIFYING] a row DATED AFTER the redefinition IS derived from',
+    (() => {
+      const d = deriveBlockEstimates([
+        ...rows,
+        { block: 'weekly_summary', decision: 'run', actual: 15, created_at: '2026-09-05 12:00:00' },
+        { block: 'weekly_summary', decision: 'run', actual: 17, created_at: '2026-09-12 12:00:00' },
+      ]);
+      return d.estimates.weekly_summary === 19; // ceil(p90 17) + margin 2
+    })());
+  check('[FALSIFYING] a row dated BEFORE it is still discarded even alongside new ones',
+    (() => {
+      const d = deriveBlockEstimates([
+        { block: 'weekly_summary', decision: 'run', actual: 53.25, created_at: '2026-08-22 12:00:00' },
+        { block: 'weekly_summary', decision: 'run', actual: 15, created_at: '2026-09-05 12:00:00' },
+        { block: 'weekly_summary', decision: 'run', actual: 17, created_at: '2026-09-12 12:00:00' },
+      ]);
+      return d.estimates.weekly_summary === 19 && d.detail.weekly_summary.max === 17;
+    })());
+  check('an ordinary block is unaffected by the redefinition filter',
+    !('meeting' in REDEFINED_BLOCKS) && estimates.owner_channel > 0);
   check('no derived estimate is pushed OVER usable by the margin alone',
     Object.entries(estimates).every(([b, v]) => v <= USABLE_MAX || Math.ceil(detail[b].p90) > USABLE_MAX));
 

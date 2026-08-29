@@ -215,7 +215,14 @@ export const ARTIFACT_CAPABLE_BLOCKS = Object.freeze([
   'guide_review',       // guides/
   'guide_verify',       // guides/
   'qa_instruments',     // campus/shared/qa-instruments/
-  'weekly_summary',     // reports/_drafts/weekly-*
+  // SESSION 35, ITEM D (2026-08-29): `weekly_summary` was split into three
+  // Friday blocks because it measured 53.25 weighted subrequests against a
+  // usable 47. Both halves that still write an artifact are named here — the
+  // template trio moved nowhere, and the reviewed draft moved to the new
+  // `weekly_report` block. `weekly_meeting` is deliberately absent: it runs a
+  // meeting, and no `meeting` block is on this list.
+  'weekly_summary',     // campus/shared/weekly/* (the template trio)
+  'weekly_report',      // reports/_drafts/weekly-*
 ]);
 
 /**
