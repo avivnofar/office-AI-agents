@@ -129,6 +129,20 @@ check('C8 — the retired rows render as text, never as a button',
     const seg = html.slice(html.indexOf('cases_enabled'), html.indexOf('cases_enabled') + 600);
     return /retired — no control offered/.test(seg) && !/data-trigger="cases_toggle"/.test(html);
   })());
+check('[FAILS-OLD] an IMMEDIATE mismatch is NOT YET VISIBLE, not a failure — KV is eventually consistent and this fired on a write that had taken',
+  /NOT YET VISIBLE/.test(read('workers/automations-page.js'))
+  && /eventually consistent/.test(read('workers/automations-page.js'))
+  && /setTimeout\(/.test(read('workers/automations-page.js')));
+check('...and only the SECOND read is allowed to say the write did not take',
+  (() => {
+    // Executable body only: the header above the fix QUOTES the sentence it
+    // replaced, so a whole-file ordering test trips on the documentation of
+    // the very change it is checking — the same scoping verify-office-
+    // bureaucracy.js applies to repo-write.js's old Bearer line.
+    const body = read('workers/automations-page.js')
+      .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+    return body.indexOf('NOT YET VISIBLE') < body.indexOf('THE WRITE DID NOT TAKE');
+  })());
 check('C7 — the toggle READS THE LIVE VALUE BACK rather than trusting the write’s own 200',
   /read-back/i.test(read('workers/automations-page.js'))
   && /automations\?format=json/.test(read('workers/automations-page.js'))

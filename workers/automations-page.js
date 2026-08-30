@@ -140,7 +140,7 @@ ${switchRows}
           </table>
         </div>
         <p class="answer-status" id="toggle-status"></p>
-        <p class="answer-effect">Every value above was read back from live SIM_KV on this page load. A toggle re-reads it after writing rather than assuming the write took &mdash; this estate has a documented case of a toggle answering 200 and changing nothing.</p>
+        <p class="answer-effect">Every value above was read back from live SIM_KV on this page load. A toggle re-reads it after writing rather than assuming the write took &mdash; this estate has a documented case of a toggle answering 200 and changing nothing. Workers KV is eventually consistent, so a value that has not moved yet reads as <em>not yet visible</em> and is re-read once after ten seconds; only the second read is allowed to be a verdict.</p>
       </div>
     </div>
   </main>
@@ -150,6 +150,16 @@ ${switchRows}
   function say(msg, ok) {
     status.textContent = msg;
     status.className = 'answer-status ' + (ok ? 'answer-status--ok' : 'answer-status--err');
+  }
+  function paint(row) {
+    if (!row) return;
+    var cell = document.querySelector('[data-value-for="' + row.key + '"]');
+    if (cell) cell.textContent = row.value === true ? 'ON' : 'OFF';
+    var b = document.querySelector('button[data-trigger="' + row.trigger + '"]');
+    if (b) {
+      b.setAttribute('data-next', row.value === true ? 'false' : 'true');
+      b.textContent = 'turn ' + (row.value === true ? 'OFF' : 'ON');
+    }
   }
   document.addEventListener('click', async function (ev) {
     var btn = ev.target.closest('button[data-trigger]');
@@ -172,14 +182,42 @@ ${switchRows}
       var data = await back.json();
       var row = (data.switches || []).filter(function (s) { return s.trigger === type; })[0];
       if (!row) { say('written, but the read-back did not return this switch', false); btn.disabled = false; return; }
-      var cell = document.querySelector('[data-value-for="' + row.key + '"]');
-      if (cell) cell.textContent = row.value === true ? 'ON' : 'OFF';
-      btn.setAttribute('data-next', row.value === true ? 'false' : 'true');
-      btn.textContent = 'turn ' + (row.value === true ? 'OFF' : 'ON');
-      btn.disabled = false;
-      say(row.value === next
-        ? 'read back from live KV: ' + row.key + ' is now ' + (row.value ? 'ON' : 'OFF') + '.'
-        : 'THE WRITE DID NOT TAKE: ' + row.key + ' still reads ' + (row.value ? 'ON' : 'OFF') + '.', row.value === next);
+      paint(row);
+      if (row.value === next) {
+        btn.disabled = false;
+        say('read back from live KV: ' + row.key + ' is now ' + (row.value ? 'ON' : 'OFF') + '.', true);
+        return;
+      }
+      /* ── A MISMATCH IS NOT YET A FAILURE (found live, 2026-08-30) ───────
+         The first version of this said THE WRITE DID NOT TAKE on any mismatch,
+         and the session that wrote it watched that fire on a write that HAD
+         taken: a read three seconds later returned the old value, and the same
+         write read back correctly at +0s on the next attempt. Workers KV is
+         eventually consistent — an immediate read can be served the prior
+         value from another colo — so an immediate mismatch is INCONCLUSIVE,
+         not a failure.
+         Reporting it as a failure would be the estate's own recurring sin one
+         level up: two different facts ("stale read" and "refused write")
+         rendered as one sentence. So the first mismatch says NOT YET VISIBLE
+         and re-reads; only the second, after a wait longer than KV's own
+         propagation, is allowed to be a verdict. */
+      say('written; the value is NOT YET VISIBLE (KV is eventually consistent) — re-reading in 10s before saying anything.', true);
+      setTimeout(async function () {
+        try {
+          var again = await fetch('${apiBase}/automations?format=json', { headers: { Accept: 'application/json' } });
+          var d2 = await again.json();
+          var r2 = (d2.switches || []).filter(function (s) { return s.trigger === type; })[0];
+          paint(r2);
+          btn.disabled = false;
+          say(r2 && r2.value === next
+            ? 'read back from live KV after 10s: ' + r2.key + ' is now ' + (r2.value ? 'ON' : 'OFF') + '.'
+            : 'THE WRITE DID NOT TAKE: ' + row.key + ' still reads ' + (r2 && r2.value ? 'ON' : 'OFF') + ' after a second read. Reload before trusting anything on this page.',
+          !!(r2 && r2.value === next));
+        } catch (e2) {
+          btn.disabled = false;
+          say('the second read-back threw: ' + e2.message + ' — reload before trusting the value', false);
+        }
+      }, 10000);
     } catch (err) {
       say('the toggle threw: ' + err.message, false);
       btn.disabled = false;
