@@ -326,7 +326,7 @@ export function normalizeContextAmendments(rawItems, { rosterIds, proposerIds = 
  * Pure function of the board snapshot + activity rows, so the verifier can
  * exercise every branch without D1 or the network.
  */
-export function computeWorkflowMetrics({ boardTasks = [], activityByAgent = {}, rosterIds = [], now = Date.now() }) {
+export function computeWorkflowMetrics({ boardTasks = [], activityByAgent = {}, rosterIds = [], now = Date.now(), lapseDays = null }) {
   const unstarted = boardTasks.filter((t) => t.state === 'READY');
   const inProgress = boardTasks.filter((t) => t.state === 'IN-PROGRESS');
   const stuck = boardTasks.filter((t) => t.state === 'BLOCKED' || t.state === 'NOT-READY');
@@ -359,8 +359,50 @@ export function computeWorkflowMetrics({ boardTasks = [], activityByAgent = {}, 
   const busy = new Set(inProgress.map((t) => t.agentId).filter((x) => x != null));
   const freeCapacity = rosterIds.filter((id) => !busy.has(id));
 
+  /*
+   * ── SESSION 39, ITEM B: MEASURE 1 CARRIES THE AGE ─────────────────────
+   *
+   * `own-assignment` (office-context.js) puts ONE unstarted assignment in front
+   * of an agent in imperative voice, and after `ASSIGNMENT_LAPSE_DAYS` it stops
+   * addressing that agent and says the item "is the Workflow's measure 1 now
+   * and is reported, dated, at every standup."
+   *
+   * That sentence was a claim about THIS function, and until now it would have
+   * been false: measure 1 listed ids and nothing else, so an item that lapsed
+   * out of one surface arrived at the other with its age discarded — an
+   * escalation to a place that could not tell a two-day-old assignment from a
+   * twenty-three-day-old one. An obligation that clears INTO a mechanism which
+   * cannot see what it was handed has not escalated, it has been dropped
+   * politely.
+   *
+   * `lapseDays` is PASSED IN, never defaulted here. office-context.js owns the
+   * number (`ASSIGNMENT_LAPSE_DAYS`) because that is where the agent-facing
+   * line is worded; a second copy living in this file is the drift both modules
+   * already have a rule against. `null` means the caller did not state one, and
+   * then no item is called lapsed — "not classified" rather than "not lapsed".
+   */
+  const ageOf = (t) => {
+    const d = Date.parse(`${t.opened}T00:00:00Z`);
+    return Number.isNaN(d) ? null : Math.floor((now - d) / 86400000);
+  };
+  const unstartedRows = unstarted.map((t) => ({
+    id: t.id, title: t.title, assignee: t.assignee, urgent: !!t.urgency,
+    opened: t.opened || null,
+    days: t.opened ? ageOf(t) : null,
+  }));
+  // Undated ones are their own list, not folded in as zero. The board carries
+  // 12 tasks whose Notes line has no date, and counting them as fresh is how a
+  // backlog stops being visible.
+  const lapsedUnstarted = lapseDays === null
+    ? []
+    : unstartedRows.filter((r) => r.days !== null && r.days >= lapseDays).sort((a, b) => b.days - a.days);
+  const undatedUnstarted = unstartedRows.filter((r) => r.days === null);
+
   return {
-    unstarted: unstarted.map((t) => ({ id: t.id, title: t.title, assignee: t.assignee, urgent: !!t.urgency })),
+    unstarted: unstartedRows,
+    lapseDays,
+    lapsedUnstarted,
+    undatedUnstarted,
     idle,
     overdue,
     undated,
@@ -523,7 +565,18 @@ export function renderWorkflowMetrics(m) {
   if (!m) return '';
   const lines = [
     'THE WORKFLOW\'S PRODUCTIVITY PICTURE (Agent 12). Four separate measures — do NOT collapse these into one percentage.',
-    `1. UNSTARTED WORK — ${m.unstarted.length} task(s) READY and undispatched${m.unstarted.filter((t) => t.urgent).length ? `, ${m.unstarted.filter((t) => t.urgent).length} of them URGENT` : ''}.${m.unstarted.length ? ` ${m.unstarted.slice(0, 8).map((t) => t.id).join(', ')}` : ''}`,
+    `1. UNSTARTED WORK — ${m.unstarted.length} task(s) READY and undispatched${m.unstarted.filter((t) => t.urgent).length ? `, ${m.unstarted.filter((t) => t.urgent).length} of them URGENT` : ''}.${m.unstarted.length ? ` ${m.unstarted.slice(0, 8).map((t) => `${t.id}${t.days === null ? ' (undated)' : ` (${t.days}d)`}`).join(', ')}` : ''}`
+      // 1a is where `own-assignment` escalates TO. It names the oldest first
+      // and it names them WITH their age, because the whole point of the lapse
+      // is that a number nobody says out loud is a number nobody acts on.
+      + (m.lapsedUnstarted?.length
+        ? `
+   1a. OF THOSE, LAPSED — unstarted ${m.lapseDays}+ calendar days, oldest first: ${m.lapsedUnstarted.slice(0, 10).map((t) => `${t.id} ${t.days}d (${t.assignee || 'unassigned'})`).join('; ')}. Each has ALSO stopped being an instruction in its owner's own prompt and is now yours. Nothing has been deleted; every one is still on the board with its whole history.`
+        : '')
+      + (m.undatedUnstarted?.length
+        ? `
+   1b. AND ${m.undatedUnstarted.length} unstarted task(s) carry NO assignment date on the board (${m.undatedUnstarted.slice(0, 10).map((t) => t.id).join(', ')}) — their age is UNMEASURABLE, which is not the same as recent, and they are excluded from 1a rather than passed by it.`
+        : ''),
     `2. AGENTS NOT WORKING — ${m.idle.length}.${m.idle.length ? ` ${m.idle.map((i) => `Agent ${i.agentId} (${i.note || `${i.days}d`})`).join('; ')}` : ''}`,
     `3. PAST THE METRIC LINE — ${m.overdue.length} overdue.${m.overdue.length ? ` ${m.overdue.map((o) => `${o.id} due ${o.due} (${o.assignee || 'unassigned'})`).join('; ')}` : ''}${m.undated.length ? ` PLUS ${m.undated.length} dispatched task(s) with no parseable deadline — reported as UNKNOWN, not as on-time: ${m.undated.join(', ')}` : ''}`,
     `4. FREE CAPACITY — ${m.freeCapacity.length} agent(s) holding no in-progress task: ${m.freeCapacity.map((id) => `Agent ${id}`).join(', ') || 'none'}`,

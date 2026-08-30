@@ -123,6 +123,173 @@ check('a requirement with an unreadable status is REFUSED, never defaulted to "n
   badStatus.ok && badStatus.requirements.length === 2 && badStatus.malformed.length === 1,
   JSON.stringify(badStatus.malformed));
 
+/* ══════════ §1b own-assignment — a meeting's decision, said as an order ══════
+ *
+ * SESSION 39, ITEM B. Everything here [FAILS-OLD] trivially, because none of
+ * these functions existed — so the interesting checks are not "does it render"
+ * but the four that a later rewrite could break while still rendering
+ * something: the VOICE, the named ARTIFACT, the CLEARING path, and the fact
+ * that it CREATES NOTHING.
+ */
+section('§1b own-assignment — the third obligation surface  [FAILS-OLD]');
+
+const ASSIGN_BOARD_MD = `# THE OFFICE BOARD
+
+### OB-171 — Investigate OB-003 (permission-flow analysis)
+
+- **Assignee:** Agent 5 — The IT Chief
+- **State:** READY
+- **Metric:** 1 office-days from dispatch (2026-08-30 if dispatched today) · delivered = assignment record OB-003 to Agent 5
+- **Blocked by:** nothing
+- **Source:** daily_standup meeting
+- **Notes:** *(2026-08-28, opened by daily_standup meeting via the action_items pipeline)*
+
+### OB-172 — Handle OB-023 (owner/office communication)
+
+- **Assignee:** Agent 5 — The IT Chief
+- **State:** READY
+- **Metric:** 1 office-days from dispatch · delivered = assignment record OB-023 to Agent 5
+- **Blocked by:** nothing
+- **Notes:** *(2026-08-28, opened by daily_standup meeting via the action_items pipeline)*
+
+### OB-060 — Something assigned a fortnight ago and never begun
+
+- **Assignee:** Agent 5 — The IT Chief
+- **State:** READY
+- **Metric:** 2 office-days from dispatch · delivered = a written finding
+- **Blocked by:** nothing
+- **Notes:** *(2026-08-12, opened by the weekly meeting)*
+
+### OB-061 — Already started, so it is not an unstarted assignment
+
+- **Assignee:** Agent 5 — The IT Chief
+- **State:** IN-PROGRESS
+- **Metric:** 2 office-days from dispatch · delivered = a started thing
+- **Blocked by:** nothing
+- **Notes:** *(2026-08-12, opened by the weekly meeting)*
+
+### OB-062 — Refused, and a refusal is an answer
+
+- **Assignee:** Agent 5 — The IT Chief
+- **State:** BLOCKED
+- **Metric:** 2 office-days from dispatch · delivered = a blocked thing
+- **Blocked by:** waiting on the owner
+- **Notes:** *(2026-08-12, opened by the weekly meeting)*
+
+### OB-063 — No date on its Notes line at all
+
+- **Assignee:** Agent 7 — The Team Lead
+- **State:** READY
+- **Metric:** 2 office-days from dispatch · delivered = an undated thing
+- **Blocked by:** nothing
+- **Notes:** opened by somebody who wrote no date
+`;
+const ASSIGN_BOARD = officeContext.parseBoard(ASSIGN_BOARD_MD);
+check('the assignment fixture parses', ASSIGN_BOARD.ok === true, ASSIGN_BOARD.reason);
+
+check('parseBoard reads `opened` off the Notes line, which is where the pipeline writes it',
+  ASSIGN_BOARD.tasks.find((t) => t.id === 'OB-171').opened === '2026-08-28');
+check('and a Notes line with NO date is `null` — reported as undated, never given today\'s date',
+  ASSIGN_BOARD.tasks.find((t) => t.id === 'OB-063').opened === null);
+
+check('deliveredArtifact() lifts the `delivered =` clause the Metric line already carried',
+  officeContext.deliveredArtifact('1 office-days from dispatch · delivered = assignment record OB-003 to Agent 5')
+    === 'assignment record OB-003 to Agent 5');
+check('and returns null rather than a guess when the Metric names no artifact',
+  officeContext.deliveredArtifact('3 office-days from dispatch') === null);
+
+const A5 = officeContext.ownAssignment(ASSIGN_BOARD.tasks, { agentId: 5, today: '2026-08-30' });
+check('the NEWEST unstarted assignment is the one put in front of the agent — a meeting\'s latest decision',
+  A5.current.id === 'OB-172', A5.current.id);
+check('...and among assignments opened the SAME DAY the HIGHEST id wins — promote-inbox.js allocates ids in order, so it is the last thing the office decided',
+  officeContext.ownAssignment(
+    ASSIGN_BOARD.tasks.filter((t) => t.opened === '2026-08-28'), { agentId: 5, today: '2026-08-30' },
+  ).current.id === 'OB-172');
+check('IN-PROGRESS and BLOCKED are NOT unstarted work — acting on it is what clears this, and both are acts',
+  A5.others === 2, `others=${A5.others}`);
+check('the artifact rides with it, because an item that cannot name one is refused upstream',
+  A5.artifact === 'assignment record OB-023 to Agent 5');
+check('the older one is carried as the LAPSED clause, not as a second instruction',
+  A5.lapsed && A5.lapsed.id === 'OB-060' && A5.lapsedAgeDays === 18, `${A5.lapsed?.id} ${A5.lapsedAgeDays}`);
+
+const A7 = officeContext.ownAssignment(ASSIGN_BOARD.tasks, { agentId: 7, today: '2026-08-30' });
+check('an undated task can be the current assignment but can NEVER be judged lapsed',
+  A7.current.id === 'OB-063' && A7.ageDays === null && A7.lapsed === null);
+check('an agent with no READY task gets NO section at all — silence, not an empty instruction',
+  officeContext.ownAssignment(ASSIGN_BOARD.tasks, { agentId: 11, today: '2026-08-30' }) === null
+  && officeContext.renderOwnAssignment(null) === null);
+
+const A5TEXT = officeContext.renderOwnAssignment(A5);
+check('THE VOICE IS IMPERATIVE — this is the whole difference from `own-tasks`, which recites and produces nothing',
+  /YOU HAVE UNSTARTED ASSIGNED WORK/.test(A5TEXT) && /START IT/.test(A5TEXT), A5TEXT.slice(0, 90));
+check('it NAMES THE ARTIFACT, so the deadline is falsifiable — normalizeActionItems() refuses an item that cannot',
+  /Owed artifact: assignment record OB-023 to Agent 5/.test(A5TEXT));
+check('it names BOTH clearing acts — an obligation with no exit is a permanent nag and worse than no line',
+  /IN-PROGRESS/.test(A5TEXT) && /BLOCKED/.test(A5TEXT) && /Either clears this line/.test(A5TEXT));
+check('and says nothing is deleted to clear it — retirement in this estate is a record, never a removal',
+  /nothing is deleted to clear it/.test(A5TEXT));
+check('the lapse is DATED and names where it escalates to, so it is an escalation rather than a louder repeat',
+  /ALSO LAPSED/.test(A5TEXT) && /OB-060, assigned 2026-08-12, unstarted 18 calendar day\(s\)/.test(A5TEXT)
+  && /Workflow's measure 1/.test(A5TEXT));
+
+// A wall of text at `headline` is the same defect at a higher priority.
+check('a 250-character `delivered` clause is TRUNCATED — and says so, and says where the whole of it is',
+  (() => {
+    const long = { ...A5, artifact: 'x'.repeat(300) };
+    const out = officeContext.renderOwnAssignment(long);
+    return /TRUNCATED/.test(out) && /Metric line on the board/.test(out) && out.length < 900;
+  })());
+
+// The lapse line and measure 1 must be talking about the same N.
+check('ASSIGNMENT_LAPSE_DAYS has ONE definition — meeting-engine imports it rather than restating it',
+  /import \{ getOfficeContext, getOfficeSnapshot, ASSIGNMENT_LAPSE_DAYS \}/.test(read('workers/meeting-engine.js'))
+  && /lapseDays: ASSIGNMENT_LAPSE_DAYS,/.test(read('workers/meeting-engine.js')));
+check('measure 1 now carries each unstarted task\'s AGE — an escalation into a list that cannot see age is a polite drop',
+  (() => {
+    const m = meetingEngine.computeWorkflowMetrics({
+      boardTasks: ASSIGN_BOARD.tasks, rosterIds: [5, 7],
+      now: Date.parse('2026-08-30T00:00:00Z'), lapseDays: officeContext.ASSIGNMENT_LAPSE_DAYS,
+    });
+    const r = meetingEngine.renderWorkflowMetrics(m);
+    return m.lapsedUnstarted.length === 1 && m.lapsedUnstarted[0].id === 'OB-060'
+      && m.undatedUnstarted.length === 1 && m.undatedUnstarted[0].id === 'OB-063'
+      && /1a\. OF THOSE, LAPSED/.test(r) && /OB-060 18d/.test(r) && /1b\. AND 1 unstarted task/.test(r);
+  })());
+check('with no lapseDays stated, NOTHING is called lapsed — "not classified" is not "not lapsed"',
+  meetingEngine.computeWorkflowMetrics({
+    boardTasks: ASSIGN_BOARD.tasks, rosterIds: [5], now: Date.parse('2026-08-30T00:00:00Z'),
+  }).lapsedUnstarted.length === 0);
+
+/* ── the section, in an assembled prompt, at the priority that survives ──── */
+const assignSnap = { fetched_at: Date.now(), today: '2026-08-30', board: ASSIGN_BOARD, requirements: reqs, errors: [] };
+const assignBuilt = officeContext.buildOfficeContext(assignSnap, 'agent', { agentId: 5, today: '2026-08-30' });
+check('own-assignment reaches a STANDARD agent — A11 withholds the office\'s recitations, never an instruction',
+  officeContext.STANDARD_SECTIONS.includes('own-assignment')
+  && /YOU HAVE UNSTARTED ASSIGNED WORK: OB-172/.test(assignBuilt.text)
+  && !assignBuilt.dropped.includes('own-assignment'));
+check('it sits at PRIORITY.headline, beside own-review and own-build, so the fitter can never trim it',
+  (() => {
+    const src = read('workers/office-context.js');
+    const at = src.indexOf("label: 'own-assignment'");
+    return at !== -1 && /priority: PRIORITY\.headline/.test(src.slice(at, at + 160));
+  })());
+
+/*
+ * IDEMPOTENCY (B6). The section creates no record, so there is nothing for a
+ * duplicate to be written into — two builds of the same snapshot, and a re-read
+ * of the same meeting's items, produce the identical line. This is asserted
+ * rather than argued because it is the property that made a new obligations
+ * table unnecessary, and a future rewrite that started PERSISTING an obligation
+ * would break it here rather than in production.
+ */
+check('building twice produces the identical prompt — no second obligation, because none is created',
+  officeContext.buildOfficeContext(assignSnap, 'agent', { agentId: 5, today: '2026-08-30' }).text === assignBuilt.text);
+check('and the same is true through a FRESH parse of the same board markdown — the projection has no memory',
+  officeContext.buildOfficeContext(
+    { ...assignSnap, board: officeContext.parseBoard(ASSIGN_BOARD_MD) },
+    'agent', { agentId: 5, today: '2026-08-30' },
+  ).text === assignBuilt.text);
+
 /* ═══════════════════ §2 budgets and drop order ════════════════════════ */
 section('§2 size budgets and the documented drop order');
 

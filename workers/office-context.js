@@ -538,6 +538,14 @@ export const STANDARD_SECTIONS = Object.freeze([
   'owner-issue-replies-count',
   'owner-issue-replies',
   'own-tasks',
+  /*
+   * SESSION 39, ITEM B. Beside `own-review` and `own-build`, and for the
+   * identical A11 reason: what a STANDARD agent needs from the board is not
+   * the office's recitation of itself, it is the one thing assigned to it.
+   * A11 withholds the picture from a regular agent; it has never withheld
+   * an instruction, and this is the only board section that is one.
+   */
+  'own-assignment',
   'own-review',
   // A regular agent needs to see THEIR OWN build obligation for the same
   // reason `own-review` is here: it is an instruction to them specifically,
@@ -803,6 +811,24 @@ export function parseBoard(markdown) {
       // the counts would give the board two grammars for "what is this task",
       // which is the drift the single `State:` field exists to prevent.
       stage: plain(boardField(block, 'Stage')) || null,
+      // ── THE FIFTH MARKER, ADDED SESSION 39 (2026-08-30) ───────────────
+      //
+      // WHEN this task was opened, read off the leading date of its own
+      // `Notes:` line — `*(2026-08-28, opened by daily_standup meeting via
+      // the action_items pipeline)*`. Every task the action_items pipeline
+      // writes carries one (renderBoardTask() in meeting-decisions.js emits
+      // it), and 152 of the live board's 165 Notes lines have it.
+      //
+      // It is read, never derived. A READY task has NO deadline — its Metric
+      // line says "N office-days FROM DISPATCH", and nothing has dispatched
+      // it — so the only honest age of unstarted work is how long ago it was
+      // ASSIGNED. The 13 tasks with no readable date come back `null` and are
+      // reported as undated rather than being given today's date, which would
+      // make every unread task look newly assigned forever.
+      //
+      // Like `Dispatched:`, `Offered:`, `Warehouse:` and `Stage:` before it:
+      // a marker, not a state, and it moves no count.
+      opened: (/^- \*\*Notes:\*\*\s*\*?\(?(\d{4}-\d{2}-\d{2})/m.exec(block) || [])[1] || null,
     });
   }
 
@@ -889,6 +915,241 @@ export const QUESTION_MARKERS = Object.freeze(['ANSWERED', 'DECLINED', 'WITHDRAW
  * live question and a false negative merely leaves the status quo. It errs
  * toward leaving the question open.
  */
+/* ───────────── THE THIRD OBLIGATION SURFACE (Session 39, Item B) ────────── */
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ * WHAT A MEETING DECIDED, SAID TO THE AGENT IT WAS DECIDED ABOUT.
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * ── WHAT WAS ALREADY TRUE, BEFORE ANYTHING HERE WAS WRITTEN ──────────────
+ *
+ * The brief this was built from said a meeting's action items "exist in
+ * `meetings.decisions.action_items` and in no other place." **That is not
+ * true, and establishing it was most of the work.** The pipeline already runs
+ * end to end and every hop of it is on disk:
+ *
+ *   meeting -> `normalizeActionItems()` (meeting-decisions.js, refuses rather
+ *   than guesses an owner) -> `writeActionItemsToBoard()` -> back-office
+ *   `campus/shared/board/inbox/<date>-<type>-<stamp>.md` -> the Workflow's
+ *   `promote-inbox.js`, unattended -> real `OB-NNN` blocks in `BOARD.md`,
+ *   with an append-only `PROMOTED-LOG.md` keyed `<file>#<id>@<sha12>`.
+ *
+ * The five action items the 2026-08-28 standup assigned are `OB-171` through
+ * `OB-175` on the live board, promoted at 2026-08-28T00:00:00Z. So the
+ * PERSISTENCE and the STATE that a new table would have provided already
+ * exist, with one writer and a promotion record — and adding a second store
+ * would have been the "two grammars for one fact" drift the board's own
+ * one-writer contract exists to prevent.
+ *
+ * ── WHAT WAS ACTUALLY MISSING, MEASURED ──────────────────────────────────
+ *
+ * The last hop. `own-tasks` above renders those items — as a recitation, at
+ * `status` priority:
+ *
+ *     Your own board tasks (showing 10 of 12):
+ *     - OB-023 [READY] [URGENT] Propose the owner/office communication mechanism
+ *     ...
+ *
+ * Three things are wrong with that and all three are why nothing happens.
+ * There is no verb — nothing in it asks for anything. There is no artifact:
+ * `delivered = ...` sits in the Metric line and never reaches the prompt, and
+ * `normalizeActionItems()` REFUSES an item that cannot name one precisely
+ * because "without it the deadline is unfalsifiable". And it is a LIST, which
+ * the fitter shrinks by item — measured 2026-08-30 against the live board,
+ * Agent 5's line came back "showing 10 of 12", and the two it cut were
+ * `OB-171` and `OB-172`: the two items that morning's standup had assigned to
+ * him. The office decided it, the board recorded it, and the fitter dropped it.
+ *
+ * `own-review` and `own-build` are the two surfaces that DO produce output, and
+ * they differ from `own-tasks` in exactly those respects: imperative voice, one
+ * named deliverable, `PRIORITY.headline` so the fitter never trims them. This
+ * is that shape a third time. It is deliberately NOT a second pattern.
+ *
+ * ── WHAT CLEARS IT, WHICH IS THE PART THAT HAD TO BE DECIDED ─────────────
+ *
+ * `own-review` clears because a filed review removes the agent from
+ * `reviewerCoverage()`'s `missing`, so the next `lifecycle.mjs` run drops it
+ * from `Owed by:` and the headline stops rendering. An obligation that cannot
+ * clear becomes a permanent nag, and a permanent nag is worse than no line.
+ *
+ * A board assignment already has the same property, because the obligation
+ * here is to ACT on an assignment, not to finish it:
+ *
+ *   START IT   -> `State: IN-PROGRESS`. This section stops rendering, and
+ *                 `own-build` takes over once the task carries a warehouse
+ *                 pairing. Written by `dispatch.js` or by the Workflow.
+ *   REFUSE IT  -> `State: BLOCKED` with a `Blocked by:` reason. Also stops it.
+ *
+ * Both are ordinary board writes with one writer, both are permanent, and
+ * neither is a new mechanism. NOTHING IS DELETED to clear this: the task keeps
+ * its whole history on the board, exactly as before.
+ *
+ * ── AND THE BOUNDED LAPSE, BECAUSE "ACT ON IT" CAN BE IGNORED ────────────
+ *
+ * An assignment nobody ever starts would otherwise sit at `headline` forever.
+ * After `ASSIGNMENT_LAPSE_DAYS` it stops being addressed to the agent and is
+ * restated as a dated finding belonging to the Workflow — whose measure 1
+ * ("unstarted work") already reports exactly this population at every standup
+ * and weekly. So the escalation target is not invented either: it is named, and
+ * `computeWorkflowMetrics()` now carries the age so the two cannot disagree.
+ *
+ * ── AND IDEMPOTENCY, WHICH IS FREE ONLY BECAUSE OF THE CHOICE ABOVE ──────
+ *
+ * This function CREATES NOTHING. It is a pure projection of `BOARD.md`, so
+ * building the context twice, or re-reading the same meeting, produces the same
+ * line and no second obligation — there is no record for a duplicate to be
+ * written into. That is the strongest argument against the new table: a store
+ * would have needed a dedup key, and the office already has one
+ * (`PROMOTED-LOG.md`'s `<file>#<id>@<sha12>`) one hop upstream doing that job.
+ */
+
+/**
+ * Calendar days, and every rendered line says "calendar" for a reason.
+ * `addOfficeDays()` in meeting-decisions.js knows about Saturdays and this
+ * module does not import it; a second, subtly different office-day
+ * implementation living here is exactly the drift this codebase keeps
+ * recording. So the unit is the honest one and it is always named.
+ */
+export const ASSIGNMENT_LAPSE_DAYS = 5;
+
+/** `delivered = <artifact>` out of a board Metric line, or null. Never guessed:
+ *  a task whose Metric names no artifact says so, and the line then sends the
+ *  agent to the board rather than inventing a filename for it. */
+export function deliveredArtifact(metric) {
+  const m = /·\s*delivered\s*=\s*(.+)$/.exec(String(metric || ''));
+  return m ? m[1].trim() : null;
+}
+
+/** Whole calendar days between two YYYY-MM-DD strings, or null if either is
+ *  unreadable. Null is a REPORTED state — see `opened` in parseBoard(). */
+export function daysBetween(fromDate, toDate) {
+  const a = Date.parse(String(fromDate) + 'T00:00:00Z');
+  const b = Date.parse(String(toDate) + 'T00:00:00Z');
+  if (Number.isNaN(a) || Number.isNaN(b)) return null;
+  return Math.floor((b - a) / 86400000);
+}
+
+/**
+ * The one unstarted assignment to put in front of this agent, plus the oldest
+ * lapsed one if there is one.
+ *
+ * ONE, not all of them. Agent 5 holds twelve READY tasks on the live board, and
+ * an imperative naming twelve things is a list again — the defect this fixes,
+ * restated at a higher priority. `own-review` and `own-build` both name what is
+ * owed and leave the recitation to somebody else.
+ *
+ * WHICH one: URGENT tasks form the pool if any exist, and the NEWEST inside the
+ * pool wins. Recency rather than age, deliberately — the newest assignment is
+ * the office's most recent decision, which is what a meeting has just made and
+ * what this surface exists to deliver. Age is not ignored; it is the other
+ * clause's job. A task with no readable `opened` date can never be the newest
+ * and can never be judged lapsed, and is counted in `others`.
+ *
+ * Pure and exported, so the verifier exercises the real ranking.
+ *
+ * @param {Array} tasks parseBoard()'s tasks
+ * @param {{agentId:number, today:string, lapseDays?:number}} opts
+ * @returns {{current:object, artifact:string|null, ageDays:number|null,
+ *            lapsed:object|null, lapsedAgeDays:number|null, others:number}|null}
+ */
+export function ownAssignment(tasks = [], { agentId, today, lapseDays = ASSIGNMENT_LAPSE_DAYS } = {}) {
+  if (!Number.isInteger(agentId) || !today) return null;
+  const mine = (tasks || []).filter((t) => t && t.agentId === agentId && t.state === 'READY');
+  if (!mine.length) return null;
+
+  const pool = mine.some((t) => t.urgency) ? mine.filter((t) => t.urgency) : mine;
+  // Descending id is the tie-break, not ascending, and it is load-bearing:
+  // OB ids are allocated in order by `promote-inbox.js`, so among several
+  // assignments opened on the SAME DAY the highest id is the last one the
+  // office decided. The live board settles it — 2026-08-28 gave Agent 7 both
+  // `OB-168` (that morning's closing review) and `OB-174`/`OB-175` (that
+  // morning's standup); ascending would have named the review item and left
+  // the standup's own decisions in the recitation this section exists to
+  // stop relying on.
+  const newest = pool.slice().sort((a, b) => (b.opened || '').localeCompare(a.opened || '') || b.id.localeCompare(a.id))[0];
+
+  const aged = mine
+    .filter((t) => t.opened)
+    .map((t) => ({ task: t, age: daysBetween(t.opened, today) }))
+    .filter((x) => x.age !== null && x.age >= lapseDays)
+    .sort((a, b) => b.age - a.age);
+  // The oldest lapsed one — unless it IS the one already named above, in which
+  // case the single line carries the lapse and there is no second clause. Two
+  // clauses about one task would read as two obligations.
+  const oldest = aged.find((x) => x.task.id !== newest.id) || null;
+
+  return {
+    current: newest,
+    artifact: deliveredArtifact(newest.metric),
+    ageDays: newest.opened ? daysBetween(newest.opened, today) : null,
+    lapsed: oldest ? oldest.task : null,
+    lapsedAgeDays: oldest ? oldest.age : null,
+    others: mine.length - 1,
+  };
+}
+
+/**
+ * How much of a task's `delivered = ...` clause rides in the prompt.
+ *
+ * MEASURED, not guessed. Most are short — "PIP_notes/agent4.md", "assignment
+ * record OB-003 to Agent 5" — but `OB-023`'s runs to 250 characters of full
+ * specification, and rendering it whole took the standard agent shape past its
+ * budget and made the fitter DROP `own-tasks` and `board-counts` outright. A
+ * headline that survives by displacing the agent's entire task list is not a
+ * fix, it is the same defect with a better priority.
+ *
+ * NO SILENT CAPS — the house rule this module keeps everywhere else. A trimmed
+ * artifact SAYS it was trimmed and names where the whole of it is, so an agent
+ * that needs the full specification knows one exists and where to read it.
+ */
+export const ARTIFACT_CLAUSE_CHARS = 130;
+
+/**
+ * The section text. Split from the ranking above so the verifier can assert the
+ * WORDING — imperative voice and a named artifact are the whole difference
+ * between this and `own-tasks`, and a check on the ranking alone would not
+ * catch a rewrite that quietly turned it back into a recitation.
+ */
+export function renderOwnAssignment(a, { lapseDays = ASSIGNMENT_LAPSE_DAYS, artifactChars = ARTIFACT_CLAUSE_CHARS } = {}) {
+  if (!a) return null;
+  const t = a.current;
+
+  let artifact;
+  if (!a.artifact) {
+    artifact = 'Its Metric line names NO artifact — read the task on the board and establish what it delivers; do not invent one.';
+  } else if (a.artifact.length > artifactChars) {
+    artifact = `Owed artifact: ${a.artifact.slice(0, artifactChars).trimEnd()}… [TRUNCATED — the whole of it is the "delivered =" clause of ${t.id}'s Metric line on the board].`;
+  } else {
+    artifact = `Owed artifact: ${a.artifact.replace(/\.$/, '')}.`;
+  }
+
+  const age = a.ageDays === null
+    ? 'Its assignment date is UNRECORDED on the board — how long it has sat is unmeasurable, which is not the same as short'
+    : `Assigned ${t.opened}, unstarted ${a.ageDays} calendar day(s)`;
+
+  const selfLapsed = a.ageDays !== null && a.ageDays >= lapseDays;
+  const head = selfLapsed
+    ? 'YOUR OLDEST UNSTARTED ASSIGNMENT HAS LAPSED:'
+    : 'YOU HAVE UNSTARTED ASSIGNED WORK:';
+
+  const parts = [
+    `${head} ${t.id} — "${t.title}"${t.urgency ? ' [URGENT]' : ''}. ${artifact} ${age}.`,
+    'Assigned as work, not offered. START IT (board → IN-PROGRESS) or say what stops it (board → BLOCKED, with the reason). Either clears this line; silence does not, and nothing is deleted to clear it.',
+  ];
+  // The lapsed clause carries the id and the dates and NOT the title. It is no
+  // longer addressed to this agent, so it is a reference to a record rather
+  // than an instruction, and a title would be paying headline tokens twice for
+  // something the board already says in full.
+  if (a.lapsed) {
+    parts.push(`ALSO LAPSED, and no longer addressed to you: ${a.lapsed.id}, assigned ${a.lapsed.opened}, unstarted ${a.lapsedAgeDays} calendar day(s) — past the ${lapseDays}-day line, and now the Workflow's measure 1, reported dated at every standup.`);
+  }
+  if (a.others > 0) {
+    parts.push(`${a.others} further READY task(s) are also yours.`);
+  }
+  return parts.join(' ');
+}
+
 function hasSubstantiveAnswer(answerField) {
   const stripped = plain(answerField)
     .replace(/^[—–-]+\s*/, '')      // the leading placeholder dash
@@ -2045,6 +2306,27 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
         priority: PRIORITY.status,
         text: 'You have no tasks on the delegation board right now.',
       });
+    }
+
+    // ── own-assignment (Session 39, Item B) ───────────────────────────────
+    //
+    // The full argument — what was already wired, what was actually missing,
+    // what clears this, the lapse, and why there is no new table — is in
+    // ownAssignment()'s header. One line here, at `headline`, so the fitter
+    // never trims it: `own-tasks` above is a recitation the fitter is entitled
+    // to shrink by item, and it shrank away the exact two items the 2026-08-28
+    // standup had assigned.
+    //
+    // The date resolution is COPIED, not invented: `opts.today ||
+    // snapshot.today || the clock` is exactly what the question-ageing block
+    // further down already does, for the same reason — the age has to follow
+    // the calendar rather than the cache, and a caller (the verifier) has to be
+    // able to pin it. Two date rules in one renderer would be two answers to
+    // "how old is this".
+    if (opts.agentId) {
+      const today = opts.today || snapshot?.today || new Date().toISOString().slice(0, 10);
+      const text = renderOwnAssignment(ownAssignment(board.tasks, { agentId: opts.agentId, today }));
+      if (text) sections.push({ label: 'own-assignment', priority: PRIORITY.headline, text });
     }
 
     // ── own-build (session 30 / OB-146) ─────────────────────────────────

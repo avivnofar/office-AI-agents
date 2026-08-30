@@ -51,7 +51,7 @@ import { callGroq } from './groq-client.js';
 import { routeTaskTypeCall } from './model-router.js';
 import { routingEnabled } from './task-router.js';
 import { commitFileToRepo, BACKOFFICE_REPO_NAME } from './repo-write.js';
-import { getOfficeContext, getOfficeSnapshot } from './office-context.js';
+import { getOfficeContext, getOfficeSnapshot, ASSIGNMENT_LAPSE_DAYS } from './office-context.js';
 import { enforceAttendeeGate, GATED_EFFECT_FIELDS } from './meeting-attendance.js';
 import {
   addOfficeDays, normalizeActionItems, renderBoardTask,
@@ -1665,6 +1665,11 @@ export async function runMeeting(meetingType, env, opts = {}) {
       boardTasks: snapshot.board.tasks,
       activityByAgent: await lastActivityByAgent(env),
       rosterIds: agentsConfig.agents.map((a) => a.id),
+      // ONE definition of the line, imported rather than repeated. It is worded
+      // in office-context.js because that is where the agent-facing sentence
+      // lives ("past the N-day line, and now the Workflow's measure 1"), and
+      // that sentence and this list must be talking about the same N.
+      lapseDays: ASSIGNMENT_LAPSE_DAYS,
     }));
 
     /*
