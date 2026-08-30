@@ -91,19 +91,28 @@ const lines = text.split(/\r?\n/);
  * task rather than a line number nobody can act on. */
 let currentId = null;
 const rows = [];
+let pending = null;
+const flush = () => { if (pending && pending.delivered) rows.push(pending); pending = null; };
 for (const line of lines) {
   const heading = /^###\s+(OB-\d+)\s*—/.exec(line);
-  if (heading) { currentId = heading[1]; continue; }
+  if (heading) { flush(); currentId = heading[1];
+    pending = { id: currentId, delivered: null, state: null, retired: false }; continue; }
+  if (!pending) continue;
+  const st = /^-\s+\*\*State:\*\*\s*(.+)$/.exec(line);
+  if (st) { pending.state = st[1].trim(); continue; }
+  if (/^-\s+\*\*Notes:\*\*/.test(line) && /\bRETIRED\b/.test(line)) { pending.retired = true; continue; }
   const metric = /^-\s+\*\*Metric:\*\*\s*(.+)$/.exec(line);
   if (!metric) continue;
   const delivered = /·\s*delivered\s*=\s*(.+)$/.exec(metric[1]);
   if (!delivered) continue;
-  rows.push({ id: currentId || '(no heading seen)', delivered: delivered[1].trim() });
+  pending.delivered = delivered[1].trim();
 }
+flush();
 
 let pathShaped = 0;
 let prose = 0;
 const failures = [];
+const acknowledged = [];
 const advisory = [];
 
 for (const row of rows) {
@@ -111,6 +120,23 @@ for (const row of rows) {
   if (!verdict.applies) { prose += 1; continue; }
   pathShaped += 1;
   if (!verdict.ok) {
+    /* ACKNOWLEDGED IS NOT FIXED, AND IS NOT A PASS EITHER.
+       A retired entry keeps its bad path ON PURPOSE - the wrong record stays in
+       the record and no file is created to satisfy it. So this check would fail
+       on OB-163..OB-170 forever, and a run that is red every time teaches the
+       reader that red means nothing (KFM-04b) - the very failure this repo's
+       citedfile check documents avoiding. An entry that is BOTH NOT-READY AND
+       carries RETIRED in its Notes is reported in its own section and does not
+       fail the run. It is still PRINTED every time, because a defect that stops
+       being visible has been deleted rather than retired.
+       THE TRADE, STATED: this is keyed on prose in a Notes line, so a board edit
+       could silence a live defect by writing the word. It also requires
+       NOT-READY, and a board edit is a governed act - but it is a weaker
+       mechanism than the root test, and that should be known, not assumed away. */
+    if (row.retired && row.state === 'NOT-READY') {
+      acknowledged.push({ ...row, candidate: verdict.candidate, root: verdict.root });
+      continue;
+    }
     failures.push({ ...row, candidate: verdict.candidate, root: verdict.root });
     continue;
   }
@@ -132,8 +158,20 @@ if (failures.length) {
   }
   console.log('');
 } else {
-  console.log('## PASS — every path-shaped `delivered` on the board has a real root.\n');
+  console.log('## PASS — every LIVE path-shaped `delivered` on the board has a real root.\n');
 }
+
+console.log(`## ACKNOWLEDGED — retired, still wrong, reported every run: ${acknowledged.length}\n`);
+if (acknowledged.length) {
+  for (const a of acknowledged) {
+    console.log(`- ${a.id} — \`${a.candidate}\` — root \`${a.root}/\` exists in no repository.`
+      + ' NOT-READY and recorded as RETIRED, so it does not fail the run —'
+      + ' the wrong record is kept on purpose and no file was created to satisfy it.');
+  }
+} else {
+  console.log('_none_');
+}
+console.log('');
 
 console.log(`## ADVISORY (never fails the run) — parent directory absent: ${advisory.length}\n`);
 if (advisory.length) {
