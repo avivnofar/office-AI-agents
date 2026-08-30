@@ -159,6 +159,24 @@ const ADMIN_API_ROUTES = new Map([
    * `ITEM_SOURCES` — the path is never built from the id.
    */
   ['item', '/api/admin/item'],
+  /*
+   * ── `automations` and `trigger` (2026-08-30, session 40, Item C) ───────
+   *
+   * Two lines, written by hand, exactly as this map's header says a fifth
+   * endpoint must be — no pattern, no prefix rewrite, no traversal surface.
+   *
+   * `trigger` is the ONE that deserves a sentence. It is the endpoint that
+   * flips the office's kill switches, and it is aliased here only so the
+   * automations page can call it from inside the prefix Access covers. **It
+   * gains no credential by being here.** The rewrite happens before the gates,
+   * so it is still `surface: 'api'` — the page cookie is still refused, and a
+   * state-changing call on the Access path still requires same-origin. On
+   * `*.workers.dev`, where no Access policy reaches, the cookie is refused and
+   * the toggles answer 401 until the caller presents the header; the page says
+   * so rather than appearing broken.
+   */
+  ['automations', '/api/admin/automations'],
+  ['trigger', '/api/agents/trigger'],
 ]);
 
 /**

@@ -65,6 +65,18 @@
  * OFFICE_CSS_ADDITIONS below, so a diff against the warehouse file stays
  * meaningful and the office's design is not quietly rewritten.
  */
+/**
+ * Exported 2026-08-30 (session 40, Item C) so a second admin page can use the
+ * office's stylesheet VERBATIM instead of writing its own.
+ *
+ * A prior session added CSS that referenced variables absent from this `:root`
+ * — every one fell through to a browser default and painted white tiles onto a
+ * dark design, a bug invisible to code review and found only by loading the
+ * page. The automations panel therefore imports these two strings unchanged and
+ * declares NO new custom property. Exporting rather than copying is what makes
+ * that checkable: `automations-panel.js` contains no `--` declaration at all,
+ * and the verifier asserts it.
+ */
 const OFFICE_CSS = `/* styles.css — The Office, static site, phase 1 (scaffold)
    Dark theme. Font-stack only, no CDN, no web fonts. */
 
@@ -1696,6 +1708,11 @@ function staticGaps(mode) {
  * gate). The admin render is the only one that contains the pending list, the
  * spec builder frame, or the string `/api/admin`.
  */
+export function officeStylesheet() {
+  return `${OFFICE_CSS}
+${OFFICE_CSS_ADDITIONS}`;
+}
+
 export function renderOfficeSite({ mode = 'public', signedInViaAccess = false } = {}) {
   const isAdmin = mode === 'admin';
 

@@ -171,7 +171,12 @@ import {
 // here for ONE thing only: the diagnostics endpoint that says whether Access is
 // configured and enforcing. The decision itself is made in admin-gate.js.
 import { accessConfig, ACCESS_JWT_HEADER, accessKeyCacheState } from './access-jwt.js';
-import { renderOfficeSite } from './office-site-page.js';
+import { renderOfficeSite, officeStylesheet } from './office-site-page.js';
+// Session 40, Item C — the automations panel. The pure join and the switch
+// vocabulary live in the first; the page template, which imports the office's
+// stylesheet verbatim and declares no custom property of its own, in the second.
+import { buildAutomationsView, SWITCHES, fetchWorkflowRuns } from './automations-panel.js';
+import { renderAutomationsPage } from './automations-page.js';
 import {
   ownerChannelEnabled, notifyOwner, selectNotificationItems, recentFailures, OWNER_ISSUE_LABEL,
   // SESSION 33, ITEM A: the daily-obligation notice files its own Issue rather
@@ -6789,6 +6794,79 @@ function israelTimeParts(date) {
   return { time: `${hh}:${mm}`, dayOfWeek: israel.getUTCDay() + 1 };
 }
 
+/*
+ * ── THE AUTOMATIONS PANEL'S DATA (session 40, Item C) ──────────────────────
+ *
+ * ONE gatherer, TWO surfaces — the page and the JSON endpoint are the same
+ * read. Two readers of one thing is the drift this project keeps finding
+ * (`parseOwnerMessage()`'s header names it, and so does `/api/agents/
+ * owner-state`), and here it would be worse than usual: the JSON is what the
+ * toggle reads BACK, so a second query shape could report a switch as taken
+ * while the page rendered from a different answer.
+ *
+ * Every value is read live. No cache: a cached answer to "did the 14:00 block
+ * run" is the failure the page exists to remove.
+ */
+async function gatherAutomations(env) {
+  const now = new Date();
+  const { time: israelTime, dayOfWeek } = israelTimeParts(now);
+  const todayDate = israelDateStr(now, ISRAEL_UTC_OFFSET_HOURS);
+
+  // `block_admissions.day` is the SIMULATED day number, not a date, so the day
+  // is selected by `created_at` — which is what a human comparing the panel to
+  // a clock actually means by "today".
+  let admissions = [];
+  let admissionsRead = true;
+  try {
+    const r = await env.DB.prepare(
+      `SELECT block, at, decision, estimate, actual, created_at
+         FROM block_admissions
+        WHERE date(created_at, '+3 hours') = ?
+        ORDER BY created_at ASC`
+    ).bind(todayDate).all();
+    admissions = r?.results || [];
+  } catch (err) {
+    // READ FAILURE IS NOT AN EMPTY DAY. Every row would otherwise render as
+    // MISSED and the page would report a total outage that never happened.
+    admissionsRead = false;
+    console.warn(`[automations] block_admissions unreadable: ${err?.message || err}`);
+  }
+
+  let writes = [];
+  try {
+    const r = await env.DB.prepare(
+      `SELECT author, COUNT(*) AS n, MAX(created_at) AS last_at
+         FROM repo_writes
+        WHERE committed = 1 AND author IS NOT NULL
+          AND date(created_at, '+3 hours') = ?
+        GROUP BY author`
+    ).bind(todayDate).all();
+    writes = r?.results || [];
+  } catch (err) {
+    console.warn(`[automations] repo_writes unreadable: ${err?.message || err}`);
+  }
+
+  const view = buildAutomationsView({
+    scheduleConfig: dailyScheduleConfig, dayOfWeek, israelTime, admissions, writes, admissionsRead,
+  });
+
+  const sim = await getSimulationState(env);
+  const switches = SWITCHES.map((s) => ({
+    key: s.key,
+    trigger: s.trigger,
+    what: s.what,
+    retired: s.retired || null,
+    // `cases_enabled` is the one switch whose ABSENT means ON. Read through the
+    // same defaulting the office's own casesEnabled() uses rather than a second
+    // reading of the raw key — see its header.
+    value: s.key === 'cases_enabled' ? sim?.cases_enabled !== false : sim?.[s.key] === true,
+  }));
+
+  const actions = await fetchWorkflowRuns(env, { owner: REPO_OWNER, repo: REPO_NAME });
+
+  return { today: todayDate, view, switches, actions, versionId: workerVersion(env) };
+}
+
 const CYCLE_STATE_KEY = 'daily-cycle-state';
 
 async function getCycleState(env) {
@@ -8240,6 +8318,32 @@ export default {
     }
 
     /*
+     * ── /admin/automations (session 40, Item C) ────────────────────────────
+     *
+     * Under `/admin/`, so it is gated by the block at the top of fetch() —
+     * Cloudflare Access on `office.avivnofar.com`, the admin token or its
+     * derived cookie everywhere. It adds no route outside that prefix.
+     *
+     * `frame-ancestors 'none'` and `connect-src 'self'`: the page's only fetch
+     * is to its own origin, and nothing may frame it.
+     */
+    if (request.method === 'GET' && (url.pathname === '/admin/automations' || url.pathname === '/admin/automations/')) {
+      const data = await gatherAutomations(env);
+      return new Response(renderAutomationsPage({ stylesheet: officeStylesheet(), ...data }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          // Never cached. A cached answer to "did the 14:00 block run" is the
+          // exact failure this page was built to remove.
+          'Cache-Control': 'no-store',
+          'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'",
+          'Referrer-Policy': 'no-referrer',
+          'X-Content-Type-Options': 'nosniff',
+        },
+      });
+    }
+
+    /*
      * -- /admin/spec — THE SPEC BUILDER ------------------------------------
      *
      * GATED since 2026-08-25 by the /admin block at the top of fetch(). Reached
@@ -8698,6 +8802,17 @@ export default {
           meetingStats: cadence.meetings,
           reportStats: cadence.reports,
         }), 200, origin);
+      }
+
+      /*
+       * The SAME gatherer the page uses, as JSON. This is what a toggle reads
+       * back after writing — see renderAutomationsPage()'s script — so it must
+       * not be a second query shape. `surface: 'api'` (the block this sits in),
+       * so the page cookie is refused here exactly as it is on every other
+       * endpoint that can change something.
+       */
+      if (request.method === 'GET' && url.pathname === '/api/admin/automations') {
+        return json({ ok: true, ...(await gatherAutomations(env)) }, 200, origin);
       }
 
       if (request.method === 'GET' && url.pathname === '/api/agents/sessions') {
