@@ -1426,6 +1426,35 @@ export async function fetchWarehouseFile(env, filePath, { ref = null } = {}) {
 }
 
 /**
+ * Lists a WAREHOUSE directory. Same shape as `fetchBackOfficeDir()` above,
+ * kept as its own function for the same reason `fetchWarehouseFile()` is not
+ * merged with `fetchBackOfficeFile()`: the two repos carry different tokens,
+ * and a shared helper would be one more place a caller could pass the wrong
+ * one silently.
+ *
+ * Added 2026-08-30 for `/api/admin/artifacts` — the first warehouse
+ * DIRECTORY listing this module has ever needed, so it can enumerate
+ * `tasks/` and ask each folder whether it carries `artifact.json`, without
+ * the owner having to maintain an index of which tasks have one.
+ */
+export async function fetchWarehouseDir(env, dirPath) {
+  if (!env?.WAREHOUSE_REPO_TOKEN) return { entries: null, reason: 'WAREHOUSE_REPO_TOKEN is not configured' };
+  const url = `https://api.github.com/repos/${REPO_OWNER}/${WAREHOUSE_REPO_NAME}/contents/${dirPath}`;
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'data-center-agent-sim',
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${env.WAREHOUSE_REPO_TOKEN}`,
+    },
+  }).catch((err) => ({ ok: false, status: 0, _err: err?.message }));
+
+  if (!res?.ok) return { entries: null, reason: `GET ${dirPath}/ failed: HTTP ${res?.status ?? 'network error'}` };
+  const body = await res.json().catch(() => null);
+  if (!Array.isArray(body)) return { entries: null, reason: `${dirPath}/: Contents API did not return a directory listing` };
+  return { entries: body, reason: null };
+}
+
+/**
  * Extracts the ONE file path a spec's own "## Where it lives" section names
  * directly under `warehouse-office-AI-agents/tasks/<slug>/`. FAIL-CLOSED:
  * returns not-ok rather than guessing when the section is missing or names

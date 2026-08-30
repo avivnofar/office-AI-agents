@@ -1020,6 +1020,7 @@ const CHROME_EN = {
   tab_agents: 'The thirteen',
   tab_spec: 'Write a spec',
   tab_office_data: 'Office data',
+  tab_artifacts: 'Tools & artifacts',
   tab_gaps: 'What this page cannot show you',
 
   /* panel notes */
@@ -1028,6 +1029,7 @@ const CHROME_EN = {
   spec_note_b: 'rather than rebuilt here — one implementation of the spec format. What you send is written to',
   spec_note_c: 'in back-office and is refused before anything is written if the office\'s own parser will not accept it.',
   office_data_note: 'The office\'s meetings and the blocks its scheduler actually iterates — read from the same configuration the Worker itself reads, joined to its database where a block leaves something behind. It is an instrument, not a status board: where the office has no record that something ran, this says so instead of inferring it.',
+  artifacts_note: 'Browsable output the office has actually built — read live from warehouse-office-AI-agents\' task folders. Most tasks have none; a task with a browsable entry point declares it in its own artifact.json, and that is the whole convention.',
   gaps_note: 'The office built this section when the page was static and could not call a server. It can now. What follows is what is still missing and what the live wiring newly limits — kept for the same reason it was written: a page that hides its own gaps is harder to trust than one that names them.',
   spec_frame_title: 'Spec builder',
 
@@ -1078,6 +1080,16 @@ const CHROME_EN = {
   od_never: 'never',
   od_in_db_b: ' in the database)',
   od_nothing: 'nothing recorded',
+
+  /* the artifact gallery */
+  artifacts_loading: 'Reading the warehouse\'s task folders…',
+  artifacts_empty: 'No task currently declares a browsable artifact.',
+  artifacts_open: 'Open',
+  artifacts_back: 'Back to the gallery',
+  artifacts_frame_title: 'Artifact viewer',
+  artifacts_unreachable: 'Could not reach the office: ',
+  artifacts_problems_heading: 'Task folders with a manifest this gallery could not use',
+  artifacts_updated_a: 'Updated ',
 
   /* the pending list */
   pending_empty: 'Nothing open right now.',
@@ -1200,6 +1212,7 @@ const CHROME_HE = {
   tab_agents: 'שלושה עשר',
   tab_spec: 'כתוב מפרט',
   tab_office_data: 'נתוני המשרד',
+  tab_artifacts: 'כלים ותוצרים',
   tab_gaps: 'מה הדף הזה לא יכול להראות לך',
 
   /* panel notes */
@@ -1208,6 +1221,7 @@ const CHROME_HE = {
   spec_note_b: 'ולא נבנה כאן מחדש — מימוש אחד לפורמט המפרט. מה שתשלח נכתב אל',
   spec_note_c: 'ב-back-office, ונדחה עוד לפני שנכתב דבר אם המנתח של המשרד עצמו לא יקבל אותו.',
   office_data_note: 'הישיבות של המשרד והבלוקים שהמתזמן שלו באמת עובר עליהם — נקראו מאותה תצורה שה-Worker עצמו קורא, מוצלבים מול מסד הנתונים שלו במקום שבו בלוק משאיר משהו אחריו. זהו מכשיר מדידה, לא לוח סטטוס: היכן שלמשרד אין תיעוד שמשהו רץ, כתוב כאן כך במקום להסיק זאת.',
+  artifacts_note: 'תוצרים ניתנים לעיון שהמשרד באמת בנה — נקראים בשידור חי מתיקיות המשימות של warehouse-office-AI-agents. לרוב המשימות אין כזה; משימה עם נקודת כניסה ניתנת לעיון מכריזה עליה בקובץ artifact.json שלה, וזוהי כל המוסכמה.',
   gaps_note: 'המשרד בנה את החלק הזה כשהדף היה סטטי ולא יכול היה לפנות לשרת. עכשיו הוא יכול. מה שלהלן הוא מה שעדיין חסר ומה שהחיווט החי מגביל מחדש — נשמר מאותה סיבה שבגללה נכתב: לדף שמסתיר את הפערים של עצמו קשה יותר להאמין מאשר לדף שמונה אותם.',
   spec_frame_title: 'בונה המפרט',
 
@@ -1258,6 +1272,16 @@ const CHROME_HE = {
   od_never: 'מעולם לא',
   od_in_db_b: ' במסד הנתונים)',
   od_nothing: 'לא נרשם דבר',
+
+  /* the artifact gallery */
+  artifacts_loading: 'קורא את תיקיות המשימות של המחסן…',
+  artifacts_empty: 'אף משימה אינה מכריזה כרגע על תוצר ניתן לעיון.',
+  artifacts_open: 'פתח',
+  artifacts_back: 'חזרה לגלריה',
+  artifacts_frame_title: 'מציג התוצר',
+  artifacts_unreachable: 'לא ניתן היה להגיע למשרד: ',
+  artifacts_problems_heading: 'תיקיות משימה עם מניפסט שהגלריה הזו לא הצליחה להשתמש בו',
+  artifacts_updated_a: 'עודכן ב-',
 
   /* the pending list */
   pending_empty: 'אין כרגע שום דבר פתוח.',
@@ -1406,6 +1430,12 @@ function clientScript(mode, signedInViaAccess) {
     '  function clear(node) { if (node) node.textContent = ""; }',
     '',
     '  /* ---------- tabs ---------- */',
+    // Filled in by the admin-only block below (e.g. tabLoaders.artifacts),
+    // and called ONCE the first time that tab is shown — the same
+    // fetch-on-open discipline the item and blocker expansions already keep,
+    // applied to a whole tab whose data costs a directory listing plus one
+    // GET per task folder rather than a field on the page.
+    '  var tabLoaders = {};',
     '  function initTabs() {',
     '    var buttons = [].slice.call(document.querySelectorAll(".tab-btn"));',
     '    function show(name) {',
@@ -1417,6 +1447,7 @@ function clientScript(mode, signedInViaAccess) {
     '        p.hidden = p.getAttribute("data-tab") !== name;',
     '      });',
     '      try { history.replaceState(null, "", "#" + name); } catch (e) {}',
+    '      if (tabLoaders[name]) { var fn = tabLoaders[name]; tabLoaders[name] = null; fn(); }',
     '    }',
     '    buttons.forEach(function (b) {',
     '      b.addEventListener("click", function () { show(b.getAttribute("data-tab")); });',
@@ -2167,6 +2198,105 @@ function clientScript(mode, signedInViaAccess) {
     '',
     '  extraRender = function () { renderPending(); renderOfficeData(); };',
     '',
+    /* ---------- tools & artifacts ----------
+     *
+     * Fetched once, the first time the tab is shown (see tabLoaders above) —
+     * never on page load, because listing warehouse task folders costs a
+     * directory read plus one GET per folder, the same discipline the item
+     * expansion keeps for its own, costlier read.
+     */
+    '  /* ---------- tools & artifacts ---------- */',
+    '  function loadArtifactsGallery() {',
+    '    var host = byId("artifacts-gallery");',
+    '    if (!host) return;',
+    '    clear(host);',
+    '    host.appendChild(el("p", { class: "state-note", dir: T.dir_chrome, text: T.artifacts_loading }));',
+    '    fetch("/admin/api/artifacts", { headers: adminHeaders(), cache: "no-store" })',
+    '      .then(function (res) { return res.json().then(function (b) { return { status: res.status, body: b }; }); })',
+    '      .then(function (r) {',
+    '        clear(host);',
+    '        if (!r.body || r.body.ok !== true) {',
+    '          host.appendChild(el("p", { class: "state-note state-note--error", dir: T.dir_chrome,',
+    '            text: T.item_http_failed_a + r.status + T.item_http_failed_b + ((r.body && r.body.reason) || T.item_no_reason) }));',
+    '          return;',
+    '        }',
+    '        renderArtifactsGallery(host, r.body);',
+    '      })',
+    '      .catch(function (err) {',
+    '        clear(host);',
+    '        host.appendChild(el("p", { class: "state-note state-note--error", dir: T.dir_chrome, text: T.artifacts_unreachable + err.message }));',
+    '      });',
+    '  }',
+    '',
+    '  function renderArtifactsGallery(host, body) {',
+    '    var list = body.artifacts || [];',
+    '    if (!list.length) {',
+    '      host.appendChild(el("p", { class: "state-note", dir: T.dir_chrome, text: T.artifacts_empty }));',
+    '    } else {',
+    '      var grid = el("div", { class: "agent-grid" });',
+    '      list.forEach(function (a) {',
+    '        var card = el("div", { class: "agent-card" });',
+    '        card.appendChild(el("h3", { text: a.title }));',
+    '        card.appendChild(el("p", { class: "section-note", text: a.description }));',
+    '        if (a.updated) card.appendChild(el("p", { class: "section-note", dir: T.dir_chrome, text: T.artifacts_updated_a + a.updated }));',
+    '        var open = el("button", { type: "button", class: "item-open" });',
+    '        open.textContent = T.artifacts_open;',
+    '        open.addEventListener("click", function () { openArtifact(a.task); });',
+    '        card.appendChild(open);',
+    '        grid.appendChild(card);',
+    '      });',
+    '      host.appendChild(grid);',
+    '    }',
+    '    if (body.problems && body.problems.length) {',
+    '      var ul = el("ul", { class: "gaps-list" }, body.problems.map(function (p) {',
+    '        return el("li", { text: p.task + ": " + p.reason });',
+    '      }));',
+    '      host.appendChild(el("div", { class: "auto-group" }, [',
+    '        el("h3", { dir: T.dir_chrome, text: T.artifacts_problems_heading }), ul',
+    '      ]));',
+    '    }',
+    '  }',
+    '',
+    /* THE SANDBOX. `srcdoc`, never `src` — the fetched HTML is a task's own
+     * markup, never trusted with the admin page's origin. `allow-scripts`
+     * only: no allow-same-origin (so a sandboxed document gets a unique,
+     * opaque origin and cannot reach this page\'s DOM, cookies or
+     * sessionStorage even if it tried), no allow-top-navigation, no
+     * allow-forms, no allow-popups. */
+    '  function openArtifact(task) {',
+    '    var gallery = byId("artifacts-gallery");',
+    '    var viewer = byId("artifacts-viewer");',
+    '    var frame = byId("artifacts-frame");',
+    '    if (!viewer || !frame) return;',
+    '    if (gallery) gallery.hidden = true;',
+    '    viewer.hidden = false;',
+    '    frame.srcdoc = "";',
+    '    fetch("/admin/api/artifact?task=" + encodeURIComponent(task), { headers: adminHeaders(), cache: "no-store" })',
+    '      .then(function (res) { return res.json().then(function (b) { return { status: res.status, body: b }; }); })',
+    '      .then(function (r) {',
+    '        if (!r.body || r.body.ok !== true) {',
+    '          var msg = T.item_http_failed_a + r.status + T.item_http_failed_b + ((r.body && r.body.reason) || T.item_no_reason);',
+    '          frame.srcdoc = "<p>" + msg.replace(/&/g, "&amp;").replace(/</g, "&lt;") + "</p>";',
+    '          return;',
+    '        }',
+    '        frame.srcdoc = r.body.html;',
+    '      })',
+    '      .catch(function (err) {',
+    '        frame.srcdoc = "<p>" + (T.artifacts_unreachable + err.message).replace(/&/g, "&amp;").replace(/</g, "&lt;") + "</p>";',
+    '      });',
+    '  }',
+    '',
+    '  (function () {',
+    '    var back = byId("artifacts-back");',
+    '    if (back) back.addEventListener("click", function () {',
+    '      var gallery = byId("artifacts-gallery");',
+    '      var viewer = byId("artifacts-viewer");',
+    '      if (viewer) viewer.hidden = true;',
+    '      if (gallery) gallery.hidden = false;',
+    '    });',
+    '  })();',
+    '  tabLoaders.artifacts = loadArtifactsGallery;',
+    '',
   ] : []).concat([
     '  /* ---------- load ---------- */',
     '  function adminHeaders() {',
@@ -2335,6 +2465,7 @@ export function renderOfficeSite({ mode = 'public', signedInViaAccess = false } 
   tabs.push({ id: 'agents', label: c.tab_agents });
   if (isAdmin) tabs.push({ id: 'spec', label: c.tab_spec });
   if (isAdmin) tabs.push({ id: 'office-data', label: c.tab_office_data });
+  if (isAdmin) tabs.push({ id: 'artifacts', label: c.tab_artifacts });
   tabs.push({ id: 'gaps', label: c.tab_gaps });
 
   const tabButtons = tabs.map((t) =>
@@ -2370,6 +2501,19 @@ export function renderOfficeSite({ mode = 'public', signedInViaAccess = false } 
           <h2 dir="${c.dir_chrome}">${c.tab_office_data}</h2>
           <p class="section-note" dir="${c.dir_chrome}">${c.office_data_note}</p>
           <div id="office-data-body"></div>
+        </div>
+      </section>`;
+
+  const artifactsPanel = !isAdmin ? '' : `
+      <section class="tab-panel" data-tab="artifacts" hidden>
+        <div class="wrap">
+          <h2 dir="${c.dir_chrome}">${c.tab_artifacts}</h2>
+          <p class="section-note" dir="${c.dir_chrome}">${c.artifacts_note}</p>
+          <div id="artifacts-gallery"></div>
+          <div id="artifacts-viewer" hidden>
+            <button type="button" id="artifacts-back" class="respond-btn">${c.artifacts_back}</button>
+            <iframe id="artifacts-frame" class="spec-frame" title="${c.artifacts_frame_title}" sandbox="allow-scripts"></iframe>
+          </div>
         </div>
       </section>`;
 
@@ -2425,6 +2569,7 @@ ${pendingPanel}
       </section>
 ${specPanel}
 ${officeDataPanel}
+${artifactsPanel}
       <section class="tab-panel data-gaps" data-tab="gaps" hidden>
         <div class="wrap">
           <h2 dir="${c.dir_chrome}">${c.tab_gaps}</h2>

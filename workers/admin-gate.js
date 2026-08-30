@@ -177,6 +177,18 @@ const ADMIN_API_ROUTES = new Map([
    */
   ['automations', '/api/admin/automations'],
   ['trigger', '/api/agents/trigger'],
+  /*
+   * ── `artifacts` and `artifact` (2026-08-30) ─────────────────────────────
+   *
+   * Two more lines, written by hand, same discipline as every entry above:
+   * an exact map, never a prefix rewrite. `artifact`'s identity travels in
+   * the query string — `?task=<slug>` — for the same reason `item`'s does:
+   * a task slug is per-task and changes as the warehouse does, so it cannot
+   * be an exact key in this map, and it is validated against a fixed
+   * pattern in `artifact-gallery.js` before it ever touches a path.
+   */
+  ['artifacts', '/api/admin/artifacts'],
+  ['artifact', '/api/admin/artifact'],
 ]);
 
 /**

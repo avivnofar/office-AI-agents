@@ -82,7 +82,7 @@ import { resolveIssueTarget } from './permission-guard.js';
 // read-back ONLY (2026-08-10): the meeting and per-agent shapes are the two that
 // actually bind, and a probe that reports only the generous `report` shape cannot
 // tell you that the meeting shape is at 98% and trimming the board out of view.
-import { getOfficeContext, getOfficeSnapshot, fetchOfficeSnapshot, officeContextEnabled, buildOfficeContext, fetchBackOfficeFile, fetchBackOfficeDir, fetchBackOfficeCommits, fetchWarehouseFile, readSpecTargetPath, BUDGETS as OFFICE_BUDGETS, CACHE_KEY as OFFICE_SNAPSHOT_CACHE_KEY } from './office-context.js';
+import { getOfficeContext, getOfficeSnapshot, fetchOfficeSnapshot, officeContextEnabled, buildOfficeContext, fetchBackOfficeFile, fetchBackOfficeDir, fetchBackOfficeCommits, fetchWarehouseFile, fetchWarehouseDir, readSpecTargetPath, BUDGETS as OFFICE_BUDGETS, CACHE_KEY as OFFICE_SNAPSHOT_CACHE_KEY } from './office-context.js';
 // The admin tier's scheduled draw from real queues (2026-08-17). Pure — every
 // fetch, model call and write for it is in processAdminDeskBlock() below.
 import {
@@ -151,6 +151,13 @@ import { buildPublicData, buildAdminData, buildPendingItems } from './site-data.
 import {
   parseItemRef, buildItemDetail, findFirstAppearance, ITEM_SOURCES, MAX_ORIGIN_PROBES, MAX_SIBLING_FILES,
 } from './item-detail.js';
+// The warehouse artifact gallery (2026-08-30). Pure and network-free, same
+// idiom as item-detail.js: everything here takes what it needs as an
+// argument, so the directory listing and the per-task manifest reads below
+// are the ONLY reads, they are all in this file.
+import {
+  TASKS_DIR, MANIFEST_FILENAME, parseTaskQuery, parseArtifactManifest, resolveArtifactEntryPath, buildArtifactGallery,
+} from './artifact-gallery.js';
 // The spec builder (2026-08-24, Session 16 Item C). Pure, and deliberately so:
 // NO MODEL is involved anywhere in this path. buildSpec() is a template fill,
 // the same answers always produce the same bytes, and
@@ -8758,6 +8765,89 @@ export default {
         detail.spec_prefill = prefillFromItem(detail);
 
         return json(detail, 200, origin);
+      }
+      /*
+       * ── /api/admin/artifacts — THE GALLERY (2026-08-30) ───────────────────
+       *
+       * Lists warehouse task folders that carry `artifact.json` — see
+       * `artifact-gallery.js`'s header for the convention. Authenticated by
+       * `AUTHENTICATED_PREFIXES` above, no handler-local check, same idiom as
+       * `/api/admin/item`.
+       *
+       * One directory listing of `tasks/`, then one GET per subfolder for its
+       * `artifact.json` — a handful of subrequests against Cloudflare's
+       * ceiling, run in parallel. A folder with no `artifact.json` (a 404) is
+       * not an error and is not reported; a folder whose manifest exists but
+       * fails to parse, or names a `kind` this gallery does not recognize, is
+       * a PROBLEM and is returned rather than silently dropped.
+       */
+      if (request.method === 'GET' && url.pathname === '/api/admin/artifacts') {
+        const lookups = [];
+        const listing = await fetchWarehouseDir(env, TASKS_DIR)
+          .catch((err) => ({ entries: null, reason: `listing ${TASKS_DIR}/ threw — ${err?.message || err}` }));
+        lookups.push({
+          what: `list ${TASKS_DIR}/`, ok: !!listing.entries, reason: listing.reason,
+          count: (listing.entries || []).length,
+        });
+
+        const dirs = (listing.entries || []).filter((e) => e && e.type === 'dir');
+        const manifestResults = {};
+        await Promise.all(dirs.map(async (d) => {
+          const manifestPath = `${TASKS_DIR}/${d.name}/${MANIFEST_FILENAME}`;
+          const got = await fetchWarehouseFile(env, manifestPath)
+            .catch((err) => ({ text: null, reason: `${manifestPath}: fetch threw — ${err?.message || err}` }));
+          if (typeof got.text !== 'string' && /HTTP 404/.test(got.reason || '')) {
+            manifestResults[d.name] = { notFound: true };
+            return; // the ordinary case — most tasks carry no manifest at all
+          }
+          manifestResults[d.name] = got;
+          lookups.push({
+            what: `read ${manifestPath}`, ok: typeof got.text === 'string', reason: got.reason || null,
+            bytes: typeof got.text === 'string' ? got.text.length : null,
+          });
+        }));
+
+        const { artifacts, problems } = buildArtifactGallery(dirs, manifestResults);
+        return json({ ok: true, repo: WAREHOUSE_REPO_NAME, artifacts, problems, lookups }, 200, origin);
+      }
+      /*
+       * ── /api/admin/artifact — ONE ARTIFACT'S ENTRY FILE (2026-08-30) ──────
+       *
+       * `?task=<slug>` — identity in the query string, never the path, same
+       * rule `/api/admin/item` keeps and for the same reason: the slug is
+       * validated against a fixed pattern in `artifact-gallery.js`'s
+       * `parseTaskQuery()` before it touches any path, and the path is never
+       * built from anything else in the request.
+       *
+       * Reads `artifact.json`, validates it, resolves `entry` relative to the
+       * task folder, and returns that file's content whole. The page renders
+       * it in a SANDBOXED IFRAME via `srcdoc` — never `src` — so a task's own
+       * markup cannot reach the admin page's DOM or its credentials.
+       */
+      if (request.method === 'GET' && url.pathname === '/api/admin/artifact') {
+        const ref = parseTaskQuery(url.searchParams.get('task'));
+        if (!ref.ok) return json({ ok: false, error: 'unknown_task', reason: ref.reason }, 400, origin);
+
+        const manifestPath = `${TASKS_DIR}/${ref.slug}/${MANIFEST_FILENAME}`;
+        const manifestGot = await fetchWarehouseFile(env, manifestPath)
+          .catch((err) => ({ text: null, reason: `${manifestPath}: fetch threw — ${err?.message || err}` }));
+        if (typeof manifestGot.text !== 'string') {
+          return json({ ok: false, error: 'no_manifest', reason: manifestGot.reason || `${manifestPath} could not be read` }, 404, origin);
+        }
+        const parsed = parseArtifactManifest(manifestGot.text, ref.slug);
+        if (!parsed.ok) return json({ ok: false, error: 'malformed_manifest', reason: parsed.reason }, 422, origin);
+
+        const entryPath = resolveArtifactEntryPath(ref.slug, parsed.entry);
+        const entryGot = await fetchWarehouseFile(env, entryPath)
+          .catch((err) => ({ text: null, reason: `${entryPath}: fetch threw — ${err?.message || err}` }));
+        if (typeof entryGot.text !== 'string') {
+          return json({ ok: false, error: 'entry_unreadable', reason: entryGot.reason || `${entryPath} could not be read` }, 502, origin);
+        }
+
+        return json({
+          ok: true, task: ref.slug, title: parsed.title, description: parsed.description,
+          kind: parsed.kind, entry: entryPath, html: entryGot.text,
+        }, 200, origin);
       }
       /*
        * -- /api/admin — THE FULL PICTURE, BEHIND THE PREFIX GATE -----------
