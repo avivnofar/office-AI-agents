@@ -247,6 +247,41 @@ check('a struck-through decided entry is found, not reported missing', (() => {
   return d.found === true && d.match === 'decided' && /Audit every model call site/.test(d.heading);
 })(), 'a finished blocker reported as "never there" is absence read as fact');
 check('an open entry is still reported as open', extractEntry(BOARD, 'OB-003').match === 'open');
+
+/*
+ * THE IDENTIFIER, ONCE.
+ *
+ * The canonical branch captures only what follows the em-dash, so its heading
+ * never carries the identifier. The decorated branch used to keep the whole
+ * heading text, identifier included — and every caller that prints the
+ * identifier beside the title (the console's blocker card does) rendered
+ * `OB-001 — OB-001 — Audit every model call site — DONE`. Found on the
+ * console, fixed at the source, pinned here so the two branches cannot drift
+ * apart again.
+ *
+ * The trailing `— DONE` is NOT stripped: it is the office's own heading text,
+ * and this fix assembles the heading differently, it does not edit the board.
+ */
+check('a decided entry\'s heading does not repeat its own identifier', (() => {
+  const d = extractEntry(SECTIONED, 'OB-001');
+  return d.match === 'decided' && !d.heading.includes('OB-001');
+})(), 'a caller printing the id beside the title rendered it twice');
+check('and it still carries the title the office wrote, decoration included', (() => {
+  const d = extractEntry(SECTIONED, 'OB-001');
+  return d.heading === 'Audit every model call site — DONE';
+})());
+check('the canonical branch is unchanged — no identifier, no leading dash', (() => {
+  const o = extractEntry(BOARD, 'OB-003');
+  return o.match === 'open' && !o.heading.includes('OB-003') && !/^[-—–\s]/.test(o.heading);
+})());
+check('a decided heading still slices the same bytes verbatim, identifier included', (() => {
+  const d = extractEntry(SECTIONED, 'OB-001');
+  return d.verbatim.startsWith('### ~~OB-001 — Audit every model call site~~ — DONE');
+})(), 'the heading string is assembled; the record itself is never edited');
+check('a decided entry whose heading is nothing but its identifier reports no title', (() => {
+  const d = extractEntry('## Agent 5\n\n### ~~OB-001~~\n\n- **State:** DONE\n', 'OB-001');
+  return d.found === true && d.match === 'decided' && d.heading === '';
+})(), 'an empty title lets the card say "no title recorded" instead of echoing the id');
 check('the slice stops at the next section heading, not the next task heading', (() => {
   const d = extractEntry(SECTIONED, 'OB-001');
   return !d.verbatim.includes('## Agent 6') && !d.verbatim.includes('OB-020');

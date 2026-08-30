@@ -227,7 +227,23 @@ export function extractEntry(markdown, itemId) {
       };
     }
     match = 'decided';
-    heading = m[0].replace(/^#{2,4} */, '').replace(/~~/g, '').replace(/^[-—–\s]+/, '').trim();
+    /*
+     * The identifier opens the decorated heading by construction — that is what
+     * `decoratedHeadingRe()` anchors on — so it is stripped here, exactly as the
+     * canonical branch above strips it by capturing only what follows the
+     * em-dash. It is already returned separately (it is this function's own
+     * input, and `resolveBlockers()` sets `item_id` from it), and a caller that
+     * prints the identifier beside the title rendered it twice:
+     * `OB-001 - OB-001 - Audit every model call site`. Nothing else in the
+     * heading is touched; a decided entry's trailing marker is the office's own
+     * text and stays.
+     */
+    heading = m[0]
+      .replace(/^#{2,4} */, '')
+      .replace(/~~/g, '')
+      .replace(new RegExp(`^\\s*${itemId}\\b`), '')
+      .replace(/^[-—–\s]+/, '')
+      .trim();
   }
 
   const start = m.index;
