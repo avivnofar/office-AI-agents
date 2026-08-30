@@ -370,6 +370,11 @@ export function normalizeContextAmendments(rawItems, { rosterIds, proposerIds = 
  * @param {Array} opts.boardTasks           parseBoard()'s tasks, or []
  * @param {Array} opts.lifecycleRecords     parseInFlight()'s records, or []
  * @param {object} opts.outputByAgent       `{ id: { lastAt, kinds } }`
+ * @param {object} opts.writesByAgent       `{ id: { lastAt, n, paths } }` —
+ *   committed files attributed to that agent by `repo_writes.author`. Session
+ *   40, Item B. Defaults to `{}`, which renders exactly as this function did
+ *   before the field existed, so a caller that has not been updated (and a
+ *   Worker running without D1) loses nothing.
  * @param {number} [opts.windowDays]
  * @param {number} [opts.now]
  * @param {boolean} [opts.boardRead]        false when BOARD.md could not be read
@@ -380,6 +385,7 @@ export function buildAttendeeGrounding({
   boardTasks = [],
   lifecycleRecords = [],
   outputByAgent = {},
+  writesByAgent = {},
   windowDays = 7,
   now = Date.now(),
   boardRead = true,
@@ -422,22 +428,53 @@ export function buildAttendeeGrounding({
         ? `${Object.entries(kinds).map(([k, n]) => `${n} ${k}`).join(', ')} (last ${new Date(out.lastAt).toISOString().slice(0, 10)})`
         : `nothing in the last ${windowDays} days; its last output was ${new Date(out.lastAt).toISOString().slice(0, 10)}`;
 
+    /*
+     * ── COMMITTED FILES, ADDED BESIDE THE DOCUMENT COUNT (session 40, B4) ──
+     *
+     * The `reports` half above kept its exact wording, because it is not wrong
+     * — it went quiet on 2026-08-23 when the case work was retired, and an
+     * agent with no `reports` row genuinely authored no document. What it is
+     * not is the whole picture: the office commits files every day and none of
+     * it reached this line.
+     *
+     * A COUNT IS NOT ENOUGH HERE. "3 files" is a number an attendee can recite
+     * without knowing what it did; the paths are what make the line usable in
+     * the sentence the meeting actually needs — "I appended to my journal" is
+     * grounded, "I produced three artifacts" is a number wearing a claim. Three
+     * paths, and the cap SAYS it capped, per this file's own no-silent-caps rule.
+     *
+     * The empty case stays honest and stays SEPARATE: an agent with no writes
+     * is told there are none, not left with a blank half-sentence.
+     */
+    const w = writesByAgent[id];
+    const wInWindow = w?.lastAt && (now - w.lastAt) <= windowMs;
+    const wPaths = (w?.paths || []).slice(0, 3);
+    const committedFiles = !w || !w.n
+      ? 'no file it committed is on record'
+      : `${w.n} file${w.n === 1 ? '' : 's'} committed, last ${new Date(w.lastAt).toISOString().slice(0, 10)}`
+        + `${wInWindow ? '' : ` (NOT in the last ${windowDays} days)`}`
+        + `: ${wPaths.join(', ')}${w.n > wPaths.length ? ` +${w.n - wPaths.length} more not listed here` : ''}`;
+
     const parts = [
       `UNSTARTED WORK: ${boardRead ? (unstarted.length ? cap(unstarted, 5) : 'none') : 'THE BOARD COULD NOT BE READ THIS CYCLE'}`,
       `IN PROGRESS: ${boardRead ? (doing.length ? doing.join(', ') : 'none') : 'unknown'}`,
       `BLOCKED ON IT: ${boardRead ? (blocked.length ? cap(blocked, 3) : 'none') : 'unknown'}`,
       `REVIEWS OWED: ${lifecycleRead ? (reviews.length ? reviews.join(', ') : 'none') : 'THE LIFECYCLE DIGEST COULD NOT BE READ THIS CYCLE'}`,
-      `PRODUCED: ${produced}`,
+      `PRODUCED: ${produced}; COMMITTED: ${committedFiles}`,
     ];
+    // A committed file counts as something on record. Without this an agent
+    // that committed to git yesterday would still be told its correct
+    // contribution is to say it has no report — the exact failure this line
+    // exists to prevent, arriving from the other direction.
     const empty = boardRead && lifecycleRead
       && !unstarted.length && !doing.length && !blocked.length && !reviews.length
-      && (!out || !out.lastAt);
+      && (!out || !out.lastAt) && (!w || !w.n);
     return `- ${who}: ${parts.join('. ')}.${empty ? ' ** THIS ATTENDEE HAS NOTHING ON RECORD — its correct contribution is to say it has no report. **' : ''}`;
   });
 
   return [
     '=== WHAT IS ACTUALLY ON RECORD FOR EACH ATTENDEE ===',
-    'Every field below is read from the delegation board, the deliverable-lifecycle digest and the office\'s own output records. It is the WHOLE of what the office knows about what these agents have done and owe. There is no other source, and an attendee has no memory of anything not written here or in the agenda data.',
+    'Every field below is read from the delegation board, the deliverable-lifecycle digest, the office\'s own document records and the git writes it actually made. It is the WHOLE of what the office knows about what these agents have done and owe. There is no other source, and an attendee has no memory of anything not written here or in the agenda data.',
     '',
     ...lines,
     '',

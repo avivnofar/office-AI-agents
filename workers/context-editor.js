@@ -30,7 +30,7 @@
  * reason:'learning_loop_disabled'}` rather than touching the network.
  */
 
-import { commitFileToRepo, BACKOFFICE_REPO_NAME } from './repo-write.js';
+import { commitFileToRepo, BACKOFFICE_REPO_NAME, agentAuthor, blockAuthor } from './repo-write.js';
 
 export const SIM_STATE_KEY = 'simulation-state';
 export const LEARNING_LOOP_FLAG = 'learning_loop_enabled';
@@ -229,7 +229,12 @@ export async function writeActiveContextAmendment(env, { actorId, targetAgentId,
 
   const commitMsg = `active-context: ${reviewer.label} conclusion for agent ${targetAgentId} (${AGENT_SLUGS[targetAgentId]})`
     + (rolledToJournal.length ? ` — rolled ${rolledToJournal.length} oldest entr${rolledToJournal.length === 1 ? 'y' : 'ies'} to journal.md (8KB cap)` : '');
-  const commit = await commitFileToRepo(env, BACKOFFICE_REPO_NAME, path, rendered, commitMsg);
+  // Session 40, Item B: the author is the REVIEWER who wrote the conclusion,
+  // not the agent the file belongs to. A2 is explicit that an agent never
+  // amends its own active context, so `targetAgentId` here would attribute the
+  // write to the one agent that provably did not make it.
+  const commit = await commitFileToRepo(env, BACKOFFICE_REPO_NAME, path, rendered, commitMsg,
+    { author: agentAuthor(actorId) });
   if (!commit.committed) {
     return { written: false, reason: `commit refused: ${commit.reason || commit.status}` };
   }
@@ -338,7 +343,12 @@ export async function writeJournalEntry(env, { actorId, agentId, content, date, 
 
   const commit = await commitFileToRepo(
     env, BACKOFFICE_REPO_NAME, path, appended,
-    `journal: agent ${agentId} (${AGENT_SLUGS[agentId]}) — ${_bypassSelfCheck ? 'active-context roll-off archive' : 'self-entry'}`
+    `journal: agent ${agentId} (${AGENT_SLUGS[agentId]}) — ${_bypassSelfCheck ? 'active-context roll-off archive' : 'self-entry'}`,
+    // Session 40, Item B. A self-entry is the agent's own work. A ROLL-OFF is
+    // the write path archiving its own output — the same distinction this
+    // function already makes with `actorId: 'system:rolloff'`, carried into the
+    // record so 410 journal rows do not all read as an agent choosing to write.
+    { author: _bypassSelfCheck ? blockAuthor('active_context_rolloff') : agentAuthor(agentId) }
   );
   if (!commit.committed) return { written: false, reason: `commit refused: ${commit.reason || commit.status}` };
   return { written: true, path, committed: commit };
@@ -389,7 +399,10 @@ export async function appendAdaptation(env, { actorId, agentId, topic, content, 
 
   const commit = await commitFileToRepo(
     env, BACKOFFICE_REPO_NAME, path, body,
-    `adaptations: agent ${agentId} (${slug}) — ${topic}${isNewFile ? ' (new)' : ''}`
+    `adaptations: agent ${agentId} (${slug}) — ${topic}${isNewFile ? ' (new)' : ''}`,
+    // The ACTOR, again — a reviewer (6/7/8) may write another agent's
+    // adaptations file, and crediting the subject would credit the wrong agent.
+    { author: agentAuthor(actorId) }
   );
   if (!commit.committed) return { written: false, reason: `commit refused: ${commit.reason || commit.status}` };
 
@@ -404,7 +417,8 @@ export async function appendAdaptation(env, { actorId, agentId, topic, content, 
         : idxRead.text;
       const idxCommit = await commitFileToRepo(
         env, BACKOFFICE_REPO_NAME, indexPath, appendedIdx,
-        `adaptations/_INDEX.md: agent ${agentId} — add ${topic}.md row`
+        `adaptations/_INDEX.md: agent ${agentId} — add ${topic}.md row`,
+        { author: agentAuthor(actorId) }
       );
       indexWrite = idxCommit;
     }

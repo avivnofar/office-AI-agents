@@ -172,8 +172,90 @@ export const REPO_WRITE_TABLE_SQL = `CREATE TABLE IF NOT EXISTS repo_writes (
   committed INTEGER NOT NULL,
   status INTEGER,
   redirected INTEGER DEFAULT 0,
+  author TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )`;
+
+/*
+ * ── `author` — WHO MADE THIS WRITE (session 40, Item B) ───────────────────
+ *
+ * THE DEFECT. Session 39 grounded every meeting attendee in what it has
+ * produced, and the grounding reads `reports` — a table that stopped receiving
+ * rows on 2026-08-23 when the case work was retired. So every attendee's
+ * `PRODUCED` field honestly said "nothing in the last 7 days" while the office
+ * was committing files every single day. The output was real; it was simply not
+ * attributable. `repo_writes` is the one structured record of an office write
+ * and it recorded WHERE a file went and never WHO sent it.
+ *
+ * ── WHY NOT `mechanism`, WHICH ALREADY EXISTS ────────────────────────────
+ *
+ * Checked before adding a second column, because a second field beside an empty
+ * one is how a schema grows two answers to one question. `mechanism` is free
+ * text of the shape `"<block>:agent<N>:<provider>"`, deliberately matching the
+ * commit-message convention rather than a taxonomy, and it answers WHICH OFFICE
+ * MECHANISM RAN. Three reasons it is the wrong home for attribution:
+ *
+ *   1. It is populated by four build-chain call sites and by nothing else, and
+ *      **in production it is populated by nothing at all** — 627 rows, 627
+ *      NULLs, read from D1 on 2026-08-30. Those blocks have never written.
+ *   2. Recovering an agent id from it means `LIKE '%agent7%'`, which also
+ *      matches `agent70` and depends on a free-text convention no code
+ *      enforces. This estate's own recorded corollary: two mechanisms agreeing
+ *      by accident is not a guard. A grounding query keyed on a substring of a
+ *      free-text field is the same shape.
+ *   3. It cannot express BLOCK-AUTHORED. A meeting report has no agent and that
+ *      is a fact about it, not a gap — see below.
+ *
+ * So `mechanism` keeps its job and this column is added beside it.
+ *
+ * ── THE VOCABULARY, AND WHY THE THIRD STATE EXISTS ───────────────────────
+ *
+ *   `agent:<N>`   one agent is responsible: its journal, its adaptation, its
+ *                 build artifact. Exact-match queryable — no LIKE.
+ *   `block:<name>` NO AGENT APPLIES, and that is the recorded fact. A meeting
+ *                 report is not anonymous, it is block-authored.
+ *   NULL          THIS CALL SITE HAS NOT BEEN WIRED. Not "no agent" — unknown.
+ *
+ * **The empty column and "no agent applies" must not look the same**, which is
+ * exactly the distinction this estate has been caught by before (a rest day
+ * that wrote no row read identically to a run that never happened). NULL is
+ * therefore never written on purpose: an unwired call site is WARNED about by
+ * name at write time, so the gap is loud rather than a silent third meaning
+ * hiding inside `block:`.
+ *
+ * A value that matches neither shape is stored as `malformed:<raw>` rather than
+ * discarded to NULL. A wrong answer that is visible can be fixed; one that
+ * decays into "unwired" cannot be told from a site nobody ever touched.
+ */
+export const AUTHOR_AGENT_RE = /^agent:\d{1,3}$/;
+export const AUTHOR_BLOCK_RE = /^block:[a-z0-9][a-z0-9_:-]*$/;
+
+/** `agent:<N>` — one agent is responsible for this write. */
+export function agentAuthor(agentId) {
+  const n = Number(agentId);
+  return Number.isInteger(n) && n >= 0 ? `agent:${n}` : null;
+}
+
+/** `block:<name>` — no agent applies; the named office block authored it. */
+export function blockAuthor(name) {
+  const slug = String(name || '').trim().toLowerCase().replace(/[^a-z0-9_:-]+/g, '_');
+  return slug ? `block:${slug}` : null;
+}
+
+/**
+ * Normalises what a call site passed. Absent is NULL **and says so in the log**;
+ * malformed is kept, marked, and never silently becomes absent.
+ */
+export function normalizeAuthor(author, { path = '', repo = '' } = {}) {
+  if (author === null || author === undefined || author === '') {
+    console.warn(`[repo-write] UNATTRIBUTED write: ${repo}/${path} — this call site passes no opts.author, so who made it is unknown. NULL here means UNWIRED, never "no agent applies".`);
+    return null;
+  }
+  const raw = String(author).trim();
+  if (AUTHOR_AGENT_RE.test(raw) || AUTHOR_BLOCK_RE.test(raw)) return raw;
+  console.warn(`[repo-write] author "${raw}" for ${repo}/${path} matches neither agent:<N> nor block:<name> — stored as malformed rather than dropped to NULL, so it cannot be mistaken for an unwired call site.`);
+  return `malformed:${raw.slice(0, 60)}`;
+}
 
 /*
  * ── `mechanism` (session 36, Item C) ──────────────────────────────────────
@@ -214,16 +296,39 @@ async function ensureMechanismColumn(env) {
   }
 }
 
-export async function recordRepoWrite(env, { repo, projectKey, path, committed, status, redirected, mechanism }) {
+/**
+ * Same retrofit shape as ensureMechanismColumn(), for the same reason: the
+ * CREATE above does not touch a table that already exists in production, and
+ * this one does. Session 40 ran the ALTER by hand against `data-center-db`
+ * as well — this is the belt, that was the braces, and neither can be the only
+ * one (a fresh D1 would have the column from CREATE and never reach the manual
+ * step; the live table would never reach CREATE).
+ */
+async function ensureAuthorColumn(env) {
+  try {
+    await env.DB.prepare('ALTER TABLE repo_writes ADD COLUMN author TEXT').run();
+  } catch (err) {
+    if (!/duplicate column/i.test(err?.message || '')) {
+      console.warn(`[repo-write] author column migration check: ${err?.message || err}`);
+    }
+  }
+}
+
+export async function recordRepoWrite(env, { repo, projectKey, path, committed, status, redirected, mechanism, author }) {
   try {
     if (!env?.DB) return { recorded: false, reason: 'no_db_binding' };
     await env.DB.prepare(REPO_WRITE_TABLE_SQL).run();
     await ensureMechanismColumn(env);
+    await ensureAuthorColumn(env);
+    // Normalised HERE and not at the call site, so every write goes through one
+    // validator and an unwired site is warned about once, by name, wherever it
+    // lives. See the `author` note above REPO_WRITE_TABLE_SQL.
+    const authorValue = normalizeAuthor(author, { path, repo });
     await env.DB.prepare(
-      `INSERT INTO repo_writes (id, repo, project_key, path, committed, status, redirected, mechanism)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    ).bind(crypto.randomUUID(), repo, projectKey || null, path, committed ? 1 : 0, status ?? null, redirected ? 1 : 0, mechanism || null).run();
-    return { recorded: true };
+      `INSERT INTO repo_writes (id, repo, project_key, path, committed, status, redirected, mechanism, author)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(crypto.randomUUID(), repo, projectKey || null, path, committed ? 1 : 0, status ?? null, redirected ? 1 : 0, mechanism || null, authorValue).run();
+    return { recorded: true, author: authorValue };
   } catch (err) {
     // Swallowed on purpose. Same posture recordOfficeEvent() takes: a capture
     // failure must not cost the thing being captured.
@@ -314,7 +419,7 @@ export async function commitFileToRepo(env, repoName, path, content, message, op
     const reason = `binary_write_to_public_repo_refused: "${path}" is base64 content bound for ${REPO_NAME}, and A10's pre-publication scan is a TEXT scan that cannot read it. Refused rather than passed through unscanned. Assets belong in back-office; publishing one to the Front is the publishing gate's decision (OB-014).`;
     console.warn(`[repo-write] ${reason}`);
     await recordRepoWrite(env, {
-      repo: repoName, projectKey: verdict.projectKey, path, committed: false, status: null, redirected: !!verdict.redirected, mechanism: opts.mechanism || null,
+      repo: repoName, projectKey: verdict.projectKey, path, committed: false, status: null, redirected: !!verdict.redirected, mechanism: opts.mechanism || null, author: opts.author || null,
     });
     return { committed: false, reason: 'binary_write_to_public_repo_refused', message: reason };
   }
@@ -328,7 +433,7 @@ export async function commitFileToRepo(env, repoName, path, content, message, op
       // refusal that leaves no row is a control nobody can audit, and A10's
       // whole argument is that unaudited security posture is the problem.
       await recordRepoWrite(env, {
-        repo: repoName, projectKey: verdict.projectKey, path, committed: false, status: null, redirected: !!verdict.redirected, mechanism: opts.mechanism || null,
+        repo: repoName, projectKey: verdict.projectKey, path, committed: false, status: null, redirected: !!verdict.redirected, mechanism: opts.mechanism || null, author: opts.author || null,
       });
       return { committed: false, reason: 'security_scan_refused', securityHits: scanned.hits, message: reason };
     }
@@ -417,6 +522,8 @@ export async function commitFileToRepo(env, repoName, path, content, message, op
     status: res.status,
     redirected: !!verdict.redirected,
     mechanism: opts.mechanism || null,
+    // Session 40, Item B. Absent is NULL and is WARNED — see normalizeAuthor().
+    author: opts.author || null,
   });
 
   // A conflict is NAMED rather than left as a bare status, so a caller that

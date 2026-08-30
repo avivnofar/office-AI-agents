@@ -119,6 +119,11 @@ import {
   // Session 31, Item E — branch + merge, added to this SAME governed module
   // rather than as a bypass of it. See their own headers in repo-write.js.
   ensureBranch, mergeBranchToMain,
+  // Session 40, Item B — the two constructors for `repo_writes.author`. Free
+  // strings are deliberately not used at call sites: the vocabulary is two
+  // shapes and a normaliser that marks anything else, so an unwired site and a
+  // block-authored write can never render the same.
+  agentAuthor, blockAuthor,
 } from './repo-write.js';
 // The owner channel (2026-08-10, REQ-001). The BASE only — the interface and
 // the visual page over it are the office's work and are on the board.
@@ -1141,7 +1146,8 @@ async function recordIssueReplies(env, recordRepo, issueReadback, commentsByIssu
         continue;
       }
       const res = await commitFileToRepo(env, recordRepo, path, content,
-        `channel: record client reply on issue #${ir.number}`)
+        `channel: record client reply on issue #${ir.number}`,
+    { author: blockAuthor('owner_issue_replies') })
         .catch((err) => ({ committed: false, reason: `threw: ${err?.message || err}` }));
       recorded.push({ issue: ir.number, repo: issueRepo, commentId: c.id, path, committed: !!res?.committed, reason: res?.reason || null });
     }
@@ -1381,8 +1387,8 @@ async function fileGapDigests(env) {
     const plural = entries.length === 1 ? '' : 's';
     const commit = await commitFileToRepo(
       env, REPO_NAME, reportPath, markdown,
-      `chore(agents): ${project} capability-gap digest — ${dateStr} (${entries.length} finding${plural}) [skip ci]`
-    );
+      `chore(agents): ${project} capability-gap digest — ${dateStr} (${entries.length} finding${plural}) [skip ci]`,
+    { author: blockAuthor('gap_digests') });
     digests.push({ project, count: entries.length, reportPath, committed: commit.committed });
   }
 
@@ -1564,7 +1570,8 @@ async function processQaInstrumentsBlock(env, opts = {}) {
 
   try {
     await commitFileToRepo(env, BACKOFFICE_REPO_NAME, path, body,
-      `chore(office): weekly QA instruments ${today} [skip ci]`);
+      `chore(office): weekly QA instruments ${today} [skip ci]`,
+    { author: blockAuthor('qa_instruments') });
     out.committed = path;
   } catch (err) {
     out.errors.push(`commit: ${err?.message}`);
@@ -1940,8 +1947,8 @@ async function processAdminDeskBlock(env, opts = {}) {
       try {
         const commit = await commitFileToRepo(
           env, BACKOFFICE_REPO_NAME, inboxPath, `${JSON.stringify(proposal, null, 2)}\n`,
-          `office: Agent ${item.agentId} ${proposal.review_kind} on ${item.slug} round ${item.round} [skip ci]`
-        );
+          `office: Agent ${item.agentId} ${proposal.review_kind} on ${item.slug} round ${item.round} [skip ci]`,
+    { author: blockAuthor('admin_desk') });
         if (!commit.committed) {
           out.errors.push(`${inboxPath}: not committed (${commit.reason || 'no reason given'})`);
           continue;
@@ -2018,7 +2025,8 @@ async function processAdminDeskBlock(env, opts = {}) {
   /* ═════════════ Desk 3 — the probation decision meeting (7, 6, 8) ═══════ */
   const probationDesk = { desk: 'probation_decision', agentIds: [], queued: 0, produced: 0, reason: null };
   try {
-    const due = await probationsDueForDecision(env);
+    const due = await probationsDueForDecision(env,
+    { author: blockAuthor('admin_desk') });
     const { draw, deferred } = probationDecisionDraw(due);
     probationDesk.queued = due.length;
     probationDesk.deferred = deferred.map((r) => r.id);
@@ -2288,8 +2296,8 @@ async function processAdminDeskBlock(env, opts = {}) {
         });
         const commit = await commitFileToRepo(
           env, BACKOFFICE_REPO_NAME, path, markdown,
-          `office: Agent ${reviewerId} review of ${target.slug} for the client [skip ci]`
-        );
+          `office: Agent ${reviewerId} review of ${target.slug} for the client [skip ci]`,
+    { author: blockAuthor('admin_desk') });
         if (!commit.committed) {
           out.errors.push(`${path}: not committed (${commit.reason || 'no reason given'}) — the review exists nowhere`);
           continue;
@@ -2426,7 +2434,8 @@ async function processArchitectSpecBlock(env, opts = {}) {
       // Session 36, Item C — see repo-write.js's `mechanism` note. The
       // Architect is never routed (CLAUDE.md: "Anthropic — never routed,
       // never shuffled"), so the provider is a constant here, not a read.
-      { mechanism: `architect_spec:agent10:anthropic` }
+      // Session 40, Item B: `mechanism` says WHICH block ran, `author` says WHO.
+      { mechanism: `architect_spec:agent10:anthropic`, author: agentAuthor(10) }
     );
   } catch (err) {
     return { ...spec, committed: false, commitError: err.message, path };
@@ -2531,7 +2540,7 @@ async function processBuildNotesBlock(env, opts = {}) {
         env, WAREHOUSE_REPO_NAME, path, content,
         `office: Agent ${item.agentId} progress note on ${item.taskId} [skip ci]`,
         // Session 36, Item C — see repo-write.js's `mechanism` note.
-        { mechanism: `build_note:agent${item.agentId}:${judged.provider || 'unrecorded'}` }
+        { mechanism: `build_note:agent${item.agentId}:${judged.provider || 'unrecorded'}`, author: agentAuthor(item.agentId) }
       );
     } catch (err) {
       out.errors.push(`${path}: commit threw — ${err?.message}`);
@@ -2705,7 +2714,7 @@ async function processBuildArtifactBlock(env, opts = {}) {
         env, WAREHOUSE_REPO_NAME, item.targetPath, content,
         `office: Agent ${item.agentId} build artifact for ${item.taskId} [skip ci]`,
         // Session 36, Item C — see repo-write.js's `mechanism` note.
-        { mechanism: `build_artifact:agent${item.agentId}:${routed.provider || 'unrecorded'}` }
+        { mechanism: `build_artifact:agent${item.agentId}:${routed.provider || 'unrecorded'}`, author: agentAuthor(item.agentId) }
       );
     } catch (err) {
       out.errors.push(`${item.targetPath}: commit threw — ${err?.message}`);
@@ -2784,7 +2793,8 @@ async function surfaceRepairStalemate(env, { slug, taskId, findingText, strikeCo
 
   let commit;
   try {
-    commit = await commitFileToRepo(env, BACKOFFICE_REPO_NAME, QUESTIONS_PATH, newBody, `office: repair loop stalemate on ${slug} — ${nextId} [skip ci]`);
+    commit = await commitFileToRepo(env, BACKOFFICE_REPO_NAME, QUESTIONS_PATH, newBody, `office: repair loop stalemate on ${slug} — ${nextId} [skip ci]`,
+    { author: blockAuthor('repair_stalemate') });
   } catch (err) {
     return { ok: false, reason: `commit threw: ${err?.message}` };
   }
@@ -2878,7 +2888,7 @@ async function processRepairBlock(env, opts = {}) {
   const commit = await commitFileToRepo(
     env, WAREHOUSE_REPO_NAME, target.targetPath, content,
     `office: repair round ${decision.strikeCount} for ${taskId || slug} (finding ${decision.fingerprint}) [skip ci]`,
-    { branch: branchName, mechanism: repairMechanism }
+    { branch: branchName, mechanism: repairMechanism, author: agentAuthor(agentId) }
   );
   if (!commit.committed) return { ok: false, reason: `repair commit failed: ${commit.reason || 'no reason given'}` };
 
@@ -2886,7 +2896,7 @@ async function processRepairBlock(env, opts = {}) {
   const logCommit = await commitFileToRepo(
     env, WAREHOUSE_REPO_NAME, logPath, `${JSON.stringify(repairLog, null, 2)}\n`,
     `office: repair log for ${taskId || slug}, round ${decision.strikeCount} [skip ci]`,
-    { branch: branchName, mechanism: repairMechanism }
+    { branch: branchName, mechanism: repairMechanism, author: agentAuthor(agentId) }
   );
 
   return {
@@ -3237,8 +3247,8 @@ async function processBrainAuditDecompose(env, opts = {}) {
   });
   const commit = await commitFileToRepo(
     env, BACKOFFICE_REPO_NAME, DECOMPOSITION_PATH, markdown,
-    `brain-audit: the Architect's decomposition, ${today} [skip ci]`
-  );
+    `brain-audit: the Architect's decomposition, ${today} [skip ci]`,
+    { author: blockAuthor('brain_audit') });
 
   return {
     ok: true, today, path: DECOMPOSITION_PATH, committed: commit.committed,
@@ -3314,8 +3324,8 @@ async function processBrainAuditTask(env, opts = {}) {
   });
   const commit = await commitFileToRepo(
     env, BACKOFFICE_REPO_NAME, path, markdown,
-    `brain-audit: deliverable ${n} — ${task.lens}, by Agent ${task.agentId} [skip ci]`
-  );
+    `brain-audit: deliverable ${n} — ${task.lens}, by Agent ${task.agentId} [skip ci]`,
+    { author: blockAuthor('brain_audit') });
   return {
     ok: !!commit.committed, index, task, path, committed: commit.committed,
     commitReason: commit.reason || null, provider: judged.provider,
@@ -3362,8 +3372,8 @@ async function processOwnerChannelBlock(env, opts = {}) {
 
     const commit = await commitFileToRepo(
       env, BACKOFFICE_REPO_NAME, READ_LOG_PATH, renderReadLog(rows),
-      `chore(office): read ${fresh.length} owner message(s) — ${today} [skip ci]`
-    );
+      `chore(office): read ${fresh.length} owner message(s) — ${today} [skip ci]`,
+    { author: blockAuthor('owner_channel') });
     out.receiptCommitted = commit.committed;
     if (!commit.committed) {
       // LOUD, and it does not stop the notification. A lost receipt is a lost
@@ -3668,7 +3678,10 @@ async function runDesignerAsset(env, {
   const assetWrite = await commitFileToRepo(
     env, BACKOFFICE_REPO_NAME, assetPath, result.base64,
     `designer: asset ${safeSlug} (${routed.provider}, role ${routed.role})`,
-    { contentIsBase64: true }
+    // Session 40, Item B. The Designer is agent 9 and the image lane is his by
+    // construction — 18 asset rows in `repo_writes` have been his all along and
+    // nothing recorded it.
+    { contentIsBase64: true, author: agentAuthor(9) }
   );
 
   /*
@@ -3709,7 +3722,7 @@ async function runDesignerAsset(env, {
       const pWrite = await commitFileToRepo(
         env, BACKOFFICE_REPO_NAME, pAssetPath, pr.base64,
         `designer: polished asset ${safeSlug} (${polished.provider}, role polish)`,
-        { contentIsBase64: true }
+        { contentIsBase64: true, author: agentAuthor(9) }
       );
       const pProvWrite = await commitFileToRepo(
         env, BACKOFFICE_REPO_NAME, pProvenancePath,
@@ -3724,7 +3737,8 @@ async function runDesignerAsset(env, {
           note: `Polished FROM \`${assetPath}\` (${result.bytes} bytes, ${result.model}). The draft's own bytes were sent as the input image — this is not a re-generation from the prompt.`
             + (pr.revisedPrompt ? ` Model's own account: ${pr.revisedPrompt.replace(/\s+/g, ' ').slice(0, 300)}` : ''),
         }),
-        `designer: provenance for ${safeSlug}-polished`
+        `designer: provenance for ${safeSlug}-polished`,
+        { author: agentAuthor(9) }
       );
       polish = {
         ok: !!pWrite.committed,
@@ -3742,7 +3756,8 @@ async function runDesignerAsset(env, {
 
   const provenanceWrite = await commitFileToRepo(
     env, BACKOFFICE_REPO_NAME, provenancePath, provenance,
-    `designer: provenance for ${safeSlug}`
+    `designer: provenance for ${safeSlug}`,
+    { author: agentAuthor(9) }
   );
 
   return {
@@ -3866,6 +3881,10 @@ async function runFrontPublish(env, { batchId, dryRun = false } = {}) {
       const commit = await commitFileToRepo(
         env, REPO_NAME, item.path, item.content,
         `front: publish ${item.path} (batch ${id}, QA sign-off agent ${batch?.qaSignOff?.agentId}) [skip ci]`,
+        // BLOCK-AUTHORED: the publishing GATE made this write. The content's
+        // author is upstream (the Designer's lane records its own rows); what
+        // this row is about is the gate deciding to publish.
+        { author: blockAuthor('front_publish') },
       );
       writes.push({ path: item.path, committed: !!commit.committed, reason: commit.reason || null });
       // A security refusal here is the scan doing its job on content the gate
@@ -3886,6 +3905,7 @@ async function runFrontPublish(env, { batchId, dryRun = false } = {}) {
     recordWrite = await commitFileToRepo(
       env, BACKOFFICE_REPO_NAME, `${FRONT_RECORD_DIR}/${date}-${id}.md`, record,
       `front-gate: ${published ? 'published' : 'refused'} batch ${id} [skip ci]`,
+      { author: blockAuthor('front_gate_record') },
     );
   }
 
@@ -4148,8 +4168,8 @@ async function processGuideReviewBlock(env, dateStr, opts = {}) {
     const finalMarkdown = renderGuideFile({ topic, writerAgentName, finalGuide: decision.finalGuide, dateStr });
     const path = guidePath(topic.domain, topic.slug);
     const commit = await commitFileToRepo(
-      env, REPO_NAME, path, finalMarkdown, `chore(agents): guide — ${topic.slug} (${topic.domain}) [skip ci]`
-    );
+      env, REPO_NAME, path, finalMarkdown, `chore(agents): guide — ${topic.slug} (${topic.domain}) [skip ci]`,
+    { author: blockAuthor('guide_review') });
 
     const unverifiedSections = extractUnverifiedSections(decision.finalGuide);
     let queueUpdated = false;
@@ -4173,8 +4193,8 @@ async function processGuideReviewBlock(env, dateStr, opts = {}) {
         if (newEntries.length) {
           await commitFileToRepo(
             env, REPO_NAME, 'guides/_verification-queue.md', renderVerificationQueue([...existingQueue, ...newEntries]),
-            `chore(agents): queue ${newEntries.length} UNVERIFIED section(s) — ${topic.slug} [skip ci]`
-          );
+            `chore(agents): queue ${newEntries.length} UNVERIFIED section(s) — ${topic.slug} [skip ci]`,
+    { author: blockAuthor('guide_review') });
           queueUpdated = true;
         }
       }
@@ -4188,7 +4208,8 @@ async function processGuideReviewBlock(env, dateStr, opts = {}) {
     topic, writerAgentName, draftContent: row.draft_content, reviewNotes: decision.notes, dateStr,
   });
   const path = draftPath(topic.slug);
-  const commit = await commitFileToRepo(env, REPO_NAME, path, draftMarkdown, `chore(agents): guide draft rejected — ${topic.slug} [skip ci]`);
+  const commit = await commitFileToRepo(env, REPO_NAME, path, draftMarkdown, `chore(agents): guide draft rejected — ${topic.slug} [skip ci]`,
+    { author: blockAuthor('guide_review') });
   await updateGuidePipelineRow(env, row.id, { status: 'rejected', reviewNotes: decision.notes });
   return { reviewed: true, decision: decision.decision, path, committed: commit.committed };
 }
@@ -4265,7 +4286,8 @@ async function processGuideVerifyBlock(env, opts = {}) {
 
     if (verifyResult.verified && verifyResult.updatedSection) {
       const updatedGuide = replaceGuideSection(guideMarkdown, item.section, verifyResult.updatedSection);
-      await commitFileToRepo(env, REPO_NAME, item.guidePath, updatedGuide, `chore(agents): guide verification — ${item.section} [skip ci]`);
+      await commitFileToRepo(env, REPO_NAME, item.guidePath, updatedGuide, `chore(agents): guide verification — ${item.section} [skip ci]`,
+    { author: blockAuthor('guide_verify') });
       remaining = remaining.filter((e) => !(e.guidePath === item.guidePath && e.section === item.section));
       outcomes.push({ ...item, outcome: 'verified' });
     } else {
@@ -4276,8 +4298,8 @@ async function processGuideVerifyBlock(env, opts = {}) {
   if (remaining.length !== entries.length) {
     await commitFileToRepo(
       env, REPO_NAME, 'guides/_verification-queue.md', renderVerificationQueue(remaining),
-      'chore(agents): verification queue updated after weekly pass [skip ci]'
-    );
+      'chore(agents): verification queue updated after weekly pass [skip ci]',
+    { author: blockAuthor('guide_verify') });
   }
 
   return { verified: outcomes.filter((o) => o.outcome === 'verified').length, outcomes };
@@ -5182,8 +5204,8 @@ async function runReportPipeline(env, { reportType, periodLabel, legacyLabels = 
     const path = reportPath(reportType, periodLabel);
     const commit = await commitFileToRepo(
       env, REPO_NAME, path, finalMarkdown,
-      `chore(agents): ${reportType} report — ${periodLabel} (reviewed) [skip ci]`
-    );
+      `chore(agents): ${reportType} report — ${periodLabel} (reviewed) [skip ci]`,
+    { author: blockAuthor('report_pipeline') });
     await updateReportRow(env, row.id, {
       status: 'approved', finalContent: finalMarkdown, reviewNotes: notesForRow(decision),
       reviewerProvider: review.provider, revisionCount,
@@ -5207,8 +5229,8 @@ async function runReportPipeline(env, { reportType, periodLabel, legacyLabels = 
         });
         const idx = await commitFileToRepo(
           env, REPO_NAME, LATEST_INDEX_PATH, renderLatestIndex(next),
-          `chore(agents): index ${reportType} report ${periodLabel} [skip ci]`
-        );
+          `chore(agents): index ${reportType} report ${periodLabel} [skip ci]`,
+    { author: blockAuthor('report_pipeline') });
         indexed = idx.committed;
       } catch (err) {
         // The index is a convenience. A report that published successfully is
@@ -5241,8 +5263,8 @@ async function runReportPipeline(env, { reportType, periodLabel, legacyLabels = 
   const path = rejectedReportPath(reportType, periodLabel);
   const commit = await commitFileToRepo(
     env, REPO_NAME, path, rejectedMarkdown,
-    `chore(agents): ${reportType} report rejected — ${periodLabel} [skip ci]`
-  );
+    `chore(agents): ${reportType} report rejected — ${periodLabel} [skip ci]`,
+    { author: blockAuthor('report_pipeline') });
   await updateReportRow(env, row.id, {
     status: 'rejected', reviewNotes: notesForRow(decision), reviewerProvider: review.provider, revisionCount,
   });
@@ -5392,7 +5414,8 @@ async function advanceSidePlots(env, currentDay) {
       const reportPath = plot.report_path.startsWith('reports/side-plots/')
         ? plot.report_path.replace('reports/side-plots/', 'campus/shared/side-plots/')
         : plot.report_path;
-      await commitFileToRepo(env, BACKOFFICE_REPO_NAME, reportPath, markdown, `chore(office): ${plot.type} side plot resolved [skip ci]`);
+      await commitFileToRepo(env, BACKOFFICE_REPO_NAME, reportPath, markdown, `chore(office): ${plot.type} side plot resolved [skip ci]`,
+    { author: blockAuthor('side_plots') });
     }
 
     updates.push({ id: plot.id, type: plot.type, dayOffset, stage: stage.event, status });
@@ -6089,7 +6112,7 @@ async function maybeOpenAssetTask(env, dayOfWeek, nextDay) {
       ? await commitFileToRepo(
         env, REPO_NAME, 'reports/asset-pipeline/board.json', JSON.stringify(board, null, 2) + '\n',
         `chore(agents): file asset-task issue for ${item.id} [skip ci]`,
-        { expectedSha: board.sha }
+        { author: blockAuthor('asset_task'), expectedSha: board.sha }
       )
       : { committed: false, reason: gate.reason };
   }
@@ -6273,9 +6296,12 @@ diagnostics. No customer-facing issues to report.
   // year; files written before 2026-08-16 keep their yearless names (A15).
   const stem = `year-${yearState?.stats?.year_number || 1}-week-${pad(weekNumber, 2)}`;
   const files = {
-    summary: await commitFileToRepo(env, BACKOFFICE_REPO_NAME, `${base}/${stem}-summary.md`, md, `chore(office): week ${weekNumber} executive summary [skip ci]`),
-    csv: await commitFileToRepo(env, BACKOFFICE_REPO_NAME, `${base}/${stem}-data.csv`, csv, `chore(office): week ${weekNumber} data export [skip ci]`),
-    public: await commitFileToRepo(env, BACKOFFICE_REPO_NAME, `${base}/${stem}-public-summary.md`, publicMd, `chore(office): week ${weekNumber} public summary [skip ci]`),
+    summary: await commitFileToRepo(env, BACKOFFICE_REPO_NAME, `${base}/${stem}-summary.md`, md, `chore(office): week ${weekNumber} executive summary [skip ci]`,
+    { author: blockAuthor('weekly_summary') }),
+    csv: await commitFileToRepo(env, BACKOFFICE_REPO_NAME, `${base}/${stem}-data.csv`, csv, `chore(office): week ${weekNumber} data export [skip ci]`,
+    { author: blockAuthor('weekly_summary') }),
+    public: await commitFileToRepo(env, BACKOFFICE_REPO_NAME, `${base}/${stem}-public-summary.md`, publicMd, `chore(office): week ${weekNumber} public summary [skip ci]`,
+    { author: blockAuthor('weekly_summary') }),
   };
 
   // SESSION 35, ITEM D: `runMeeting('weekly')` and `runReportPipeline()` used
@@ -6443,7 +6469,7 @@ async function checkProductVersionBumps(env, yearState, nextDay) {
       ? await commitFileToRepo(
         env, REPO_NAME, 'reports/asset-pipeline/board.json', JSON.stringify(board, null, 2) + '\n',
         `chore(agents): version bump for ${bumps.map((b) => b.id).join(', ')} [skip ci]`,
-        { expectedSha: board.sha }
+        { author: blockAuthor('version_bumps'), expectedSha: board.sha }
       )
       : { committed: false, reason: gate.reason };
     if (!write.committed) {
@@ -6690,8 +6716,8 @@ export async function runWorkDayCycle(env) {
     // Moved to back-office 2026-08-11 (plan 0.4, stage 5 of 5).
     await commitFileToRepo(
       env, BACKOFFICE_REPO_NAME, `campus/shared/promotions/promotion-results-year-${yearNumber}.md`, promoMarkdown,
-      `chore(office): year ${yearNumber} promotion results [skip ci]`
-    );
+      `chore(office): year ${yearNumber} promotion results [skip ci]`,
+    { author: blockAuthor('work_day_cycle') });
   }
 
   const displayYearState = {
@@ -6738,8 +6764,8 @@ export async function runWorkDayCycle(env) {
       // just ENDED. Files written before 2026-08-16 keep their yearless names
       // and are not renamed (A15).
       env, BACKOFFICE_REPO_NAME, `campus/shared/daily/year-${newStats.year_number || 1}-day-${pad(nextDay, 3)}-summary.md`, markdownWithHeadline,
-      `chore(office): year ${newStats.year_number || 1} day ${nextDay} summary [skip ci]`
-    );
+      `chore(office): year ${newStats.year_number || 1} day ${nextDay} summary [skip ci]`,
+    { author: blockAuthor('work_day_cycle') });
 
   return {
     ...summary, year: newState, standup, sidePlotsStarted: sidePlotStarted, sidePlotUpdates, milestone, milestoneMeeting, monthlyReport, report,
@@ -7623,8 +7649,8 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
     // Moved to back-office 2026-08-11 (plan 0.4, stage 5 of 5).
     await commitFileToRepo(
       env, BACKOFFICE_REPO_NAME, `campus/shared/promotions/promotion-results-year-${yearNumber}.md`, promoMarkdown,
-      `chore(office): year ${yearNumber} promotion results [skip ci]`
-    );
+      `chore(office): year ${yearNumber} promotion results [skip ci]`,
+    { author: blockAuthor('day_finalize') });
   }
 
   const displayYearState = {
@@ -7704,8 +7730,8 @@ async function finalizeScheduledDay(env, cycle, schedule, isOffDay) {
       // just ENDED. Files written before 2026-08-16 keep their yearless names
       // and are not renamed (A15).
       env, BACKOFFICE_REPO_NAME, `campus/shared/daily/year-${newStats.year_number || 1}-day-${pad(nextDay, 3)}-summary.md`, markdownWithHeadline,
-      `chore(office): year ${newStats.year_number || 1} day ${nextDay} summary [skip ci]`
-    );
+      `chore(office): year ${newStats.year_number || 1} day ${nextDay} summary [skip ci]`,
+    { author: blockAuthor('day_finalize') });
 
   return {
     ...summary, year: newState, standup, sidePlotsStarted: sidePlotStarted, sidePlotUpdates, milestone, milestoneMeeting, monthlyReport, report,
@@ -8358,8 +8384,8 @@ export default {
 
         const write = await commitFileToRepo(
           env, BACKOFFICE_REPO_NAME, built.path, built.text,
-          `owner: ${parsed.message.kind} — ${parsed.message.title} (via the owner page)`
-        );
+          `owner: ${parsed.message.kind} — ${parsed.message.title} (via the owner page)`,
+    { author: blockAuthor('owner_message_page') });
         if (!write.committed) {
           return json({ ok: false, reason: `the message parsed but could not be written: ${write.reason || `HTTP ${write.status}`}` }, 502, origin);
         }
@@ -10050,7 +10076,7 @@ export default {
             if (!body.path || typeof body.content !== 'string' || !body.message) {
               return json({ error: 'warehouse_write_requires_path_content_message' }, 400, origin);
             }
-            result = await commitFileToRepo(env, WAREHOUSE_REPO_NAME, body.path, body.content, body.message, {
+            result = await commitFileToRepo(env, WAREHOUSE_REPO_NAME, body.path, body.content, body.message, { author: blockAuthor('warehouse_write_api'),
               explicitCodeTask: body.explicitCodeTask !== false,
             });
             break;

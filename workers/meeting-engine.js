@@ -50,7 +50,7 @@ import { callGroq } from './groq-client.js';
 // still there to do.
 import { routeTaskTypeCall } from './model-router.js';
 import { routingEnabled } from './task-router.js';
-import { commitFileToRepo, BACKOFFICE_REPO_NAME } from './repo-write.js';
+import { commitFileToRepo, BACKOFFICE_REPO_NAME, blockAuthor } from './repo-write.js';
 import { getOfficeContext, getOfficeSnapshot, ASSIGNMENT_LAPSE_DAYS } from './office-context.js';
 import { enforceAttendeeGate, GATED_EFFECT_FIELDS } from './meeting-attendance.js';
 import {
@@ -623,6 +623,70 @@ async function lastActivityByAgent(env) {
  * Returns `{}` without D1. An empty map makes every agent read NEVER, which is
  * loud rather than quiet — the safe direction for a census.
  */
+/**
+ * WHAT EACH AGENT ACTUALLY COMMITTED — session 40, Item B.
+ *
+ * ── WHY THIS EXISTS BESIDE outputByAgent() AND DOES NOT REPLACE IT ───────
+ *
+ * `reports` is what the office AUTHORED as a document. It stopped receiving
+ * rows on 2026-08-23 when the case work was retired, so from that date every
+ * attendee's `PRODUCED` line read "nothing in the last 7 days" — truthfully,
+ * and uselessly, while the office committed files to git every day. The
+ * grounding was honest about an input that had gone quiet, which is the worst
+ * kind of correct: nothing was wrong to find.
+ *
+ * `repo_writes` is where that output actually is, and until this session it
+ * could not be attributed to anyone — the reason the block above this one used
+ * to say, in as many words, that `repo_writes` is NOT the source. It now has an
+ * `author` column (see repo-write.js), so it is.
+ *
+ * BOTH are read, not one. A document row and a committed file are different
+ * facts, and collapsing them would make a quiet `reports` table look like a
+ * quiet office all over again — one axis down.
+ *
+ * `author = 'agent:<N>'` — an EXACT match, never `LIKE '%agent7%'`, which also
+ * matches agent 70. Block-authored rows (`block:meeting:daily_standup` and the
+ * rest) are deliberately NOT counted for any attendee: they are the office's
+ * output, not an agent's, and crediting them to whoever chaired the meeting is
+ * exactly the invention this grounding was built to stop.
+ *
+ * Returns `{}` without D1 — an empty map reads as NEVER, which is loud.
+ */
+async function writesByAgent(env) {
+  if (!env?.DB) return {};
+  const { results } = await env.DB.prepare(
+    `SELECT author, COUNT(*) AS n, MAX(created_at) AS last_at,
+            MAX(path) AS a_path
+     FROM repo_writes
+     WHERE committed = 1 AND author LIKE 'agent:%'
+     GROUP BY author`
+  ).all().catch(() => ({ results: [] }));
+
+  // The most recent paths per agent, for naming a real artifact rather than a
+  // count. A second small query rather than a window function: D1 is SQLite and
+  // this runs once per meeting.
+  const recent = await env.DB.prepare(
+    `SELECT author, path, created_at FROM repo_writes
+     WHERE committed = 1 AND author LIKE 'agent:%'
+     ORDER BY created_at DESC LIMIT 200`
+  ).all().catch(() => ({ results: [] }));
+
+  const out = {};
+  for (const r of results || []) {
+    const id = Number(String(r.author).slice('agent:'.length));
+    if (!Number.isInteger(id)) continue;
+    const t = Date.parse(r.last_at);
+    out[id] = { n: Number(r.n || 0), lastAt: Number.isNaN(t) ? null : t, paths: [] };
+  }
+  for (const r of recent?.results || []) {
+    const id = Number(String(r.author).slice('agent:'.length));
+    const e = out[id];
+    if (!e || e.paths.length >= 3 || e.paths.includes(r.path)) continue;
+    e.paths.push(r.path);
+  }
+  return out;
+}
+
 async function outputByAgent(env) {
   if (!env?.DB) return {};
   const { results } = await env.DB.prepare(
@@ -995,7 +1059,12 @@ ${droppedBlock}`;
     BACKOFFICE_REPO_NAME,
     path,
     markdown,
-    `chore(office): ${label} action items -> board inbox [skip ci]`
+    `chore(office): ${label} action items -> board inbox [skip ci]`,
+    // Session 40, Item B. BLOCK-AUTHORED, and that is a fact rather than a gap:
+    // an inbox file is the pipeline's output over a whole meeting's items, and
+    // no single attendee made it. `meetingType` and not `label` because the
+    // record wants the mechanism, not the sentence the file prints.
+    { author: blockAuthor(`meeting_action_items:${meetingType}`) }
   );
 
   if (!result.committed) {
@@ -1397,7 +1466,10 @@ async function commitMeetingReport(env, meetingType, markdown) {
     BACKOFFICE_REPO_NAME,
     path,
     markdown,
-    `chore(office): ${meetingType} meeting report ${stamp} [skip ci]`
+    `chore(office): ${meetingType} meeting report ${stamp} [skip ci]`,
+    // BLOCK-AUTHORED. A transcript is the meeting's, not any attendee's — and
+    // crediting the chair would put every daily standup on one agent's record.
+    { author: blockAuthor(`meeting:${meetingType}`) }
   );
 }
 
@@ -1756,17 +1828,27 @@ export async function runMeeting(meetingType, env, opts = {}) {
    * are different facts and only one of them means an attendee may say it has
    * no report. That distinction is the whole point of the block.
    *
-   * `repo_writes` is NOT the source of "what it produced", and that is worth
-   * stating because the obvious guess is wrong: `repo_writes` has no
-   * `agent_id` column, so it records that the OFFICE committed a file and
-   * cannot attribute it to anyone. `outputByAgent()` reads `reports`, which is
-   * per-agent and by kind, and is the same source the output census uses.
+   * ── CORRECTED 2026-08-30 (session 40, Item B) ─────────────────────────
+   *
+   * This note used to read: *"`repo_writes` is NOT the source of what it
+   * produced ... it has no `agent_id` column, so it records that the OFFICE
+   * committed a file and cannot attribute it to anyone."* That was true when
+   * it was written and it is not true now — `repo_writes.author` exists, and
+   * `writesByAgent()` above reads it. A15: corrected in place, dated, with the
+   * previous claim quoted rather than deleted.
+   *
+   * BOTH sources are passed. `outputByAgent()` reads `reports` (documents the
+   * office authored, per agent and by kind — the same source the output census
+   * uses) and `writesByAgent()` reads committed files. `reports` has taken no
+   * new row since 2026-08-23; that is why an attendee's PRODUCED line was
+   * empty every day while the office was committing.
    */
   const grounding = buildAttendeeGrounding({
     attendees: attendeeSnapshots.map((snap) => ({ id: snap.id, name: snap.config?.name, role: snap.config?.role })),
     boardTasks: snapshot?.board?.tasks || [],
     lifecycleRecords: snapshot?.lifecycle?.records || [],
     outputByAgent: await outputByAgent(env),
+    writesByAgent: await writesByAgent(env),
     boardRead: !!snapshot?.board,
     lifecycleRead: !!snapshot?.lifecycle,
   });

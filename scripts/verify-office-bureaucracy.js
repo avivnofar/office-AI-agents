@@ -1155,6 +1155,67 @@ check('it sits after the personas and BEFORE the office-wide block — own work 
 check('C5 — the prompt size is MEASURED in the run, with and without the grounding, not in a session note',
   /estTokensWithoutGrounding/.test(meSrc) && /promptSize,/.test(meSrc));
 
+const repoWriteSrcForAuthor = read('workers/repo-write.js');
+const contextEditorSrcForAuthor = read('workers/context-editor.js');
+const meetingEngineSrcForAuthor = read('workers/meeting-engine.js');
+
+/* ══════ §8c write attribution — a write records who made it  [FAILS-OLD] ══ */
+section('§8c write attribution — repo_writes.author (session 40, Item B)');
+
+const repoWrite = await import('../workers/repo-write.js');
+
+check('the vocabulary has exactly two shapes and a constructor for each — no free strings at call sites',
+  repoWrite.agentAuthor(7) === 'agent:7' && repoWrite.blockAuthor('meeting:daily_standup') === 'block:meeting:daily_standup');
+check('an ABSENT author is NULL — "unwired", and it is never confusable with "no agent applies"',
+  repoWrite.normalizeAuthor(undefined, { path: 'x.md' }) === null
+  && repoWrite.normalizeAuthor(null, { path: 'x.md' }) === null
+  && repoWrite.blockAuthor('meeting:x') !== null);
+check('a MALFORMED author is kept and MARKED, never dropped to NULL — a wrong answer that is visible can be fixed',
+  repoWrite.normalizeAuthor('agent 7', { path: 'x.md' }) === 'malformed:agent 7');
+check('agent:<N> is matched EXACTLY — agent:70 is not agent:7, so no grounding query may use LIKE',
+  repoWrite.AUTHOR_AGENT_RE.test('agent:7') && repoWrite.AUTHOR_AGENT_RE.test('agent:70')
+  && 'agent:70'.slice('agent:'.length) === '70');
+check('the INSERT carries the author column, and recordRepoWrite normalises rather than trusting the caller',
+  /INSERT INTO repo_writes \(id, repo, project_key, path, committed, status, redirected, mechanism, author\)/.test(repoWriteSrcForAuthor)
+  && /const authorValue = normalizeAuthor\(author, \{ path, repo \}\)/.test(repoWriteSrcForAuthor));
+check('the live table is migrated the same way `mechanism` was — CREATE cannot alter an existing table',
+  /ALTER TABLE repo_writes ADD COLUMN author TEXT/.test(repoWriteSrcForAuthor));
+check('[FAILS-OLD] the journal write — 410 of 627 historical rows — now names the agent',
+  /author: _bypassSelfCheck \? blockAuthor\('active_context_rolloff'\) : agentAuthor\(agentId\)/.test(contextEditorSrcForAuthor));
+check('a REVIEWER-written file is attributed to the reviewer, not to the agent whose folder it is in (A2)',
+  /const commit = await commitFileToRepo\(env, BACKOFFICE_REPO_NAME, path, rendered, commitMsg,\s*\n\s*\{ author: agentAuthor\(actorId\) \}\)/.test(contextEditorSrcForAuthor));
+check('a meeting report is BLOCK-authored — not credited to whoever chaired it',
+  /author: blockAuthor\(`meeting:\$\{meetingType\}`\)/.test(meetingEngineSrcForAuthor));
+
+/* The grounding, fed real writes. */
+const GROUND_WRITES = {
+  5: { n: 4, lastAt: Date.parse('2026-08-30T07:41:53Z'), paths: ['campus/agents/05-the-it-chief/journal.md'] },
+};
+const groundWithWrites = meetingEngine.buildAttendeeGrounding({
+  attendees: ATTENDEES, boardTasks: GROUND_TASKS, lifecycleRecords: GROUND_LC,
+  outputByAgent: { 5: { lastAt: Date.parse('2026-08-29T00:00:00Z'), kinds: { incident: 2 } } },
+  writesByAgent: GROUND_WRITES,
+  now: NOW,
+});
+check('[FAILS-OLD] PRODUCED now names a REAL ARTIFACT, not only a document count',
+  /campus\/agents\/05-the-it-chief\/journal\.md/.test(groundWithWrites));
+check('...and the count says how many were not listed — no silent cap',
+  /4 files committed, last 2026-08-30/.test(groundWithWrites) && /\+3 more not listed here/.test(groundWithWrites));
+check('the `reports` half is UNCHANGED beside it — a document row and a committed file are different facts',
+  /2 incident \(last 2026-08-29\)/.test(groundWithWrites));
+check('an agent with NO committed file is told so explicitly — the honest empty case survives',
+  /Agent 9[\s\S]{0,300}no file it committed is on record/.test(groundWithWrites));
+check('an agent that committed yesterday is NO LONGER told it has nothing on record',
+  !/Agent 5[\s\S]{0,400}THIS ATTENDEE HAS NOTHING ON RECORD/.test(groundWithWrites));
+check('[FAILS-OLD] the pre-change call shape (no writesByAgent) renders NO committed evidence at all',
+  !/campus\/agents\/05-the-it-chief\/journal\.md/.test(ground));
+check('block-authored rows are excluded from every agent line — the query matches agent:% only',
+  /WHERE committed = 1 AND author LIKE 'agent:%'/.test(meetingEngineSrcForAuthor)
+  && !/author LIKE '%agent/.test(meetingEngineSrcForAuthor));
+check('A15 — the note that said repo_writes CANNOT attribute is corrected in place, with the old claim quoted',
+  /CORRECTED 2026-08-30 \(session 40, Item B\)/.test(meetingEngineSrcForAuthor)
+  && /cannot attribute it to anyone/.test(meetingEngineSrcForAuthor));
+
 section('§9 source-level guarantees');
 
 check('NO Anthropic/Claude client is imported by the meeting engine (the Architect provider rule)',
