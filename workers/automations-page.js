@@ -33,8 +33,23 @@ const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => (
  * takes. The whole panel is one distinction, and the loading state was the one
  * place it could be lost for free.
  */
+/*
+ * ── THE TWO ENDPOINT URLS ARE PASSED IN, NOT BUILT HERE (2026-08-30) ──────
+ *
+ * They used to be a base plus a suffix, with the base defaulted to a string
+ * literal. `admin-gate.js` exports `adminApiUrl()` for exactly this — its own
+ * comment says it exists "so the three admin page renderers name one constant
+ * instead of three string literals that can drift" — and it was **exported and
+ * read by nothing**, which the weekly failure-mode walk flags as KFM-12
+ * (`deadexport`). This page was a fourth renderer about to reproduce the drift
+ * the helper was written to prevent.
+ *
+ * Passing the resolved URLs also keeps the alias map the single place a route
+ * name is written down: change a key there and this page follows, instead of
+ * silently pointing at a path that no longer rewrites.
+ */
 export function renderAutomationsPage({
-  stylesheet, view, actions, switches, today, versionId, apiBase = '/admin/api',
+  stylesheet, view, actions, switches, today, versionId, triggerUrl, readBackUrl,
 }) {
   const blockRows = view.rows.map((r) => `      <tr>
         <td class="auto-time">${esc(r.time)}</td>
@@ -169,7 +184,7 @@ ${switchRows}
     btn.disabled = true;
     say('writing ' + type + ' -> ' + next + ' ...', true);
     try {
-      var res = await fetch('${apiBase}/trigger', {
+      var res = await fetch('${triggerUrl}', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ type: type, enabled: next }),
@@ -177,7 +192,7 @@ ${switchRows}
       if (!res.ok) { say('the write was refused: HTTP ' + res.status, false); btn.disabled = false; return; }
       /* THE READ-BACK. Not the write's own response — a fresh read of the live
          value, which is the only thing that answers "did it take". */
-      var back = await fetch('${apiBase}/automations?format=json', { headers: { Accept: 'application/json' } });
+      var back = await fetch('${readBackUrl}?format=json', { headers: { Accept: 'application/json' } });
       if (!back.ok) { say('written, but the read-back failed (HTTP ' + back.status + ') - reload before trusting the value', false); btn.disabled = false; return; }
       var data = await back.json();
       var row = (data.switches || []).filter(function (s) { return s.trigger === type; })[0];
@@ -204,7 +219,7 @@ ${switchRows}
       say('written; the value is NOT YET VISIBLE (KV is eventually consistent) — re-reading in 10s before saying anything.', true);
       setTimeout(async function () {
         try {
-          var again = await fetch('${apiBase}/automations?format=json', { headers: { Accept: 'application/json' } });
+          var again = await fetch('${readBackUrl}?format=json', { headers: { Accept: 'application/json' } });
           var d2 = await again.json();
           var r2 = (d2.switches || []).filter(function (s) { return s.trigger === type; })[0];
           paint(r2);

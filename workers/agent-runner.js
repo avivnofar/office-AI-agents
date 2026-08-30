@@ -166,6 +166,10 @@ import {
   isAdminPagePath, adminPageAuthorized, adminCredential, adminUnauthorizedResponse,
   adminCookieValue, adminSessionSetCookie,
   canonicalAdminApiPath,
+  // Session 40 addendum: the automations page's two fetch targets are built
+  // from this, not from a literal. Until today it was exported and read by
+  // nothing — KFM-12 `deadexport`, which the weekly failure-mode walk flags.
+  adminApiUrl,
 } from './admin-gate.js';
 // Cloudflare Access as a credential (2026-08-25, Session 18 Item A). Imported
 // here for ONE thing only: the diagnostics endpoint that says whether Access is
@@ -8329,7 +8333,14 @@ export default {
      */
     if (request.method === 'GET' && (url.pathname === '/admin/automations' || url.pathname === '/admin/automations/')) {
       const data = await gatherAutomations(env);
-      return new Response(renderAutomationsPage({ stylesheet: officeStylesheet(), ...data }), {
+      return new Response(renderAutomationsPage({
+        stylesheet: officeStylesheet(),
+        // Built from the alias map's own helper, never from a literal — see
+        // renderAutomationsPage()'s header and admin-gate.js's adminApiUrl().
+        triggerUrl: adminApiUrl('trigger'),
+        readBackUrl: adminApiUrl('automations'),
+        ...data,
+      }), {
         status: 200,
         headers: {
           'Content-Type': 'text/html; charset=utf-8',

@@ -145,8 +145,16 @@ check('...and only the SECOND read is allowed to say the write did not take',
   })());
 check('C7 — the toggle READS THE LIVE VALUE BACK rather than trusting the write’s own 200',
   /read-back/i.test(read('workers/automations-page.js'))
-  && /automations\?format=json/.test(read('workers/automations-page.js'))
+  // The read-back target is now the alias map's own resolved URL rather than a
+  // literal path, so this asserts the SHAPE (a fresh GET of the read-back
+  // endpoint) instead of a string the page no longer contains.
+  && /readBackUrl\}\?format=json/.test(read('workers/automations-page.js'))
   && /THE WRITE DID NOT TAKE/.test(read('workers/automations-page.js')));
+
+check('the page builds its two fetch targets from adminApiUrl(), not from a literal — KFM-12 deadexport',
+  /triggerUrl: adminApiUrl\('trigger'\)/.test(triggerCases)
+  && /readBackUrl: adminApiUrl\('automations'\)/.test(triggerCases)
+  && !/\$\{apiBase\}/.test(read('workers/automations-page.js')));
 
 section('§4 the Actions half — C3');
 
