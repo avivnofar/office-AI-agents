@@ -38,7 +38,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { renderOfficeSite } from '../workers/office-site-page.js';
+import { renderOfficeSite, officeChrome, chromeKeysUsed } from '../workers/office-site-page.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repo = join(here, '..');
@@ -47,6 +47,24 @@ const module_ = readFileSync(join(repo, 'workers', 'office-site-page.js'), 'utf8
 
 const PUBLIC = renderOfficeSite({ mode: 'public' });
 const ADMIN = renderOfficeSite({ mode: 'admin' });
+
+/**
+ * The two chrome variants (2026-08-30).
+ *
+ * ── WHY THE CHECKS BELOW ASK THE DICTIONARY AND NOT A LITERAL ───────────
+ *
+ * Seven checks in this file used to assert on an English sentence — *"raises it
+ * once more after seven days"*, *"If you say nothing: "*. Every one of them was
+ * really asking *does the page still SAY this*, and every one of them broke the
+ * moment the owner's surface was translated, without a single behaviour
+ * changing. A check that fails on a translation was testing the wrong thing.
+ *
+ * So they now ask the dictionary for the sentence and then ask the render
+ * whether it is there. The property survives any future language; what it still
+ * catches is the sentence being DROPPED, which is what it was written for.
+ */
+const HE = officeChrome('admin');
+const EN = officeChrome('public');
 
 /**
  * The three surfaces of one render, kept apart on purpose.
@@ -190,7 +208,7 @@ check('the public page is cacheable, the admin page is not',
 console.log('\n--- 4. "what this page cannot show you" ---');
 
 check('the section still exists in both renders',
-  PUBLIC.includes('What this page cannot show you') && ADMIN.includes('What this page cannot show you'),
+  PUBLIC.includes(EN.tab_gaps) && ADMIN.includes(HE.tab_gaps),
   'this is the best thing on the office\'s site and the habit is the point');
 check('it no longer claims live counts are unavailable',
   !PUBLIC.includes('not available from a static page'),
@@ -205,7 +223,8 @@ check('it names the real staleness bound the live wiring introduces',
 check('it still refuses to claim the counts mean quality',
   /is a count, not a quality claim/.test(PUBLIC));
 check('the admin version adds the pending list\'s own limits',
-  ADMIN.includes('read FRESH') && !PUBLIC.includes('read FRESH'));
+  ADMIN.includes(HE.gaps_admin[0]) && !PUBLIC.includes(HE.gaps_admin[0])
+  && !PUBLIC.includes(EN.gaps_admin[0]));
 check('the section is filled from the live payload too, not only a static list',
   /GAP_KEYS\.forEach/.test(ADM.js) && /data\[key\]/.test(ADM.js));
 check('the admin bundle reads BOTH live gap sources, the public bundle only the public one',
@@ -302,7 +321,7 @@ check('the answer carries the item id so the office\'s reply reader can attribut
 check('the subject leads with the id, because the filename slug is cut at 48 characters',
   /item\.item_id \+ " — " \+ ask/.test(ADM.js));
 check('the card renders the ask, the options and the office\'s default',
-  ADM.js.includes('notice.options') && ADM.js.includes('If you say nothing: ')
+  ADM.js.includes('notice.options') && ADM.js.includes(HE.pending_if_nothing)
   && ADM.js.includes('item.by_when'));
 check('the card renders the PLAIN provenance, not the board line with its identifier',
   ADM.js.includes('item.source_plain') && !ADM.js.includes('text: item.source }'));
@@ -312,13 +331,13 @@ check('the card renders the PLAIN detail and status note, so no identifier reach
 check('the headline is the stripped ask, not the raw title',
   /var headline = item\.ask \|\| item\.title/.test(ADM.js));
 check('what the office FAILED to state is shown rather than hidden',
-  ADM.js.includes('notice.missing') && /did not record/.test(ADM.js));
+  ADM.js.includes('notice.missing') && ADM.js.includes(HE.pending_missing_head));
 check('a refusal is shown in the parser\'s own words, not summarised',
-  /r\.body && r\.body\.reason/.test(ADM.js) && /The office refused it/.test(ADM.js));
+  /r\.body && r\.body\.reason/.test(ADM.js) && ADM.js.includes(HE.answer_refused_a));
 check('the page states, on the card, whether an answer stops the office asking',
-  /answer_stops_the_asking/.test(ADM.js) && /raises it once more after seven days/.test(ADM.js));
+  /answer_stops_the_asking/.test(ADM.js) && ADM.js.includes(HE.answer_effect_stops));
 check('AND IT DOES NOT CLAIM the card disappears — this list reads the ledger',
-  /stays on this page until the office marks its own ledger entry/.test(ADM.js),
+  ADM.js.includes(HE.answer_stays),
   'the page must not promise a state change it does not perform');
 
 check('the office-data tab exists and renders from the payload',
@@ -341,6 +360,116 @@ const used = new Set((module_.match(/var\((--[a-z0-9-]+)/g) || []).map((m) => m.
 const undeclared = [...used].filter((v) => !declared.has(v));
 check('every CSS variable the page USES is one the office\'s palette DECLARES',
   undeclared.length === 0, undeclared.join(', '));
+
+/* ══ 9. THE CHROME IS TRANSLATED. THE OFFICE'S OWN WORDS ARE NOT. ══════ */
+
+/**
+ * Added 2026-08-30, layer 1 of the owner-channel readability plan.
+ *
+ * The boundary this whole change lives or dies on: **chrome is translated,
+ * content is not.** `item-detail.js`'s header states the reason — a fluent
+ * paraphrase of something the office did not mean is worse than no expansion at
+ * all, because a paraphrase reads exactly like evidence.
+ *
+ * A translation cannot be checked by reading it. What CAN be checked is that
+ * every office-originating value still reaches the DOM by a path that touches
+ * no dictionary — so the assertions below are about which expression supplies a
+ * node's text, not about what any particular sentence says.
+ */
+console.log('\n--- 9. Hebrew chrome, English record ---');
+
+check('the two chrome variants carry exactly the same keys',
+  JSON.stringify(Object.keys(EN).sort()) === JSON.stringify(Object.keys(HE).sort()),
+  'a key present in one and missing from the other renders as "undefined" on one surface only');
+check('every T.<key> either bundle references resolves in its own dictionary',
+  ['admin', 'public'].every((m) => {
+    const c = officeChrome(m);
+    return chromeKeysUsed(m).every((k) => c[k] !== undefined);
+  }),
+  'the slot filler ships undefined rather than throwing, so this is the check that makes that safe');
+check('the admin chrome is actually Hebrew',
+  /[\u0590-\u05FF]/.test(HE.tab_pending) && /[\u0590-\u05FF]/.test(HE.group_blocked)
+  && /[\u0590-\u05FF]/.test(HE.item_h_blocker));
+check('THE PUBLIC PAGE IS UNTOUCHED — not one Hebrew character reaches it',
+  !/[\u0590-\u05FF]/.test(PUBLIC),
+  '/ is the office\'s public face and this session was scoped to the owner\'s console');
+check('the public bundle ships only the chrome its own code reads',
+  chromeKeysUsed('public').length < chromeKeysUsed('admin').length
+  && !PUB.js.includes(EN.group_blocked + '"') && !PUB.js.includes(EN.item_h_blocker),
+  'serialising the whole dictionary into both bundles put admin vocabulary on the public page');
+
+/*
+ * THE VALUES. Each of these is a field the office wrote — a board entry, a
+ * blocking entry, a resolution failure, the office's own default sentence — and
+ * each is asserted to reach its node from the field itself, with no dictionary
+ * lookup and no concatenation that could reword it.
+ */
+const VERBATIM_PATHS = [
+  ['the item\'s own entry', 'el("pre", { class: "item-verbatim", text: d.entry.verbatim })'],
+  ['the blocking item\'s entry', 'el("pre", { class: "item-verbatim", text: r.verbatim })'],
+  ['the board\'s own "Blocked by" line', 'el("p", { class: "item-line", text: b.stated })'],
+  ['the office\'s stated default', 'el("p", { class: "item-line", text: def.label + ": " + def.text })'],
+  ['the card\'s plain detail', 'el("p", { class: "pending-detail", text: detail })'],
+  ['the office\'s composed ask', 'el("p", { class: "pending-ask", text: notice.ask })'],
+];
+for (const [what, expr] of VERBATIM_PATHS) {
+  check(`${what} reaches the page unaltered`, ADM.js.includes(expr),
+    'a value that came off the wire must not pass through the chrome dictionary');
+}
+check('NO_STATED_DEFAULT is rendered as the server sent it, not re-composed',
+  ADM.js.includes('el("span", { text: def.words })'),
+  'item-detail.js owns that sentence; a second copy here is the drift a shared constant prevents');
+check('an unresolved blocker\'s reason is the server\'s sentence, not a summary',
+  ADM.js.includes('el("span", { text: u.reason })'));
+check('the office\'s verbatim material is forced left-to-right in Hebrew chrome',
+  ADM.css.includes('.chrome-he .item-verbatim') && ADM.css.includes('direction: ltr'),
+  'a board entry rendered right-aligned is a paraphrase by typography');
+
+/* ══ 10. THE BLOCKER, ON THE CARD (layer 1, part 2) ════════════════════ */
+
+/**
+ * The card used to say *"Blocked by another item on the board"* and stop. The
+ * answer — which item, and what it says — has been in the endpoint's response
+ * since it was built; it was three clicks away, below the fold of a panel
+ * opened for a different question.
+ */
+console.log('\n--- 10. the blocker, inline on the card ---');
+
+check('a card whose board entry names a blocker gets its own control',
+  ADM.js.includes('function blockerControl(') && ADM.js.includes('/^Blocked by:/i.test'),
+  'the test is on the office\'s own text, not the card kind — a NOT-READY task can carry a blocker too');
+check('it is collapsed by default and opens in place',
+  /panel\.hidden = true;/.test(ADM.js) && !ADM.js.includes('window.open')
+  && !ADM.js.includes('location.href ='),
+  'no page reload, no new tab');
+check('ONE implementation of the blocker view, called by the card and the expansion',
+  (ADM.js.split('function renderBlockerSection(').length - 1) === 1
+  && (ADM.js.split('renderBlockerSection(').length - 1) === 3,
+  'two renderings of one answer is the drift this estate keeps finding');
+check('both controls share ONE fetch, so opening both does not pay 17 subrequests twice',
+  ADM.js.includes('function itemLoader(')
+  && (ADM.js.split('fetch("/admin/api/item').length - 1) === 1
+  && ADM.js.includes('var loader = itemLoader(item);'));
+check('the detail call goes through the /admin/api/ alias map, not a bare /api/ path',
+  ADM.js.includes('fetch("/admin/api/item?id=" + encodeURIComponent(item.id)')
+  && !ADM.js.includes('fetch("/api/admin/item'),
+  'a call from outside /admin/ arrives with no Access assertion on it');
+check('a blocker named but not found is SHOWN, with the server\'s own reason',
+  ADM.js.includes('(b.unresolved || []).forEach') && ADM.js.includes(HE.item_blocker_unresolved),
+  'a silently missing blocker reads as "nothing blocks this"');
+check('a resolved blocker shows its heading, its state and its entry',
+  ADM.js.includes('class: "item-blocker-id", text: r.item_id')
+  && ADM.js.includes('r.state ? "  ·  " + r.state : ""')
+  && ADM.js.includes('text: r.verbatim'));
+check('an entry found beside the board says which file it came out of',
+  ADM.js.includes('if (r.elsewhere)') && ADM.js.includes('el("code", { text: r.file })'));
+check('a struck-through blocker is labelled as one the board parser does not read',
+  ADM.js.includes('r.match === "decided"') && ADM.js.includes(HE.item_blocker_struck));
+check('a failed lookup is reported, never rendered as an empty panel',
+  (ADM.js.split('btn.textContent = T.item_retry;').length - 1) === 2);
+check('none of it is in the public bundle',
+  !PUB.js.includes('blockerControl') && !PUB.js.includes('renderBlockerSection')
+  && !PUB.js.includes('itemLoader'));
 
 /* ═════════════════════════════ RESULT ══════════════════════════════════ */
 
