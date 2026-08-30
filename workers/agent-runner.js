@@ -222,6 +222,8 @@ import {
 import {
   countArtifacts, lastArtifactCapableBlock, switchedOffBlockTypes, buildObligationIssue,
   DAILY_OBLIGATION_TABLE_SQL, OBLIGATION_ISSUE_LABEL,
+  DAILY_OBLIGATION_MIGRATIONS,
+  skipReasonFor,
 } from './daily-obligation.js';
 // The publishing gate (2026-08-16, OB-014, audit finding #17). Deliberately has
 // NO kill switch — see front-gate.js's header. The gate itself is pure and
@@ -7420,14 +7422,38 @@ async function runScheduledBlockInner(env, israelTime, dayOfWeek, ctx) {
  * a silence indistinguishable from a day that passed.
  */
 async function runDailyObligationCheck(env, { date, dayOfWeek, schedule, isOffDay, source } = {}) {
-  if (isOffDay) {
-    return { ok: true, skipped: true, reason: 'rest_day_not_checked', policy: 'OFFICE-POLICY.md A13' };
-  }
+  /*
+   * ── SESSION 39, ITEM A (2026-08-30): THE REST DAY NOW WRITES ITS ROW ────
+   *
+   * This function used to `return` here, before touching D1. Saturday
+   * 2026-08-29 was the FIRST tick this check ever reached on its own schedule
+   * — `block_admissions` carries `day 66 · spare_time · 08:00 · run` at
+   * 05:00:38Z, which is that day's last block, so `isLastBlock` was true and
+   * this ran — and it wrote nothing at all. A mechanism built so that "the
+   * office produced nothing" could never again look like "nobody looked"
+   * spent its first live firing producing exactly that.
+   *
+   * `skipReasonFor()` decides; this only carries the answer down. The check
+   * still COUNTS on a rest day — the count is two D1 statements the
+   * 50-subrequest cap does not measure, so recording it is free and its
+   * absence would be a second gap. What it never does on a rest day is
+   * NOTIFY: A13 is why the day is quiet, and an alarm the owner learns to
+   * ignore is the only way an alarm like this dies.
+   */
+  const skipReason = skipReasonFor({ isOffDay });
   const today = date || todayDateStr();
   try {
     if (!env?.DB) return { ok: false, reason: 'no_db_binding' };
     await env.DB.prepare(REPO_WRITE_TABLE_SQL).run();
     await env.DB.prepare(DAILY_OBLIGATION_TABLE_SQL).run();
+    // Columns added to a table that already exists. Each ALTER is independent
+    // and its "duplicate column name" is the expected steady state, not a
+    // failure — swallowed per statement so one already-applied migration
+    // cannot stop the next one. KFM-14: a schema top-up must never cost the
+    // measurement.
+    for (const sql of DAILY_OBLIGATION_MIGRATIONS) {
+      await env.DB.prepare(sql).run().catch(() => {});
+    }
 
     // `repo_writes` is this Worker's own record of what it committed, and it is
     // the ONLY readable record of the day's output: nothing here can read the
@@ -7449,7 +7475,7 @@ async function runDailyObligationCheck(env, { date, dayOfWeek, schedule, isOffDa
     let notifyDetail = null;
     let seq = null;
 
-    if (!met) {
+    if (!met && !skipReason) {
       if (!(await ownerChannelEnabled(env))) {
         notifyDetail = 'owner_channel_enabled is not true — the failure is recorded and the owner was NOT told';
       } else {
@@ -7484,13 +7510,14 @@ async function runDailyObligationCheck(env, { date, dayOfWeek, schedule, isOffDa
 
     await env.DB.prepare(
       `INSERT OR REPLACE INTO daily_obligation
-        (date, day_of_week, artifact_count, met, artifacts, last_capable_block, notified, notify_detail, source)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (date, day_of_week, artifact_count, met, artifacts, last_capable_block, notified, notify_detail, source, checked, skip_reason)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).bind(
       today, dayOfWeek ?? null, counted.count, met ? 1 : 0,
       JSON.stringify(counted.artifacts.map((a) => `${a.repo}/${a.path}`)),
       lastCapable ? `${lastCapable.type}@${lastCapable.time}` : null,
-      notified ? 1 : 0, notifyDetail, source || 'finalizeScheduledDay'
+      notified ? 1 : 0, notifyDetail, source || 'finalizeScheduledDay',
+      skipReason ? 0 : 1, skipReason
     ).run();
 
     if (counted.unclassified.length) {
@@ -7500,10 +7527,14 @@ async function runDailyObligationCheck(env, { date, dayOfWeek, schedule, isOffDa
       console.warn(`[daily-obligation] ${today}: ${counted.unclassified.length} write path(s) matched no classification rule and were counted as NOT artifacts: `
         + counted.unclassified.map((u) => `${u.repo}/${u.path}`).join(', '));
     }
-    console.log(`[daily-obligation] ${today}: ${counted.count} artifact(s), ${counted.notArtifacts.length} non-artifact write(s), met=${met}, notified=${notified}`);
+    console.log(`[daily-obligation] ${today}: ${counted.count} artifact(s), ${counted.notArtifacts.length} non-artifact write(s), `
+      + `checked=${skipReason ? 0 : 1}, met=${met}, notified=${notified}${skipReason ? ' — NOT CHECKED: rest day (A13)' : ''}`);
 
     return {
       ok: true, date: today, met, artifactCount: counted.count,
+      // `checked` is returned as well as stored, so the supervised trigger's
+      // read-back answers "was this day evaluated" without a second D1 query.
+      checked: !skipReason, skipReason,
       artifacts: counted.artifacts, unclassified: counted.unclassified,
       lastCapableBlock: lastCapable, notified, notifyDetail, seq,
     };
@@ -9271,13 +9302,27 @@ export default {
             // a gap — it routes whoever needs it onto whatever path happens to
             // exist (AD §7.5). Costs no model call and, on a day that produced
             // something, no subrequest at all.
-            result = await runDailyObligationCheck(env, {
-              date: body.date,
-              dayOfWeek: Number(body.dayOfWeek) || undefined,
-              schedule: getDaySchedule(Number(body.dayOfWeek) || israelTimeParts(new Date()).dayOfWeek),
-              isOffDay: false,
-              source: 'supervised trigger',
-            });
+            //
+            // SESSION 39: `isOffDay` is DERIVED, not hardcoded false. It was
+            // hardcoded, and once the rest day started writing a row that would
+            // have meant a supervised run on a Saturday recording `checked = 1`
+            // and EMAILING the owner that a rest day produced nothing — the
+            // alarm A13 exists to suppress, fired by the debug door. Body may
+            // pass `{"offDay": true|false}` to state it explicitly; anything
+            // else and the schedule decides.
+            {
+              const dow = Number(body.dayOfWeek) || israelTimeParts(new Date()).dayOfWeek;
+              const sched = getDaySchedule(dow);
+              result = await runDailyObligationCheck(env, {
+                date: body.date,
+                dayOfWeek: Number(body.dayOfWeek) || undefined,
+                schedule: sched,
+                isOffDay: typeof body.offDay === 'boolean'
+                  ? body.offDay
+                  : sched === dailyScheduleConfig.saturday_schedule,
+                source: 'supervised trigger',
+              });
+            }
             break;
           case 'brain_audit_decompose':
             // Session 33, Item D3 — SUPERVISED ONLY. One real Anthropic call on

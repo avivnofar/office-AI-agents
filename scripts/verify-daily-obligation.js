@@ -29,6 +29,7 @@ import path from 'node:path';
 
 import {
   CLASSIFICATION_RULES, ARTIFACT_CAPABLE_BLOCKS, DAILY_OBLIGATION_TABLE_SQL,
+  DAILY_OBLIGATION_MIGRATIONS, skipReasonFor,
   classifyWrite, countArtifacts, lastArtifactCapableBlock, switchedOffBlockTypes, buildObligationIssue,
   WAREHOUSE_REPO, BACKOFFICE_REPO, PUBLIC_REPO,
 } from '../workers/daily-obligation.js';
@@ -248,8 +249,43 @@ check('a day that BROKE is distinguishable from a quiet one IN THE ROW, not only
   /FINALIZE THREW/.test(runner));
 check('and the check is reachable on demand — a capability with no route to it does not stay a gap',
   /case 'daily_obligation_check':/.test(runner));
-check('it is skipped on the rest day (A13) rather than recording a designed silence as a failure',
-  /rest_day_not_checked/.test(runner));
+/*
+ * ── §9b, SESSION 39 (2026-08-30): THE REST DAY WRITES ITS ROW ────────────
+ *
+ * These replace one assertion that had gone stale in the direction that
+ * matters. It said the check "is skipped on the rest day", it passed, and what
+ * it was pinning was a `return` placed BEFORE any D1 write — so the first tick
+ * this mechanism ever reached on its own schedule (Sat 2026-08-29 08:00, its
+ * day's last block) recorded nothing at all, and the absence of a row was
+ * indistinguishable from the Worker never having run. The old check was
+ * correct about the behaviour and wrong about whether the behaviour was
+ * acceptable, which is why it is REPLACED rather than deleted.
+ *
+ * The rule itself is now a pure exported function, so this calls it instead of
+ * grepping for a string. `skipReasonFor()` and the caller cannot drift.
+ */
+check('the rest day is NOT evaluated — A13, and the rule is a callable function, not a comment',
+  typeof skipReasonFor({ isOffDay: true }) === 'string' && /A13/.test(skipReasonFor({ isOffDay: true })));
+check('a working day IS evaluated — the skip is not the default',
+  skipReasonFor({ isOffDay: false }) === null && skipReasonFor({}) === null);
+check('the rest day still WRITES ITS ROW — the check no longer returns before touching D1',
+  !/if \(isOffDay\) \{\s*return \{ ok: true, skipped: true/.test(runner)
+  && /const skipReason = skipReasonFor\(\{ isOffDay \}\);/.test(runner));
+check('and it is NEVER notified on a rest day — an alarm the owner learns to ignore is a dead alarm',
+  /if \(!met && !skipReason\) \{/.test(runner));
+check('`checked` and `skip_reason` are bound into the INSERT, not merely declared in the CREATE',
+  /skipReason \? 0 : 1, skipReason/.test(runner));
+check('the two columns are migrated onto the LIVE table — CREATE TABLE IF NOT EXISTS reaches a fresh D1 and nothing else',
+  DAILY_OBLIGATION_MIGRATIONS.length === 2
+  && DAILY_OBLIGATION_MIGRATIONS.every((sql) => /^ALTER TABLE daily_obligation ADD COLUMN /.test(sql))
+  && /for \(const sql of DAILY_OBLIGATION_MIGRATIONS\)/.test(runner));
+check('`checked` backfills to 1 — the seven rows already there WERE evaluated, and defaulting them to 0 would rewrite history',
+  DAILY_OBLIGATION_MIGRATIONS.some((sql) => /checked INTEGER NOT NULL DEFAULT 1/.test(sql)));
+check('the supervised trigger DERIVES isOffDay — hardcoded `false` would have emailed the owner about a Saturday',
+  !/schedule: getDaySchedule\(Number\(body.dayOfWeek\)[\s\S]{0,40}isOffDay: false/.test(runner)
+  && /isOffDay: typeof body.offDay === 'boolean'/.test(runner));
+check('the alarm query is written down where the column is defined, not only in a session report',
+  /WHERE checked = 1 AND met = 0/.test(readFileSync(path.join(ROOT, 'workers/daily-obligation.js'), 'utf8')));
 check('the D1 row is written even when the notice is gated off — a suppressed alarm stays countable',
   /owner_channel_enabled is not true — the failure is recorded and the owner was NOT told/.test(runner));
 check('the notice rides the SAME ledger and sequence as every other owner notification',

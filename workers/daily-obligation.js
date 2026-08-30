@@ -293,6 +293,29 @@ export function lastArtifactCapableBlock(schedule, opts = {}) {
  * `notified` is stored SEPARATELY from `artifact_count`, because "produced
  * nothing" and "produced nothing and the owner was told" are different facts,
  * and the second one is the one that can fail.
+ *
+ * ── `checked` AND `skip_reason`, ADDED SESSION 39 (2026-08-30) ────────────
+ *
+ * The rest day was the first tick this check ever reached on its own schedule
+ * (Saturday 2026-08-29, 08:00 Israel — `block_admissions` has the row) and it
+ * wrote NOTHING: `runDailyObligationCheck()` returned on `isOffDay` before it
+ * touched D1. So the FIRST scheduled firing of a mechanism built to end
+ * "silence and absence look identical" produced a silence indistinguishable
+ * from the Worker never having run.
+ *
+ * A rest day is not a met obligation and it is not a failed one. Both of the
+ * existing columns are the wrong place to say so — `met = 1` would claim an
+ * artifact that does not exist, `met = 0` would raise an alarm A13 exists to
+ * suppress. So the fact gets its own column:
+ *
+ *   `checked = 1` — the obligation was evaluated. `met` means what it says.
+ *   `checked = 0` — the obligation was NOT evaluated. `skip_reason` says why,
+ *                   `met` is still the truthful count-derived verdict, and
+ *                   NOBODY IS NOTIFIED.
+ *
+ * The alarm query is therefore `WHERE checked = 1 AND met = 0`, and it is
+ * written down here because a column whose meaning lives only in a session
+ * report is a column the next reader will get wrong.
  */
 export const DAILY_OBLIGATION_TABLE_SQL = `CREATE TABLE IF NOT EXISTS daily_obligation (
   date TEXT PRIMARY KEY,
@@ -304,8 +327,49 @@ export const DAILY_OBLIGATION_TABLE_SQL = `CREATE TABLE IF NOT EXISTS daily_obli
   notified INTEGER DEFAULT 0,
   notify_detail TEXT,
   source TEXT,
+  checked INTEGER NOT NULL DEFAULT 1,
+  skip_reason TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )`;
+
+/**
+ * The two columns above, for a table that ALREADY EXISTS.
+ *
+ * `CREATE TABLE IF NOT EXISTS` is a no-op against the live table, so the
+ * declaration above reaches a fresh D1 and nothing else. These do the rest.
+ * Each is run on its own and its "duplicate column name" error is swallowed by
+ * the caller — SQLite has no `ADD COLUMN IF NOT EXISTS`, and the alternative
+ * (a probe of `pragma_table_info` first) is two round trips to learn something
+ * the ALTER itself reports.
+ *
+ * `NOT NULL DEFAULT 1` on `checked` is the correct backfill for every row
+ * already in the table: all seven were evaluated. It is not a convenience —
+ * defaulting them to 0 would retroactively claim the 2026-08-26 failure was
+ * never checked, which is the opposite of what happened.
+ */
+export const DAILY_OBLIGATION_MIGRATIONS = Object.freeze([
+  'ALTER TABLE daily_obligation ADD COLUMN checked INTEGER NOT NULL DEFAULT 1',
+  'ALTER TABLE daily_obligation ADD COLUMN skip_reason TEXT',
+]);
+
+/**
+ * Why a day was not evaluated, or `null` when it was.
+ *
+ * Pure, and exported, so `scripts/verify-daily-obligation.js` exercises the
+ * REAL rule rather than a transcription of it — the same reason every other
+ * decision in this module is a pure function.
+ *
+ * @param {{isOffDay?: boolean}} opts
+ * @returns {string|null}
+ */
+export function skipReasonFor({ isOffDay } = {}) {
+  if (isOffDay) {
+    return 'REST DAY — OFFICE-POLICY.md A13. The office writes nothing by design on a Saturday, '
+      + 'so the obligation does not apply and the owner is NOT notified. The row exists so that '
+      + '"the rest day skipped it" and "the check never ran" stop being the same observation.';
+  }
+  return null;
+}
 
 /* ───────────────────────────── The notification ─────────────────────────── */
 
