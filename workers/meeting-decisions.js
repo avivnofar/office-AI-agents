@@ -305,6 +305,150 @@ export function normalizeContextAmendments(rawItems, { rosterIds, proposerIds = 
   return { items, dropped };
 }
 
+/* ───────────── What each attendee actually has (Session 39, Item C) ──────── */
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ * NOTHING IS SAID IN A MEETING WITHOUT A RECORD BEHIND IT.
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * ── WHAT AN ATTENDEE HAD BEFORE THIS, MEASURED ──────────────────────────
+ *
+ * `buildMeetingPrompt()` gives every attendee its persona, its mood and
+ * irritation, its durable config overrides, the office-wide context block, and
+ * the agenda data. Of all of that, exactly ONE item is per-agent and factual:
+ * `gatherDailyStandup()`'s `sessionStats` row. Live, for 2026-08-27..29, every
+ * attendee's row was
+ *
+ *     { agent_id, sessions: 4, cases: 0, avg_mood: 100,
+ *       irritation_events: 0, happy_events: 0 }
+ *
+ * Six numbers, five of them constant or zero, and NOT ONE of them says what
+ * that agent produced, what it owes, or what is blocked on it. The Workflow
+ * (Agent 12) is the sole exception, because `renderWorkflowMetrics()` hands him
+ * real board figures — and his contributions are the ones that are correct.
+ *
+ * Then the standup told each attendee to "give a 1-2 sentence status". On both
+ * 2026-08-27 and 2026-08-28 the IT Chief's line was, verbatim:
+ *
+ *     "Network optimization continues on schedule, firewall rules updated
+ *      yesterday; no client escalations pending, so I'm clear to assist where
+ *      needed."
+ *
+ * The office has no network, no firewall, no clients and no escalations. The
+ * attendance was real and the content was invented — and it was invented in the
+ * only direction available to a model asked to speak and given nothing about
+ * itself. **This is not a persona failure. It is an empty input.**
+ *
+ * ── WHAT THIS BLOCK IS, AND WHAT IT DELIBERATELY IS NOT ─────────────────
+ *
+ * One line per attendee, every field read from a record: the board (`BOARD.md`,
+ * parsed by office-context.js), the lifecycle digest (`IN-FLIGHT.md`), and D1's
+ * own output counts. It is NOT a summary and NOT an interpretation — an empty
+ * field renders as the words "none recorded", because the whole purpose is that
+ * "nothing is on record" must be sayable.
+ *
+ * NO ROLE IS REMOVED (C4). The IT Chief invents because he has no facts, not
+ * because he has no place, and dropping him from the meeting would delete the
+ * symptom while leaving every other silent attendee free to do the same thing.
+ *
+ * ── AND SILENCE IS NAMED AS A CONTRIBUTION ──────────────────────────────
+ *
+ * The rules below say, in as many words, that an attendee with an empty line
+ * says it has no report and that this is complete and correct. Without that
+ * sentence the grounding alone would not help: a model handed an empty line and
+ * an instruction to speak fills the gap exactly as before. The same argument
+ * `gatherClosingQaReview()`'s `nothingToReview` guard already makes — a meeting
+ * handed empty arrays and told to be specific does not decline, it produces
+ * something.
+ *
+ * Pure, like everything else in this module, so the verifier exercises it
+ * without D1 or the network.
+ *
+ * @param {object} opts
+ * @param {Array<{id:number,name?:string,role?:string}>} opts.attendees
+ * @param {Array} opts.boardTasks           parseBoard()'s tasks, or []
+ * @param {Array} opts.lifecycleRecords     parseInFlight()'s records, or []
+ * @param {object} opts.outputByAgent       `{ id: { lastAt, kinds } }`
+ * @param {number} [opts.windowDays]
+ * @param {number} [opts.now]
+ * @param {boolean} [opts.boardRead]        false when BOARD.md could not be read
+ * @param {boolean} [opts.lifecycleRead]    false when IN-FLIGHT.md could not be read
+ */
+export function buildAttendeeGrounding({
+  attendees = [],
+  boardTasks = [],
+  lifecycleRecords = [],
+  outputByAgent = {},
+  windowDays = 7,
+  now = Date.now(),
+  boardRead = true,
+  lifecycleRead = true,
+} = {}) {
+  if (!attendees.length) return '';
+  const windowMs = windowDays * 24 * 60 * 60 * 1000;
+  const cap = (list, n) => (list.length > n ? `${list.slice(0, n).join(', ')} +${list.length - n} more` : list.join(', '));
+
+  const lines = attendees.map((a) => {
+    const id = Number(a?.id);
+    const who = `Agent ${id}${a?.name ? ` — ${a.name}` : ''}`;
+    const mine = boardTasks.filter((t) => t.agentId === id);
+
+    const unstarted = mine.filter((t) => t.state === 'READY').map((t) => `${t.id}${t.urgency ? ' [URGENT]' : ''}`);
+    const doing = mine.filter((t) => t.state === 'IN-PROGRESS').map((t) => t.id);
+    // The `Blocked by:` line is prose and can run to 200 characters of
+    // reasoning (OB-011's does). One clause is what a meeting needs; the rest
+    // is on the board. Truncation SAYS it truncated — the same NO SILENT CAPS
+    // rule office-context.js keeps, applied to the same class of field.
+    const why = (t) => {
+      const b = String(t.blockedBy || '').trim();
+      if (!b) return 'something unstated';
+      return b.length > 90 ? `${b.slice(0, 90).trimEnd()}… [truncated; the whole reason is on the board]` : b;
+    };
+    const blocked = mine.filter((t) => t.state === 'BLOCKED').map((t) => `${t.id} (waiting on ${why(t)})`);
+    const reviews = lifecycleRecords
+      .filter((r) => (r.owed_by || []).includes(id))
+      .map((r) => `${r.slug} r${r.round}`);
+
+    const out = outputByAgent[id];
+    const kinds = out?.kinds || {};
+    const inWindow = out?.lastAt && (now - out.lastAt) <= windowMs;
+    // Three distinguishable states, not two — the same discrimination
+    // computeOutputCensus() makes, for the same reason: "produced before,
+    // nothing lately" and "nothing ever" call for different sentences.
+    const produced = !out || !out.lastAt
+      ? 'NOTHING ever recorded'
+      : inWindow
+        ? `${Object.entries(kinds).map(([k, n]) => `${n} ${k}`).join(', ')} (last ${new Date(out.lastAt).toISOString().slice(0, 10)})`
+        : `nothing in the last ${windowDays} days; its last output was ${new Date(out.lastAt).toISOString().slice(0, 10)}`;
+
+    const parts = [
+      `UNSTARTED WORK: ${boardRead ? (unstarted.length ? cap(unstarted, 5) : 'none') : 'THE BOARD COULD NOT BE READ THIS CYCLE'}`,
+      `IN PROGRESS: ${boardRead ? (doing.length ? doing.join(', ') : 'none') : 'unknown'}`,
+      `BLOCKED ON IT: ${boardRead ? (blocked.length ? cap(blocked, 3) : 'none') : 'unknown'}`,
+      `REVIEWS OWED: ${lifecycleRead ? (reviews.length ? reviews.join(', ') : 'none') : 'THE LIFECYCLE DIGEST COULD NOT BE READ THIS CYCLE'}`,
+      `PRODUCED: ${produced}`,
+    ];
+    const empty = boardRead && lifecycleRead
+      && !unstarted.length && !doing.length && !blocked.length && !reviews.length
+      && (!out || !out.lastAt);
+    return `- ${who}: ${parts.join('. ')}.${empty ? ' ** THIS ATTENDEE HAS NOTHING ON RECORD — its correct contribution is to say it has no report. **' : ''}`;
+  });
+
+  return [
+    '=== WHAT IS ACTUALLY ON RECORD FOR EACH ATTENDEE ===',
+    'Every field below is read from the delegation board, the deliverable-lifecycle digest and the office\'s own output records. It is the WHOLE of what the office knows about what these agents have done and owe. There is no other source, and an attendee has no memory of anything not written here or in the agenda data.',
+    '',
+    ...lines,
+    '',
+    'HOW TO SPEAK FROM THIS — these are conditions on the transcript, not style advice:',
+    '1. An attendee speaks only from its own line above, from the agenda data below, or from what another attendee has just said in this meeting.',
+    '2. AN ATTENDEE WITH NOTHING ON ITS LINE SAYS SO — "I have no completed work, no open obligation and nothing blocked, so I have no report." That is a COMPLETE and CORRECT contribution, it is expected, and it is not a failure. Nobody is asked to fill it.',
+    '3. THIS OFFICE HAS NO CLIENTS, NO NETWORK, NO FIREWALL, NO SERVERS, NO TICKETS AND NO ESCALATIONS. It builds software artifacts in three git repositories and carries them through review. A status line about network optimisation, firewall rules, client escalations, uptime or deployments to customers is fabricated by construction, because there is nothing for it to be about.',
+    '4. Naming a board id, a deliverable slug or an output kind that does not appear above is inventing a record. If you believe something exists that is not listed, SAY THAT IT IS NOT ON THE RECORD rather than describing it.',
+  ].join('\n');
+}
+
 /* ─────────────────── The Workflow's productivity picture ───────────────── */
 
 /**

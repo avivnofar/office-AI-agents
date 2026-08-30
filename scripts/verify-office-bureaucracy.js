@@ -1086,6 +1086,75 @@ check('the hand-off path is stated — flag, delegate to whoever is present, Tea
   /DELEGATES TO WHOEVER IS PRESENT/.test(rendered) && /Team Lead \(Agent 7\) may pass work onward/.test(rendered));
 
 /* ═══════════ §9 source-level guarantees ═══════════════════════════════ */
+section('§8b attendee grounding — nothing is said without a record  [FAILS-OLD]');
+
+const GROUND_TASKS = [
+  { id: 'OB-171', agentId: 5, state: 'READY', urgency: null, blockedBy: null, title: 'a' },
+  { id: 'OB-023', agentId: 5, state: 'READY', urgency: 'URGENT (owner-assigned)', blockedBy: null, title: 'b' },
+  { id: 'OB-081', agentId: 5, state: 'IN-PROGRESS', urgency: null, blockedBy: null, title: 'c' },
+  { id: 'OB-011', agentId: 5, state: 'BLOCKED', urgency: null, title: 'd',
+    blockedBy: 'OB-009 (no cadence to report on) and the write path — generating a report into back-office is a Worker write through resolveRepoWrite(), which is live code and needs its own session.' },
+];
+const GROUND_LC = [{ slug: 'office-site', round: 0, owed_by: [5], stage: 'IN-REVIEW' }];
+const ATTENDEES = [{ id: 5, name: 'The IT Chief' }, { id: 9, name: 'The Designer' }];
+const NOW = Date.parse('2026-08-30T10:00:00Z');
+
+const ground = meetingEngine.buildAttendeeGrounding({
+  attendees: ATTENDEES, boardTasks: GROUND_TASKS, lifecycleRecords: GROUND_LC,
+  outputByAgent: { 5: { lastAt: Date.parse('2026-08-29T00:00:00Z'), kinds: { incident: 2 } } },
+  now: NOW,
+});
+
+check('every attendee gets a line of its own — the previous per-agent input was six session counters, five of them zero',
+  /- Agent 5 — The IT Chief:/.test(ground) && /- Agent 9 — The Designer:/.test(ground));
+check('the line names UNSTARTED, IN PROGRESS, BLOCKED and REVIEWS OWED, all read off the board and the digest',
+  /UNSTARTED WORK: OB-171, OB-023 \[URGENT\]/.test(ground)
+  && /IN PROGRESS: OB-081/.test(ground)
+  && /BLOCKED ON IT: OB-011/.test(ground)
+  && /REVIEWS OWED: office-site r0/.test(ground));
+check('a 190-character `Blocked by:` reason is truncated AND says so — no silent caps, in a meeting prompt too',
+  /truncated; the whole reason is on the board/.test(ground));
+check('output is three states, not two — "nothing ever" and "nothing lately" call for different sentences',
+  /2 incident \(last 2026-08-29\)/.test(ground) && /NOTHING ever recorded/.test(ground));
+check('an attendee with nothing on record is TOLD its correct contribution is to say it has no report',
+  /Agent 9[\s\S]{0,300}THIS ATTENDEE HAS NOTHING ON RECORD/.test(ground));
+check('C3 — silence is named as a legitimate contribution, in the rules, in as many words',
+  /AN ATTENDEE WITH NOTHING ON ITS LINE SAYS SO/.test(ground)
+  && /COMPLETE and CORRECT contribution/.test(ground));
+check('C6 — the fabricated subject matter is ruled out by name: this office has no network and no clients',
+  /NO CLIENTS, NO NETWORK, NO FIREWALL/.test(ground)
+  && /fabricated by construction/.test(ground));
+check('and inventing a board id is ruled out too — the failure was a record, not only a topic',
+  /inventing a record/.test(ground));
+
+// "could not be read" must never render as "owes nothing" — the discrimination
+// the whole block exists to make.
+const unread = meetingEngine.buildAttendeeGrounding({
+  attendees: ATTENDEES, boardTasks: [], lifecycleRecords: [], outputByAgent: {},
+  boardRead: false, lifecycleRead: false, now: NOW,
+});
+check('an UNREADABLE board says so — it never renders as "this agent owes nothing"',
+  /THE BOARD COULD NOT BE READ THIS CYCLE/.test(unread)
+  && /THE LIFECYCLE DIGEST COULD NOT BE READ THIS CYCLE/.test(unread)
+  && !/HAS NOTHING ON RECORD/.test(unread));
+check('and with no attendees it returns EMPTY — a heading over nothing is worse than no heading',
+  meetingEngine.buildAttendeeGrounding({ attendees: [] }) === '');
+
+const meSrc = read('workers/meeting-engine.js');
+check('C4 — no role is removed from any meeting: the grounding is additive and touches no attendee list',
+  /const grounding = buildAttendeeGrounding\(\{/.test(meSrc)
+  && !/attendeeIds\s*=\s*attendeeIds\.filter/.test(meSrc));
+check('it is fed from the SAME snapshot as the office-context block, so the two cannot disagree about the board',
+  /boardTasks: snapshot\?\.board\?\.tasks \|\| \[\]/.test(meSrc)
+  && /lifecycleRecords: snapshot\?\.lifecycle\?\.records \|\| \[\]/.test(meSrc));
+check('read-vs-empty is PASSED, not inferred from a short list',
+  /boardRead: !!snapshot\?\.board/.test(meSrc) && /lifecycleRead: !!snapshot\?\.lifecycle/.test(meSrc));
+check('it sits after the personas and BEFORE the office-wide block — own work before the office\'s',
+  meSrc.indexOf('    groundingBlock,') > meSrc.indexOf('    personas,')
+  && meSrc.indexOf('    groundingBlock,') < meSrc.indexOf('    officeBlock,'));
+check('C5 — the prompt size is MEASURED in the run, with and without the grounding, not in a session note',
+  /estTokensWithoutGrounding/.test(meSrc) && /promptSize,/.test(meSrc));
+
 section('§9 source-level guarantees');
 
 check('NO Anthropic/Claude client is imported by the meeting engine (the Architect provider rule)',

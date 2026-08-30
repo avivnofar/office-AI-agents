@@ -57,6 +57,7 @@ import {
   addOfficeDays, normalizeActionItems, renderBoardTask,
   computeWorkflowMetrics, renderWorkflowMetrics,
   computeOutputCensus, renderOutputCensus,
+  buildAttendeeGrounding,
   normalizeContextAmendments,
   parseMeetingResponse, emptyDecisions,
 } from './meeting-decisions.js';
@@ -83,6 +84,7 @@ export {
   addOfficeDays, normalizeActionItems, renderBoardTask,
   computeWorkflowMetrics, renderWorkflowMetrics,
   computeOutputCensus, renderOutputCensus,
+  buildAttendeeGrounding,
   normalizeContextAmendments,
   parseMeetingResponse, emptyDecisions,
 } from './meeting-decisions.js';
@@ -814,10 +816,29 @@ function buildMeetingPrompt(meetingType, attendeeSnapshots, data, opts) {
     ? opts.officeContext.text
     : '';
 
+  /*
+   * ── SESSION 39, ITEM C: WHAT EACH ATTENDEE HAS, BEFORE IT SPEAKS ───────
+   *
+   * Placed IMMEDIATELY AFTER the personas and BEFORE the office-wide block,
+   * and the ordering is the argument. The personas say who each attendee is;
+   * this says what each attendee has actually done and owes; the office block
+   * says what the office as a whole is carrying. A reader given the third
+   * without the second has been told about the office's work and nothing about
+   * its own — which is precisely the state that produced two consecutive days
+   * of firewall updates in an office with no network. See
+   * buildAttendeeGrounding()'s header for the measurement.
+   *
+   * Empty string when the caller supplied nothing (the snapshot could not be
+   * read, or a meeting type with no attendee list), and `.filter(Boolean)`
+   * below then omits it entirely rather than emitting a heading over nothing.
+   */
+  const groundingBlock = typeof opts?.grounding === 'string' ? opts.grounding : '';
+
   const systemPrompt = [
     `You are simulating a "${meta.label}" at a small IT company's office. The following personas are attendees. Roleplay all of them faithfully and consistently with their states and behavioral rules.`,
     personas,
     relNotes.length ? `Known dynamics:\n- ${relNotes.join('\n- ')}` : '',
+    groundingBlock,
     officeBlock,
     // ITEM C: this call now asks for the transcript ALONE. The decisions are
     // asked for separately, by buildDecisionsPrompt() below, off the
@@ -859,7 +880,7 @@ function buildMeetingPrompt(meetingType, attendeeSnapshots, data, opts) {
 
   const prompt = `Meeting type: ${meta.label}\nDate: ${new Date().toISOString()}\n\n${requirementsFirst}${architectNight}Agenda data:\n${agendaBuilder(data)}`;
 
-  return { systemPrompt, prompt };
+  return { systemPrompt, prompt, groundingChars: groundingBlock.length };
 }
 
 /**
@@ -1722,7 +1743,53 @@ export async function runMeeting(meetingType, env, opts = {}) {
     architectRuns = rows?.results || [];
   }
 
-  const { systemPrompt, prompt } = buildMeetingPrompt(meetingType, attendeeSnapshots, data, { ...opts, officeContext, architectRuns });
+  /*
+   * ── ITEM C: THE GROUNDING, READ FROM RECORDS RATHER THAN REMEMBERED ────
+   *
+   * Built from the SAME `snapshot` the office-context block came from, so an
+   * attendee's own line and the office-wide picture cannot disagree about the
+   * board — the identical reason `computeWorkflowMetrics()` above is fed from
+   * it rather than re-fetching.
+   *
+   * `boardRead` / `lifecycleRead` are passed rather than inferred from an empty
+   * list, because "this agent owes nothing" and "the board could not be read"
+   * are different facts and only one of them means an attendee may say it has
+   * no report. That distinction is the whole point of the block.
+   *
+   * `repo_writes` is NOT the source of "what it produced", and that is worth
+   * stating because the obvious guess is wrong: `repo_writes` has no
+   * `agent_id` column, so it records that the OFFICE committed a file and
+   * cannot attribute it to anyone. `outputByAgent()` reads `reports`, which is
+   * per-agent and by kind, and is the same source the output census uses.
+   */
+  const grounding = buildAttendeeGrounding({
+    attendees: attendeeSnapshots.map((snap) => ({ id: snap.id, name: snap.config?.name, role: snap.config?.role })),
+    boardTasks: snapshot?.board?.tasks || [],
+    lifecycleRecords: snapshot?.lifecycle?.records || [],
+    outputByAgent: await outputByAgent(env),
+    boardRead: !!snapshot?.board,
+    lifecycleRead: !!snapshot?.lifecycle,
+  });
+
+  const { systemPrompt, prompt, groundingChars } = buildMeetingPrompt(meetingType, attendeeSnapshots, data, { ...opts, officeContext, architectRuns, grounding });
+
+  /*
+   * MEASURED IN THE RUN, NOT IN A SESSION NOTE. The meeting prompt was 20,253
+   * tokens before Session 28 and the number was recovered only because a live
+   * Groq 413 printed it. `estimateTokens()`'s divisor is office-context.js's
+   * own (length / 2.75), so this figure is in the same units as every budget in
+   * this estate — and `withoutGrounding` is carried beside it so the cost of
+   * Item C is answerable from any run rather than from one session's arithmetic.
+   */
+  const promptSize = {
+    systemChars: systemPrompt.length,
+    promptChars: prompt.length,
+    estTokens: Math.ceil((systemPrompt.length + prompt.length) / 2.75),
+    groundingChars,
+    estTokensWithoutGrounding: Math.ceil((systemPrompt.length + prompt.length - groundingChars) / 2.75),
+  };
+  console.log(`[meeting-engine] ${meetingType}: prompt ~${promptSize.estTokens} tokens `
+    + `(${promptSize.estTokensWithoutGrounding} without the attendee grounding, which costs ${groundingChars} chars)`);
 
   const modelResult = await composeMeetingCall(env, meetingType, {
     prompt, systemPrompt, maxTokens: TRANSCRIPT_MAX_TOKENS, label: 'transcript',
@@ -1944,6 +2011,7 @@ export async function runMeeting(meetingType, env, opts = {}) {
     // that happened and could not be recorded is unrecoverable per B5, and a
     // caller that cannot see the count cannot report it.
     refusals,
+    promptSize,
     report: { markdown, ...commit },
   };
 }
