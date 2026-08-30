@@ -1155,6 +1155,62 @@ check('it sits after the personas and BEFORE the office-wide block — own work 
 check('C5 — the prompt size is MEASURED in the run, with and without the grounding, not in a session note',
   /estTokensWithoutGrounding/.test(meSrc) && /promptSize,/.test(meSrc));
 
+/* ══ §8d `delivered` must name a place that exists  [FAILS-OLD] ═══════════ */
+section('§8d the delivered-path gate (session 40, addendum 3)');
+
+const GATE_ROSTER = { rosterIds: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13] };
+const gateItems = [
+  { agent_id: 12, task: 'a', delivered: 'character_files/agent3.json', due_days: 1, decided: true },
+  { agent_id: 7, task: 'b', delivered: 'PIP_notes/agent4.md', due_days: 1, decided: true },
+  { agent_id: 12, task: 'c', delivered: 'repo/updates_commit', due_days: 1, decided: true },
+  { agent_id: 13, task: 'd', delivered: 'campus/agents/13-the-cyber-expert/findings/permission-flow.md', due_days: 2, decided: true },
+  { agent_id: 6, task: 'e', delivered: 'A document containing conclusions and recommendations', due_days: 2, decided: true },
+  { agent_id: 5, task: 'f', delivered: '`office-AI-agents/workers/deliverable-lifecycle.js` no longer emits the line', due_days: 2, decided: true },
+];
+const gated = meetingEngine.normalizeActionItems(gateItems, GATE_ROSTER);
+
+check('[FAILS-OLD] an invented top-level directory is REFUSED at the door — all three shapes the 2026-08-28 meeting produced',
+  gated.dropped.length === 3
+  && gated.dropped.every((d) => /does not exist in any of the three repositories/.test(d.reason)));
+check('...and the refusal follows the existing dropped.push({item, reason}) shape, naming the path and the root',
+  gated.dropped.every((d) => d.item && typeof d.reason === 'string')
+  && /character_files/.test(gated.dropped[0].reason));
+check('THE ARTIFACT IS NOT REQUIRED TO EXIST — a real path to an unwritten file is accepted',
+  gated.items.some((i) => i.delivered === 'campus/agents/13-the-cyber-expert/findings/permission-flow.md'));
+check('PROSE IS NOT A PATH and is never tested as one — most real board deliverables are sentences',
+  meetingEngine.deliveredRootCheck('A document containing conclusions and recommendations').applies === false
+  && gated.items.some((i) => /^A document containing/.test(i.delivered)));
+check('a backtick-quoted path followed by a describing sentence is read as the path — the dominant real board shape',
+  meetingEngine.deliveredPathCandidate('`office-AI-agents/workers/deliverable-lifecycle.js` no longer emits the line')
+    === 'office-AI-agents/workers/deliverable-lifecycle.js');
+check('a leading REPO NAME is stripped before the root is read — office-AI-agents is a repo, not a directory',
+  meetingEngine.deliveredRootCheck('`office-AI-agents/workers/deliverable-lifecycle.js` x').ok === true);
+check('the root list is DERIVED and frozen, and carries the roots the eight bad paths are NOT under',
+  Object.isFrozen(meetingEngine.ESTATE_ROOTS)
+  && ['campus', 'channel', 'docs', 'tasks', 'workers', 'logs'].every((r) => meetingEngine.ESTATE_ROOTS.includes(r))
+  && !['character_files', 'PIP_notes', 'repo'].some((r) => meetingEngine.ESTATE_ROOTS.includes(r)));
+check('THE LIMIT IS STATED, NOT HIDDEN: logs/ is a REAL root, so two of the eight pass this test',
+  meetingEngine.deliveredRootCheck('logs/agent3_interaction.log').ok === true
+  && /logs\/agent3_interaction\.log/.test(read('workers/meeting-decisions.js'))
+  && /6 of 8, and the two survivors are named/.test(read('workers/meeting-decisions.js')));
+check('the parent-directory test is NOT in the gate, and the reason is recorded with its false positive',
+  /FALSE POSITIVE on a legitimate/.test(read('workers/meeting-decisions.js'))
+  && /05-the-it-chief\/proposals/.test(read('workers/meeting-decisions.js')));
+check('the sweep and the gate share ONE predicate — two mechanisms cannot agree by coincidence here',
+  /from '\.\.\/workers\/meeting-decisions\.js'/.test(read('scripts/board-path-sweep.mjs'))
+  && !/ESTATE_ROOTS = /.test(read('scripts/board-path-sweep.mjs')));
+check('the sweep has NO citation threshold and reads EVERY extension — the two reasons citedfile caught 1 of 8',
+  // Executable body only: the header EXPLAINS citedfile's CITE_THRESHOLD, so a
+  // whole-file test trips on the documentation of the difference it asserts.
+  !/THRESHOLD/.test(read('scripts/board-path-sweep.mjs')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, ''))
+  && /NO threshold/.test(read('scripts/board-path-sweep.mjs'))
+  && !/\.md['"`]/.test(read('scripts/board-path-sweep.mjs')
+    .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    .replace(/BOARD\.md/g, 'BOARD')));
+check('an unreadable board exits 2, never 0 — "could not read" is not "clean"',
+  /process\.exit\(2\)/.test(read('scripts/board-path-sweep.mjs')));
+
 const repoWriteSrcForAuthor = read('workers/repo-write.js');
 const contextEditorSrcForAuthor = read('workers/context-editor.js');
 const meetingEngineSrcForAuthor = read('workers/meeting-engine.js');

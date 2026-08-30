@@ -65,6 +65,136 @@ export function addOfficeDays(from, days) {
  *
  * @returns {{items: Array, dropped: Array<{item: any, reason: string}>}}
  */
+/* ═══════════════════════════════════════════════════════════════════════════
+   `delivered` MUST NAME A PLACE THAT EXISTS — session 40, addendum 3
+   ═══════════════════════════════════════════════════════════════════════════
+
+   THE DEFECT. The 2026-08-28 closing_qa_review produced eight action items
+   whose `delivered` values named a filesystem this estate has never had:
+   `character_files/agent3.json`, `logs/agent3_interaction.log`,
+   `PIP_notes/agent4.md`, `repo/updates_commit` and four more. All eight passed
+   the check below — which tested that the string was NOT EMPTY and nothing
+   else — and became OB-163..OB-170, all READY, all impossible. Seven belong to
+   Agent 12, the agent whose job is dispatching the board.
+
+   The comment on that check said the field is required because "without it the
+   deadline is unfalsifiable and the board metric is a formality." **A non-empty
+   string made the metric a formality anyway.**
+
+   ── WHAT THIS IS NOT ───────────────────────────────────────────────────────
+
+   **It does NOT test whether the artifact exists.** It must not: a `delivered`
+   path is the OUTPUT of the task, so it is absent by definition until the work
+   is done. `campus/agents/13-the-cyber-expert/findings/permission-flow.md` is
+   absent and correct.
+
+   **It does not test prose.** Most legitimate `delivered` values on the real
+   board are sentences — "A document containing conclusions and
+   recommendations", "Coaching session schedule", "Delivery order for client
+   requirements (OB-024)". A sentence is a valid deliverable and is NOT a path;
+   testing it as one would flag most of the board. `deliveredPathCandidate()`
+   below decides that question first, and answers NOT-A-PATH as a third state
+   rather than folding it into pass or fail.
+
+   ── THE TEST: IS THE ROOT REAL ─────────────────────────────────────────────
+
+   One structural question: is the path's first segment a top-level directory
+   that actually exists in one of the three repos? `ESTATE_ROOTS` is DERIVED,
+   not transcribed — `git ls-tree -d --name-only HEAD` in each repo on
+   2026-08-30, unioned. The eight invented paths sit under `character_files/`,
+   `PIP_notes/` and `repo/`, which are under none of them.
+
+   A repo name may prefix the path (`office-AI-agents/workers/...` appears on
+   the real board and is correct), so a leading repo name is stripped first.
+
+   ── WHY THERE IS NO "DOES THE PARENT DIRECTORY EXIST" TEST HERE ────────────
+
+   It was specified, built, and MEASURED AGAINST THE REAL BOARD, and it is not
+   added — see `scripts/board-path-sweep.mjs`, which still computes it and
+   reports it as ADVISORY so the evidence stays visible:
+
+     * Against the eight it catches NOTHING the root test does not.
+     * Against the current board it produces a FALSE POSITIVE on a legitimate
+       task: `campus/agents/05-the-it-chief/proposals/owner-channel.md`.
+       `proposals/` does not exist because the proposal has not been written —
+       **a new subdirectory is created BY the work**, so requiring the parent
+       to pre-exist refuses exactly the kind of task the board is for.
+
+   A guard that catches nothing new and refuses real work is not a second layer.
+
+   ── WHAT THIS TEST DOES NOT CATCH, STATED RATHER THAN DISCOVERED ───────────
+
+   Two of the eight survive it: `logs/agent3_interaction.log` (OB-164) and
+   `logs/agent12_interaction.log` (OB-166). `logs/` IS a real top-level
+   directory in back-office (it holds the Architect's `logs/worker/*.jsonl`
+   pulls), so their root is genuinely valid and only their meaning is invented.
+   **6 of 8, and the two survivors are named rather than left to be found.**
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/** Top-level directories that exist in at least one of the three repos.
+ *  DERIVED 2026-08-30 by `git ls-tree -d --name-only HEAD` in each repo and
+ *  unioning the result. Re-derive it rather than editing it by hand. */
+export const ESTATE_ROOTS = Object.freeze([
+  '.claude', '.github', 'agents', 'assets', 'campus', 'channel', 'checkpoints',
+  'config', 'dashboard', 'database', 'docs', 'front', 'guides', 'logs', 'plans',
+  'reports', 'scripts', 'tasks', 'tools', 'workers',
+]);
+
+/** A leading repo name is legitimate on the board and is stripped before the
+ *  root is read — `office-AI-agents/workers/deliverable-lifecycle.js` names a
+ *  real file and its first segment is a repository, not a directory. */
+export const REPO_NAMES = Object.freeze([
+  'office-AI-agents', 'back-office-AI-agents', 'warehouse-office-AI-agents',
+]);
+
+/**
+ * The path a `delivered` value names, or null when it names prose.
+ *
+ * A value may be a bare path, a backtick-quoted path followed by a sentence
+ * describing it (the dominant real shape on the board), or a sentence with no
+ * path in it at all. Only the first two yield a candidate.
+ *
+ * NOT-A-PATH IS A THIRD STATE, not a pass. A caller that treats null as "fine"
+ * and a caller that treats it as "broken" are both wrong; it means the question
+ * this check asks does not apply.
+ */
+export function deliveredPathCandidate(delivered) {
+  const raw = String(delivered || '').trim();
+  if (!raw) return null;
+  // A backtick-quoted head: `campus/.../owner-channel.md`, comparing three ...
+  const quoted = /^`([^`]+)`/.exec(raw);
+  const cand = (quoted ? quoted[1] : raw).trim().replace(/[.,;:]+$/, '');
+  if (!cand || /\s/.test(cand)) return null;   // a sentence is not a path
+  if (!cand.includes('/')) return null;        // no separator, no path
+  return cand;
+}
+
+/**
+ * Does a `delivered` value name a place this estate has?
+ *
+ * @returns {{applies: boolean, ok: boolean, candidate: string|null, root: string|null, reason: string|null}}
+ *   `applies:false` means the value is prose — the check does not apply and
+ *   nothing is being asserted about it.
+ */
+export function deliveredRootCheck(delivered) {
+  const candidate = deliveredPathCandidate(delivered);
+  if (!candidate) return { applies: false, ok: true, candidate: null, root: null, reason: null };
+
+  let rest = candidate.replace(/^\.\//, '');
+  for (const repo of REPO_NAMES) {
+    if (rest === repo || rest.startsWith(`${repo}/`)) { rest = rest.slice(repo.length + 1); break; }
+  }
+  const root = rest.split('/')[0] || '';
+  if (ESTATE_ROOTS.includes(root)) {
+    return { applies: true, ok: true, candidate, root, reason: null };
+  }
+  return {
+    applies: true, ok: false, candidate, root: root || null,
+    reason: `delivered names "${candidate}", whose top-level directory "${root || '(none)'}" does not exist in any of the three repositories`
+      + ` — the artifact is not expected to exist yet, but the place it goes must. Known roots: ${ESTATE_ROOTS.join(', ')}.`,
+  };
+}
+
 export function normalizeActionItems(rawItems, { rosterIds }) {
   const items = [];
   const dropped = [];
@@ -101,6 +231,15 @@ export function normalizeActionItems(rawItems, { rosterIds }) {
     const delivered = String(raw.delivered || '').trim();
     if (!delivered) {
       dropped.push({ item: raw, reason: 'delivered is empty — REQUIRED, and must name an artifact: without it the deadline is unfalsifiable and the board metric is a formality' });
+      continue;
+    }
+
+    // Session 40, addendum 3. Beside the non-emptiness test above and for the
+    // reason that test gave: a metric nobody can satisfy is a formality. See
+    // the header block above this function for what is and is not tested.
+    const rootCheck = deliveredRootCheck(delivered);
+    if (!rootCheck.ok) {
+      dropped.push({ item: raw, reason: rootCheck.reason });
       continue;
     }
 
