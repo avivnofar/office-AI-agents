@@ -219,6 +219,27 @@ const ADMIN_API_ROUTES = new Map([
    * about which way the owner meant to flip something.
    */
   ['workflow', '/api/admin/workflow'],
+  /*
+   * ── `designer/gallery`, `designer/asset`, `designer/generate` (2026-08-31) ─
+   *
+   * Three more lines, written by hand, same discipline as every entry above:
+   * an exact key, never a prefix rewrite. `designer/generate` is the ONE
+   * route the spec for this session names directly; the other two are the
+   * page's own reads, added the same way `artifacts`/`artifact` were for the
+   * warehouse gallery — a page needs its reads aliased exactly as much as its
+   * one write does.
+   *
+   * `designer/asset`'s identity travels in the query string (`?path=`), for
+   * the same reason `artifact`'s does: an asset path is per-asset and cannot
+   * be an exact key in this map, and it is validated against the Designer's
+   * own directory before it ever reaches a fetch — see the route's own
+   * comment in agent-runner.js. `designer/generate` is a POST, so it carries
+   * the same `surface: 'api'` discipline `workflow` does: the page cookie is
+   * refused, and a call arriving on the Access path must be same-origin.
+   */
+  ['designer/gallery', '/api/admin/designer/gallery'],
+  ['designer/asset', '/api/admin/designer/asset'],
+  ['designer/generate', '/api/admin/designer/generate'],
 ]);
 
 /**

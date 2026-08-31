@@ -1394,6 +1394,36 @@ export async function fetchBackOfficeFile(env, filePath, { ref = null } = {}) {
 }
 
 /**
+ * Same request as fetchBackOfficeFile(), but the content is returned as the
+ * RAW base64 the Contents API sent — no UTF-8 decode.
+ *
+ * Added 2026-08-31 for the Designer's gallery/polish-picker (session: "office
+ * console: the designer page"). `fetchBackOfficeFile()`'s
+ * `decodeURIComponent(escape(atob(...)))` step is correct for text and
+ * CORRUPTING for image bytes — the same distinction `commitFileToRepo()`'s
+ * `opts.contentIsBase64` exists to make on the write side. This is that
+ * distinction on the read side: a caller that needs the committed JPEG bytes
+ * back (to render one, or to hand it to `polishImage()` as an input image)
+ * must not run them through a text decoder.
+ */
+export async function fetchBackOfficeFileRaw(env, filePath) {
+  if (!env?.BACKOFFICE_REPO_TOKEN) return { base64: null, reason: 'BACKOFFICE_REPO_TOKEN not configured' };
+  const url = `https://api.github.com/repos/${BACKOFFICE_REPO_OWNER}/${BACKOFFICE_REPO_NAME}/contents/${filePath}`;
+  const res = await fetch(url, {
+    headers: {
+      'User-Agent': 'data-center-agent-sim',
+      Accept: 'application/vnd.github+json',
+      Authorization: `Bearer ${env.BACKOFFICE_REPO_TOKEN}`,
+    },
+  }).catch((err) => ({ ok: false, status: 0, _err: err?.message }));
+
+  if (!res?.ok) return { base64: null, reason: `GET ${filePath} failed: HTTP ${res?.status ?? 'network error'}` };
+  const body = await res.json().catch(() => null);
+  if (!body?.content) return { base64: null, reason: `${filePath}: no content field in Contents API response` };
+  return { base64: body.content.replace(/\n/g, ''), reason: null };
+}
+
+/**
  * Reads one file from the WAREHOUSE repo. Same shape as fetchBackOfficeFile()
  * above — deliberately not merged with it into one parameterised function,
  * because the two repos carry different tokens (WAREHOUSE_REPO_TOKEN vs

@@ -66,7 +66,7 @@ import { getClaudeBudgetStatus, recordClaudeSpend, routeTaskTypeCall, resolveTas
 // before anything is attributed to a key, and the only meaningful place to run
 // that check is inside the Worker, with the secret the Worker actually holds.
 import { listImageCapableModels } from './gemini-image-client.js';
-import { renderAssetProvenance, extensionForMime } from './provider-common.js';
+import { renderAssetProvenance, extensionForMime, sniffImageMime } from './provider-common.js';
 import { collectTodayGapReports, renderGapDigest } from './gap-reports.js';
 import { METRIC_DISCLOSURE } from './quality-metric.js';
 // OB-081 — the sampled real judge. The Worker owns the toggle, the calibration
@@ -82,7 +82,7 @@ import { resolveIssueTarget } from './permission-guard.js';
 // read-back ONLY (2026-08-10): the meeting and per-agent shapes are the two that
 // actually bind, and a probe that reports only the generous `report` shape cannot
 // tell you that the meeting shape is at 98% and trimming the board out of view.
-import { getOfficeContext, getOfficeSnapshot, fetchOfficeSnapshot, officeContextEnabled, buildOfficeContext, fetchBackOfficeFile, fetchBackOfficeDir, fetchBackOfficeCommits, fetchWarehouseFile, fetchWarehouseDir, readSpecTargetPath, BUDGETS as OFFICE_BUDGETS, CACHE_KEY as OFFICE_SNAPSHOT_CACHE_KEY } from './office-context.js';
+import { getOfficeContext, getOfficeSnapshot, fetchOfficeSnapshot, officeContextEnabled, buildOfficeContext, fetchBackOfficeFile, fetchBackOfficeFileRaw, fetchBackOfficeDir, fetchBackOfficeCommits, fetchWarehouseFile, fetchWarehouseDir, readSpecTargetPath, BUDGETS as OFFICE_BUDGETS, CACHE_KEY as OFFICE_SNAPSHOT_CACHE_KEY } from './office-context.js';
 // The admin tier's scheduled draw from real queues (2026-08-17). Pure — every
 // fetch, model call and write for it is in processAdminDeskBlock() below.
 import {
@@ -158,6 +158,14 @@ import {
 import {
   TASKS_DIR, MANIFEST_FILENAME, parseTaskQuery, parseArtifactManifest, resolveArtifactEntryPath, buildArtifactGallery,
 } from './artifact-gallery.js';
+// The Designer's OWN gallery (2026-08-31, "office console: the designer
+// page"). A separate, smaller listing than artifact-gallery.js's — see
+// designer-assets.js's header for why the two are not merged: the Designer's
+// assets are a flat folder of paired images with no per-asset manifest,
+// discovered from the folder listing plus each asset's own provenance note.
+import {
+  DESIGNER_ASSET_DIR, provenancePathFor, buildDesignerGallery,
+} from './designer-assets.js';
 // The spec builder (2026-08-24, Session 16 Item C). Pure, and deliberately so:
 // NO MODEL is involved anywhere in this path. buildSpec() is a template fill,
 // the same answers always produce the same bytes, and
@@ -193,6 +201,7 @@ import {
   buildAutomationsView, SWITCHES, fetchWorkflowRuns, setWorkflowEnabled, parseWorkflowRef,
 } from './automations-panel.js';
 import { renderAutomationsPage } from './automations-page.js';
+import { renderDesignerPage } from './designer-page.js';
 import {
   ownerChannelEnabled, notifyOwner, selectNotificationItems, recentFailures, OWNER_ISSUE_LABEL,
   // SESSION 33, ITEM A: the daily-obligation notice files its own Issue rather
@@ -3577,8 +3586,11 @@ async function processOwnerChannelBlock(env, opts = {}) {
  * now refused twice rather than once. Whether an image reaches the Front at all
  * needs a deliberate mechanism that does not exist yet, and proposing or
  * rejecting one is `OB-095`.
+ *
+ * `DESIGNER_ASSET_DIR` itself moved to `designer-assets.js` on 2026-08-31,
+ * imported above — the Designer's own gallery reader needs the same constant
+ * and a second copy of the literal is how the two drift.
  */
-const DESIGNER_ASSET_DIR = 'campus/agents/09-the-designer/assets';
 
 /** Filename-safe slug. Refuses to invent one: an empty slug is the caller's
  *  error and a generated fallback would produce assets nobody can find by name. */
@@ -8372,6 +8384,47 @@ export default {
     }
 
     /*
+     * ── /admin/designer (2026-08-31) ────────────────────────────────────────
+     *
+     * Under `/admin/`, gated the same way `/admin/automations` is. The
+     * gallery listing is read HERE, server-side, and handed to the renderer
+     * — the same "no empty-vs-loading ambiguity" reasoning
+     * `renderAutomationsPage()`'s header states. The image BYTES are not
+     * fetched here; see `designer-page.js`'s header for why.
+     */
+    if (request.method === 'GET' && (url.pathname === '/admin/designer' || url.pathname === '/admin/designer/')) {
+      const listing = await fetchBackOfficeDir(env, DESIGNER_ASSET_DIR).catch((err) => ({ entries: null, reason: String(err?.message || err) }));
+      const imageFiles = (listing.entries || []).filter((e) => e && e.type === 'file' && /\.(jpe?g|png|webp|gif|bin)$/i.test(e.name));
+      const provenanceResults = {};
+      await Promise.all(imageFiles.map(async (f) => {
+        const provPath = `${DESIGNER_ASSET_DIR}/${provenancePathFor(f.name)}`;
+        provenanceResults[f.name] = await fetchBackOfficeFile(env, provPath)
+          .catch((err) => ({ text: null, reason: `${provPath}: fetch threw — ${err?.message || err}` }));
+      }));
+      const { assets, problems } = buildDesignerGallery(listing.entries, provenanceResults);
+      if (listing.reason) problems.unshift({ asset: DESIGNER_ASSET_DIR, reason: listing.reason });
+
+      return new Response(renderDesignerPage({
+        stylesheet: officeStylesheet(),
+        versionId: workerVersion(env),
+        generateUrl: adminApiUrl('designer/generate'),
+        assetUrl: adminApiUrl('designer/asset'),
+        dir: DESIGNER_ASSET_DIR,
+        assets,
+        problems,
+      }), {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'Content-Security-Policy': "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'",
+          'Referrer-Policy': 'no-referrer',
+          'X-Content-Type-Options': 'nosniff',
+        },
+      });
+    }
+
+    /*
      * -- /admin/spec — THE SPEC BUILDER ------------------------------------
      *
      * GATED since 2026-08-25 by the /admin block at the top of fetch(). Reached
@@ -8857,6 +8910,212 @@ export default {
         return json({
           ok: true, task: ref.slug, title: parsed.title, description: parsed.description,
           kind: parsed.kind, entry: entryPath, html: entryGot.text,
+        }, 200, origin);
+      }
+      /*
+       * ── /api/admin/designer/gallery (2026-08-31) ───────────────────────────
+       *
+       * Lists the Designer's own asset folder — see `designer-assets.js`'s
+       * header for why this is a separate, smaller reader than
+       * `buildArtifactGallery()` above rather than a reuse of it. One
+       * directory listing plus one GET per image's `.provenance.md`, run in
+       * parallel — the same shape `/api/admin/artifacts` already uses.
+       */
+      if (request.method === 'GET' && url.pathname === '/api/admin/designer/gallery') {
+        const lookups = [];
+        const listing = await fetchBackOfficeDir(env, DESIGNER_ASSET_DIR)
+          .catch((err) => ({ entries: null, reason: `listing ${DESIGNER_ASSET_DIR}/ threw — ${err?.message || err}` }));
+        lookups.push({
+          what: `list ${DESIGNER_ASSET_DIR}/`, ok: !!listing.entries, reason: listing.reason,
+          count: (listing.entries || []).length,
+        });
+
+        const imageFiles = (listing.entries || []).filter((e) => e && e.type === 'file' && /\.(jpe?g|png|webp|gif|bin)$/i.test(e.name));
+        const provenanceResults = {};
+        await Promise.all(imageFiles.map(async (f) => {
+          const provPath = `${DESIGNER_ASSET_DIR}/${provenancePathFor(f.name)}`;
+          const got = await fetchBackOfficeFile(env, provPath)
+            .catch((err) => ({ text: null, reason: `${provPath}: fetch threw — ${err?.message || err}` }));
+          provenanceResults[f.name] = got;
+          lookups.push({
+            what: `read ${provPath}`, ok: typeof got.text === 'string', reason: got.reason || null,
+          });
+        }));
+
+        const { assets, problems } = buildDesignerGallery(listing.entries, provenanceResults);
+        return json({ ok: true, dir: DESIGNER_ASSET_DIR, repo: BACKOFFICE_REPO_NAME, assets, problems, lookups }, 200, origin);
+      }
+      /*
+       * ── /api/admin/designer/asset (2026-08-31) — ONE IMAGE'S BYTES ─────────
+       *
+       * `?path=<full asset path>` — identity in the query string, validated
+       * against the Designer's own directory before it ever reaches a fetch,
+       * same discipline `/api/admin/artifact` keeps for `?task=`. Returns the
+       * raw base64 (via `fetchBackOfficeFileRaw()` — see that function's
+       * header for why the ordinary, UTF-8-decoding fetch would corrupt it)
+       * and a mime type SNIFFED from the bytes, never assumed — the same rule
+       * `provider-common.js sniffImageMime()` exists for on the write side.
+       *
+       * Used two ways by the page: rendering the gallery's `<img>` tags as
+       * data URIs, and letting the form build a polish request's input image
+       * from an asset already in the repo — there is no manual upload path.
+       */
+      if (request.method === 'GET' && url.pathname === '/api/admin/designer/asset') {
+        const rawPath = String(url.searchParams.get('path') || '').trim();
+        if (!rawPath || !rawPath.startsWith(`${DESIGNER_ASSET_DIR}/`) || rawPath.includes('..') || rawPath.includes('\\')) {
+          return json({
+            ok: false, error: 'bad_asset_path',
+            reason: `"path" must be a plain path under ${DESIGNER_ASSET_DIR}/, with no ".." segment`,
+          }, 400, origin);
+        }
+        const got = await fetchBackOfficeFileRaw(env, rawPath)
+          .catch((err) => ({ base64: null, reason: `${rawPath}: fetch threw — ${err?.message || err}` }));
+        if (!got.base64) {
+          return json({ ok: false, error: 'asset_unreadable', reason: got.reason || `${rawPath} could not be read` }, 502, origin);
+        }
+        return json({
+          ok: true, path: rawPath, base64: got.base64, mimeType: sniffImageMime(got.base64) || 'application/octet-stream',
+        }, 200, origin);
+      }
+      /*
+       * ── /api/admin/designer/generate (2026-08-31) — THE REQUEST FORM ───────
+       *
+       * The one new write route Part 2 of the spec asks for. Delegates the
+       * generate → commit → provenance chain to `runDesignerAsset()`, which
+       * already IS that chain (built 2026-08-10 for the `design_asset`
+       * supervised trigger) — this route is the owner-facing form's entry
+       * into the same code path, not a second one.
+       *
+       * Body: `{ brief: string, role?: 'draft'|'polish', sourceAssetPath?:
+       * string, slug?: string }`.
+       *
+       * ── POLISH REQUIRES A SOURCE, AND IT IS CHECKED HERE, NOT DOWNSTREAM ──
+       *
+       * `polishImage()` already refuses a call with no input image — but that
+       * refusal happens after a routed provider call has been dispatched, and
+       * it reports as an ordinary generation failure. The spec asks for this
+       * refusal to be a 400, at the door, distinguishable from "the model
+       * declined" — so it is checked here, before `runDesignerAsset()` is
+       * even called. `sourceAssetPath` is never trusted as raw bytes: it
+       * names an asset already committed in THIS folder, read back with
+       * `fetchBackOfficeFileRaw()`, and its bytes — never the request body —
+       * become the polish input image. There is no path here for the caller
+       * to hand this route bytes directly; the source is always a prior
+       * generation, per the spec's "never a raw file upload" rule.
+       */
+      if (request.method === 'POST' && url.pathname === '/api/admin/designer/generate') {
+        const body = await request.json().catch(() => null);
+        if (!body || typeof body.brief !== 'string' || !body.brief.trim()) {
+          return json({ ok: false, error: 'brief_required', message: 'A brief (text) is required.' }, 400, origin);
+        }
+        if (body.role !== undefined && body.role !== 'draft' && body.role !== 'polish') {
+          return json({ ok: false, error: 'bad_role', message: 'role must be "draft" or "polish" — no default is guessed once it is present.' }, 400, origin);
+        }
+        const role = body.role || 'draft';
+
+        let inputImages = null;
+        let sourceAssetPath = null;
+        if (role === 'polish') {
+          sourceAssetPath = typeof body.sourceAssetPath === 'string' ? body.sourceAssetPath.trim() : '';
+          if (!sourceAssetPath) {
+            return json({
+              ok: false, error: 'polish_requires_source',
+              message: 'A polish request must name a source image (sourceAssetPath) — one of the owner\'s own prior '
+                + 'generations, picked by id. Refused rather than downgraded to a fresh draft under the polish role\'s name.',
+            }, 400, origin);
+          }
+          if (!sourceAssetPath.startsWith(`${DESIGNER_ASSET_DIR}/`) || sourceAssetPath.includes('..') || sourceAssetPath.includes('\\')) {
+            return json({
+              ok: false, error: 'bad_source_path',
+              message: `sourceAssetPath must name an asset already committed under ${DESIGNER_ASSET_DIR}/ — there is no manual upload path.`,
+            }, 400, origin);
+          }
+          const src = await fetchBackOfficeFileRaw(env, sourceAssetPath)
+            .catch((err) => ({ base64: null, reason: `${sourceAssetPath}: fetch threw — ${err?.message || err}` }));
+          if (!src.base64) {
+            return json({
+              ok: false, error: 'source_unreadable',
+              message: `The named source image could not be read (${src.reason || 'unknown reason'}). This is a repo-read failure, `
+                + 'not a generation failure — nothing was drawn.',
+              sourceAssetPath,
+            }, 502, origin);
+          }
+          inputImages = [{ base64: src.base64, mimeType: sniffImageMime(src.base64) || 'image/jpeg' }];
+        }
+
+        const runResult = await runDesignerAsset(env, {
+          prompt: role === 'draft' ? body.brief : null,
+          instruction: role === 'polish' ? body.brief : null,
+          // `runDesignerAsset()`'s own fallback is `slug || prompt` — for a
+          // polish request the brief travels in `instruction`, not `prompt`,
+          // so that fallback alone would leave a polish with no slug
+          // unusable. Deriving the slug from the brief HERE, for both roles,
+          // means the request form never depends on which field carries the
+          // text this call happened to route it through.
+          slug: body.slug || body.brief,
+          role,
+          inputImages,
+          commit: true,
+          note: 'Requested via the Designer\'s own request form (surface: api).',
+        });
+
+        if (!runResult.ok) {
+          // THE MODEL REFUSED OR IS UNAVAILABLE. `routeTaskTypeCall()`'s
+          // clients return null after a console.warn — this endpoint cannot
+          // read that log line, but it CAN read the attempt trail, which is
+          // where a quota refusal (`overtime_required`, or a 429 embedded in
+          // a provider's own error text) is distinguishable from every other
+          // failure shape. See routeTaskTypeCall()'s header in task-router.js.
+          const attempts = Array.isArray(runResult.attempts) ? runResult.attempts : [];
+          const quotaHit = attempts.some((a) => a.reason === 'overtime_required' || a.status === 429 || /\b429\b/.test(String(a.reason || a.providerMessage || '')));
+          if (quotaHit) {
+            return json({
+              ok: false, error: 'quota_exhausted', role, sourceAssetPath, attempts,
+              message: 'The free tier for this provider is spent for now. Refused and logged, never retried into an overage — try again after the daily/monthly reset.',
+            }, 429, origin);
+          }
+          return json({
+            ok: false, error: 'model_unavailable', role, sourceAssetPath, reason: runResult.reason || 'unknown', attempts,
+            message: `The model refused or returned nothing (${runResult.reason || 'unknown reason'}). Nothing was drawn and nothing was committed.`,
+          }, 502, origin);
+        }
+
+        if (!runResult.committed) {
+          // THE IMAGE GENERATED AND THE COMMIT FAILED. The most important of
+          // the four facts Part 2 asks this route to keep distinct: the asset
+          // was drawn and is NOT saved anywhere — a real cost with nothing to
+          // show for it if this is read as an ordinary failure.
+          return json({
+            ok: false, error: 'commit_failed',
+            message: 'The image was generated successfully and is NOT SAVED — the commit to the repository failed. '
+              + 'The asset exists only in this response and nowhere else.',
+            role, sourceAssetPath, assetPath: runResult.assetPath, bytes: runResult.bytes,
+            provider: runResult.provider, model: runResult.model, assetWrite: runResult.assetWrite,
+          }, 502, origin);
+        }
+
+        // THE COMMIT SUCCEEDED AND THE READ-BACK DOES NOT SHOW IT. A fresh GET
+        // of the exact bytes just PUT — not trusting the PUT's own 200/201,
+        // which this repo has a recorded case of being an accepted write whose
+        // effect never happened. See `setWorkflowEnabled()`'s "unchanged"
+        // outcome in automations-panel.js for the same discipline elsewhere.
+        const readBack = await fetchBackOfficeFileRaw(env, runResult.assetPath)
+          .catch((err) => ({ base64: null, reason: `${runResult.assetPath}: fetch threw — ${err?.message || err}` }));
+        if (!readBack.base64) {
+          return json({
+            ok: false, error: 'readback_failed',
+            message: `The commit reported success, and reading the file back from the repository failed (${readBack.reason || 'unknown reason'}). `
+              + 'The write may have succeeded — this response cannot confirm it either way.',
+            role, sourceAssetPath, assetPath: runResult.assetPath, provenancePath: runResult.provenancePath,
+          }, 502, origin);
+        }
+
+        return json({
+          ok: true, verifiedByReadback: true, role, sourceAssetPath,
+          assetPath: runResult.assetPath, provenancePath: runResult.provenancePath,
+          provenanceCommitted: runResult.provenanceCommitted, provenanceReason: runResult.provenanceReason,
+          bytes: runResult.bytes, mimeType: runResult.mimeType, provider: runResult.provider,
+          model: runResult.model, polish: runResult.polish,
         }, 200, origin);
       }
       /*

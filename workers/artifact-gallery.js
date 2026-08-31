@@ -29,8 +29,17 @@ export const TASKS_DIR = 'tasks';
 export const MANIFEST_FILENAME = 'artifact.json';
 
 /** Kinds this gallery knows how to render. A second kind is a second entry
- *  here plus a second `case` in the renderer — not a redesign. */
-export const KNOWN_ARTIFACT_KINDS = Object.freeze(['static-html']);
+ *  here plus a second `case` in the renderer — not a redesign.
+ *
+ * `'image'` added 2026-08-31 (the designer-page session) for a task-folder
+ * artifact whose entry file is an image rather than an HTML app — rendered
+ * as `<img>`, never inside the `srcdoc` iframe `static-html` uses, since an
+ * image has no script to sandbox against. This is the STRUCTURAL kind for a
+ * warehouse task artifact; the Designer's own asset folder is a different
+ * shape (a flat folder of paired images, not one task per artifact) and is
+ * read by `workers/designer-assets.js`, not by this module — see that
+ * file's header for why. */
+export const KNOWN_ARTIFACT_KINDS = Object.freeze(['static-html', 'image']);
 
 /** Lowercase, hyphenated, per `tasks/README.md`'s own intake convention for
  *  a task slug. The identity this whole gallery is keyed on, so it is
