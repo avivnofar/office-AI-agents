@@ -19,6 +19,17 @@
  * declaration at all.
  */
 
+/*
+ * ── ONE IMPORT, AND WHY THE DECISION IS NOT MADE HERE (2026-08-31) ────────
+ *
+ * `workflowControl()` lives in the pure panel module, not in this template, so
+ * "which rows get a control" is a statement the verifier can call directly with
+ * a hand-made workflow row — and so this file stays what its header says it is:
+ * a renderer. A control offered on the wrong row is a permission decision, and
+ * a permission decision inside a string template is one nobody can test.
+ */
+import { workflowControl } from './automations-panel.js';
+
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => (
   { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
 ));
@@ -50,6 +61,7 @@ const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => (
  */
 export function renderAutomationsPage({
   stylesheet, view, actions, switches, today, versionId, triggerUrl, readBackUrl,
+  workflowUrl, writableRepo,
 }) {
   const blockRows = view.rows.map((r) => `      <tr>
         <td class="auto-time">${esc(r.time)}</td>
@@ -67,17 +79,39 @@ export function renderAutomationsPage({
       ? `<p class="answer-status answer-status--err"><strong>${view.missedCount} block${view.missedCount === 1 ? '' : 's'} due today with no admission row.</strong> That is the row this page exists for: it should have run and there is no record that it did.</p>`
       : '<p class="answer-status answer-status--ok">Every block due so far today has an admission row. Nothing is missing.</p>';
 
-  const actionRows = actions.ok
-    ? (actions.workflows.length
-      ? actions.workflows.map((w) => `      <tr>
+  /*
+   * ── THE CONTROL COLUMN (2026-08-31) ─────────────────────────────────────
+   *
+   * `writable` is a comparison against the ONE repo this Worker's token may
+   * write to, made per row rather than assumed for the table. The panel reads a
+   * single repo today, so every row is writable and the comparison is trivially
+   * true — which is exactly why it is written down: the day a second repo's
+   * workflows appear here, the rows this token cannot touch say so instead of
+   * offering a button that would 403.
+   */
+  const workflowRow = (w) => {
+    const writable = !!writableRepo && actions.repo === writableRepo;
+    const ctl = workflowControl(w, { writable, repo: actions.repo, writeRepo: writableRepo });
+    const control = ctl.action
+      ? `<button class="item-open" data-workflow="${esc(w.id)}"`
+        + ` data-enable="${ctl.action === 'enable' ? 'true' : 'false'}"`
+        + ` data-name="${esc(w.name)}">${esc(ctl.label)}</button>`
+      : `<span class="auto-none">${esc(ctl.why)}</span>`;
+    return `      <tr>
         <td>${esc(w.name)}</td>
         <td class="auto-time">${esc(w.path)}</td>
         <td class="auto-time">${w.lastRunAt ? esc(w.lastRunAt) : '<span class="auto-none">never / unknown</span>'}</td>
-        <td${w.state && w.state !== 'active' ? ' class="auto-none"' : ''}>${esc(w.conclusion || '—')}</td>
+        <td${w.state && w.state !== 'active' ? ' class="auto-none"' : ''}><span data-state-for="${esc(w.id)}">${esc(w.conclusion || '—')}</span></td>
         <td class="auto-none">${esc(w.event || '—')}</td>
-      </tr>`).join('\n')
-      : '      <tr><td colspan="5" class="auto-none">The API answered and listed no active workflow. This is an empty list, not a refused read.</td></tr>')
-    : `      <tr><td colspan="5" class="auto-none">NOT READ — ${esc(actions.reason)}</td></tr>`;
+        <td data-control-for="${esc(w.id)}">${control}</td>
+      </tr>`;
+  };
+
+  const actionRows = actions.ok
+    ? (actions.workflows.length
+      ? actions.workflows.map(workflowRow).join('\n')
+      : '      <tr><td colspan="6" class="auto-none">The API answered and listed no active workflow. This is an empty list, not a refused read.</td></tr>')
+    : `      <tr><td colspan="6" class="auto-none">NOT READ — ${esc(actions.reason)}</td></tr>`;
 
   const switchRows = switches.map((s) => {
     const on = s.value === true;
@@ -135,13 +169,15 @@ ${blockRows || '      <tr><td colspan="7" class="auto-none">No blocks are schedu
         <h3>GitHub Actions &mdash; the half that does not run in this Worker</h3>
         <div class="auto-scroll">
           <table class="auto-table">
-            <thead><tr><th>workflow</th><th>file</th><th>last run</th><th>result</th><th>trigger</th></tr></thead>
+            <thead><tr><th>workflow</th><th>file</th><th>last run</th><th>result</th><th>trigger</th><th></th></tr></thead>
             <tbody>
 ${actionRows}
             </tbody>
           </table>
         </div>
+        <p class="answer-status" id="workflow-status"></p>
         <p class="answer-effect">The declared cron is NOT shown: it lives in each workflow&rsquo;s YAML and this Worker does not parse YAML. A guessed schedule beside a real last-run time is the more dangerous half of that pair.</p>
+        <p class="answer-effect">Enable and disable act on GitHub, not on a local flag, and the state beside each row is re-read from GitHub after the call rather than repainted optimistically &mdash; a control that assumed its own success would reintroduce, inside this page, the gap between what should be true and what is that the page exists to close. This Worker holds one public-repo token: only <code>${esc(writableRepo || 'none')}</code> can be written from here, and nothing here pushes to a workflow YAML file &mdash; that is a different scope this token does not carry.</p>
       </div>
 
       <div class="auto-group">
@@ -176,6 +212,68 @@ ${switchRows}
       b.textContent = 'turn ' + (row.value === true ? 'OFF' : 'ON');
     }
   }
+  /* ── THE WORKFLOW CONTROLS (2026-08-31) ──────────────────────────────
+     A separate status line and a separate handler, because a GitHub write and
+     a KV write fail in different ways and one shared sentence would flatten
+     them. Every branch below is a DIFFERENT message: the endpoint returns a
+     code and that code is what is shown, so 403 (scope), 404 (no such
+     workflow), unreachable (unknown, not failed) and unchanged (accepted, and
+     the state did not move) never collapse into "it failed". */
+  var wfStatus = document.getElementById('workflow-status');
+  function sayWf(msg, ok) {
+    wfStatus.textContent = msg;
+    wfStatus.className = 'answer-status ' + (ok ? 'answer-status--ok' : 'answer-status--err');
+  }
+  document.addEventListener('click', async function (ev) {
+    var wf = ev.target.closest('button[data-workflow]');
+    if (!wf) return;
+    var id = wf.getAttribute('data-workflow');
+    var enable = wf.getAttribute('data-enable') === 'true';
+    var name = wf.getAttribute('data-name') || id;
+    wf.disabled = true;
+    sayWf((enable ? 'enabling ' : 'disabling ') + name + ' on GitHub ...', true);
+    var res;
+    try {
+      res = await fetch('${workflowUrl}?id=' + encodeURIComponent(id), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enable: enable }),
+      });
+    } catch (err) {
+      /* The browser never got an answer. UNKNOWN, not failed — the call may
+         have landed, so nothing is repainted and nothing is retried for you. */
+      wf.disabled = false;
+      sayWf('the call got no answer at all (' + err.message + '). This is UNKNOWN, not failed — it may have landed. Reload before trying again.', false);
+      return;
+    }
+    var data = null;
+    try { data = await res.json(); } catch (e) { data = null; }
+    if (!data) {
+      wf.disabled = false;
+      sayWf('HTTP ' + res.status + ', and the response was not readable JSON — the result is unknown. Reload before trying again.', false);
+      return;
+    }
+    if (data.ok) {
+      /* The state shown is the one the SERVER read back from GitHub after the
+         write, not the direction this button asked for. */
+      var cell = document.querySelector('[data-state-for="' + id + '"]');
+      if (cell) cell.textContent = data.state === 'active' ? 'active (re-read)' : 'DISABLED (' + data.state + ')';
+      var host = document.querySelector('[data-control-for="' + id + '"]');
+      if (host) {
+        var flip = data.state === 'disabled_manually';
+        wf.setAttribute('data-enable', flip ? 'true' : 'false');
+        wf.textContent = flip ? 'enable' : 'disable';
+      }
+      wf.disabled = false;
+      sayWf(name + ': ' + data.message, true);
+      return;
+    }
+    /* Every refusal keeps its own sentence. The code distinguishes them; the
+       message the endpoint wrote is what a person reads. */
+    wf.disabled = false;
+    sayWf(name + ' — [' + (data.code || 'error') + '] ' + (data.message || data.reason || ('HTTP ' + res.status)), false);
+  });
+
   document.addEventListener('click', async function (ev) {
     var btn = ev.target.closest('button[data-trigger]');
     if (!btn) return;

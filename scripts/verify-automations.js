@@ -221,7 +221,173 @@ check('the page lives under /admin/, so the existing gate covers it and no new d
 check('the page and the JSON endpoint call ONE gatherer — the toggle’s read-back cannot see a different query',
   (triggerCases.match(/await gatherAutomations\(env\)/g) || []).length === 2);
 check('the panel is never cached — a cached answer to "did the 14:00 block run" is the failure it exists to remove',
-  /url\.pathname === '\/admin\/automations'[\s\S]{0,900}'Cache-Control': 'no-store'/.test(triggerCases));
+  /url\.pathname === '\/admin\/automations'[\s\S]{0,1400}'Cache-Control': 'no-store'/.test(triggerCases));
+
+section('§7 the Actions half is WRITABLE — 2026-08-31');
+
+/*
+ * The write path is exercised WITHOUT A NETWORK. `globalThis.fetch` is replaced
+ * with a scripted stub for the length of each case and restored after, so every
+ * one of Part 3's four failure shapes is asserted as a real call through
+ * `setWorkflowEnabled()` rather than as a regex over its source. The tripwire
+ * idiom is the estate's own (verify-providers.js, verify-routing.js); here the
+ * stub IS the tripwire — an unexpected URL throws.
+ */
+const realFetch = globalThis.fetch;
+async function withFetch(script, fn) {
+  const seen = [];
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url: String(url), method: (init && init.method) || 'GET' });
+    const step = script.shift();
+    if (!step) throw new Error(`unscripted fetch to ${url}`);
+    if (step === 'throw') throw new Error('socket hung up');
+    return {
+      ok: step.status >= 200 && step.status < 300,
+      status: step.status,
+      json: async () => step.body,
+    };
+  };
+  try { return { result: await fn(), seen }; } finally { globalThis.fetch = realFetch; }
+}
+const ENV = { GITHUB_TOKEN: 'stub' };
+const CALL = { owner: 'avivnofar', repo: 'office-AI-agents', id: '12345' };
+
+check('the id is DIGITS ONLY, checked before it is a URL — a workflow FILE NAME is refused, which GitHub itself would accept',
+  panel.parseWorkflowRef('12345').ok
+  && !panel.parseWorkflowRef('owner-email.yml').ok
+  && !panel.parseWorkflowRef('../../secrets').ok
+  && !panel.parseWorkflowRef('').ok);
+
+check('[FAILS-OLD] a real enable call PUTs the enable endpoint and then RE-READS the live state — two calls, not one',
+  await (async () => {
+    const { result, seen } = await withFetch(
+      [{ status: 204 }, { status: 200, body: { state: 'active' } }],
+      () => panel.setWorkflowEnabled(ENV, { ...CALL, enable: true }),
+    );
+    return result.ok && result.code === 'confirmed' && result.state === 'active'
+      && seen.length === 2
+      && seen[0].method === 'PUT' && /\/actions\/workflows\/12345\/enable$/.test(seen[0].url)
+      && seen[1].method === 'GET' && /\/actions\/workflows\/12345$/.test(seen[1].url);
+  })());
+
+check('PART 3 — 403 says the TOKEN CANNOT DO THIS (scope), and says it is not the same as the call being wrong',
+  await (async () => {
+    const { result } = await withFetch([{ status: 403 }], () => panel.setWorkflowEnabled(ENV, { ...CALL, enable: false }));
+    return result.code === 'forbidden' && /scope/.test(result.message) && /NOT the same as/.test(result.message);
+  })());
+
+check('PART 3 — 404 says NO SUCH WORKFLOW, and says it is not a refusal',
+  await (async () => {
+    const { result } = await withFetch([{ status: 404 }], () => panel.setWorkflowEnabled(ENV, { ...CALL, enable: false }));
+    return result.code === 'not_found' && /NOT a refusal/.test(result.message);
+  })());
+
+check('PART 3 — no response at all is UNKNOWN, never "failed": the call may have landed',
+  await (async () => {
+    const { result } = await withFetch(['throw'], () => panel.setWorkflowEnabled(ENV, { ...CALL, enable: true }));
+    return result.code === 'unreachable' && /UNKNOWN, not failed/.test(result.message);
+  })());
+
+check('PART 3 — the one that is easiest to paper over: 204 ACCEPTED and the follow-up read still shows the OLD state',
+  await (async () => {
+    const { result } = await withFetch(
+      [{ status: 204 }, { status: 200, body: { state: 'disabled_manually' } }],
+      () => panel.setWorkflowEnabled(ENV, { ...CALL, enable: true }),
+    );
+    return result.ok === false && result.code === 'unchanged'
+      && /SUCCEEDED/.test(result.message) && /DID NOT MOVE/.test(result.message);
+  })(),
+  'the write answered success, so folding this into "it worked" is the failure this endpoint is built to refuse');
+
+check('...and a 204 whose follow-up read ITSELF fails is `unverified` — the write is known and the result is not',
+  await (async () => {
+    const { result } = await withFetch([{ status: 204 }, { status: 500 }], () => panel.setWorkflowEnabled(ENV, { ...CALL, enable: false }));
+    return result.code === 'unverified' && /WRITE is known and the RESULT is not/.test(result.message);
+  })());
+
+check('DISABLING SOMETHING ALREADY DISABLED IS A SUCCESS — which is what makes the permission probe possible with no live effect',
+  await (async () => {
+    const { result } = await withFetch(
+      [{ status: 204 }, { status: 200, body: { state: 'disabled_manually' } }],
+      () => panel.setWorkflowEnabled(ENV, { ...CALL, enable: false }),
+    );
+    return result.ok && result.state === 'disabled_manually';
+  })());
+
+check('no GITHUB_TOKEN attempts NOTHING — it does not reach the network to find out',
+  await (async () => {
+    const { result, seen } = await withFetch([], () => panel.setWorkflowEnabled({}, { ...CALL, enable: true }));
+    return result.code === 'no_token' && seen.length === 0;
+  })());
+check('a missing direction is a 400-shaped refusal, never a guess about which way to flip something',
+  (await panel.setWorkflowEnabled(ENV, { ...CALL })).code === 'bad_direction');
+
+check('THE SWITCHES IDIOM IS HELD: an unwritable row gets NO control at all, not a greyed-out one, and says why',
+  (() => {
+    const off = panel.workflowControl({ state: 'active' }, { writable: false, repo: 'back-office-AI-agents', writeRepo: 'office-AI-agents' });
+    return off.action === null && /back-office-AI-agents/.test(off.why) && /different credential/.test(off.why);
+  })());
+check('active -> disable, disabled_manually -> enable, and NOTHING for a state this panel does not model',
+  panel.workflowControl({ state: 'active' }, { writable: true }).action === 'disable'
+  && panel.workflowControl({ state: 'disabled_manually' }, { writable: true }).action === 'enable'
+  && panel.workflowControl({ state: 'disabled_inactivity' }, { writable: true }).action === null
+  && /went quiet/.test(panel.workflowControl({ state: 'disabled_inactivity' }, { writable: true }).why)
+  && panel.workflowControl({ state: 'something_new' }, { writable: true }).action === null);
+
+const WF = [
+  { id: 111, name: 'Owner email notice', path: '.github/workflows/owner-email.yml', state: 'active', lastRunAt: '2026-08-30T16:55:13Z', conclusion: 'success', event: 'schedule' },
+  { id: 222, name: 'Archive Architect', path: '.github/workflows/archive-architect.yml', state: 'disabled_manually', lastRunAt: null, conclusion: 'DISABLED (disabled_manually)', event: null },
+];
+const renderActions = (repo, writableRepo) => page.renderAutomationsPage({
+  stylesheet: '', view, switches: [], today: '2026-08-30', versionId: 'v',
+  workflowUrl: '/admin/api/workflow', writableRepo,
+  actions: { ok: true, reason: null, owner: 'avivnofar', repo, workflows: WF },
+});
+
+check('[FAILS-OLD] the page renders an ENABLE control on the disabled row and a DISABLE control on the active one',
+  (() => {
+    const html = renderActions('office-AI-agents', 'office-AI-agents');
+    return /data-workflow="111" data-enable="false" data-name="Owner email notice">disable</.test(html)
+      && /data-workflow="222" data-enable="true" data-name="Archive Architect">enable</.test(html);
+  })());
+check('PART 4 — a row in a repo this token cannot write to carries NO button, and the reason instead',
+  (() => {
+    const html = renderActions('back-office-AI-agents', 'office-AI-agents');
+    return !/data-workflow=/.test(html) && /not writable from here/.test(html);
+  })());
+check('the page calls the workflow endpoint through the alias map, never a literal /api path',
+  (() => {
+    const html = renderActions('office-AI-agents', 'office-AI-agents');
+    return /fetch\('\/admin\/api\/workflow\?id='/.test(html)
+      && /workflowUrl: adminApiUrl\('workflow'\)/.test(triggerCases);
+  })());
+check('the control column did not break the two colspans that describe a refused or empty read',
+  (() => {
+    const empty = page.renderAutomationsPage({
+      stylesheet: '', view, switches: [], today: '2026-08-30', versionId: 'v',
+      actions: { ok: true, reason: null, repo: 'office-AI-agents', workflows: [] },
+      workflowUrl: '/admin/api/workflow', writableRepo: 'office-AI-agents',
+    });
+    return /colspan="6"[^>]*>The API answered and listed no active workflow/.test(empty)
+      && !/colspan="5"/.test(empty);
+  })());
+check('the page REPAINTS FROM THE STATE THE SERVER READ BACK, never from the direction the button asked for',
+  /the state shown is the one the SERVER read back from GitHub/i.test(pageSrc)
+  && /cell\.textContent = data\.state === 'active'/.test(pageSrc));
+
+check('the write route is an EXPLICIT MAP KEY like every other, and the direction is not in the query string',
+  /\['workflow', '\/api\/admin\/workflow'\]/.test(gate)
+  && /id=<digits>/.test(gate));
+check('the endpoint is POST and lives inside the AUTHENTICATED_PREFIXES block — surface: \'api\', so the page cookie is refused',
+  /request\.method === 'POST' && url\.pathname === '\/api\/admin\/workflow'/.test(triggerCases)
+  && triggerCases.indexOf("url.pathname === '/api/admin/workflow'")
+     > triggerCases.indexOf("const credential = await adminCredential(request, env, { surface: 'api' });"));
+check('the HTTP status carries the same distinction the body does — 403, 404, 409 and 504 are four different answers',
+  /forbidden: 403/.test(triggerCases) && /not_found: 404/.test(triggerCases)
+  && /unchanged: 409/.test(triggerCases) && /unreachable: 504/.test(triggerCases));
+check('NOTHING here pushes to a workflow YAML file — that is the `workflow` scope this token does not carry',
+  !/\.github\/workflows\/[a-z-]+\.yml/.test(stripComments(panelSrc))
+  && /workflow` scope/.test(panelSrc));
 
 console.log(`\n${passed}/${passed + failed} checks passed.`);
 process.exit(failed ? 1 : 0);

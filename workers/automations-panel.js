@@ -256,7 +256,10 @@ export function buildAutomationsView({
 export async function fetchWorkflowRuns(env, { owner, repo } = {}) {
   const token = env?.GITHUB_TOKEN;
   if (!token) {
-    return { ok: false, reason: 'no GITHUB_TOKEN in this environment — the Actions half cannot be read', workflows: [] };
+    return {
+      ok: false, owner: owner || null, repo: repo || null, workflows: [],
+      reason: 'no GITHUB_TOKEN in this environment — the Actions half cannot be read',
+    };
   }
   const headers = {
     Authorization: `Bearer ${token}`,
@@ -269,6 +272,8 @@ export async function fetchWorkflowRuns(env, { owner, repo } = {}) {
     const status = res?.status ?? 'no response';
     return {
       ok: false,
+      owner: owner || null,
+      repo: repo || null,
       workflows: [],
       reason: `the GitHub Actions API answered ${status}`
         + (res?.status === 403
@@ -303,10 +308,21 @@ export async function fetchWorkflowRuns(env, { owner, repo } = {}) {
 
   return {
     ok: true,
+    owner: owner || null,
+    repo: repo || null,
     reason: runsRes?.ok ? null : 'the workflow LIST was readable but the RUN history was not — every last-run below is unknown, not absent',
     workflows: workflows.map((w) => {
       const r = latest.get(w.id) || null;
       return {
+        /*
+         * `id` and the enclosing `owner`/`repo` were added 2026-08-31 for the
+         * enable/disable controls. They are ADDITIVE: no request this function
+         * makes changed, no field was removed, and nothing it already reported
+         * is computed differently. The id is GitHub's own numeric workflow id
+         * and is what the write endpoint validates against `parseWorkflowRef()`
+         * before it is ever spliced into a URL.
+         */
+        id: w.id,
         name: w.name,
         path: w.path,
         state: w.state,
@@ -317,5 +333,203 @@ export async function fetchWorkflowRuns(env, { owner, repo } = {}) {
         event: r?.event || null,
       };
     }),
+  };
+}
+
+/* ── The Actions half, made WRITABLE (2026-08-31) ────────────────────────── */
+
+/**
+ * WHY THE READ-ONLY HALF STOPPED BEING READ-ONLY.
+ *
+ * `fetchWorkflowRuns()` above has shown a workflow's state since 2026-08-30,
+ * including the three this repo has in `disabled_manually`. Showing the state
+ * and being unable to change it is the smaller half of the job: the owner then
+ * reads the panel, learns a workflow is off, and leaves for github.com to do
+ * something about it — which is the hand-comparison this page was built to
+ * retire, moved one step later.
+ *
+ * **The reason it was read-only was never a permission.** It was that no write
+ * call had been written. `GITHUB_TOKEN` is a classic PAT carrying `repo`, which
+ * is the scope the enable/disable endpoints require; the `workflow` scope it
+ * does NOT carry governs pushing changes to workflow *files*, which nothing
+ * here does. That claim is not taken on trust — the session that added this
+ * probed the disable endpoint against an ALREADY-DISABLED workflow first, where
+ * a 204 proves the scope and changes nothing.
+ *
+ * ── THE ID IS DIGITS, AND IT IS CHECKED BEFORE IT IS A URL ───────────────
+ *
+ * `parseWorkflowRef()` keeps the discipline `parseItemRef()` and
+ * `parseTaskQuery()` already keep: the identity arrives in a query string, is
+ * validated against a fixed pattern, and only then is spliced into a path.
+ * GitHub also accepts a workflow's FILE NAME at this endpoint; that spelling is
+ * deliberately not accepted here, because a file name is a free-form string
+ * reaching a URL path and digits are not.
+ */
+export function parseWorkflowRef(rawId) {
+  const s = String(rawId ?? '').trim();
+  if (!s) return { ok: false, reason: 'no workflow id was given' };
+  if (!/^[0-9]{1,20}$/.test(s)) {
+    return {
+      ok: false,
+      reason: 'a workflow id is digits only — GitHub also accepts a workflow FILE NAME at this endpoint '
+        + 'and this office deliberately does not, because a file name is a free-form string reaching a URL path',
+    };
+  }
+  return { ok: true, id: s };
+}
+
+/**
+ * Which control, if any, a workflow row gets.
+ *
+ * THE `SWITCHES` IDIOM, HELD. A row that must not be flipped gets NO control at
+ * all — not a greyed-out one — and carries the reason as text, exactly as the
+ * two retired kill switches do. A disabled-looking button is an invitation with
+ * a refusal attached; a sentence is an answer.
+ *
+ * Only two states get a control, and the rest say what they are:
+ *
+ *   `active`              -> disable
+ *   `disabled_manually`   -> enable
+ *   `disabled_inactivity` -> NOTHING. GitHub disabled this itself after 60 days
+ *                            of repo inactivity. The enable endpoint would work,
+ *                            and a one-click re-enable would hide the fact that
+ *                            the repo went quiet — which is the finding.
+ *   anything else         -> NOTHING, and the state is named.
+ *
+ * @param {object}  w            a row from fetchWorkflowRuns().workflows
+ * @param {object}  o
+ * @param {boolean} o.writable   may THIS token write to the repo the row is in
+ * @param {string}  o.repo       the repo the row is in, for the refusal text
+ * @param {string}  o.writeRepo  the one repo this token may write to
+ */
+export function workflowControl(w, { writable, repo, writeRepo } = {}) {
+  if (!writable) {
+    return {
+      action: null,
+      why: `not writable from here — this Worker holds one public-repo token, scoped to ${writeRepo || 'the public repo'}`
+        + `${repo ? `, and this row is in ${repo}` : ''}. Another repo needs a different credential and the owner’s decision.`,
+    };
+  }
+  if (w?.state === 'active') return { action: 'disable', label: 'disable', why: null };
+  if (w?.state === 'disabled_manually') return { action: 'enable', label: 'enable', why: null };
+  if (w?.state === 'disabled_inactivity') {
+    return {
+      action: null,
+      why: 'GitHub disabled this itself after 60 days without repo activity. A one-click re-enable here would hide '
+        + 'that the repo went quiet, which is the finding — re-enable it on github.com, deliberately.',
+    };
+  }
+  return { action: null, why: `state “${String(w?.state ?? 'unknown')}” — no control is offered for a state this panel does not model.` };
+}
+
+/** The one live state each direction is allowed to land in. */
+const EXPECTED_STATE = { enable: 'active', disable: 'disabled_manually' };
+
+/**
+ * Enable or disable ONE workflow, then READ THE LIVE STATE BACK.
+ *
+ * ── EVERY FAILURE IS ITS OWN SENTENCE ────────────────────────────────────
+ *
+ * `fetchWorkflowRuns()` already refuses to render "the token cannot read this"
+ * and "there are no workflows" as one line. The write half holds the same
+ * standard, and these codes are the whole of it:
+ *
+ *   `forbidden`    403 — the token cannot do this. NOT "the call was wrong".
+ *   `not_found`    404 — no workflow with that id. NOT "you were refused".
+ *   `unreachable`  no response at all. UNKNOWN, not failed: the call may well
+ *                  have landed and this side never learned the answer.
+ *   `unchanged`    the API accepted it (204) and a fresh read still reports the
+ *                  old state. This is the one that most deserves its own
+ *                  message and is the easiest to paper over, because the write
+ *                  itself answered success.
+ *   `unverified`   accepted (204) and the follow-up read itself failed. Neither
+ *                  "it worked" nor "it did not" — say which half is unknown.
+ *
+ * ── THE RE-READ IS A FRESH GET, NOT THE WRITE'S OWN 204 ──────────────────
+ *
+ * Same rule the KV toggle above the switch table keeps, for the same recorded
+ * reason: this estate has a documented case of a toggle answering 200 and
+ * changing nothing. GitHub's workflow state is not eventually consistent the
+ * way Workers KV is, so — unlike that toggle — one read is allowed to be the
+ * verdict here; the ten-second second look is not needed and is not faked.
+ *
+ * DISABLING SOMETHING ALREADY DISABLED IS A SUCCESS, deliberately: the expected
+ * state is compared against the LIVE state, never against a change. That is
+ * what makes the permission probe possible with no live effect.
+ */
+export async function setWorkflowEnabled(env, { owner, repo, id, enable } = {}) {
+  const token = env?.GITHUB_TOKEN;
+  if (!token) {
+    return { ok: false, code: 'no_token', message: 'no GITHUB_TOKEN in this environment — nothing was attempted' };
+  }
+  const ref = parseWorkflowRef(id);
+  if (!ref.ok) return { ok: false, code: 'bad_id', message: ref.reason };
+  if (typeof enable !== 'boolean') {
+    return { ok: false, code: 'bad_direction', message: 'the direction must be a boolean `enable` — no default is guessed' };
+  }
+
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    'User-Agent': 'data-center-agent-sim',
+    Accept: 'application/vnd.github+json',
+  };
+  const verb = enable ? 'enable' : 'disable';
+  const base = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${ref.id}`;
+
+  const res = await fetch(`${base}/${verb}`, { method: 'PUT', headers }).catch(() => null);
+  if (!res) {
+    return {
+      ok: false, code: 'unreachable', verb, id: ref.id,
+      message: `the ${verb} call got no response at all. This is UNKNOWN, not failed — it may have landed. `
+        + 'Reload the panel and read the live state before trying again.',
+    };
+  }
+  if (res.status === 403) {
+    return {
+      ok: false, code: 'forbidden', httpStatus: 403, verb, id: ref.id,
+      message: 'GitHub answered 403: this token cannot enable or disable workflows (scope). That is NOT the same as '
+        + 'the call being wrong — the id and the repo may both be correct. Replacing the token is an owner action.',
+    };
+  }
+  if (res.status === 404) {
+    return {
+      ok: false, code: 'not_found', httpStatus: 404, verb, id: ref.id,
+      message: `GitHub answered 404: no workflow with id ${ref.id} in ${owner}/${repo}. That is NOT a refusal — `
+        + 'the token was accepted and the thing asked for does not exist. Reload the panel; the list may have moved.',
+    };
+  }
+  if (res.status !== 204) {
+    return {
+      ok: false, code: `http_${res.status}`, httpStatus: res.status, verb, id: ref.id,
+      message: `GitHub answered ${res.status} to the ${verb} call — neither the 204 that means done, nor a 403 or 404 `
+        + 'this panel knows how to explain. Nothing is assumed about the workflow’s state.',
+    };
+  }
+
+  /* THE FOLLOW-UP READ. Not the 204 — a fresh read of the live state, which is
+     the only thing that answers "did it take". */
+  const back = await fetch(base, { headers }).catch(() => null);
+  if (!back?.ok) {
+    return {
+      ok: false, code: 'unverified', httpStatus: 204, verb, id: ref.id,
+      message: `the ${verb} call was accepted (204), and the follow-up read `
+        + `${back ? `answered ${back.status}` : 'got no response'} — so the WRITE is known and the RESULT is not. `
+        + 'Reload the panel before acting on the state shown for this row.',
+    };
+  }
+  const live = await back.json().catch(() => null);
+  const state = live?.state ?? null;
+  const expected = EXPECTED_STATE[verb];
+  if (state !== expected) {
+    return {
+      ok: false, code: 'unchanged', httpStatus: 204, verb, id: ref.id, state,
+      message: `GitHub accepted the ${verb} call (204) and a fresh read still reports “${String(state)}”, not `
+        + `“${expected}”. The write SUCCEEDED and the state DID NOT MOVE — those are different facts and this is the `
+        + 'second one. Nothing on this page should be trusted for this row until it is checked on github.com.',
+    };
+  }
+  return {
+    ok: true, code: 'confirmed', httpStatus: 204, verb, id: ref.id, state,
+    message: `${verb}d, and read back live from GitHub: the workflow is now “${state}”.`,
   };
 }

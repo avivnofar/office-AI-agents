@@ -186,7 +186,12 @@ import { renderOfficeSite, officeStylesheet } from './office-site-page.js';
 // Session 40, Item C — the automations panel. The pure join and the switch
 // vocabulary live in the first; the page template, which imports the office's
 // stylesheet verbatim and declares no custom property of its own, in the second.
-import { buildAutomationsView, SWITCHES, fetchWorkflowRuns } from './automations-panel.js';
+// `setWorkflowEnabled`/`parseWorkflowRef` (2026-08-31) make the Actions half
+// of the panel WRITABLE — see that module's own block for why it was only
+// ever read-only and what was probed before this was written.
+import {
+  buildAutomationsView, SWITCHES, fetchWorkflowRuns, setWorkflowEnabled, parseWorkflowRef,
+} from './automations-panel.js';
 import { renderAutomationsPage } from './automations-page.js';
 import {
   ownerChannelEnabled, notifyOwner, selectNotificationItems, recentFailures, OWNER_ISSUE_LABEL,
@@ -8346,6 +8351,11 @@ export default {
         // renderAutomationsPage()'s header and admin-gate.js's adminApiUrl().
         triggerUrl: adminApiUrl('trigger'),
         readBackUrl: adminApiUrl('automations'),
+        workflowUrl: adminApiUrl('workflow'),
+        // The ONE repo this Worker's GITHUB_TOKEN may write to. Named here from
+        // repo-write.js's own constant rather than restated in the template, so
+        // a row in any other repo shows a reason instead of a button that 403s.
+        writableRepo: REPO_NAME,
         ...data,
       }), {
         status: 200,
@@ -8914,6 +8924,68 @@ export default {
        */
       if (request.method === 'GET' && url.pathname === '/api/admin/automations') {
         return json({ ok: true, ...(await gatherAutomations(env)) }, 200, origin);
+      }
+
+      /*
+       * ── /api/admin/workflow — ENABLE OR DISABLE ONE GITHUB WORKFLOW ───────
+       *
+       * The automations panel has shown a workflow's state since 2026-08-30 and
+       * could not change it. The reason was never a permission: `GITHUB_TOKEN`
+       * is a classic PAT with `repo`, which is the scope these two endpoints
+       * require, and the `workflow` scope it lacks governs pushing changes to
+       * workflow FILES — which nothing here does. It was simply that no write
+       * call had been written. Before this one was, the disable endpoint was
+       * probed against an ALREADY-DISABLED workflow, where a 204 proves the
+       * scope and changes nothing.
+       *
+       * POST, so `surface: 'api'` above refuses the page cookie AND — on the
+       * Access path, where the assertion is an ambient credential —
+       * `accessRequestIsSameOrigin()` refuses anything a hostile page caused.
+       * Nothing new is invented here; this is the same gate `/api/agents/
+       * trigger` has always had.
+       *
+       * `?id=<digits>` in the query string, validated by `parseWorkflowRef()`
+       * before it reaches a URL. The DIRECTION is a boolean in the body with no
+       * default: a missing direction is a 400, never a guess about which way
+       * the owner meant to flip something.
+       *
+       * ── EVERY FAILURE KEEPS ITS OWN STATUS AND ITS OWN SENTENCE ──────────
+       *
+       * `fetchWorkflowRuns()` refuses to render "the token cannot read this"
+       * and "there are no workflows" as one line; the write half holds the same
+       * standard. 403 is scope and not a wrong call, 404 is a missing workflow
+       * and not a refusal, no response is UNKNOWN and not failed, and a 204
+       * whose follow-up read still shows the old state is `unchanged` — the one
+       * that most deserves its own message, because the write itself succeeded.
+       */
+      if (request.method === 'POST' && url.pathname === '/api/admin/workflow') {
+        const ref = parseWorkflowRef(url.searchParams.get('id'));
+        if (!ref.ok) return json({ ok: false, code: 'bad_id', message: ref.reason }, 400, origin);
+        const body = await request.json().catch(() => null);
+        if (!body || typeof body.enable !== 'boolean') {
+          return json({
+            ok: false, code: 'bad_direction',
+            message: 'the body must carry a boolean `enable` — no direction is guessed',
+          }, 400, origin);
+        }
+        const result = await setWorkflowEnabled(env, {
+          owner: REPO_OWNER, repo: REPO_NAME, id: ref.id, enable: body.enable,
+        });
+        // The HTTP status carries the same distinction the body does, so a
+        // caller reading only the status still cannot confuse a scope refusal
+        // with a missing workflow or with an accepted write that did not move.
+        const STATUS_FOR = {
+          confirmed: 200,
+          bad_id: 400,
+          bad_direction: 400,
+          forbidden: 403,
+          not_found: 404,
+          unchanged: 409,
+          no_token: 503,
+          unreachable: 504,
+          unverified: 502,
+        };
+        return json({ ...result, owner: REPO_OWNER, repo: REPO_NAME }, STATUS_FOR[result.code] || 502, origin);
       }
 
       if (request.method === 'GET' && url.pathname === '/api/agents/sessions') {

@@ -189,6 +189,36 @@ const ADMIN_API_ROUTES = new Map([
    */
   ['artifacts', '/api/admin/artifacts'],
   ['artifact', '/api/admin/artifact'],
+  /*
+   * ── `workflow` (2026-08-31) ─────────────────────────────────────────────
+   *
+   * One more line, written by hand, exactly as this map's header requires — an
+   * exact key, never a prefix rewrite.
+   *
+   * It is the FIRST entry here that changes something outside this estate: a
+   * POST enables or disables a GitHub Actions workflow in the public repo. It
+   * gains no credential by being in this map. The rewrite happens before the
+   * gates, so it is `surface: 'api'` like every other entry — the page cookie
+   * is refused, and because a POST is not a safe method, a call arriving on the
+   * Access path must also be same-origin. On `*.workers.dev` the caller
+   * presents `X-Admin-Token` or gets 401.
+   *
+   * THE WORKFLOW'S IDENTITY TRAVELS IN THE QUERY STRING — `?id=<digits>` — for
+   * exactly the reason `item` and `artifact` do, and the reason is sharper here
+   * because this one writes: an id is per-workflow and changes as the repo
+   * does, so a path segment carrying it could only be matched by a pattern, and
+   * a pattern is the generalisation this map's header forbids.
+   * `canonicalAdminApiPath()` rewrites `url.pathname` and never touches
+   * `url.search`, so the id reaches the handler untouched and no attacker-
+   * shaped string ever influences which path is served. It is then validated
+   * against a digits-only pattern in `automations-panel.js`'s
+   * `parseWorkflowRef()` before it is spliced into any GitHub URL.
+   *
+   * The DIRECTION is not in the query string. It is a boolean `enable` in the
+   * JSON body, with no default: a missing direction is a 400, never a guess
+   * about which way the owner meant to flip something.
+   */
+  ['workflow', '/api/admin/workflow'],
 ]);
 
 /**
