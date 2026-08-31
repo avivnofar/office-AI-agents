@@ -8979,6 +8979,11 @@ export default {
           bad_id: 400,
           bad_direction: 400,
           forbidden: 403,
+          // A 403 whose body says the workflow is ALREADY in the state asked
+          // for is a conflict, not a refusal — GitHub uses one status for both
+          // and only the body separates them. Answering 403 here too would
+          // hand the caller back the exact ambiguity this endpoint decodes.
+          state_conflict: 409,
           not_found: 404,
           unchanged: 409,
           no_token: 503,

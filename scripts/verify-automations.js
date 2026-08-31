@@ -244,7 +244,12 @@ async function withFetch(script, fn) {
     return {
       ok: step.status >= 200 && step.status < 300,
       status: step.status,
-      json: async () => step.body,
+      // `body` is served on failures too: a 403's BODY is the only thing that
+      // separates "you may not" from "it is already that way".
+      json: async () => {
+        if (step.body === undefined) throw new Error('no body');
+        return step.body;
+      },
     };
   };
   try { return { result: await fn(), seen }; } finally { globalThis.fetch = realFetch; }
@@ -272,13 +277,73 @@ check('[FAILS-OLD] a real enable call PUTs the enable endpoint and then RE-READS
 
 check('PART 3 — 403 says the TOKEN CANNOT DO THIS (scope), and says it is not the same as the call being wrong',
   await (async () => {
+    const { result } = await withFetch(
+      [{ status: 403, body: { message: 'Resource not accessible by personal access token' } }],
+      () => panel.setWorkflowEnabled(ENV, { ...CALL, enable: false }),
+    );
+    return result.code === 'forbidden' && /scope/.test(result.message) && /NOT the same as/.test(result.message)
+      && /Resource not accessible/.test(result.message);
+  })());
+
+/*
+ * ── THE CASE THE LIVE PROBE FOUND, 2026-08-31 ────────────────────────────
+ *
+ * The probe this session was asked to run — `disable` against an ALREADY-
+ * DISABLED workflow, on the reasoning that it changes nothing and so is a free
+ * permission test — returns 403, and the spec reads 403 as "the scope is
+ * insufficient, stop and report". It was run with a token carrying
+ * `gist, read:org, repo, workflow` and STILL returned 403, because GitHub uses
+ * that one status for two unrelated facts and only the body separates them.
+ *
+ * The first version of this module reported it as a scope failure, which would
+ * have sent the owner to replace a credential that was fine. This is the check
+ * that fails against that version.
+ */
+check('[FAILS-OLD] a 403 whose BODY says the workflow is already in that state is NOT a scope failure — GitHub uses one status for both',
+  await (async () => {
+    const { result } = await withFetch(
+      [{ status: 403, body: { message: 'Unable to disable a workflow that is not active.' } }],
+      () => panel.setWorkflowEnabled(ENV, { ...CALL, enable: false }),
+    );
+    return result.code === 'state_conflict'
+      && /NOT a permission problem/.test(result.message)
+      && /that status covers both/.test(result.message)
+      && /stale/.test(result.message)
+      && !/scope/.test(result.message);
+  })(),
+  'reporting this as scope is how an owner ends up replacing a working token');
+
+check('...and the real zero-effect probe is the OTHER direction: enable against an already-active workflow is a plain 204',
+  await (async () => {
+    const { result } = await withFetch(
+      [{ status: 204 }, { status: 200, body: { state: 'active' } }],
+      () => panel.setWorkflowEnabled(ENV, { ...CALL, enable: true }),
+    );
+    return result.ok && result.state === 'active';
+  })());
+
+check('GitHub’s own message is QUOTED VERBATIM on every refusal, never paraphrased',
+  await (async () => {
+    const { result } = await withFetch(
+      [{ status: 404, body: { message: 'Not Found' } }],
+      () => panel.setWorkflowEnabled(ENV, { ...CALL, enable: true }),
+    );
+    return result.code === 'not_found' && /GitHub said: “Not Found”/.test(result.message)
+      && result.githubMessage === 'Not Found';
+  })());
+
+check('a refusal with NO readable body still says so, rather than inventing a reason',
+  await (async () => {
     const { result } = await withFetch([{ status: 403 }], () => panel.setWorkflowEnabled(ENV, { ...CALL, enable: false }));
-    return result.code === 'forbidden' && /scope/.test(result.message) && /NOT the same as/.test(result.message);
+    return result.code === 'forbidden' && /sent no readable message/.test(result.message);
   })());
 
 check('PART 3 — 404 says NO SUCH WORKFLOW, and says it is not a refusal',
   await (async () => {
-    const { result } = await withFetch([{ status: 404 }], () => panel.setWorkflowEnabled(ENV, { ...CALL, enable: false }));
+    const { result } = await withFetch(
+      [{ status: 404, body: { message: 'Not Found' } }],
+      () => panel.setWorkflowEnabled(ENV, { ...CALL, enable: false }),
+    );
     return result.code === 'not_found' && /NOT a refusal/.test(result.message);
   })());
 
@@ -305,7 +370,11 @@ check('...and a 204 whose follow-up read ITSELF fails is `unverified` — the wr
     return result.code === 'unverified' && /WRITE is known and the RESULT is not/.test(result.message);
   })());
 
-check('DISABLING SOMETHING ALREADY DISABLED IS A SUCCESS — which is what makes the permission probe possible with no live effect',
+/* NOT a claim about GitHub, which 403s that call — see above. This asserts the
+ * COMPARISON: the expected state is checked against the LIVE state, never
+ * against a change, so a call that lands somewhere it already was is a success
+ * rather than a false alarm. */
+check('the verdict compares the LIVE state to the expected one, never "did something change" — a no-op landing is a success',
   await (async () => {
     const { result } = await withFetch(
       [{ status: 204 }, { status: 200, body: { state: 'disabled_manually' } }],
@@ -385,6 +454,11 @@ check('the endpoint is POST and lives inside the AUTHENTICATED_PREFIXES block �
 check('the HTTP status carries the same distinction the body does — 403, 404, 409 and 504 are four different answers',
   /forbidden: 403/.test(triggerCases) && /not_found: 404/.test(triggerCases)
   && /unchanged: 409/.test(triggerCases) && /unreachable: 504/.test(triggerCases));
+check('...and a state conflict does NOT answer 403, which would hand back the ambiguity the endpoint just decoded',
+  /state_conflict: 409/.test(triggerCases));
+check('the module RECORDS the measurement rather than restating the assumption it disproved',
+  /X-Oauth-Scopes/.test(panelSrc) && /Unable to disable a workflow that is not active/.test(panelSrc)
+  && /ALREADY-ACTIVE workflow returns \*\*204\*\*/.test(panelSrc));
 check('NOTHING here pushes to a workflow YAML file — that is the `workflow` scope this token does not carry',
   !/\.github\/workflows\/[a-z-]+\.yml/.test(stripComments(panelSrc))
   && /workflow` scope/.test(panelSrc));

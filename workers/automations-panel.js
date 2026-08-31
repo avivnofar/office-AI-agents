@@ -353,8 +353,31 @@ export async function fetchWorkflowRuns(env, { owner, repo } = {}) {
  * is the scope the enable/disable endpoints require; the `workflow` scope it
  * does NOT carry governs pushing changes to workflow *files*, which nothing
  * here does. That claim is not taken on trust — the session that added this
- * probed the disable endpoint against an ALREADY-DISABLED workflow first, where
- * a 204 proves the scope and changes nothing.
+ * probed it live before trusting it.
+ *
+ * ── A 403 HERE MEANS TWO DIFFERENT THINGS, AND THE STATUS CANNOT TELL YOU
+ *    WHICH (measured 2026-08-31) ─────────────────────────────────────────
+ *
+ * The probe that was SPECIFIED was `disable` against an already-disabled
+ * workflow, on the reasoning that disabling something already disabled changes
+ * nothing and so is a free permission test. It is not a permission test at all.
+ * GitHub answers:
+ *
+ *     403  {"message": "Unable to disable a workflow that is not active."}
+ *
+ * — and it answers the same 403 to a token that genuinely lacks the scope. The
+ * probe was run with a token carrying `gist, read:org, repo, workflow`
+ * (`X-Oauth-Scopes` on the response says so) and still got 403. **A status code
+ * that means both "you may not" and "it is already that way" is the estate's
+ * own recurring defect arriving from outside**, and the first version of this
+ * module reported that 403 as "the token cannot do this (scope)" — which would
+ * have sent the owner to replace a credential that was fine.
+ *
+ * So the BODY is read, not just the status, and a state conflict is its own
+ * code. And the real zero-effect probe is the other direction: `enable` against
+ * an ALREADY-ACTIVE workflow returns **204** and leaves the state at `active`.
+ * That is what proved the scope on 2026-08-31, through this Worker's own
+ * `GITHUB_TOKEN`.
  *
  * ── THE ID IS DIGITS, AND IT IS CHECKED BEFORE IT IS A URL ───────────────
  *
@@ -434,7 +457,11 @@ const EXPECTED_STATE = { enable: 'active', disable: 'disabled_manually' };
  * and "there are no workflows" as one line. The write half holds the same
  * standard, and these codes are the whole of it:
  *
- *   `forbidden`    403 — the token cannot do this. NOT "the call was wrong".
+ *   `forbidden`      403 whose BODY is not a state complaint — the token
+ *                    cannot do this. NOT "the call was wrong".
+ *   `state_conflict` 403 whose body says the workflow is already in the state
+ *                    asked for. NOT a permission problem at all: the panel that
+ *                    was clicked from is stale. See the header.
  *   `not_found`    404 — no workflow with that id. NOT "you were refused".
  *   `unreachable`  no response at all. UNKNOWN, not failed: the call may well
  *                  have landed and this side never learned the answer.
@@ -484,25 +511,45 @@ export async function setWorkflowEnabled(env, { owner, repo, id, enable } = {}) 
         + 'Reload the panel and read the live state before trying again.',
     };
   }
-  if (res.status === 403) {
-    return {
-      ok: false, code: 'forbidden', httpStatus: 403, verb, id: ref.id,
-      message: 'GitHub answered 403: this token cannot enable or disable workflows (scope). That is NOT the same as '
-        + 'the call being wrong — the id and the repo may both be correct. Replacing the token is an owner action.',
-    };
-  }
-  if (res.status === 404) {
-    return {
-      ok: false, code: 'not_found', httpStatus: 404, verb, id: ref.id,
-      message: `GitHub answered 404: no workflow with id ${ref.id} in ${owner}/${repo}. That is NOT a refusal — `
-        + 'the token was accepted and the thing asked for does not exist. Reload the panel; the list may have moved.',
-    };
-  }
   if (res.status !== 204) {
+    /*
+     * THE BODY, NOT ONLY THE STATUS. GitHub's own message is the only thing
+     * that separates "you may not" from "it is already that way" on a 403 —
+     * see this section's header for the measurement. It is quoted verbatim in
+     * every branch below rather than paraphrased, because a paraphrase of a
+     * refusal reads exactly like a diagnosis.
+     */
+    const detail = await res.json().catch(() => null);
+    const gh = typeof detail?.message === 'string' ? detail.message : null;
+    const quoted = gh ? ` GitHub said: “${gh}”.` : ' GitHub sent no readable message.';
+
+    if (res.status === 403 && gh && /unable to (disable|enable) a workflow|already (active|disabled)/i.test(gh)) {
+      return {
+        ok: false, code: 'state_conflict', httpStatus: 403, verb, id: ref.id,
+        message: `this is NOT a permission problem, even though GitHub answered 403 — that status covers both. `
+          + `The workflow is already in the state the ${verb} asked for, so nothing changed and nothing is broken.`
+          + `${quoted} The panel you clicked from is stale; reload it.`,
+      };
+    }
+    if (res.status === 403) {
+      return {
+        ok: false, code: 'forbidden', httpStatus: 403, verb, id: ref.id, githubMessage: gh,
+        message: 'GitHub answered 403 and its message is not a state complaint, so this reads as scope: this token '
+          + 'cannot enable or disable workflows. That is NOT the same as the call being wrong — the id and the repo '
+          + `may both be correct. Replacing the token is an owner action.${quoted}`,
+      };
+    }
+    if (res.status === 404) {
+      return {
+        ok: false, code: 'not_found', httpStatus: 404, verb, id: ref.id, githubMessage: gh,
+        message: `GitHub answered 404: no workflow with id ${ref.id} in ${owner}/${repo}. That is NOT a refusal — `
+          + `the token was accepted and the thing asked for does not exist. Reload the panel; the list may have moved.${quoted}`,
+      };
+    }
     return {
-      ok: false, code: `http_${res.status}`, httpStatus: res.status, verb, id: ref.id,
+      ok: false, code: `http_${res.status}`, httpStatus: res.status, verb, id: ref.id, githubMessage: gh,
       message: `GitHub answered ${res.status} to the ${verb} call — neither the 204 that means done, nor a 403 or 404 `
-        + 'this panel knows how to explain. Nothing is assumed about the workflow’s state.',
+        + `this panel knows how to explain. Nothing is assumed about the workflow’s state.${quoted}`,
     };
   }
 
