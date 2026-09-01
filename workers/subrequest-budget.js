@@ -198,8 +198,16 @@ export const TICK_TAIL_RESERVE_NO_CASES = 3;
  * reserve forces a choice, the deliverable wins and the filler yields —
  * `spare_time` (a 20%-chance coworker chat, idle otherwise) is what gives way
  * at 16:30, and it says so in the admissions record rather than vanishing.
+ *
+ * SESSION 41, ITEM C (2026-09-01) — THE CONSTANT NEVER MATCHED ITS OWN
+ * COMMENT. This paragraph has said "reserved at 20" since the day it was
+ * written; the constant below was 10, unedited, from that same commit. That
+ * gap is the recurring `finalize @ 16:30 — Too many subrequests` incident's
+ * second cause (the first — `daily_standup` sharing the last tick with
+ * nothing to gate it — is fixed in config/daily-schedule.json the same
+ * session). Corrected to match the value this note always described.
  */
-export const FINALIZE_RESERVE = 10;
+export const FINALIZE_RESERVE = 20;
 
 /** Cases' guaranteed share of the usable budget. See header for the measurement. */
 export const CASE_FLOOR_FRACTION = 0.6;

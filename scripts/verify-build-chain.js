@@ -181,8 +181,19 @@ check('neither is on Friday — every Friday tick already carries a block and bl
 
 const times = schedule.full_day_schedule.blocks.map((b) => b.time);
 check('the block array is still time-ordered', JSON.stringify(times) === JSON.stringify([...times].sort()));
-check('the DAY-FINALIZING last block is unchanged (16:30) — adding blocks must not move the finalize',
-  schedule.full_day_schedule.blocks[schedule.full_day_schedule.blocks.length - 1].time === '16:30');
+// SESSION 41, ITEM C (2026-09-01) — the last block moved on PURPOSE: 16:30
+// carried `daily_standup` (a ~31-subrequest meeting) sharing its tick with
+// finalizeScheduledDay(), with nothing gating the combination, and that is
+// what `reports` incident rows show recurring as 'finalize @ 16:30 — Too
+// many subrequests' since 2026-08-12. daily_standup moved to 09:00 (its own
+// free tick, mirroring friday_schedule's 08:30 placement); `report` (16:00,
+// worst measured ~10.25) is now the last block finalize shares a tick with.
+// This check still guards the INVARIANT — a schedule edit must know it is
+// moving the finalize anchor, not do so by accident — it just names the new
+// deliberate value instead of the old one.
+check('the DAY-FINALIZING last block is 16:00 (report) — moved deliberately from 16:30, see Session 41 Item C',
+  schedule.full_day_schedule.blocks[schedule.full_day_schedule.blocks.length - 1].time === '16:00'
+  && schedule.full_day_schedule.blocks[schedule.full_day_schedule.blocks.length - 1].type === 'report');
 check('repair runs BEFORE approval, so a repair made this morning is judged this afternoon',
   times.indexOf('11:30') < times.indexOf('13:00'));
 check('each sits on a tick of its own — a free tick is its own invocation budget',
