@@ -206,8 +206,8 @@ export async function listImageCapableModels({ apiKey, agentId }) {
 
   let res;
   try {
-    res = await fetch(`${GEMINI_ENDPOINT}/models?key=${apiKey}&pageSize=1000`, {
-      headers: { 'User-Agent': 'data-center-agent-sim' },
+    res = await fetch(`${GEMINI_ENDPOINT}/models?pageSize=1000`, {
+      headers: { 'User-Agent': 'data-center-agent-sim', 'x-goog-api-key': apiKey },
     });
   } catch (err) {
     return { ok: false, reason: `transport_error: ${String(err?.message || err).slice(0, 200)}` };
@@ -293,9 +293,18 @@ function firstText(data) {
 async function callGeminiImageApi({ apiKey, model, parts, agentId, onResponse, label }) {
   let res;
   try {
-    res = await fetch(`${GEMINI_ENDPOINT}/models/${model}:generateContent?key=${apiKey}`, {
+    res = await fetch(`${GEMINI_ENDPOINT}/models/${model}:generateContent`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'User-Agent': 'data-center-agent-sim' },
+      headers: {
+        'Content-Type': 'application/json', 'User-Agent': 'data-center-agent-sim',
+        // SESSION 41, ITEM B — the key moves from a `?key=` query param to this
+        // header. Cloudflare Workers Logs captures every outbound subrequest's
+        // URL (`$workers.event.request.url`); a key in the URL is a key in the
+        // logs, on every single call, forever. The header is Google's own
+        // supported alternative for the Generative Language API and carries
+        // nothing in the URL for observability to capture.
+        'x-goog-api-key': apiKey,
+      },
       body: JSON.stringify({ contents: [{ parts }] }),
     });
   } catch (err) {

@@ -96,7 +96,7 @@ export async function callGemini({
 
   if (!apiKey) throw new Error('GEMINI_API_KEY is not configured');
 
-  const url = `${endpoint}/${model}:generateContent?key=${apiKey}`;
+  const url = `${endpoint}/${model}:generateContent`;
 
   const body = {
     contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -110,9 +110,13 @@ export async function callGemini({
     body.systemInstruction = { parts: [{ text: systemPrompt }] };
   }
 
+  // SESSION 41, ITEM B — the key moves from a `?key=` query param to this
+  // header (Google's own supported alternative for the Generative Language
+  // API). Cloudflare Workers Logs captures every outbound subrequest's URL;
+  // a key in the URL is a key in the logs, on every call, forever.
   const res = await fetch(url, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
     body: JSON.stringify(body),
   });
 

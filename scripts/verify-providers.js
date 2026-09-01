@@ -327,6 +327,26 @@ check('the asset writer takes its extension from the sniffed type, not from a te
 
 check('no image-provider path reached the network', NETWORK_TRIPWIRE.length === 0, NETWORK_TRIPWIRE.join(', '));
 
+/* ── SESSION 41, ITEM B — the Gemini key travels in a header, never a URL ─── */
+//
+// `?key=${apiKey}` in a fetch URL puts the key in
+// `$workers.event.request.url` on every call, which is exactly what
+// Cloudflare Workers Logs captures for every outbound subrequest —
+// confirmed blocking a real day's log pull (2026-08-31, entropy backstop,
+// 10 events on that field alone; SESSION-41-REPORT.md Item B). Google's
+// Generative Language API accepts the same key via the `x-goog-api-key`
+// header instead, which never reaches the URL.
+for (const [file, label] of [
+  ['gemini-client.js', 'the text lane'],
+  ['gemini-image-client.js', 'the image lane'],
+]) {
+  const src = readFileSync(new URL(`../workers/${file}`, import.meta.url), 'utf8');
+  check(`${file} (${label}) never puts the API key in the request URL`,
+    !/[?&]key=\$\{apiKey\}/.test(src));
+  check(`${file} (${label}) sends the key via the x-goog-api-key header instead`,
+    /'x-goog-api-key':\s*apiKey/.test(src));
+}
+
 /* ── GitHub Models is GONE, and stays gone ──────────────────────────────── */
 //
 // Removed 2026-08-06: the service was permanently retired on 2026-07-30. This
