@@ -130,6 +130,33 @@ function isRestDay(now = new Date()) {
   return israelNow(now).getUTCDay() === 6; // Saturday
 }
 
+/**
+ * SESSION 41, ITEM D (2026-09-01) — the UTC instant of Israel midnight-to-
+ * midnight for an Israel-local calendar date string.
+ *
+ * `checkReports()` and `checkWorkerLiveness()` both built their GitHub API
+ * `since`/`until` window as `${dateStr}T00:00:00Z` / `T23:59:59Z` — treating
+ * an ISRAEL-local date string as a UTC date, off by ISRAEL_UTC_OFFSET_HOURS
+ * in both directions. Harmless most of the time (Israel office hours,
+ * 08:00-18:00 = 05:00-15:00 UTC, sit safely inside the wrong window too) —
+ * but GitHub Actions' `schedule` trigger is not exact, and a run delayed
+ * past Israel midnight computes `dateStr` as the NEW Israel day (which has
+ * barely started, or has not started at all in UTC terms) and then queries
+ * a window that can be almost entirely in the future. `external-check.yml`
+ * failed this way on 2026-08-28, 2026-08-30 and 2026-08-31 — each run's own
+ * printed header read "2026-09-01 (Israel)" while the run itself executed
+ * on 2026-08-31 in UTC, and the query it built (`since=2026-09-01T00:00Z`)
+ * had not started yet. `all.length` (total commits in that impossible
+ * window) was correctly 0 every time — the check was not wrong about what
+ * it found, it was asking about a window that could not contain anything.
+ */
+function israelDayBoundsUtc(dateStr) {
+  const offsetMs = ISRAEL_UTC_OFFSET_HOURS * 3600 * 1000;
+  const since = new Date(Date.parse(`${dateStr}T00:00:00Z`) - offsetMs).toISOString();
+  const until = new Date(Date.parse(`${dateStr}T23:59:59Z`) - offsetMs).toISOString();
+  return { since, until };
+}
+
 /* ──────────────────────────── The report check ────────────────────────── */
 
 /**
@@ -154,7 +181,8 @@ async function checkReports(dateStr, { exec = execFileSync } = {}) {
 
   // `until` added 2026-08-17 for the same reason as in checkWorkerLiveness()
   // below: unbounded `since` made every past-date check count later days too.
-  const apiPath = `repos/${OWNER}/${BACKOFFICE_REPO}/commits?path=${DAILY_SUMMARY_PATH}&since=${dateStr}T00:00:00Z&until=${dateStr}T23:59:59Z&per_page=20`;
+  const { since, until } = israelDayBoundsUtc(dateStr);
+  const apiPath = `repos/${OWNER}/${BACKOFFICE_REPO}/commits?path=${DAILY_SUMMARY_PATH}&since=${since}&until=${until}&per_page=20`;
   try {
     const raw = exec('gh', ['api', apiPath], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     const commits = JSON.parse(raw);
@@ -247,7 +275,8 @@ export async function checkWorkerLiveness(dateStr, { exec = execFileSync, repo =
   // 2026-08-15 check was reporting 5 commits, all of them from later days.
   // That made the one path this watchdog can be TESTED on report a pass it had
   // not measured — the defect the file's own exit-code discipline is about.
-  const apiPath = `repos/${OWNER}/${repo}/commits?since=${dateStr}T00:00:00Z&until=${dateStr}T23:59:59Z&per_page=100`;
+  const { since, until } = israelDayBoundsUtc(dateStr);
+  const apiPath = `repos/${OWNER}/${repo}/commits?since=${since}&until=${until}&per_page=100`;
   try {
     const raw = exec('gh', ['api', apiPath], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
     const all = JSON.parse(raw);
@@ -525,7 +554,7 @@ finish(code);
  * The gates, exported so they can be exercised. Nothing about them changed;
  * they were simply unreachable from outside a run.
  */
-export { isRestDay, israelDateStr, israelNow, checkReports, checkBranches, branchVerdict };
+export { isRestDay, israelDateStr, israelNow, israelDayBoundsUtc, checkReports, checkBranches, branchVerdict };
 
 /*
  * RUN ONLY WHEN RUN. `import.meta.url` against `process.argv[1]` — resolved
