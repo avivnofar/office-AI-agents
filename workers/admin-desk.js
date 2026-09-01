@@ -500,17 +500,72 @@ export function buildArtifactAssignments(boardTasks = [], opts = {}) {
 /* ───────────────────────────── The repair loop ───────────────────────────── */
 
 /**
- * Session 31, Item E — a small, deterministic fingerprint for a blocking
- * finding's text, so the SAME finding recurring can be told apart from
- * different findings that each happen to block once. Normalized (lowercase,
- * collapsed whitespace) before hashing so cosmetic rewording of the same
- * complaint by a different reviewer still counts as the same finding. Not
- * cryptographic — FNV-1a, the same family this repo already uses elsewhere
- * (task-router.js's embodiment hash) for a deterministic, dependency-free
- * fingerprint.
+ * SESSION 41, ITEM A — pulls the stable technical identifiers out of a
+ * finding's prose, TIERED rather than pooled, because a pooled set breaks
+ * on the exact kind of noise real Architect prose adds round to round: one
+ * review quotes 'done' as well as 'unchecked', the next only 'unchecked' —
+ * an exact-set comparison would call those different findings, which is
+ * the same bug this function exists to fix, one level down.
+ *
+ * Tier 1 — file/path-like tokens (`test_audit.py`,
+ * `tasks/x/notes/foo.json`). Reduced to their BASENAME (`foo.json`, not the
+ * full path) because the same file gets named with and without its
+ * directory from round to round. If the finding names at least one file,
+ * that is the fingerprint: the file is the most reliable stable anchor a
+ * review can repeat, and quoted field/function names are dropped as noise
+ * once a file anchor exists.
+ *
+ * Tier 2 — only when NO file is named: quoted-or-backticked identifiers
+ * (field and function names — `'unchecked'`, `` `generate_report` ``).
+ *
+ * Falls back (caller-side) to the normalized full text when a finding names
+ * neither (rare — most blocking findings cite a concrete file or field), so
+ * a token-less case still gets *a* fingerprint rather than an empty one
+ * that would collide with every other token-less finding.
+ */
+export function extractStableFindingTokens(text) {
+  const s = String(text || '');
+  const fileTokens = new Set();
+  for (const m of s.match(/\b[\w][\w./-]*\.\w{1,6}\b/g) || []) {
+    const basename = m.toLowerCase().split('/').pop();
+    fileTokens.add(basename);
+  }
+  if (fileTokens.size) return Array.from(fileTokens).sort();
+
+  const quotedTokens = new Set();
+  for (const m of s.matchAll(/['"`]([a-zA-Z_][\w./-]{1,60})['"`]/g)) quotedTokens.add(m[1].toLowerCase());
+  return Array.from(quotedTokens).sort();
+}
+
+/**
+ * Session 31, Item E; keying revised Session 41, Item A — a small,
+ * deterministic fingerprint for a blocking finding, so the SAME finding
+ * recurring can be told apart from different findings that each happen to
+ * block once.
+ *
+ * ORIGINALLY hashed the finding's normalized prose directly, on the theory
+ * that lowercasing and collapsing whitespace would let "cosmetic rewording
+ * of the same complaint" still hash the same. It does not: two Architect
+ * reviews of the same underlying defect, worded differently round to
+ * round, produce two different fingerprints, and `repairDecision()`'s
+ * backward streak count never accumulates past 1 — confirmed against
+ * `dependency-audit`'s real five-round repair log (OB-103, five distinct
+ * fingerprints, ceiling never reached). Session 41, Item A.
+ *
+ * NOW keys on `extractStableFindingTokens()` — the finding's own stable
+ * identifiers — rather than its prose, so a re-worded review of the same
+ * file/field/criterion still fingerprints identically. This will NOT catch
+ * two prose-only findings (no filename, no quoted identifier) that
+ * describe the same defect in different words; that residual case falls
+ * back to full-text hashing same as before. Not cryptographic — FNV-1a,
+ * the same family this repo already uses elsewhere (task-router.js's
+ * embodiment hash) for a deterministic, dependency-free fingerprint.
  */
 export function fingerprintFinding(text) {
-  const s = String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const tokens = extractStableFindingTokens(text);
+  const s = tokens.length
+    ? tokens.join('|')
+    : String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
   let h = 2166136261;
   for (let i = 0; i < s.length; i += 1) {
     h ^= s.charCodeAt(i);

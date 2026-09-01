@@ -21,6 +21,7 @@ import {
 } from '../workers/build-chain.js';
 import { runArchitectApprovalCall } from '../workers/architect-spec.js';
 import { BLOCK_COST } from '../workers/subrequest-budget.js';
+import { fingerprintFinding, repairDecision, extractStableFindingTokens } from '../workers/admin-desk.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -210,6 +211,72 @@ check('a desk that had a queue and produced nothing must give a reason, and its 
   /itself a defect/.test(chainSummary([{ desk: 'repair', queued: 2, produced: 0 }])[0]));
 check('the table is keyed on slug — one task, one position in the chain',
   /slug TEXT PRIMARY KEY/.test(BUILD_CHAIN_TABLE_SQL));
+
+/* ═══════════════ §7 — the repair loop's fingerprint, Session 41 Item A ═══════════════ */
+section('§7 fingerprintFinding — keyed on stable tokens, not prose, so the ceiling can fire');
+
+// The real round-5 finding for dependency-audit/OB-103, read verbatim from
+// D1 `build_chain` on 2026-09-01 (SESSION-41-REPORT.md, Item A). Rounds 1-4
+// verbatim text is NOT retained anywhere (build_chain.finding is
+// overwritten each round; only its fingerprint survives in
+// tasks/dependency-audit/notes/repair-log.json on the repair branch) — that
+// gap is itself part of Item A's finding. Rounds 1-4 below are
+// RECONSTRUCTED paraphrases of the same two recurring defects
+// (`test_audit.py` missing, `unchecked` field shape), built to exercise the
+// fingerprint the way five real Architect rounds plausibly would — labelled
+// as reconstructed, never presented as the recovered originals.
+const ROUND5_REAL = "No test_audit.py is present in the artifact despite the spec explicitly requiring tests at warehouse-office-AI-agents/tasks/dependency-audit/test_audit.py, and 'done' is explicitly defined as 'verified by a passing test that asserts the summary field is never empty and never silently omits the checked/unchecked distinction.' Without that test file (or any test file) in the deliverable, there is no verification artifact to point to, so the done-criteria is unmet regardless of whether the script logic itself is correct. Additionally, the 'unchecked' list in generate_report includes full dependency dicts (with the injected advisory_checked/advisory_result keys) rather than a simple list of unchecked dependency identifiers as implied by the example output schema, which is a minor but real drift from the spec's example shape and should be reconciled. Blocking until test_audit.py exists and passes, and the unchecked field's shape is confirmed intentional or fixed.";
+const RECONSTRUCTED_ROUNDS_1_TO_4 = [
+  "The artifact has no test file. The spec requires tests at test_audit.py and defines done as a passing test that checks the summary field never drops the 'unchecked' distinction. Blocking until that file exists.",
+  "Still missing a test — test_audit.py isn't in the deliverable, so there's no way to verify the summary field never drops the 'unchecked' distinction. Please add it.",
+  "Blocking again: test_audit.py has not been added. Also noticed 'unchecked' in generate_report carries full dependency dicts rather than plain identifiers — worth reconciling with the spec's example shape.",
+  "Same two issues as last round: no test_audit.py anywhere in the deliverable, and the 'unchecked' field's shape still doesn't match the spec's example output.",
+];
+const FIVE_REAL_ROUNDS = [...RECONSTRUCTED_ROUNDS_1_TO_4, ROUND5_REAL];
+
+function oldFingerprintFinding(text) {
+  const s = String(text || '').toLowerCase().replace(/\s+/g, ' ').trim();
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i += 1) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+const oldFps = FIVE_REAL_ROUNDS.map(oldFingerprintFinding);
+check('reproduces the real defect: the OLD (prose-hash) fingerprint gives 5 distinct hashes across the 5 rounds',
+  new Set(oldFps).size === 5);
+
+let oldLog = [];
+let oldStrikeAtRound5 = null;
+for (const text of FIVE_REAL_ROUNDS) {
+  const d = repairDecision(oldLog, text);
+  oldLog.push({ fingerprint: oldFingerprintFinding(text) }); // old keying, for the old-behaviour trace
+  oldStrikeAtRound5 = d.strikeCount;
+}
+check('and under the OLD keying the ceiling is confirmed to never fire across all 5 real-shaped rounds',
+  oldStrikeAtRound5 < 3);
+
+const newFps = FIVE_REAL_ROUNDS.map(fingerprintFinding);
+check('the NEW (stable-token) fingerprint collides all 5 rounds onto ONE fingerprint',
+  new Set(newFps).size === 1);
+
+let newLog = [];
+let stoppedAtRound = null;
+for (let i = 0; i < FIVE_REAL_ROUNDS.length; i += 1) {
+  const d = repairDecision(newLog, FIVE_REAL_ROUNDS[i]);
+  if (d.action === 'stop_surface_to_owner' && stoppedAtRound === null) stoppedAtRound = i + 1;
+  newLog.push({ fingerprint: d.fingerprint });
+}
+check('under the NEW keying, repairDecision() reaches the ceiling (round 3 of the 5)', stoppedAtRound === 3);
+
+check('extractStableFindingTokens pulls the filename out regardless of surrounding prose',
+  extractStableFindingTokens(FIVE_REAL_ROUNDS[0]).includes('test_audit.py')
+  && extractStableFindingTokens(FIVE_REAL_ROUNDS[4]).includes('test_audit.py'));
+
+check('a GENUINELY different finding (different file, no shared token) still gets its own fingerprint — no over-collapsing',
+  fingerprintFinding(FIVE_REAL_ROUNDS[4]) !== fingerprintFinding("The README.md is missing a usage section entirely."));
+
+check('a tokenless finding still falls back to a real (non-empty) fingerprint rather than colliding on the empty case',
+  /^[0-9a-f]{8}$/.test(fingerprintFinding('this deliverable is simply not good enough')));
 
 /* ═══════════════ done ═══════════════ */
 console.log(`\n${fail === 0 ? '✅' : '❌'} verify-build-chain: ${pass} passed, ${fail} failed`);
