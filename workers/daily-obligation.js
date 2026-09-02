@@ -153,16 +153,73 @@ export function classifyWrite(write) {
 }
 
 /**
- * Counts a day's committed writes.
+ * The task directory a warehouse path was written under — `tasks/<slug>/...`
+ * — or `null` for anything else (including a warehouse path outside
+ * `tasks/`, which this office has none of today but which must not crash a
+ * slug lookup).
  *
- * Takes ONLY `committed = 1` rows — a write that was attempted and refused is
- * not something a person can open. The caller filters in SQL; this filters
- * again, so a caller that forgets cannot quietly satisfy the obligation with
- * a day's worth of failures.
+ * @param {string} path
+ * @returns {string|null}
+ */
+export function warehouseSlugFromPath(path) {
+  const m = /^tasks\/([^/]+)\//.exec(String(path || ''));
+  return m ? m[1] : null;
+}
+
+// Duplicated from `workers/build-chain.js`'s own `AWAITING_REPAIR`, not
+// imported — this module's header rule ("imports nothing") is why
+// `scripts/verify-daily-obligation.js` can load and CALL it rather than
+// mirror it, and that rule is worth one repeated string literal.
+// `scripts/verify-daily-obligation.js` asserts this equals the real export.
+const AWAITING_REPAIR_STATE = 'AWAITING-REPAIR';
+
+/**
+ * ══════════════════════════════════════════════════════════════════════════
+ * SESSION 42, ITEM C (2026-09-02) — A REPAIR ROUND'S OUTPUT IS NOT A NEW
+ * ARTIFACT.
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * `dependency-audit` (OB-103, build_chain slug `dependency-audit`) satisfied
+ * this office's daily obligation on 2026-08-31 and 2026-09-01 by rewriting
+ * the SAME two files — `tasks/dependency-audit/audit.py` and its
+ * `notes/repair-log.json` — every day the repair loop ran a round and the
+ * Architect blocked it again. `countArtifacts()`'s existing distinct-path
+ * dedupe (above) already stops ONE DAY's four commits to the same file from
+ * counting as four artifacts; it does nothing to stop the SAME FILE, on a
+ * DIFFERENT day, from counting as a fresh one — which is exactly the shape
+ * that let a five-round stalemate read as three good days in a row.
+ *
+ * The obligation check (`countArtifacts` here) and the build chain
+ * (`build_chain` in D1, read by the caller and passed in as
+ * `opts.buildChainStates`) are two mechanisms that are each correct on their
+ * own — the obligation check is right to count warehouse writes, and the
+ * repair loop is right to write to the warehouse — and wrong together,
+ * because neither one is aware of the other. This is that awareness, added
+ * in the narrowest place: a warehouse write is excluded from the count ONLY
+ * when the CURRENT `build_chain` state for its task slug is `AWAITING-REPAIR`
+ * — a task that has not delivered anything yet (Session 33's own build-chain
+ * diagram: `block -> AWAITING-REPAIR`, and only `approve -> MERGED` or
+ * `APPROVED-UNMERGED` is a finished outcome). A slug with no `build_chain`
+ * row at all (every non-repair-loop warehouse write, e.g.
+ * `session-40-attribution`) is unaffected — this touches ONLY the one state
+ * the session names, not "the warehouse" and not "dependency-audit" by name.
+ *
+ * `opts.buildChainStates` is a plain object or Map of `slug -> state`,
+ * supplied by the caller from a live `SELECT slug, state FROM build_chain`.
+ * Passing nothing (the default) reproduces the OLD behaviour exactly — a
+ * caller that has not been updated to read `build_chain` does not silently
+ * start under- or over-counting.
  *
  * @param {Array<{repo: string, path: string, committed?: number}>} rows
+ * @param {{buildChainStates?: Map<string,string>|Record<string,string>}} [opts]
  */
-export function countArtifacts(rows = []) {
+export function countArtifacts(rows = [], opts = {}) {
+  const states = opts.buildChainStates;
+  const stateFor = (slug) => {
+    if (!states || slug === null) return undefined;
+    return states instanceof Map ? states.get(slug) : states[slug];
+  };
+
   const artifacts = [];
   const notArtifacts = [];
   const unclassified = [];
@@ -181,6 +238,17 @@ export function countArtifacts(rows = []) {
     const key = `${row.repo}::${row.path}`;
     if (seen.has(key)) continue;
     seen.add(key);
+
+    if (row.repo === WAREHOUSE_REPO) {
+      const slug = warehouseSlugFromPath(row.path);
+      if (slug !== null && stateFor(slug) === AWAITING_REPAIR_STATE) {
+        notArtifacts.push({
+          repo: row.repo, path: row.path,
+          category: `a repair round's output — build_chain '${slug}' is AWAITING-REPAIR, so the cycle has not delivered anything yet`,
+        });
+        continue;
+      }
+    }
 
     const verdict = classifyWrite(row);
     const entry = { repo: row.repo, path: row.path, category: verdict.category };

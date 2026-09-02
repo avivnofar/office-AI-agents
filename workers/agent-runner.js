@@ -7595,7 +7595,20 @@ async function runDailyObligationCheck(env, { date, dayOfWeek, schedule, isOffDa
     const res = await env.DB.prepare(
       `SELECT repo, path, committed FROM repo_writes WHERE date(created_at) = ? AND committed = 1`
     ).bind(today).all();
-    const counted = countArtifacts(res?.results || []);
+    // SESSION 42, ITEM C: a repair round's output must not, on its own,
+    // satisfy the obligation — see countArtifacts()'s own header in
+    // daily-obligation.js. `build_chain` may not exist yet on a fresh D1
+    // (it is created lazily by the build-chain blocks, not by this function),
+    // so a missing table degrades to "no states known" rather than throwing —
+    // KFM-14 applies here exactly as it does to the rest of this function.
+    const buildChainRows = await env.DB.prepare(
+      `SELECT slug, state FROM build_chain`
+    ).all().catch(() => ({ results: [] }));
+    const buildChainStates = {};
+    for (const r of buildChainRows?.results || []) {
+      if (r?.slug) buildChainStates[r.slug] = r.state;
+    }
+    const counted = countArtifacts(res?.results || [], { buildChainStates });
     // The diagnostic must name a block that COULD have run. `guides_enabled`
     // was false when this was written, so the naive answer on a Sun-Thu day was
     // `guide_review` — a gated no-op, and the wrong place to send anyone.

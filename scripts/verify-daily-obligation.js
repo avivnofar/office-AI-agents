@@ -31,8 +31,10 @@ import {
   CLASSIFICATION_RULES, ARTIFACT_CAPABLE_BLOCKS, DAILY_OBLIGATION_TABLE_SQL,
   DAILY_OBLIGATION_MIGRATIONS, skipReasonFor,
   classifyWrite, countArtifacts, lastArtifactCapableBlock, switchedOffBlockTypes, buildObligationIssue,
+  warehouseSlugFromPath,
   WAREHOUSE_REPO, BACKOFFICE_REPO, PUBLIC_REPO,
 } from '../workers/daily-obligation.js';
+import { AWAITING_REPAIR } from '../workers/build-chain.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '..');
@@ -294,6 +296,53 @@ check('the table is keyed on `date`, so a re-run replaces a day rather than appe
   /date TEXT PRIMARY KEY/.test(DAILY_OBLIGATION_TABLE_SQL));
 check('the check cannot throw out of finalize (KFM-14)',
   /check_threw:/.test(runner));
+
+/* ═══ §11 — SESSION 42, ITEM C: a repair round's output is not a new artifact ═══ */
+section("§11 build_chain awareness — the loop and the check agreeing wrongly");
+
+check('warehouseSlugFromPath reads the task directory out of a warehouse path',
+  warehouseSlugFromPath('tasks/dependency-audit/audit.py') === 'dependency-audit'
+  && warehouseSlugFromPath('tasks/dependency-audit/notes/repair-log.json') === 'dependency-audit'
+  && warehouseSlugFromPath('README.md') === null);
+
+check('a warehouse write for a slug NOT in build_chain still counts — the fix is narrow, not "exclude the warehouse"',
+  countArtifacts([{ repo: WAREHOUSE_REPO, path: 'tasks/session-40-attribution/VERIFICATION.md', committed: 1 }],
+    { buildChainStates: { 'dependency-audit': AWAITING_REPAIR } }).count === 1);
+
+check('a warehouse write for a slug in build_chain but NOT AWAITING-REPAIR still counts (e.g. freshly MERGED)',
+  countArtifacts([{ repo: WAREHOUSE_REPO, path: 'tasks/dependency-audit/audit.py', committed: 1 }],
+    { buildChainStates: { 'dependency-audit': 'MERGED' } }).count === 1);
+
+check('the REAL AWAITING_REPAIR constant from build-chain.js is what this checks against — not a private guess',
+  countArtifacts([{ repo: WAREHOUSE_REPO, path: 'tasks/dependency-audit/audit.py', committed: 1 }],
+    { buildChainStates: { 'dependency-audit': AWAITING_REPAIR } }).count === 0);
+
+check('with NO buildChainStates passed at all, behaviour is UNCHANGED from before this session — an un-migrated caller does not silently start over/under-counting',
+  countArtifacts([{ repo: WAREHOUSE_REPO, path: 'tasks/dependency-audit/audit.py', committed: 1 }]).count === 1);
+
+/* THE RED PROOF. The real 2026-09-01 day, from live D1 (queried 2026-09-02):
+ * repo_writes for that date is ONLY dependency-audit's audit.py + repair-log.json,
+ * and build_chain's real live row for slug dependency-audit is state
+ * AWAITING-REPAIR, rounds 5 (task_id OB-103). Before this session's fix, this
+ * exact input made countArtifacts().count === 2 and the day's obligation read
+ * as MET. */
+const REAL_2026_09_01 = [
+  { repo: WAREHOUSE_REPO, path: 'tasks/dependency-audit/audit.py', committed: 1 },
+  { repo: WAREHOUSE_REPO, path: 'tasks/dependency-audit/notes/repair-log.json', committed: 1 },
+];
+const withoutFix = countArtifacts(REAL_2026_09_01); // no buildChainStates = the pre-session-42 shape
+check('THE BUG, TRANSCRIBED: without build_chain awareness, 2026-09-01 reads as MET (count 2)',
+  withoutFix.count === 2);
+const withFix = countArtifacts(REAL_2026_09_01, { buildChainStates: { 'dependency-audit': AWAITING_REPAIR } });
+check('THE FIX: with the real live build_chain state (AWAITING-REPAIR), 2026-09-01 now reads as a FAILURE (count 0)',
+  withFix.count === 0);
+
+/* THE CONTROL. 2026-08-28 must still pass — ten genuine artifacts, nothing to
+ * do with the repair loop, and build_chain has no row for any of that day's
+ * slugs (none of it is a warehouse write at all). */
+check('the CONTROL: 2026-08-28 (ten genuine non-warehouse artifacts) is UNAFFECTED and still passes',
+  countArtifacts(REAL_2026_08_28, { buildChainStates: { 'dependency-audit': AWAITING_REPAIR } }).count === 1
+  && countArtifacts(REAL_2026_08_28).count === 1);
 
 /* ═══════════ §10 — the rules themselves ═══════════ */
 section('§10 rule hygiene');
