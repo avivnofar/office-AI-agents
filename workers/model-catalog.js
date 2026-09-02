@@ -128,13 +128,14 @@ export const CATALOG_SOURCES = Object.freeze({
     extract: (data) => (data?.models || []).map((m) => m?.name).filter(Boolean),
   },
   gemini: {
-    // The key rides in the query string for this provider, so the URL is NEVER
-    // put into a result object. `endpointLabel` is what output shows.
+    // The key rides in the `x-goog-api-key` header, not the URL or query
+    // string, so it never reaches Cloudflare Workers Logs' subrequest URL
+    // record. `endpointLabel` is what output shows.
     endpointLabel: 'GET https://generativelanguage.googleapis.com/v1beta/models',
     secretName: 'GEMINI_API_KEY',
     request: (key) => ({
-      url: `https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000&key=${encodeURIComponent(key)}`,
-      headers: {},
+      url: 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000',
+      headers: { 'x-goog-api-key': key },
     }),
     // Gemini returns fully-qualified names (`models/gemini-3.1-flash-lite`).
     // BOTH forms are emitted so a configured id matches whichever way it is
@@ -161,8 +162,8 @@ export const CATALOG_SOURCES = Object.freeze({
     endpointLabel: 'GET https://generativelanguage.googleapis.com/v1beta/models  (same key and endpoint as `gemini`)',
     secretName: 'GEMINI_API_KEY',
     request: (key) => ({
-      url: `https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000&key=${encodeURIComponent(key)}`,
-      headers: {},
+      url: 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000',
+      headers: { 'x-goog-api-key': key },
     }),
     extract: (data) => (data?.models || []).flatMap((m) => {
       const name = m?.name;

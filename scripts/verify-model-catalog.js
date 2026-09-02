@@ -95,6 +95,34 @@ check('no endpointLabel contains a key placeholder or a query string with `key=`
 check('every source names its SECRET rather than carrying a value',
   Object.values(CATALOG_SOURCES).every((s) => typeof s.secretName === 'string' && /_API_KEY$/.test(s.secretName)));
 
+// SESSION 42, ITEM A — the endpointLabel check above proves the LABEL is clean;
+// it says nothing about the actual `request()` output, which is what a
+// subrequest logger actually records. Session 41 moved three call sites off
+// the query string and missed a fourth (workers/model-catalog.js's own two
+// Gemini entries) precisely because nothing asserted the built URL itself.
+// This probes every source's request() with a marker value standing in for a
+// real key and asserts the marker never appears in the URL — only ever in
+// headers, which Cloudflare Workers Logs does not record verbatim.
+const PROBE_SECRET = 'PROBE-SECRET-DO-NOT-LOG-abc123XYZ';
+const leakedInUrl = Object.entries(CATALOG_SOURCES)
+  .filter(([, s]) => typeof s.request === 'function')
+  .filter(([, s]) => String(s.request(PROBE_SECRET).url || '').includes(PROBE_SECRET))
+  .map(([name]) => name);
+check('no CATALOG_SOURCES request() ever puts the credential value into the URL',
+  leakedInUrl.length === 0, leakedInUrl.join(', '));
+
+// THE RED PROOF for the assertion above: transcribe the pre-fix shape (the
+// query-string form workers/model-catalog.js actually shipped with before this
+// session) and confirm the SAME assertion catches it.
+const PRE_FIX_GEMINI_SOURCE = {
+  request: (key) => ({
+    url: `https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000&key=${encodeURIComponent(key)}`,
+    headers: {},
+  }),
+};
+check('...and the assertion actually catches the pre-fix query-string shape (the red proof)',
+  PRE_FIX_GEMINI_SOURCE.request(PROBE_SECRET).url.includes(PROBE_SECRET));
+
 /* ── §2  THE RED PROOF ─────────────────────────────────────────────────── */
 console.log('\n--- §2  It goes RED on an absent identifier (THE PROOF) ---');
 
