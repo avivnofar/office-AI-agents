@@ -50,7 +50,7 @@ export const ARCHITECT_SPEC_SYSTEM = [
   'You are turning ONE real board task into a buildable spec, for a Cerebras-driven builder to execute in the warehouse repo afterward.',
   '',
   'You must answer with a SINGLE JSON object and nothing else — no prose before or after it, no markdown code fence.',
-  'The object has exactly these keys: "title", "task_type", "what", "out_of_scope", "where", "io", "constraints", "done", "open_decisions". All values are plain strings.',
+  'The object has exactly these keys: "title", "task_type", "what", "out_of_scope", "where", "io", "constraints", "phases", "done", "open_decisions". All values are plain strings.',
   `"task_type" must be exactly one of: ${TASK_TYPES.join(', ')}.`,
   '',
   'What each of the other fields means (this is the office\'s own spec form — answer it the way a careful human would):',
@@ -58,6 +58,22 @@ export const ARCHITECT_SPEC_SYSTEM = [
   '',
   `Under "open_decisions": ${OPEN_DECISIONS_INSTRUCTION} Do not leave a real ambiguity in the board task unresolved — decide it yourself and record the decision and reasoning as the value of this field. Leave the field genuinely empty only if there is truly nothing to decide.`,
   'Be specific and concrete. "io" especially needs a real example line of input and a real example line of output, not a description of their shape.',
+  '',
+  // ── THE TWO SECTIONS THE CHAIN'S TWO READERS NEED (2026-09-05, session 43)
+  //
+  // `where` was already required and is restated below with its own paragraph.
+  // `phases` is the half that was missing, and its GRAMMAR is the whole of it:
+  // `dispatch.js readPhases()` parses `N. [phase-id] Title` and nothing else, so
+  // a beautifully-reasoned prose breakdown here produces a spec that reads as
+  // planned and dispatches as empty. runArchitectSpecCall() refuses a reply
+  // whose phases do not parse rather than committing one — see its own note.
+  'THE "phases" FIELD HAS A GRAMMAR AND IT IS NOT NEGOTIABLE. The office\'s dispatcher reads it with a regular expression and understands NOTHING ELSE. Write between 2 and 8 phases, one per line, each line exactly of the form:',
+  '  N. [short-id] What that phase produces.',
+  'For example:',
+  '  1. [scaffold] Create the directory and an empty module with its CLI entry point.',
+  '  2. [parse] Read the input file and produce the row objects.',
+  '  3. [tests] One offline test per rule in "What \\"done\\" looks like".',
+  'The id is lowercase letters, digits and hyphens. Prose under this heading, bullets instead of numbers, or a missing [id] all parse as ZERO phases and the spec is refused. Separate the lines with real newlines inside the JSON string value.',
   '',
   'This spec is written for a build that will happen INSIDE the warehouse-office-AI-agents repo, by a builder that only has write access there — never in office-AI-agents or back-office-AI-agents, which are Architect/owner-authorized only. So "where" MUST name a path of the exact shape `warehouse-office-AI-agents/tasks/<a-short-lowercase-hyphenated-slug>/...` — never a path in either of the other two repos, and never a bare path with no repo name.',
 ].join('\n');
@@ -178,10 +194,47 @@ export async function runArchitectSpecCall(env, task, { date, cacheSystem = fals
     return { ok: false, reason: `buildSpec() refused: ${spec.reason}`, answers: parsed.answers, usage: { inputTokens: result.inputTokens, outputTokens: result.outputTokens }, spend, model: CLAUDE_MODEL };
   }
 
+  /*
+   * ── THE STRICT END OF THE PHASES FIELD (2026-09-05, session 43, Item A) ──
+   *
+   * `phases` is OPTIONAL on the owner's own form, deliberately — see the
+   * field's note in spec-builder.js. It is effectively REQUIRED here, and this
+   * is the line that makes it so.
+   *
+   * The reason is that the two ends of the form serve different people. The
+   * owner describing what he wants should not have to produce an
+   * implementation plan; the Architect writing a spec FOR THE OFFICE'S OWN
+   * BUILD CHAIN has no such excuse — the very next thing to touch this file is
+   * `dispatch.js`, which refuses `no_phases`, and a spec that cannot be
+   * dispatched is a spec that cost an Anthropic call and moved nothing. This
+   * refusal is what makes "every spec the office writes for itself is
+   * dispatchable" true by construction rather than by hope.
+   *
+   * It fires AFTER the spend is recorded, on purpose: the call happened and
+   * cost money whatever came back, the same posture the parse failure above
+   * takes. And it names the count it got, because "no phases" and "one phase
+   * the parser could not read" are different mistakes.
+   */
+  if (!spec.phases?.length) {
+    return {
+      ok: false,
+      reason: 'the Architect\'s spec has no "## Phases" list the dispatcher can read, so it would be '
+        + 'refused with `no_phases` the moment it was paired. Nothing was committed. '
+        + `(${(parsed.answers.phases || '').split(/\r?\n/).filter((l) => l.trim()).length} non-empty line(s) were written under that heading, 0 parsed.)`,
+      answers: parsed.answers,
+      usage: { inputTokens: result.inputTokens, outputTokens: result.outputTokens },
+      spend,
+      model: CLAUDE_MODEL,
+    };
+  }
+
   return {
     ok: true,
     markdown: spec.markdown,
     title: spec.title,
+    // Reported, not just used: a caller reading a dispatch record wants to see
+    // the same phase count `dispatch.js` will see, without re-parsing the file.
+    phases: spec.phases,
     answers: parsed.answers,
     usage: { inputTokens: result.inputTokens, outputTokens: result.outputTokens },
     spend,

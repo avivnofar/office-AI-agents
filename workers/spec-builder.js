@@ -168,6 +168,51 @@ export const SPEC_FIELDS = Object.freeze([
     hint: 'No new dependencies, no keys in the repo, must run offline — whatever is actually true.',
     placeholder: 'No new dependencies — standard library only. No keys, no network. Must run on Windows.',
   }),
+  /*
+   * PHASES — the EIGHTH field, added 2026-09-05 (session 43, Item A).
+   *
+   * ── WHY A SPEC NEEDED AN EIGHTH SECTION ─────────────────────────────────
+   *
+   * Two readers stand downstream of a spec, and until today NO SPEC SATISFIED
+   * BOTH, because each was written against a different template:
+   *
+   *   dispatch.js readPhases()                needs `## Phases`
+   *   office-context.js readSpecTargetPath()  needs `## Where it lives`
+   *
+   * Measured 2026-09-05 across all five warehouse specs: three carried the
+   * first, two carried the second, NONE carried both. So a board task could be
+   * paired and dispatched and then dead-end at the build, or be buildable and
+   * undispatchable — the chain had no template that could travel its whole
+   * length. This field is the half that was missing from the form; `where` was
+   * already here.
+   *
+   * ── THE GRAMMAR IS NOT DECORATIVE ───────────────────────────────────────
+   *
+   * `dispatch.js readPhases()` parses `N. [phase-id] Title` and NOTHING else,
+   * and `run-controller.js` walks the ids it returns. Prose under this heading
+   * parses to zero phases, which dispatch reports as `no_phases` — the same
+   * refusal as an absent section. That is why `buildSpec()` REFUSES a phases
+   * value in which not one line parses: a section that reads as done and parses
+   * as absent is this file's "convincing wrong spec", in miniature.
+   *
+   * ── OPTIONAL ON THE FORM, EFFECTIVELY REQUIRED OF THE ARCHITECT ─────────
+   *
+   * The owner fills this form himself at `/admin/spec`. Making a phase
+   * breakdown a required box for a person describing what they want would put
+   * an implementation plan in front of the request — the wizard this file's own
+   * header refuses to become. So the heading ALWAYS renders (an absent one is
+   * what breaks the reader), the box may be left empty, and the consequence is
+   * stated in the rendered text rather than left to be noticed.
+   *
+   * `architect-spec.js` holds the strict end: an Architect-written spec whose
+   * phases do not parse is REFUSED there, so every spec the office writes for
+   * itself is dispatchable by construction.
+   */
+  Object.freeze({
+    key: 'phases', heading: 'Phases', required: false,
+    hint: 'The build, broken into steps a builder can do one at a time. One per line, numbered, each starting with a short [phase-id] in square brackets — that exact shape is what the dispatcher reads, and prose here parses as no phases at all. Leave it blank if you would rather not break the work down; the office will.',
+    placeholder: '1. [scaffold] Create the directory and an empty module with its CLI entry point.\n2. [parse] Read the CSV and produce the row objects.\n3. [report] Render the markdown table and print it.\n4. [tests] A test per rule above, run offline.',
+  }),
   Object.freeze({
     key: 'done', heading: 'What "done" looks like', required: true,
     hint: 'One sentence, and it has to be testable. "Works well" is not testable.',
@@ -247,6 +292,30 @@ export const CONDITIONAL_QUESTIONS = Object.freeze({
  * the obvious next move and belongs to whoever has the evidence to justify
  * changing the seven fields.
  */
+/**
+ * THE PHASE LINE, and it is a COPY OF ANOTHER FILE'S REGEX ON PURPOSE.
+ *
+ * The authority is `back-office-AI-agents/campus/agents/10-the-architect/
+ * automation/dispatch.js` `readPhases()`, which is what actually decides
+ * whether a spec is dispatchable, and it lives in a DIFFERENT REPOSITORY —
+ * this module imports nothing, by the rule at the top of this file, and could
+ * not import it even if it wanted to. So the grammar is restated here
+ * character for character and `scripts/verify-spec-builder.js` asserts the two
+ * agree against the same fixture lines. A drift between them is a spec this
+ * form calls valid and the dispatcher calls empty, which is the exact failure
+ * the `phases` field was added to end.
+ */
+export const PHASE_LINE_RE = /^\s*\d+\.\s*\[(\w[\w-]*)\]\s*(.+?)\s*$/;
+
+/** Every line of a phases value that the dispatcher would actually see. */
+export function parsePhases(v) {
+  return String(v || '')
+    .split(/\r?\n/)
+    .map((line) => PHASE_LINE_RE.exec(line))
+    .filter(Boolean)
+    .map((m) => ({ id: m[1], title: m[2] }));
+}
+
 export function hasSpecimen(v) {
   const s = String(v ?? '');
   // 1. a backticked span with something in it
@@ -321,6 +390,24 @@ export function buildSpec(answers = {}) {
   for (const f of SPEC_FIELDS) {
     if (f.required && !tidy(answers[f.key])) {
       return { ok: false, reason: `"${f.heading}" is empty, and it is required. ${f.hint}` };
+    }
+    /*
+     * THE PHASE-GRAMMAR REFUSAL (2026-09-05, session 43, Item A).
+     *
+     * Fires only when something WAS written — an empty `phases` is allowed and
+     * renders as an explicit "not broken down yet". What is refused is a phases
+     * section in which not one line parses, because that is the case that costs
+     * something: `dispatch.js readPhases()` returns an empty list for it, the
+     * dispatcher refuses `no_phases`, and the refusal names a spec whose own
+     * text looks like it answered the question.
+     */
+    if (f.key === 'phases' && tidy(answers[f.key]) && !parsePhases(answers[f.key]).length) {
+      return {
+        ok: false,
+        reason: 'the "Phases" section has text in it but not one line the dispatcher can read. '
+          + 'Every phase must be its own numbered line beginning with a [phase-id] in square brackets, like '
+          + '"1. [scaffold] Create the directory and an empty module." — prose under this heading counts as no phases at all.',
+      };
     }
     /*
      * THE SPECIMEN REFUSAL. Fires after the emptiness check, so a blank field is
@@ -408,6 +495,23 @@ export function buildSpec(answers = {}) {
   for (const f of SPEC_FIELDS) {
     const value = tidy(answers[f.key]);
 
+    /*
+     * THE HEADING RENDERS WHETHER OR NOT ANYTHING WAS WRITTEN UNDER IT — the
+     * same rule `open_decisions` keeps below, and for a sharper reason: an
+     * ABSENT `## Phases` heading is what `dispatch.js readPhases()` and a human
+     * reader disagree about. With the heading always present, "nobody broke
+     * this down yet" is a fact on the page rather than a shape a reader has to
+     * notice is missing.
+     */
+    if (f.key === 'phases') {
+      lines.push(`## ${f.heading}`);
+      lines.push('');
+      lines.push(value || '_Not broken down yet. `dispatch.js` refuses this spec with `no_phases` until '
+        + 'somebody writes the steps here, one numbered `[phase-id]` line each._');
+      lines.push('');
+      continue;
+    }
+
     if (f.key === 'open_decisions') {
       /*
        * THE FIELD THAT MADE BOTH BUILDS AUTONOMOUS, and the instruction is
@@ -471,7 +575,10 @@ export function buildSpec(answers = {}) {
    */
   const channelBody = markdown.replace(/^#\s+.*\n+/, '');
 
-  return { ok: true, markdown, channelBody, title };
+  // `phases` comes back PARSED, not as text: every caller that cares wants the
+  // count `dispatch.js` would see, and re-parsing it at each call site is how
+  // two readers of one field start to disagree.
+  return { ok: true, markdown, channelBody, title, phases: parsePhases(answers.phases) };
 }
 
 /* ───────────────── Carrying a pending item into the form ────────────────── */

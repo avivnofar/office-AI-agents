@@ -30,7 +30,7 @@ import { dirname, join } from 'node:path';
 import {
   OPEN_DECISIONS_INSTRUCTION, TASK_TYPES, SPEC_FIELDS, CONDITIONAL_QUESTIONS,
   buildSpec, specFilename, renderSpecPage, prefillFromItem, PREFILL_LOCATION_LABELS,
-  hasSpecimen, SPECIMEN_TASK_TYPES,
+  hasSpecimen, SPECIMEN_TASK_TYPES, PHASE_LINE_RE, parsePhases,
 } from '../workers/spec-builder.js';
 import { PAGE_KINDS } from '../workers/owner-page.js';
 import { parseOwnerMessage } from '../workers/owner-channel.js';
@@ -57,15 +57,17 @@ const ANSWERS = {
   constraints: 'Standard library only. No keys. Must run on Windows.',
   done: 'Running it against samples/invoices.csv prints exactly the three bad rows and exits 0.',
   open_decisions: 'Whether a malformed row fails the run or is skipped with a warning.',
+  phases: '1. [scaffold] Create the module and its CLI entry point.\n2. [parse] Read the CSV into row objects.\n3. [report] Render the markdown table.',
   invoked: 'node check-invoices.js path/to/file.csv',
 };
 
-/* ═══════════════════ 1. THE SEVEN FIELDS ARE ALL THERE ═══════════════════ */
+/* ═══════════════════ 1. THE EIGHT FIELDS ARE ALL THERE ═══════════════════ */
 
-check('there are exactly seven fields', SPEC_FIELDS.length === 7, `got ${SPEC_FIELDS.length}`);
-check('six of the seven are required; open decisions is the one that is not',
+check('there are exactly eight fields', SPEC_FIELDS.length === 8, `got ${SPEC_FIELDS.length}`);
+check('six of the eight are required; open decisions and phases are the two that are not',
   SPEC_FIELDS.filter((f) => f.required).length === 6
-  && SPEC_FIELDS.find((f) => f.key === 'open_decisions')?.required === false);
+  && SPEC_FIELDS.find((f) => f.key === 'open_decisions')?.required === false
+  && SPEC_FIELDS.find((f) => f.key === 'phases')?.required === false);
 
 const built = buildSpec(ANSWERS);
 check('a complete form builds', built.ok, built.reason || '');
@@ -647,6 +649,55 @@ check('a prose `done` still builds — the rule did not leak to other fields [PA
   check('...and compares against no vocabulary',
     !/\.includes\s*\(|\.indexOf\s*\(|\bWORDS\b|\bPHRASES\b/.test(fn),
     'a word list would be a list in one language, and this rule has to hold in every language');
+}
+
+/* ══════════ P. THE PHASES FIELD — the half the template was missing ═══════
+ *
+ * The point of this section is not that a field exists. It is that a spec this
+ * form calls valid is a spec `dispatch.js readPhases()` calls DISPATCHABLE, and
+ * those are two programs in two repositories reading one heading. The grammar
+ * below is `readPhases()`'s own regex, restated — if these fixtures ever stop
+ * agreeing, one of the two files moved and a spec is about to pass here and be
+ * refused there.
+ */
+{
+  const DISPATCH_PHASE_RE = /^\s*\d+\.\s*\[(\w[\w-]*)\]\s*(.+?)\s*$/;
+  const FIXTURES = [
+    ['1. [scaffold] Create the module.', true],
+    ['12. [tests-offline] Add the offline test.', true],
+    ['  3. [x] indented still counts', true],
+    ['- [scaffold] a bullet, not a number', false],
+    ['1. scaffold — no brackets', false],
+    ['1. [] an empty id', false],
+    ['First, scaffold the module.', false],
+  ];
+  for (const [line, want] of FIXTURES) {
+    check(`the two readers agree on ${JSON.stringify(line)}`,
+      DISPATCH_PHASE_RE.test(line) === want && PHASE_LINE_RE.test(line) === want,
+      `dispatch.js=${DISPATCH_PHASE_RE.test(line)} spec-builder=${PHASE_LINE_RE.test(line)} want=${want}`);
+  }
+
+  check('parsePhases returns id and title, in order',
+    JSON.stringify(parsePhases('1. [a] Do a\n2. [b] Do b'))
+      === JSON.stringify([{ id: 'a', title: 'Do a' }, { id: 'b', title: 'Do b' }]));
+
+  const withPhases = buildSpec(ANSWERS);
+  check('a built spec carries BOTH headings the two downstream readers need',
+    /^## Phases$/m.test(withPhases.markdown) && /^## Where it lives$/m.test(withPhases.markdown),
+    'this is the whole reason the eighth field exists');
+  check('the built spec hands back its phases already parsed', withPhases.phases?.length === 3);
+
+  const blank = buildSpec({ ...ANSWERS, phases: '' });
+  check('an EMPTY phases section still renders its heading',
+    blank.ok && /^## Phases$/m.test(blank.markdown),
+    'an absent heading is what the dispatcher and a human reader disagree about');
+  check('...and says out loud what it will cost', /no_phases/.test(blank.markdown));
+  check('...and reports zero phases rather than none', Array.isArray(blank.phases) && blank.phases.length === 0);
+
+  const prose = buildSpec({ ...ANSWERS, phases: 'We will do this in about three stages, roughly.' });
+  check('a phases section the dispatcher cannot read is REFUSED', prose.ok === false, prose.reason || 'it built');
+  check('...and the refusal shows the shape instead of naming a regex',
+    /\[scaffold\]/.test(prose.reason || ''), prose.reason || '');
 }
 
 /* ═══════════════════════════════ Result ════════════════════════════════ */
