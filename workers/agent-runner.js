@@ -3400,6 +3400,39 @@ async function processScheduledApprovalBlock(env, opts = {}) {
   return out;
 }
 
+/**
+ * ── A SUPERVISED ROUND MOVES THE CHAIN TOO (2026-09-05, session 43) ────────
+ *
+ * The two supervised triggers (`repair_block`, `architect_approval_block`) ran
+ * the real work and then wrote NOTHING to `build_chain`: the state transition
+ * lived only in the two scheduled drivers above. So a supervised repair that
+ * genuinely fixed the artifact left the row saying AWAITING-REPAIR, and the
+ * next scheduled tick drew it again and repaired the same finding into a file
+ * that no longer had it.
+ *
+ * That is not a testing convenience — it is the loop failing to converge, from
+ * the other end, and it is why the last two sessions each had to hand-hold this
+ * task. The mapper is the SAME one the scheduled driver uses
+ * (`nextStateAfterRepair` / `nextStateAfterApproval`), deliberately: two paths
+ * deciding a state two ways is how they start to disagree.
+ *
+ * A round that returns not-ok still moves nothing, exactly as before — the
+ * scheduled driver's own comment says why, and it applies verbatim here.
+ */
+async function recordSupervisedChainMove(env, { slug, next, bumpRounds }) {
+  if (!slug || !next?.state) return { moved: false, why: next?.reason || 'no state transition' };
+  let prior = null;
+  try {
+    const rows = await readBuildChain(env);
+    prior = (rows || []).find((r) => r.slug === slug) || null;
+  } catch { /* an unreadable queue costs the rounds count, never the transition */ }
+  await setBuildChainState(env, {
+    slug, state: next.state, finding: next.finding,
+    detail: next.reason, rounds: bumpRounds ? ((prior?.rounds || 0) + 1) : (prior?.rounds || 0),
+  });
+  return { moved: true, to: next.state, why: next.reason };
+}
+
 /* ════════════════ SESSION 33, ITEM D — THE BRAIN AUDIT ════════════════════ */
 
 const HARVEST_PATH = 'campus/brain-export/audit/HARVEST.md';
@@ -10183,6 +10216,15 @@ export default {
               taskId: body.taskId, slug: body.slug, agentId: body.agentId, findingText: body.findingText,
               bypassGate: body.bypassGate !== false,
             });
+            // SESSION 43 — see recordSupervisedChainMove()'s header. A
+            // supervised repair that actually fixed the artifact used to leave
+            // the row saying AWAITING-REPAIR, so the next scheduled tick
+            // repaired the same finding again.
+            if (result?.ok) {
+              result.chain = await recordSupervisedChainMove(env, {
+                slug: body.slug, next: nextStateAfterRepair(result), bumpRounds: true,
+              });
+            }
             break;
           case 'architect_approval_block':
             // Session 31, Item E, addendum — SUPERVISED ONLY, not on the
@@ -10194,6 +10236,13 @@ export default {
               taskId: body.taskId, slug: body.slug, reviewSummary: body.reviewSummary,
               bypassGate: body.bypassGate !== false,
             });
+            // SESSION 43 — the same gap the repair trigger had: a verdict was
+            // rendered and never persisted, so the chain could not act on it.
+            if (result?.ok) {
+              result.chain = await recordSupervisedChainMove(env, {
+                slug: body.slug, next: nextStateAfterApproval(result), bumpRounds: false,
+              });
+            }
             break;
           case 'qa_instruments_block':
             // Runs the Friday qa_instruments block directly, gate bypassed —
