@@ -2611,20 +2611,65 @@ async function processBuildNotesBlock(env, opts = {}) {
  *  - otherwise: draws from the live board via buildArtifactAssignments(),
  *    the actual mechanism a scheduled tick would use once wired.
  */
+/**
+ * ── THE TARGET CAP, AND WHY IT IS A NUMBER RATHER THAN A HOPE (2026-09-05) ──
+ *
+ * `readSpecTargetPath()` returned ONE path until today and now returns every
+ * path the spec names. That is the fix; this is its cost, measured rather than
+ * assumed, because a fix that turns one write into eleven is how a block starts
+ * dying `oversize` daily.
+ *
+ * MEASURED, against `subrequest-budget.js`'s `SUBREQUEST_CEILING = 50` external
+ * fetches per invocation (a platform fact, probed live 2026-08-16 — D1 and KV
+ * are free, only `fetch()` counts):
+ *
+ *   fixed, per repair round     ~6   spec read, repair-log read, branch check,
+ *                                    and the log commit (a GET + a PUT)
+ *   per target file             ~5   read current content (1, +1 if it must
+ *                                    fall back to main) + one provider call (1)
+ *                                    + commit (GET sha + PUT = 2)
+ *
+ * So 3 targets ~= 21 fetches and fits comfortably; `tasks/contract-analyst/`
+ * names ELEVEN files, which is ~61 and does not. Four is the cap: 6 + 20 = 26,
+ * leaving room for the retry, the fallback read and the tail the budget file
+ * reserves, and it covers every spec in the warehouse today except that one.
+ *
+ * THE REMAINDER IS REPORTED, NEVER DROPPED. That is the whole difference
+ * between this cap and the defect it is standing next to: `re.exec()` also
+ * "capped" the list, at one, and said nothing. Deferred paths come back in
+ * `deferredTargets` with the reason, and the next round picks them up because
+ * a build skips targets it has already committed.
+ */
+const MAX_SPEC_TARGETS_PER_BLOCK = 4;
+
+/**
+ * The ONE place a spec's target files are resolved, shared by the build, the
+ * repair and the approval blocks below.
+ *
+ * It exists because those three used to ask the same question in three places
+ * and one change had to be made three times — and because `targetPath` (the
+ * first path) and `targetPaths` (all of them) are exactly the pair of names a
+ * caller can pick the wrong one of by accident. Here there is one answer.
+ */
+async function resolveSpecTargets(env, slug) {
+  const specFile = await fetchWarehouseFile(env, `tasks/${slug}/SPEC.md`);
+  if (specFile.reason) return { ok: false, reason: `could not read tasks/${slug}/SPEC.md: ${specFile.reason}` };
+  const target = readSpecTargetPath(specFile.text, slug);
+  if (!target.ok) return { ok: false, reason: target.reason };
+  return { ok: true, targetPaths: target.targetPaths, specText: specFile.text };
+}
+
 async function processBuildArtifactBlock(env, opts = {}) {
   if (!opts.bypassGate && !(await officeContextEnabled(env))) {
     return { ok: false, skipped: true, reason: 'office_context_disabled' };
   }
 
-  const out = { desk: 'build_artifact', mode: 'board', queued: 0, produced: 0, filed: [], deferred: [], skipped: [], errors: [] };
-
-  const resolveTarget = async (slug) => {
-    const specFile = await fetchWarehouseFile(env, `tasks/${slug}/SPEC.md`);
-    if (specFile.reason) return { ok: false, reason: `could not read tasks/${slug}/SPEC.md: ${specFile.reason}` };
-    const target = readSpecTargetPath(specFile.text, slug);
-    if (!target.ok) return { ok: false, reason: target.reason };
-    return { ok: true, targetPath: target.targetPath, specText: specFile.text };
+  const out = {
+    desk: 'build_artifact', mode: 'board', queued: 0, produced: 0,
+    filed: [], deferred: [], deferredTargets: [], skipped: [], errors: [],
   };
+
+  const resolveTarget = (slug) => resolveSpecTargets(env, slug);
 
   // Same idempotency source build_note uses (this Worker's OWN write
   // history) and the same fail-closed posture on a read it cannot verify —
@@ -2638,6 +2683,29 @@ async function processBuildArtifactBlock(env, opts = {}) {
     return !!row;
   };
 
+  /*
+   * WHICH OF A SPEC'S FILES ARE STILL OWED (2026-09-05).
+   *
+   * The idempotency question used to be asked once, about the first path, and
+   * its answer stood for the whole task: "audit.py is committed, so
+   * dependency-audit is built" — while `sample-advisories.json` and
+   * `test_audit.py` had never been written. Asked per path, the same check
+   * becomes a RESUME: a build that got through two of three files leaves the
+   * third owed, and the next round takes it.
+   *
+   * A `null` from `alreadyCommitted()` still means CANNOT TELL and still stops
+   * the task, per path — an unreadable record must never read as "not built".
+   */
+  const pendingTargets = async (paths) => {
+    const pending = [];
+    for (const p of paths) {
+      const exists = await alreadyCommitted(p);
+      if (exists === null) return { ok: false, reason: `${p}: repo_writes could not be read — idempotency could not be checked` };
+      if (!exists) pending.push(p);
+    }
+    return { ok: true, pending };
+  };
+
   let candidates;
   if (opts.taskId && opts.slug && opts.agentId) {
     out.mode = 'explicit';
@@ -2646,19 +2714,27 @@ async function processBuildArtifactBlock(env, opts = {}) {
       out.errors.push(`${opts.taskId}: ${resolved.reason}`);
       return out;
     }
-    const exists = await alreadyCommitted(resolved.targetPath);
-    if (exists === null) {
-      out.errors.push(`${resolved.targetPath}: repo_writes could not be read — idempotency could not be checked, nothing drawn`);
+    const owed = await pendingTargets(resolved.targetPaths);
+    if (!owed.ok) {
+      out.errors.push(`${owed.reason}, nothing drawn`);
       return out;
     }
-    if (exists) {
-      out.skipped.push({ taskId: opts.taskId, slug: opts.slug, why: `${resolved.targetPath} is already committed` });
+    if (!owed.pending.length) {
+      out.skipped.push({
+        taskId: opts.taskId, slug: opts.slug,
+        why: `all ${resolved.targetPaths.length} file(s) this spec names are already committed`,
+      });
       out.summary = 'already committed — nothing drawn.';
       return out;
     }
+    const take = owed.pending.slice(0, MAX_SPEC_TARGETS_PER_BLOCK);
+    for (const p of owed.pending.slice(MAX_SPEC_TARGETS_PER_BLOCK)) {
+      out.deferredTargets.push({ taskId: opts.taskId, path: p, why: `over the ${MAX_SPEC_TARGETS_PER_BLOCK}-file invocation cap — owed, not dropped; the next round takes it` });
+    }
     candidates = [{
       taskId: opts.taskId, title: opts.title || opts.taskId, agentId: Number(opts.agentId),
-      slug: opts.slug, targetPath: resolved.targetPath, specText: resolved.specText,
+      slug: opts.slug, targetPaths: take, allTargetPaths: resolved.targetPaths,
+      stillOwed: owed.pending.length - take.length, specText: resolved.specText,
     }];
     out.queued = 1;
   } else {
@@ -2684,12 +2760,15 @@ async function processBuildArtifactBlock(env, opts = {}) {
 
     const noTarget = {};
     const alreadyBuilt = {};
+    const owedBySlug = {};
     for (const t of building) {
       const r = resolvedBySlug[t.warehouse];
       if (!r.ok) { noTarget[t.id] = r.reason; continue; }
-      const exists = await alreadyCommitted(r.targetPath);
-      if (exists === null) { noTarget[t.id] = `${r.targetPath}: repo_writes could not be read — idempotency could not be checked`; continue; }
-      if (exists) alreadyBuilt[t.id] = true;
+      // Per PATH, not per task — see pendingTargets()'s own note. A task counts
+      // as built only when every file its spec names has been committed.
+      const owed = owedBySlug[t.warehouse] || (owedBySlug[t.warehouse] = await pendingTargets(r.targetPaths));
+      if (!owed.ok) { noTarget[t.id] = owed.reason; continue; }
+      if (!owed.pending.length) alreadyBuilt[t.id] = true;
     }
 
     const assigned = buildArtifactAssignments(boardTasks, { noTarget, alreadyBuilt });
@@ -2698,7 +2777,12 @@ async function processBuildArtifactBlock(env, opts = {}) {
     out.skipped = assigned.skipped;
     candidates = assigned.draw.map((item) => {
       const r = resolvedBySlug[item.slug];
-      return { ...item, targetPath: r.targetPath, specText: r.specText };
+      const pending = owedBySlug[item.slug]?.pending || r.targetPaths;
+      const take = pending.slice(0, MAX_SPEC_TARGETS_PER_BLOCK);
+      for (const p of pending.slice(MAX_SPEC_TARGETS_PER_BLOCK)) {
+        out.deferredTargets.push({ taskId: item.taskId, path: p, why: `over the ${MAX_SPEC_TARGETS_PER_BLOCK}-file invocation cap — owed, not dropped; the next round takes it` });
+      }
+      return { ...item, targetPaths: take, allTargetPaths: r.targetPaths, stillOwed: pending.length - take.length, specText: r.specText };
     });
   }
 
@@ -2709,67 +2793,99 @@ async function processBuildArtifactBlock(env, opts = {}) {
 
   for (const item of candidates) {
     const config = getAgentConfig(item.agentId);
-    const routed = await routeTaskTypeCall(env, 'build_artifact', {
-      systemPrompt: `You are ${config?.name || `Agent ${item.agentId}`}, ${config?.role || 'an agent'} in an AI office. `
-        + `${config?.personality?.core || ''} You are producing a real deliverable file, not a status note about one.`,
-      prompt: [
-        `You are building board task ${item.taskId} — "${item.title}" — warehouse \`tasks/${item.slug}/\`.`,
-        '',
-        'This task\'s own spec, in full:',
-        '---',
-        item.specText,
-        '---',
-        '',
-        `Produce the COMPLETE, FINAL content of the file at \`${item.targetPath}\` — exactly what the spec's "Where it lives" and "Input and output" sections describe.`,
-        'Output ONLY the raw file content. No markdown code fence, no commentary before or after it, no explanation.',
-      ].join('\n'),
-      maxTokens: laneMaxTokens,
-      agentId: `build-artifact:${item.taskId}:${item.agentId}`,
-    });
+    /*
+     * ONE MODEL CALL PER FILE, not one per task (2026-09-05).
+     *
+     * A spec names every file it owes; before today only the first was ever
+     * produced. Asking one call for several files at once would need an
+     * envelope format the provider has to get right and this code has to
+     * split, and a mistake there is a file written into another file's path.
+     * One call, one path, one commit — the same shape the repair loop uses.
+     *
+     * The other files are NAMED in each prompt, so a builder producing
+     * `test_audit.py` knows `audit.py` is the thing it is testing.
+     */
+    const producedHere = [];
+    for (const targetPath of item.targetPaths) {
+      const routed = await routeTaskTypeCall(env, 'build_artifact', {
+        systemPrompt: `You are ${config?.name || `Agent ${item.agentId}`}, ${config?.role || 'an agent'} in an AI office. `
+          + `${config?.personality?.core || ''} You are producing a real deliverable file, not a status note about one.`,
+        prompt: [
+          `You are building board task ${item.taskId} — "${item.title}" — warehouse \`tasks/${item.slug}/\`.`,
+          '',
+          'This task\'s own spec, in full:',
+          '---',
+          item.specText,
+          '---',
+          '',
+          `This spec names ${item.allTargetPaths.length} file(s) in total: ${item.allTargetPaths.map((p) => `\`${p}\``).join(', ')}. They are built one at a time and the others are being handled separately — do not put more than one file's content in this reply.`,
+          '',
+          `Produce the COMPLETE, FINAL content of the file at \`${targetPath}\` — exactly what the spec's "Where it lives" and "Input and output" sections describe.`,
+          'Output ONLY the raw file content. No markdown code fence, no commentary before or after it, no explanation.',
+        ].join('\n'),
+        maxTokens: laneMaxTokens,
+        agentId: `build-artifact:${item.taskId}:${item.agentId}`,
+      });
 
-    const text = routed.ok ? routed.result?.text : null;
-    if (!routed.ok || !text || !String(text).trim()) {
-      out.errors.push(`${item.taskId}: ${routed.reason || 'empty artifact from provider'} (provider: ${routed.provider || 'none'})`);
-      continue;
+      const text = routed.ok ? routed.result?.text : null;
+      if (!routed.ok || !text || !String(text).trim()) {
+        out.errors.push(`${item.taskId} ${targetPath}: ${routed.reason || 'empty artifact from provider'} (provider: ${routed.provider || 'none'})`);
+        continue;
+      }
+
+      let content = String(text).trim();
+      // A model told "no fence" sometimes adds one anyway — stripped rather
+      // than refused, since the content itself is what was asked for.
+      content = content.replace(/^```[\w-]*\n/, '').replace(/\n```\s*$/, '');
+
+      let commit;
+      try {
+        commit = await commitFileToRepo(
+          env, WAREHOUSE_REPO_NAME, targetPath, content,
+          `office: Agent ${item.agentId} build artifact for ${item.taskId} [skip ci]`,
+          // Session 36, Item C — see repo-write.js's `mechanism` note.
+          { mechanism: `build_artifact:agent${item.agentId}:${routed.provider || 'unrecorded'}`, author: agentAuthor(item.agentId) }
+        );
+      } catch (err) {
+        out.errors.push(`${targetPath}: commit threw — ${err?.message}`);
+        continue;
+      }
+      if (!commit.committed) {
+        out.errors.push(`${targetPath}: not committed (${commit.reason || 'no reason given'})`);
+        continue;
+      }
+
+      out.produced += 1;
+      producedHere.push(targetPath);
+      out.filed.push({
+        taskId: item.taskId, path: targetPath, provider: routed.provider,
+        outputTokens: routed.result?.usage?.outputTokens ?? null, outputChars: content.length,
+      });
     }
 
-    let content = String(text).trim();
-    // A model told "no fence" sometimes adds one anyway — stripped rather
-    // than refused, since the content itself is what was asked for.
-    content = content.replace(/^```[\w-]*\n/, '').replace(/\n```\s*$/, '');
-
-    let commit;
-    try {
-      commit = await commitFileToRepo(
-        env, WAREHOUSE_REPO_NAME, item.targetPath, content,
-        `office: Agent ${item.agentId} build artifact for ${item.taskId} [skip ci]`,
-        // Session 36, Item C — see repo-write.js's `mechanism` note.
-        { mechanism: `build_artifact:agent${item.agentId}:${routed.provider || 'unrecorded'}`, author: agentAuthor(item.agentId) }
-      );
-    } catch (err) {
-      out.errors.push(`${item.targetPath}: commit threw — ${err?.message}`);
-      continue;
+    // SESSION 33, ITEM B — the artifact ENTERS THE CHAIN rather than stopping
+    // here. Until then a built artifact sat on main with nobody scheduled to
+    // look at it.
+    //
+    // 2026-09-05: the transition now waits for the WHOLE deliverable. A task
+    // whose spec names three files and has produced one is not awaiting
+    // approval — sending it there is what produced an Architect verdict of
+    // "test_audit.py is missing" against a repair loop that had no way to
+    // create it. A partial build is reported as partial and the next round
+    // continues it, because a build skips paths it has already committed.
+    const owedAfter = item.stillOwed + (item.targetPaths.length - producedHere.length);
+    if (producedHere.length && owedAfter === 0) {
+      await setBuildChainState(env, {
+        slug: item.slug, taskId: item.taskId, agentId: item.agentId,
+        state: AWAITING_APPROVAL, finding: null, rounds: 0,
+        detail: `built ${producedHere.length} file(s) — ${producedHere.join(', ')} — via the build_artifact lane`,
+      });
+    } else if (producedHere.length) {
+      out.deferred.push({
+        taskId: item.taskId, slug: item.slug,
+        why: `${producedHere.length} of ${item.allTargetPaths.length} file(s) built this round; ${owedAfter} still owed, so this task is NOT sent for approval yet`,
+      });
     }
-    if (!commit.committed) {
-      out.errors.push(`${item.targetPath}: not committed (${commit.reason || 'no reason given'})`);
-      continue;
-    }
-
-    out.produced += 1;
-    // SESSION 33, ITEM B — the artifact now ENTERS THE CHAIN rather than
-    // stopping here. Until today a built artifact sat on main with nobody
-    // scheduled to look at it: Session 31 approved and repaired its one
-    // artifact by hand, from a supervised session, with the slug typed in.
-    // This row is what a tick can find tomorrow without being told anything.
-    await setBuildChainState(env, {
-      slug: item.slug, taskId: item.taskId, agentId: item.agentId,
-      state: AWAITING_APPROVAL, finding: null, rounds: 0,
-      detail: `built ${item.targetPath} via ${routed.provider || 'an unrecorded provider'}`,
-    });
-    out.filed.push({
-      taskId: item.taskId, path: item.targetPath, provider: routed.provider,
-      outputTokens: routed.result?.usage?.outputTokens ?? null, outputChars: content.length,
-    });
   }
 
   out.summary = out.produced > 0
@@ -2855,10 +2971,11 @@ async function processRepairBlock(env, opts = {}) {
 
   const branchName = `repair/${slug}`;
 
-  const specFile = await fetchWarehouseFile(env, `tasks/${slug}/SPEC.md`);
-  if (specFile.reason) return { ok: false, reason: `could not read tasks/${slug}/SPEC.md: ${specFile.reason}` };
-  const target = readSpecTargetPath(specFile.text, slug);
-  if (!target.ok) return { ok: false, reason: target.reason };
+  const resolved = await resolveSpecTargets(env, slug);
+  if (!resolved.ok) return { ok: false, reason: resolved.reason };
+  const specFile = { text: resolved.specText };
+  const targetPaths = resolved.targetPaths.slice(0, MAX_SPEC_TARGETS_PER_BLOCK);
+  const overCap = resolved.targetPaths.slice(MAX_SPEC_TARGETS_PER_BLOCK);
 
   const logPath = `tasks/${slug}/notes/repair-log.json`;
   let logFile = await fetchWarehouseFile(env, logPath, { ref: branchName });
@@ -2880,59 +2997,122 @@ async function processRepairBlock(env, opts = {}) {
   const branch = await ensureBranch(env, WAREHOUSE_REPO_NAME, branchName);
   if (!branch.ok) return { ok: false, reason: `could not create/reach branch ${branchName}: ${branch.reason}` };
 
-  let currentFile = await fetchWarehouseFile(env, target.targetPath, { ref: branchName });
-  if (currentFile.reason) currentFile = await fetchWarehouseFile(env, target.targetPath);
-  if (currentFile.reason) return { ok: false, reason: `could not read current content of ${target.targetPath} from branch or main: ${currentFile.reason}` };
-
   const config = getAgentConfig(agentId);
   const laneMaxTokens = MODEL_ROUTING?.lanes?.build_artifact?.max_tokens || 6000;
-  const routed = await routeTaskTypeCall(env, 'build_artifact', {
-    systemPrompt: `You are ${config?.name || `Agent ${agentId}`}, ${config?.role || 'an agent'} in an AI office. `
-      + `${config?.personality?.core || ''} You are repairing a real deliverable file to address ONE specific review finding.`,
-    prompt: [
-      `Task ${taskId || slug} — warehouse \`tasks/${slug}/\`. Repair round ${decision.strikeCount}.`,
-      '',
-      'The spec, in full:',
-      '---', specFile.text, '---',
-      '',
-      `The CURRENT content of \`${target.targetPath}\`:`,
-      '---', currentFile.text, '---',
-      '',
-      'The blocking review finding you must fix, and ONLY this — do not rewrite unrelated parts of the file:',
-      '---', findingText, '---',
-      '',
-      `Produce the COMPLETE repaired content of \`${target.targetPath}\`. Output ONLY the raw file content — no fence, no commentary.`,
-    ].join('\n'),
-    maxTokens: laneMaxTokens,
-    agentId: `repair:${slug}:${agentId}:${decision.strikeCount}`,
-  });
 
-  const text = routed.ok ? routed.result?.text : null;
-  if (!routed.ok || !text || !String(text).trim()) {
-    return { ok: false, reason: `${routed.reason || 'empty repair from provider'} (provider: ${routed.provider || 'none'})` };
+  /*
+   * ── EVERY FILE THE SPEC NAMES, NOT THE FIRST (2026-09-05, session 43) ────
+   *
+   * This loop is the whole of the fix. `readSpecTargetPath()` used to return
+   * ONE path — `tasks/dependency-audit/audit.py` — and silently discard the two
+   * beside it. So the Architect kept reporting `test_audit.py` and
+   * `sample-advisories.json` missing, correctly, and this function kept
+   * rewriting `audit.py`, because that was the only path it had. Seven rounds,
+   * the same finding, no possible convergence: a correct review made unfixable
+   * by a reader that dropped data without saying so.
+   *
+   * TWO THINGS KEEP IT HONEST AND CHEAP:
+   *
+   *  1. A FILE THAT DOES NOT EXIST YET IS A REPAIR TARGET, not an error. That
+   *     is the case that mattered — the missing test file could never be
+   *     created because the old code returned early when it could not read the
+   *     current content. Now "it is not there" is stated in the prompt and the
+   *     model creates it.
+   *  2. THE MODEL MAY DECLINE A FILE. A finding usually touches one or two of
+   *     them, and rewriting the rest for no reason is how a repair damages
+   *     work nobody complained about. A reply of exactly NO CHANGE costs one
+   *     provider call and no commit.
+   */
+  const repaired = [];
+  const untouched = [];
+  const failures = [];
+  let lastProvider = null;
+
+  for (const targetPath of targetPaths) {
+    let currentFile = await fetchWarehouseFile(env, targetPath, { ref: branchName });
+    if (currentFile.reason) currentFile = await fetchWarehouseFile(env, targetPath);
+    const exists = !currentFile.reason;
+
+    const routed = await routeTaskTypeCall(env, 'build_artifact', {
+      systemPrompt: `You are ${config?.name || `Agent ${agentId}`}, ${config?.role || 'an agent'} in an AI office. `
+        + `${config?.personality?.core || ''} You are repairing a real deliverable file to address ONE specific review finding.`,
+      prompt: [
+        `Task ${taskId || slug} — warehouse \`tasks/${slug}/\`. Repair round ${decision.strikeCount}.`,
+        '',
+        'The spec, in full:',
+        '---', specFile.text, '---',
+        '',
+        `This spec names ${resolved.targetPaths.length} file(s): ${resolved.targetPaths.map((p) => `\`${p}\``).join(', ')}. You are being asked about ONE of them at a time; the others are handled in their own calls.`,
+        '',
+        exists
+          ? `The CURRENT content of \`${targetPath}\`:\n---\n${currentFile.text}\n---`
+          : `\`${targetPath}\` DOES NOT EXIST YET. The spec names it and it has never been written. If the finding below is about this file being absent, create it in full.`,
+        '',
+        'The blocking review finding you must fix, and ONLY this — do not rewrite unrelated parts of the file:',
+        '---', findingText, '---',
+        '',
+        `If \`${targetPath}\` needs NO change at all to address this finding, reply with exactly the two words: NO CHANGE`,
+        `Otherwise produce the COMPLETE repaired content of \`${targetPath}\`. Output ONLY the raw file content — no fence, no commentary.`,
+      ].join('\n'),
+      maxTokens: laneMaxTokens,
+      agentId: `repair:${slug}:${agentId}:${decision.strikeCount}`,
+    });
+    lastProvider = routed.provider || lastProvider;
+
+    const text = routed.ok ? routed.result?.text : null;
+    if (!routed.ok || !text || !String(text).trim()) {
+      failures.push(`${targetPath}: ${routed.reason || 'empty repair from provider'} (provider: ${routed.provider || 'none'})`);
+      continue;
+    }
+    const content = String(text).trim().replace(/^```[\w-]*\n/, '').replace(/\n```\s*$/, '');
+    if (/^NO\s+CHANGE\.?$/i.test(content)) {
+      untouched.push({ path: targetPath, why: 'the builder judged this file needs no change for this finding' });
+      continue;
+    }
+
+    const commit = await commitFileToRepo(
+      env, WAREHOUSE_REPO_NAME, targetPath, content,
+      `office: repair round ${decision.strikeCount} for ${taskId || slug} (finding ${decision.fingerprint}) [skip ci]`,
+      { branch: branchName, mechanism: `repair:agent${agentId}:${routed.provider || 'unrecorded'}`, author: agentAuthor(agentId) }
+    );
+    if (!commit.committed) {
+      failures.push(`${targetPath}: repair commit failed — ${commit.reason || 'no reason given'}`);
+      continue;
+    }
+    repaired.push({ path: targetPath, created: !exists, chars: content.length, provider: routed.provider });
   }
-  const content = String(text).trim().replace(/^```[\w-]*\n/, '').replace(/\n```\s*$/, '');
 
-  // Session 36, Item C — see repo-write.js's `mechanism` note.
-  const repairMechanism = `repair:agent${agentId}:${routed.provider || 'unrecorded'}`;
-  const commit = await commitFileToRepo(
-    env, WAREHOUSE_REPO_NAME, target.targetPath, content,
-    `office: repair round ${decision.strikeCount} for ${taskId || slug} (finding ${decision.fingerprint}) [skip ci]`,
-    { branch: branchName, mechanism: repairMechanism, author: agentAuthor(agentId) }
-  );
-  if (!commit.committed) return { ok: false, reason: `repair commit failed: ${commit.reason || 'no reason given'}` };
+  /*
+   * A ROUND THAT COMMITTED NOTHING IS NOT A ROUND. It must not be written into
+   * the repair log, because the log is what the three-strike count is made of
+   * — recording a strike for a round that changed no file would spend the
+   * ceiling on transport failures and call the result non-convergence.
+   */
+  if (!repaired.length) {
+    return {
+      ok: false,
+      reason: failures.length
+        ? `no file was repaired: ${failures.join('; ')}`
+        : `the builder replied NO CHANGE for all ${targetPaths.length} file(s) this spec names — the finding names nothing this deliverable can fix`,
+      slug, branch: branchName, targetPaths, untouched, failures,
+    };
+  }
 
-  repairLog.push({ fingerprint: decision.fingerprint, at: new Date().toISOString(), taskId: taskId || null, agentId });
+  repairLog.push({ fingerprint: decision.fingerprint, at: new Date().toISOString(), taskId: taskId || null, agentId, paths: repaired.map((r) => r.path) });
   const logCommit = await commitFileToRepo(
     env, WAREHOUSE_REPO_NAME, logPath, `${JSON.stringify(repairLog, null, 2)}\n`,
     `office: repair log for ${taskId || slug}, round ${decision.strikeCount} [skip ci]`,
-    { branch: branchName, mechanism: repairMechanism, author: agentAuthor(agentId) }
+    { branch: branchName, mechanism: `repair:agent${agentId}:${lastProvider || 'unrecorded'}`, author: agentAuthor(agentId) }
   );
 
   return {
-    ok: true, action: 'repaired', slug, branch: branchName, targetPath: target.targetPath,
-    provider: routed.provider, strikeCount: decision.strikeCount, fingerprint: decision.fingerprint,
-    committed: commit.committed, logCommitted: logCommit.committed,
+    ok: true, action: 'repaired', slug, branch: branchName,
+    targetPath: repaired[0].path, targetPaths: repaired.map((r) => r.path),
+    created: repaired.filter((r) => r.created).map((r) => r.path),
+    untouched, failures,
+    overCap: overCap.length ? { paths: overCap, why: `over the ${MAX_SPEC_TARGETS_PER_BLOCK}-file invocation cap — not repaired this round, and reported rather than dropped` } : null,
+    provider: lastProvider, strikeCount: decision.strikeCount, fingerprint: decision.fingerprint,
+    committed: true, logCommitted: logCommit.committed,
   };
 }
 
@@ -2958,20 +3138,41 @@ async function processArchitectApprovalBlock(env, opts = {}) {
 
   const branchName = `repair/${slug}`;
 
-  const specFile = await fetchWarehouseFile(env, `tasks/${slug}/SPEC.md`);
-  if (specFile.reason) return { ok: false, reason: `could not read tasks/${slug}/SPEC.md: ${specFile.reason}` };
-  const target = readSpecTargetPath(specFile.text, slug);
-  if (!target.ok) return { ok: false, reason: target.reason };
+  const resolved = await resolveSpecTargets(env, slug);
+  if (!resolved.ok) return { ok: false, reason: resolved.reason };
+  const specFile = { text: resolved.specText };
+  const targetPaths = resolved.targetPaths.slice(0, MAX_SPEC_TARGETS_PER_BLOCK);
 
-  // Prefer the repair branch's version if one exists (a repaired artifact
-  // awaiting approval); fall back to main's (nothing has ever blocked it).
-  let artifactFile = await fetchWarehouseFile(env, target.targetPath, { ref: branchName });
-  let onBranch = !artifactFile.reason;
-  if (artifactFile.reason) {
-    artifactFile = await fetchWarehouseFile(env, target.targetPath);
-    onBranch = false;
+  /*
+   * ── THE ARCHITECT NOW SEES THE WHOLE DELIVERABLE (2026-09-05, session 43) ─
+   *
+   * This is the THIRD reader of `readSpecTargetPath()` and the brief for the
+   * fix named only the other two. Leaving it on the first path would have kept
+   * the loop broken from the other end: the Architect would still be judging
+   * `audit.py` alone, still reporting `test_audit.py` missing — and now the
+   * repair would create it and the very next approval would not be able to see
+   * that it had. A one-sided fix here is worse than none, because it makes the
+   * same verdict recur against work that has actually been done.
+   *
+   * A FILE THAT IS STILL MISSING IS SHOWN AS MISSING, not omitted. That is the
+   * evidence the verdict turns on: "the spec names three files and one of them
+   * does not exist" is exactly what an approver should be told, and it is what
+   * this function silently withheld for seven rounds.
+   */
+  const parts = [];
+  const missing = [];
+  let onBranch = false;
+  for (const p of targetPaths) {
+    let f = await fetchWarehouseFile(env, p, { ref: branchName });
+    if (!f.reason) onBranch = true;
+    else f = await fetchWarehouseFile(env, p);
+    if (f.reason) { missing.push(p); parts.push(`===== ${p} =====\n[THIS FILE DOES NOT EXIST on branch ${branchName} or on main. The spec names it and it has not been written.]`); continue; }
+    parts.push(`===== ${p} =====\n${f.text}`);
   }
-  if (artifactFile.reason) return { ok: false, reason: `could not read ${target.targetPath} from branch or main: ${artifactFile.reason}` };
+  if (missing.length === targetPaths.length) {
+    return { ok: false, reason: `not one of the ${targetPaths.length} file(s) this spec names could be read from branch ${branchName} or main: ${missing.join(', ')}` };
+  }
+  const artifactFile = { text: parts.join('\n\n') };
 
   const approval = await runArchitectApprovalCall(env, {
     taskId, slug, specText: specFile.text, artifactContent: artifactFile.text, reviewSummary,
@@ -2979,27 +3180,35 @@ async function processArchitectApprovalBlock(env, opts = {}) {
   if (!approval.ok) return approval;
 
   if (approval.verdict === 'block') {
-    return { ok: true, verdict: 'block', reasoning: approval.reasoning, usage: approval.usage, merged: false };
+    return { ok: true, verdict: 'block', reasoning: approval.reasoning, usage: approval.usage, merged: false, reviewed: targetPaths, missing };
   }
 
   // approve, and nothing to merge (the artifact never left main) — done,
   // no merge to attempt.
   if (!onBranch) {
-    return { ok: true, verdict: 'approve', reasoning: approval.reasoning, usage: approval.usage, merged: false, mergeReason: 'nothing on a branch — the artifact was never repaired off main' };
+    return { ok: true, verdict: 'approve', reasoning: approval.reasoning, usage: approval.usage, merged: false, reviewed: targetPaths, missing, mergeReason: 'nothing on a branch — the artifact was never repaired off main' };
   }
 
   const merge = await mergeBranchToMain(env, WAREHOUSE_REPO_NAME, branchName, `office: Architect-approved merge for ${taskId || slug} [skip ci]`);
   if (!merge.merged) {
-    return { ok: true, verdict: 'approve', reasoning: approval.reasoning, usage: approval.usage, merged: false, conflict: merge.conflict, mergeReason: merge.reason };
+    return { ok: true, verdict: 'approve', reasoning: approval.reasoning, usage: approval.usage, merged: false, reviewed: targetPaths, missing, conflict: merge.conflict, mergeReason: merge.reason };
   }
 
-  // VERIFY THE MERGE, DO NOT ASSUME IT — a fresh read of main, not the
-  // merge API's own success status.
-  const verify = await fetchWarehouseFile(env, target.targetPath);
+  // VERIFY THE MERGE, DO NOT ASSUME IT — a fresh read of main, not the merge
+  // API's own success status. Checked for EVERY file the approval covered:
+  // a merge that landed one of three is not a merge that landed, and the old
+  // single-path check could not tell the difference.
+  const verifiedOnMain = [];
+  for (const p of targetPaths) {
+    if (missing.includes(p)) continue;
+    const v = await fetchWarehouseFile(env, p);
+    verifiedOnMain.push({ path: p, present: !v.reason });
+  }
   return {
     ok: true, verdict: 'approve', reasoning: approval.reasoning, usage: approval.usage,
-    merged: true, mergeSha: merge.sha, path: target.targetPath,
-    verifiedOnMain: !verify.reason && verify.text === artifactFile.text,
+    merged: true, mergeSha: merge.sha, paths: targetPaths, path: targetPaths[0], missing,
+    verifiedOnMain: verifiedOnMain.length > 0 && verifiedOnMain.every((v) => v.present),
+    verifiedDetail: verifiedOnMain,
   };
 }
 

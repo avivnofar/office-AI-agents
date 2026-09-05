@@ -1485,12 +1485,41 @@ export async function fetchWarehouseDir(env, dirPath) {
 }
 
 /**
- * Extracts the ONE file path a spec's own "## Where it lives" section names
+ * Extracts EVERY file path a spec's own "## Where it lives" section names
  * directly under `warehouse-office-AI-agents/tasks/<slug>/`. FAIL-CLOSED:
  * returns not-ok rather than guessing when the section is missing or names
  * no file under that exact prefix — inventing a path here would be exactly
  * the "convincing wrong spec" workers/spec-builder.js's own header warns
  * against, just moved one layer downstream of it.
+ *
+ * ── IT USED TO RETURN ONE PATH AND DROP THE REST, SILENTLY (fixed 2026-09-05)
+ *
+ * The line was `const m = re.exec(section)` — a non-global regex, one match,
+ * no loop, no count, no warning. A spec naming three files got its first file
+ * and the other two were discarded with nothing recorded anywhere: not an
+ * error, not a `reason`, not a degraded flag. The header above promised
+ * fail-closed behaviour and this was the one place in the function that was
+ * not.
+ *
+ * IT COST SEVEN REPAIR ROUNDS ON ONE TASK. `tasks/dependency-audit/SPEC.md`
+ * names `audit.py`, `sample-advisories.json` and `test_audit.py`. The Worker
+ * read `audit.py`. The Architect reviewed the build, correctly reported
+ * `test_audit.py` and `sample-advisories.json` missing, and blocked — and
+ * `processRepairBlock()` then repaired `audit.py` again, because that was the
+ * only path it had. The finding was right, the repair could not possibly
+ * address it, and the loop ran until its own strike ceiling. **A reader that
+ * drops data without saying so turns a correct review into an unfixable one.**
+ *
+ * ── WHAT "EVERY PATH" MEANS, PRECISELY ───────────────────────────────────
+ *
+ * Every DISTINCT match, in the order the section names them, de-duplicated
+ * (a spec that names the same file in two sentences owes one file). A path
+ * with no extension — `.../tasks/<slug>/tool/` — does not match and never
+ * did: this function names FILES, and a directory is not a deliverable.
+ *
+ * `targetPath` is still returned, still the first one, for callers that
+ * genuinely want a single representative path. Every caller that acts on the
+ * deliverable uses `targetPaths`.
  */
 export function readSpecTargetPath(specText, slug) {
   const s = String(specText || '');
@@ -1500,16 +1529,16 @@ export function readSpecTargetPath(specText, slug) {
   const afterHeading = rest.slice(rest.indexOf('\n') + 1);
   const nextHeading = afterHeading.search(/^##\s/m);
   const section = nextHeading === -1 ? afterHeading : afterHeading.slice(0, nextHeading);
-  const re = new RegExp(`warehouse-office-AI-agents/tasks/${slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/([\\w./-]+\\.[A-Za-z0-9]+)`);
-  const m = re.exec(section);
-  if (!m) {
+  const re = new RegExp(`warehouse-office-AI-agents/tasks/${slug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}/([\\w./-]+\\.[A-Za-z0-9]+)`, 'g');
+  const targetPaths = [...new Set([...section.matchAll(re)].map((m) => `tasks/${slug}/${m[1]}`))];
+  if (!targetPaths.length) {
     return {
       ok: false,
       reason: `the spec's "Where it lives" section names no file directly under warehouse-office-AI-agents/tasks/${slug}/`,
       section: section.trim(),
     };
   }
-  return { ok: true, targetPath: `tasks/${slug}/${m[1]}`, section: section.trim() };
+  return { ok: true, targetPath: targetPaths[0], targetPaths, section: section.trim() };
 }
 
 /**
@@ -2421,7 +2450,15 @@ export function buildOfficeContext(snapshot, shape, opts = {}) {
           const resolved = targets[t.warehouse];
           const base = `${t.id} — "${t.title}" — warehouse \`warehouse-office-AI-agents/tasks/${t.warehouse}/\`${t.dispatched ? ` (${t.dispatched})` : ''}`;
           if (resolved?.ok) {
-            return `${base}. THE SPEC NAMES THE FILE YOU OWE: \`${resolved.targetPath}\`. Produce and commit it exactly as \`tasks/${t.warehouse}/SPEC.md\`'s "Where it lives" and "Input and output" sections describe.`;
+            // 2026-09-05: `targetPaths`, not `targetPath`. An agent told it owed
+            // ONE file when its spec named three was being told the same untruth
+            // the repair loop was acting on — and this sentence is the one the
+            // agent actually reads.
+            const paths = resolved.targetPaths || [resolved.targetPath];
+            const owed = paths.length === 1
+              ? `THE SPEC NAMES THE FILE YOU OWE: \`${paths[0]}\``
+              : `THE SPEC NAMES ${paths.length} FILES YOU OWE, all of them: ${paths.map((p) => `\`${p}\``).join(', ')}`;
+            return `${base}. ${owed}. Produce and commit ${paths.length === 1 ? 'it' : 'each of them'} exactly as \`tasks/${t.warehouse}/SPEC.md\`'s "Where it lives" and "Input and output" sections describe.`;
           }
           return `${base}. Its SPEC does not name one file plainly enough to state here (${resolved?.reason || 'tasks/' + t.warehouse + '/SPEC.md 404s or is unreadable'}) — read \`tasks/${t.warehouse}/SPEC.md\` yourself and file the artifact it describes.`;
         });
