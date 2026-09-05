@@ -60,11 +60,49 @@ check('both target projects represented in the pool', dcCount > 0 && nbxCount > 
 check('every topic entry targets exactly ONE project (never both)', TOPIC_POOL.every((t) => t.project === 'data-center' || t.project === 'notebook-x'));
 check('every notebook-x-targeted topic has a kbSlug', TOPIC_POOL.filter((t) => t.project === 'notebook-x').every((t) => !!t.kbSlug));
 
-const expectedKbSlugs = ['kb-linux', 'kb-1com', 'kb-voip-sip', 'kb-mirtapbx', 'kb-cloud-devops', 'kb-cybersecurity', 'kb-firewall', 'kb-networking', 'kb-vpn'];
+/*
+ * ── WHY `kb-1com` AND `kb-mirtapbx` ARE NOT IN THIS LIST (2026-09-05) ──────
+ *
+ * They were, and this check went RED on 2026-08-20 and stayed red for sixteen
+ * days. **THE VERIFIER WAS THE STALE SIDE, NOT THE POOL.** Commit `2764b5e`
+ * ("qa-topics.js: remove the six 1COM/MirtaPBX question templates, owner
+ * decision 2026-08-20") deleted the six question templates carrying
+ * `platform: '1com'|'mirtapbx'` and `kbSlug: 'kb-1com'|'kb-mirtapbx'`, on an
+ * owner authorization recorded in `SESSION-02-STOP-THE-BLEEDING-REPORT.md`
+ * PHASE 7: they were filing real, dated capability-gap reports naming two real
+ * third-party VoIP/PBX products, and several of those "gaps" were a Cloudflare
+ * `too many subrequests` error misreported as a Notebook-X content gap. The
+ * same two products sit on `workers/guide-engine.js`'s ABSOLUTE ZERO blocklist
+ * (`BLOCKLIST_KEYWORDS`) for the same owner decision — the office does not work
+ * on them at all.
+ *
+ * (The brief that authorized this edit dated that decision 2026-08-22; the
+ * commit and its report date it 2026-08-20. The earlier, sourced date is used
+ * here — the two-day difference changes nothing about the decision.)
+ *
+ * The list is therefore SHORTENED, not the blocklist re-opened. Two slugs
+ * moved out of scope and their expectation moved with them. Anyone restoring
+ * them to this array is restoring an owner-retired capability, which is a
+ * decision for the owner and not a fix for a red verifier.
+ *
+ * `kb-voip-sip` STAYS. The commit is explicit that "generic voip-sip entries
+ * are untouched" — what was retired is the two named products, not the
+ * protocol, and the `voipCount > 0` check above still depends on them.
+ */
+const RETIRED_KB_SLUGS = ['kb-1com', 'kb-mirtapbx'];
+const expectedKbSlugs = ['kb-linux', 'kb-voip-sip', 'kb-cloud-devops', 'kb-cybersecurity', 'kb-firewall', 'kb-networking', 'kb-vpn'];
 const actualKbSlugs = new Set(TOPIC_POOL.filter((t) => t.kbSlug).map((t) => t.kbSlug));
-check('all 6 owner-named kb slugs + 4 discovered core skeletons are covered',
+check('all 4 still-owner-named kb slugs + 3 discovered core skeletons are covered',
   expectedKbSlugs.every((s) => actualKbSlugs.has(s)),
   `missing: ${expectedKbSlugs.filter((s) => !actualKbSlugs.has(s)).join(', ') || 'none'}`);
+
+// The other half of the same fact, and it is the half that would catch a
+// silent restore: the two retired slugs must be ABSENT. Deleting the
+// expectation without asserting the absence would leave the pool free to grow
+// them back with nothing red.
+check('the two owner-retired kb slugs are absent from the pool',
+  RETIRED_KB_SLUGS.every((s) => !actualKbSlugs.has(s)),
+  `present but retired: ${RETIRED_KB_SLUGS.filter((s) => actualKbSlugs.has(s)).join(', ') || 'none'}`);
 
 check('config/ai-tools.json case_platform_map covers the same kb slugs',
   expectedKbSlugs.every((s) => Object.values(aiToolsConfig.notebook_x.case_platform_map).includes(s)));
