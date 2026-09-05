@@ -16,7 +16,6 @@
     },
     "case_volume_design_note": "SUPERSEDED 2026-07-18 (Q&A-engine rebuild) — volume is no longer a fixed per-agent quota at all. Once per day, at cycle start, agent-runner.js's computeDailyQuestionVolume() checks the remaining shared Claude budget for the month (config/token-economy.json shared_claude_budget) and picks a conservative day total from it (0 if exhausted) — never a fixed number decided in advance. That total is then SPREAD across the day exactly as before, via the existing case_batch case_share proportions below (6 case_batch blocks, 08:00-15:00 Israel since the 2026-08-06 office-hours retime — was 02:00-15:00 — roughly 90 minutes apart; full_day_schedule has 11 blocks total — the 6 case batches plus tool_task_window, chore_rotation, report, standup meeting, and spare_time). Non-burstiness for Notebook-X specifically doesn't come from this per-day total at all — it comes from workers/gemini-pacer.js's per-call pacing check at ask time (agent-base.js askAssignedProject()), which is what actually rate-limits Gemini calls regardless of how many questions a block was handed."
   },
-
   "_office_hours_retime_2026_08_06": {
     "what": "All case_batch blocks that sat before 08:00 Israel were moved into the 08:00-18:00 office-hours window, in the same change that narrowed the Cloudflare cron to that window (wrangler.toml: '*/30 5-14 * * *' + '0 15 * * *' = 08:00-18:00 IDT).",
     "why": "This file already declared work_hours.start = 08:00 while scheduling case batches at 02:00, 04:30 and 07:00 — hours before its own stated start. The blocks never matched the declaration. Narrowing the cron did not break the schedule's intent; it exposed a contradiction the file had been carrying. Owner decision 2026-08-06: retime the blocks to agree with the declaration rather than widen the cron back out.",
@@ -26,47 +25,176 @@
     "saturday_unchanged": "Saturday's two blocks were already at 08:00 — the new window's first tick — so they did not move and Saturday remains a zero-simulation-activity day.",
     "every_block_time_must_land_on_a_cron_tick": "Ticks fire at :00 and :30 only, from 08:00 to 18:00 Israel inclusive. A block at any other minute, or outside that range, is simply never reached — runScheduledBlock() matches on an exact time string."
   },
-
-  "work_hours": { "start": "08:00", "end": "18:00", "_corrected_2026_08_06": "Was 08:00-16:00. Widened to match the office-hours cron window (08:00-18:00 Israel) so this file stops disagreeing with itself — owner decision 2026-08-06. NOTE: neither this field nor overtime_window below is read by any code; both are documentation. Behaviour comes from the cron window plus the `blocks` times, which is exactly why the two were able to drift apart unnoticed in the first place." },
-  "overtime_window": { "start": "16:00", "end": "18:00", "agent_dependent": true, "note": "Per-agent overtime eligibility comes from agents-config.json work_routine.overtime (e.g. agent_2 '30%_of_days', agent_5 'regular', agent_10 'daily'). Overtime cases are drawn from the same daily pool via extendSession(), not a separate pool.", "_relationship_to_work_hours_2026_08_06": "This window now sits INSIDE work_hours rather than after it, and that is deliberate, not a leftover. Read it as: the office is OPEN 08:00-18:00, and 16:00-18:00 is the portion of that only overtime-eligible agents work. Before 2026-08-06 work_hours ended at 16:00 and this was the extension past closing; the span an agent could possibly work was 08:00-18:00 either way, so no agent's hours changed." },
-
+  "work_hours": {
+    "start": "08:00",
+    "end": "18:00",
+    "_corrected_2026_08_06": "Was 08:00-16:00. Widened to match the office-hours cron window (08:00-18:00 Israel) so this file stops disagreeing with itself — owner decision 2026-08-06. NOTE: neither this field nor overtime_window below is read by any code; both are documentation. Behaviour comes from the cron window plus the `blocks` times, which is exactly why the two were able to drift apart unnoticed in the first place."
+  },
+  "overtime_window": {
+    "start": "16:00",
+    "end": "18:00",
+    "agent_dependent": true,
+    "note": "Per-agent overtime eligibility comes from agents-config.json work_routine.overtime (e.g. agent_2 '30%_of_days', agent_5 'regular', agent_10 'daily'). Overtime cases are drawn from the same daily pool via extendSession(), not a separate pool.",
+    "_relationship_to_work_hours_2026_08_06": "This window now sits INSIDE work_hours rather than after it, and that is deliberate, not a leftover. Read it as: the office is OPEN 08:00-18:00, and 16:00-18:00 is the portion of that only overtime-eligible agents work. Before 2026-08-06 work_hours ended at 16:00 and this was the extension past closing; the span an agent could possibly work was 08:00-18:00 either way, so no agent's hours changed."
+  },
   "full_day_schedule": {
-    "applies_to_day_of_week": [1, 2, 3, 4, 5],
+    "applies_to_day_of_week": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
     "_retimed_2026_08_06": "Three case batches moved into office hours: 02:00 -> 08:00 (share 0.20), 04:30 -> 09:30 (0.15), 07:00 -> 11:00 (0.15). The remaining three moved only to keep the spread even: 09:30 -> 12:00 (0.15), 12:00 -> 13:30 (0.15), 15:00 unchanged (0.20). Six batches before, six after; shares unedited and still summing to 1.00. Non-batch blocks did not move at all.",
     "blocks": [
-      { "time": "08:30", "type": "architect_liaison", "label": "Architect liaison: file last night's headless run as a D1 report (gated, SEE architect_liaison_program — SHIPPED OFF 2026-08-07) MOVED OFF THE 08:00 TICK on 2026-08-16 (OB-074): it shared 08:00 with the day's largest case_batch, and under the invocation budget the case floor (cases run first, by design) left too little for it -- verified on a live tick, where it was deferred with 11 of 38 usable subrequests left. A block deferred every single day is a block that never runs, so it gets its own tick instead of a daily refusal.", "ref": "architect_liaison_program" },
-      { "time": "09:00", "type": "meeting", "meeting_type": "daily_standup", "label": "Daily standup (existing meeting-engine.js type). MOVED HERE FROM 16:30 on 2026-09-01 (SESSION 41, ITEM C): 16:30 was this schedule's LAST block, so this meeting shared its tick with finalizeScheduledDay() (office context, branch listing, the daily summary render and commit) with NOTHING gating whether the combined real cost fit Cloudflare's 50-subrequest cap -- the tail-reserve constants in subrequest-budget.js only gate OTHER blocks admitted alongside a tick, and this meeting was the only thing scheduled there, so nothing ever refused it. Measured live at ~31 subrequests (BLOCK_COST.meeting), it left too little for finalize's own (variable, cache-dependent) real cost on most working days: D1 `reports` incident rows show 'finalize @ 16:30 -- Too many subrequests' recurring on every Sun-Tue tick from 2026-08-12 through 2026-09-01, despite three EARLIER rounds (2026-08-15, 2026-08-16 x2) already moving closing_qa_review, spare_time and guide_review off this same tick for the identical reason. Moving the meeting itself, rather than reserving harder around it, is the same established remedy this file already uses four times over: 'a free tick is its own invocation budget'. 09:00 mirrors friday_schedule's own placement of daily_standup at 08:30 -- first, not last. `report` (16:00) is now this schedule's last block and inherits finalize; its real measured cost is far cheaper (worst measured ~10.25 against an estimate of 40 -- see subrequest-budget.js Session 34 Item A note), so the tick finalize now shares is safe rather than merely reserved-for." },
-      { "time": "10:00", "type": "admin_desk", "label": "Admin desk: the admin tier draws from four real queues — deliverable reviews owed (lifecycle IN-FLIGHT owed_by), the CEO's approval queue, probation decisions due at 20 actions, and the IT Chief's incident triage. ADDED 2026-08-17: agents 5-9 and 11 had no reports row since 2026-08-11, the day in_case_rotation:false correctly removed the admin tier from the case rotation and NOTHING replaced it. An EMPTY QUEUE PRODUCES NOTHING — no file, no row, no model call — which is the whole design; see workers/admin-desk.js. 10:00 is a free tick with nothing else on it, so this block gets its own 50-subrequest invocation budget (OB-074) rather than being deferred off a crowded one.", "ref": "admin_desk_program" },
-      {"time": "11:30", "type": "repair", "label": "Build chain: ONE repair round against the ONE blocking finding recorded for it (Session 33, Item B). Reads workers/build-chain.js's D1 `build_chain` queue -- rows at AWAITING-REPAIR, oldest first, MAX_REPAIRS_PER_TICK=1. Cerebras only, on the build_artifact lane; the Architect NEVER repairs (Session 31, E1). Repairs land on branch `repair/<slug>`, never on main. 11:30 is a FREE Sun-Thu tick, chosen for the same reason closing_qa_review took 15:30 on 2026-08-15 and owner_channel took 14:00 on 2026-08-16: a free tick is its own ~38-subrequest invocation budget, and this block is sized at 14 (subrequest-budget.js BLOCK_COST). It sits AFTER admin_desk at 10:00 and BEFORE architect_approval at 13:00, so a repair produced this morning is judged the same afternoon. NOT on the Friday schedule -- every Friday tick from 08:00 to 12:30 already carries a block and blocks[last] finalizes the day, which is the same reason admin_desk_program gives for being Sun-Thu only.", "ref": "build_chain_program"},
-      { "time": "12:30", "type": "chore_rotation", "label": "Cross-project chore rotation (Notebook-X/data-center/archive-alpha, Gemini-routed, wiring-only)", "ref": "chore-schedule.json" },
-      {"time": "13:00", "type": "architect_approval", "label": "Build chain: the Architect's verdict on ONE artifact awaiting it, and on approval the merge (Session 33, Item B). Reads the same `build_chain` queue -- rows at AWAITING-APPROVAL, oldest first, MAX_APPROVALS_PER_TICK=1. His SECOND and LAST touch on a build: he does not repair, and a `block` verdict's reasoning becomes the next repair's finding, which is what makes this queue self-filling. The $1.00/mo component:'architect' Claude sub-budget is checked INSIDE runArchitectApprovalCall(), so this scheduled path and the supervised trigger are guarded by ONE check in ONE place. The cap is 1 because the MONEY, not the subrequests, is what runs out first: two per weekday is ~44 Anthropic calls a month against that sub-budget. 13:00 is a FREE Sun-Thu tick; sized at 10 (subrequest-budget.js BLOCK_COST). NOT on the Friday schedule, for the same reason as `repair` above.", "ref": "build_chain_program"},
-{ "time": "14:00", "type": "owner_channel", "label": "Owner channel: record what was read from channel/from-owner/, then notify the client (gated by owner_channel_enabled — SHIPPED OFF 2026-08-10) MOVED HERE FROM 16:00 on 2026-08-16 (OB-074): the 16:00 tick was measured at 53 subrequests against Cloudflare's 50-per-invocation cap, so blocks on it were being refused by the invocation budget. Same remedy the closing_qa_review move used on 2026-08-15 -- a free tick is its own invocation budget.", "ref": "owner_channel_program" },
-{ "time": "14:30", "type": "spare_time", "label": "Spare time: coworker interaction or idle (token-saving) MOVED HERE FROM 16:30 on 2026-08-16 (OB-074): the 16:30 tick was measured at 71 subrequests against Cloudflare's 50-per-invocation cap, so blocks on it were being refused by the invocation budget. Same remedy the closing_qa_review move used on 2026-08-15 -- a free tick is its own invocation budget.", "ref": "spare_time_program" },
-      { "time": "15:30", "type": "meeting", "meeting_type": "closing_qa_review", "label": "Closing QA review — QA (6) on work quality, Team Lead (7) on persona/worker-model, backward-looking on today's output only. Wired to the schedule 2026-08-11 (OFFICE-POLICY A12/A3, learning_loop_enabled). MOVED HERE FROM 16:30 on 2026-08-15 (OB-073): it had been grouped with daily_standup, spare_time and guide_review at 16:30, all firing in the same Worker invocation immediately before finalizeScheduledDay() (getOfficeContext + fetchOpenBranches + the summary commit itself) -- the combined subrequest count for that one tick regularly exceeded Cloudflare's 50-per-invocation cap on the Bundled plan (confirmed via `reports` incident rows, 'Too many subrequests by single Worker invocation', starting 2026-08-12, the day after this meeting was wired in), so finalizeScheduledDay() threw before ever reaching commitFileToRepo() and the daily summary silently stopped landing in back-office for three consecutive days. 15:30 is a free tick with nothing else scheduled, giving this meeting its own invocation budget and reducing 16:30's load back toward what it carried before 2026-08-11.", "_ref_removed_2026_08_29": "This block carried `ref: closing_qa_review_program` and NO SUCH KEY HAS EVER EXISTED in this file — a pointer to nothing. Pre-existing, unrelated to the retirement below. REMOVED rather than invented: the identical closing_qa_review block on friday_schedule has never carried a ref either, and the label above already holds everything a program block would have said. The two blocks now agree. (Session 34, Item B3.)" },
-      { "time": "16:00", "type": "report", "label": "Daily AI-experience reports + model-education case studies. NOW THIS SCHEDULE'S LAST BLOCK (SESSION 41, ITEM C, 2026-09-01) since daily_standup moved to 09:00 -- see that block's label for why. finalizeScheduledDay() now runs after this cheap block (worst measured ~10.25) rather than after a ~31-subrequest meeting, which is the actual fix for the recurring 'finalize @ 16:30 -- Too many subrequests' incidents.", "ref": "model_education_program" }
+      {
+        "time": "08:30",
+        "type": "architect_liaison",
+        "label": "Architect liaison: file last night's headless run as a D1 report (gated, SEE architect_liaison_program — SHIPPED OFF 2026-08-07) MOVED OFF THE 08:00 TICK on 2026-08-16 (OB-074): it shared 08:00 with the day's largest case_batch, and under the invocation budget the case floor (cases run first, by design) left too little for it -- verified on a live tick, where it was deferred with 11 of 38 usable subrequests left. A block deferred every single day is a block that never runs, so it gets its own tick instead of a daily refusal.",
+        "ref": "architect_liaison_program"
+      },
+      {
+        "time": "09:00",
+        "type": "meeting",
+        "meeting_type": "daily_standup",
+        "label": "Daily standup (existing meeting-engine.js type). MOVED HERE FROM 16:30 on 2026-09-01 (SESSION 41, ITEM C): 16:30 was this schedule's LAST block, so this meeting shared its tick with finalizeScheduledDay() (office context, branch listing, the daily summary render and commit) with NOTHING gating whether the combined real cost fit Cloudflare's 50-subrequest cap -- the tail-reserve constants in subrequest-budget.js only gate OTHER blocks admitted alongside a tick, and this meeting was the only thing scheduled there, so nothing ever refused it. Measured live at ~31 subrequests (BLOCK_COST.meeting), it left too little for finalize's own (variable, cache-dependent) real cost on most working days: D1 `reports` incident rows show 'finalize @ 16:30 -- Too many subrequests' recurring on every Sun-Tue tick from 2026-08-12 through 2026-09-01, despite three EARLIER rounds (2026-08-15, 2026-08-16 x2) already moving closing_qa_review, spare_time and guide_review off this same tick for the identical reason. Moving the meeting itself, rather than reserving harder around it, is the same established remedy this file already uses four times over: 'a free tick is its own invocation budget'. 09:00 mirrors friday_schedule's own placement of daily_standup at 08:30 -- first, not last. `report` (16:00) is now this schedule's last block and inherits finalize; its real measured cost is far cheaper (worst measured ~10.25 against an estimate of 40 -- see subrequest-budget.js Session 34 Item A note), so the tick finalize now shares is safe rather than merely reserved-for."
+      },
+      {
+        "time": "10:00",
+        "type": "admin_desk",
+        "label": "Admin desk: the admin tier draws from four real queues — deliverable reviews owed (lifecycle IN-FLIGHT owed_by), the CEO's approval queue, probation decisions due at 20 actions, and the IT Chief's incident triage. ADDED 2026-08-17: agents 5-9 and 11 had no reports row since 2026-08-11, the day in_case_rotation:false correctly removed the admin tier from the case rotation and NOTHING replaced it. An EMPTY QUEUE PRODUCES NOTHING — no file, no row, no model call — which is the whole design; see workers/admin-desk.js. 10:00 is a free tick with nothing else on it, so this block gets its own 50-subrequest invocation budget (OB-074) rather than being deferred off a crowded one.",
+        "ref": "admin_desk_program"
+      },
+      {
+        "time": "10:30",
+        "type": "build_artifact",
+        "label": "Build chain: the block that WRITES. Draws ONE IN-PROGRESS warehouse-paired board task (admin-desk.js MAX_BUILD_ARTIFACTS_PER_TICK=1) and produces up to FOUR of the files its tasks/<slug>/SPEC.md 'Where it lives' section names (agent-runner.js MAX_SPEC_TARGETS_PER_BLOCK=4) -- one routed build_artifact-lane call and one commit per file -- then puts the task on the build_chain queue at AWAITING-APPROVAL. SCHEDULED 2026-09-05 (SESSION 44, ITEM A). It was SUPERVISED-ONLY from Session 31 under a graduated-rollout posture (supervised run -> small unattended window -> full schedule) that was correct when written and that nobody lifted for nine sessions -- so `repair` (11:30) and `architect_approval` (13:00) have been scheduled since Session 33 against a queue only a human at a keyboard could fill. This is the last link. 10:30 IS CHOSEN, NOT SPARE: it is a free Sun-Thu tick (its own ~47-subrequest invocation budget, the same remedy repair/architect_approval/owner_channel/spare_time/closing_qa_review all took), it sits AFTER admin_desk at 10:00 and BEFORE architect_approval at 13:00, so an artifact built this morning is judged this afternoon -- and admin_desk is what REFRESHES the office snapshot, which this block deliberately no longer does. MEASURED LIVE 2026-09-05 through the metered supervised trigger: a whole round costs 44 of 50 subrequests when it refreshes the snapshot and 11 when it reads the cached one, so the refresh alone is 33 -- three quarters of a tick -- and a four-file round on a refreshing tick would be 56, over Cloudflare's platform limit outright. Sized at 32 in subrequest-budget.js BLOCK_COST, the worst case its two caps allow (20 resolution reads + 4 files x 3 measured each). NOT on the Friday schedule, same reason as repair and architect_approval: every Friday tick from 08:30 to 13:30 already carries a block.",
+        "ref": "build_chain_program"
+      },
+      {
+        "time": "11:00",
+        "type": "build_notes",
+        "label": "Build chain: Desk 5, the status NOTE about a build -- not the build itself, that is 10:30 above. Up to TWO notes per tick (admin-desk.js MAX_BUILD_NOTES_PER_TICK=2), one per IN-PROGRESS warehouse-paired task held by an admin-desk agent, written to tasks/<slug>/notes/<date>-agent<N>.md and idempotent against this Worker's own repo_writes history. SCHEDULED 2026-09-05 (SESSION 44, ITEM A), off the same Session 30 graduated-rollout posture as build_artifact. METERING IT IS WHAT FOUND IT WAS BROKEN: its idempotency query used a LIKE pattern of 33 fixed characters plus the warehouse slug, and D1 refuses a LIKE pattern over 50 characters (LIKE or GLOB pattern too complex: SQLITE_ERROR) -- so any slug longer than 17 characters threw, the desk fail-closed correctly, and it had been writing NOTHING. Two of the board's three warehouse slugs are longer than that. Replaced with a prefix range; the first run after the fix filed a real note. Measured at 3 subrequests for one note with a cached snapshot; sized at 10. 11:00 is a free Sun-Thu tick after admin_desk (10:00), which refreshes the office snapshot this block reads and no longer fetches itself. NOT on the Friday schedule, same reason as repair and architect_approval.",
+        "ref": "build_chain_program"
+      },
+      {
+        "time": "11:30",
+        "type": "repair",
+        "label": "Build chain: ONE repair round against the ONE blocking finding recorded for it (Session 33, Item B). Reads workers/build-chain.js's D1 `build_chain` queue -- rows at AWAITING-REPAIR, oldest first, MAX_REPAIRS_PER_TICK=1. Cerebras only, on the build_artifact lane; the Architect NEVER repairs (Session 31, E1). Repairs land on branch `repair/<slug>`, never on main. 11:30 is a FREE Sun-Thu tick, chosen for the same reason closing_qa_review took 15:30 on 2026-08-15 and owner_channel took 14:00 on 2026-08-16: a free tick is its own ~38-subrequest invocation budget, and this block is sized at 14 (subrequest-budget.js BLOCK_COST). It sits AFTER admin_desk at 10:00 and BEFORE architect_approval at 13:00, so a repair produced this morning is judged the same afternoon. NOT on the Friday schedule -- every Friday tick from 08:00 to 12:30 already carries a block and blocks[last] finalizes the day, which is the same reason admin_desk_program gives for being Sun-Thu only.",
+        "ref": "build_chain_program"
+      },
+      {
+        "time": "12:30",
+        "type": "chore_rotation",
+        "label": "Cross-project chore rotation (Notebook-X/data-center/archive-alpha, Gemini-routed, wiring-only)",
+        "ref": "chore-schedule.json"
+      },
+      {
+        "time": "13:00",
+        "type": "architect_approval",
+        "label": "Build chain: the Architect's verdict on ONE artifact awaiting it, and on approval the merge (Session 33, Item B). Reads the same `build_chain` queue -- rows at AWAITING-APPROVAL, oldest first, MAX_APPROVALS_PER_TICK=1. His SECOND and LAST touch on a build: he does not repair, and a `block` verdict's reasoning becomes the next repair's finding, which is what makes this queue self-filling. The $1.00/mo component:'architect' Claude sub-budget is checked INSIDE runArchitectApprovalCall(), so this scheduled path and the supervised trigger are guarded by ONE check in ONE place. The cap is 1 because the MONEY, not the subrequests, is what runs out first: two per weekday is ~44 Anthropic calls a month against that sub-budget. 13:00 is a FREE Sun-Thu tick; sized at 10 (subrequest-budget.js BLOCK_COST). NOT on the Friday schedule, for the same reason as `repair` above.",
+        "ref": "build_chain_program"
+      },
+      {
+        "time": "14:00",
+        "type": "owner_channel",
+        "label": "Owner channel: record what was read from channel/from-owner/, then notify the client (gated by owner_channel_enabled — SHIPPED OFF 2026-08-10) MOVED HERE FROM 16:00 on 2026-08-16 (OB-074): the 16:00 tick was measured at 53 subrequests against Cloudflare's 50-per-invocation cap, so blocks on it were being refused by the invocation budget. Same remedy the closing_qa_review move used on 2026-08-15 -- a free tick is its own invocation budget.",
+        "ref": "owner_channel_program"
+      },
+      {
+        "time": "14:30",
+        "type": "spare_time",
+        "label": "Spare time: coworker interaction or idle (token-saving) MOVED HERE FROM 16:30 on 2026-08-16 (OB-074): the 16:30 tick was measured at 71 subrequests against Cloudflare's 50-per-invocation cap, so blocks on it were being refused by the invocation budget. Same remedy the closing_qa_review move used on 2026-08-15 -- a free tick is its own invocation budget.",
+        "ref": "spare_time_program"
+      },
+      {
+        "time": "15:30",
+        "type": "meeting",
+        "meeting_type": "closing_qa_review",
+        "label": "Closing QA review — QA (6) on work quality, Team Lead (7) on persona/worker-model, backward-looking on today's output only. Wired to the schedule 2026-08-11 (OFFICE-POLICY A12/A3, learning_loop_enabled). MOVED HERE FROM 16:30 on 2026-08-15 (OB-073): it had been grouped with daily_standup, spare_time and guide_review at 16:30, all firing in the same Worker invocation immediately before finalizeScheduledDay() (getOfficeContext + fetchOpenBranches + the summary commit itself) -- the combined subrequest count for that one tick regularly exceeded Cloudflare's 50-per-invocation cap on the Bundled plan (confirmed via `reports` incident rows, 'Too many subrequests by single Worker invocation', starting 2026-08-12, the day after this meeting was wired in), so finalizeScheduledDay() threw before ever reaching commitFileToRepo() and the daily summary silently stopped landing in back-office for three consecutive days. 15:30 is a free tick with nothing else scheduled, giving this meeting its own invocation budget and reducing 16:30's load back toward what it carried before 2026-08-11.",
+        "_ref_removed_2026_08_29": "This block carried `ref: closing_qa_review_program` and NO SUCH KEY HAS EVER EXISTED in this file — a pointer to nothing. Pre-existing, unrelated to the retirement below. REMOVED rather than invented: the identical closing_qa_review block on friday_schedule has never carried a ref either, and the label above already holds everything a program block would have said. The two blocks now agree. (Session 34, Item B3.)"
+      },
+      {
+        "time": "16:00",
+        "type": "report",
+        "label": "Daily AI-experience reports + model-education case studies. NOW THIS SCHEDULE'S LAST BLOCK (SESSION 41, ITEM C, 2026-09-01) since daily_standup moved to 09:00 -- see that block's label for why. finalizeScheduledDay() now runs after this cheap block (worst measured ~10.25) rather than after a ~31-subrequest meeting, which is the actual fix for the recurring 'finalize @ 16:30 -- Too many subrequests' incidents.",
+        "ref": "model_education_program"
+      }
     ]
   },
-
   "friday_schedule": {
-    "applies_to_day_of_week": [6],
+    "applies_to_day_of_week": [
+      6
+    ],
     "label": "Short day: reduced case load, weekly executive summary at 12:00",
     "_retimed_2026_08_06": "Two case batches moved into office hours: 02:00 -> 08:00 (share 0.40) and 05:30 -> 09:00 (0.30); the 09:00 batch shifted to 10:00 (0.30) to keep one-hour spacing. Three batches before, three after; shares unedited and still summing to 1.00. Friday stays a SHORT day — the batches finish at 10:00 and the day still closes at 12:00, so its reduced load is preserved rather than stretched across the full window.",
     "blocks": [
-{ "time": "08:30", "type": "meeting", "meeting_type": "daily_standup", "label": "Daily standup (existing meeting-engine.js type) MOVED HERE FROM 12:00 on 2026-08-16 (OB-074): the Friday 12:00 tick was measured at 89 subrequests against Cloudflare's 50-per-invocation cap, because weekly_summary alone costs ~78 and left nothing for the blocks sharing its invocation. weekly_summary stays at 12:00 and remains a KNOWN single-block overflow (it cannot fit in one invocation and is run rather than refused -- see subrequest-budget.js admitBlock() 'oversize'); these two moved off it so they are not starved by it." },
-      { "time": "09:30", "type": "qa_instruments", "label": "Weekly QA instruments: the Lead QA's cross-embodiment comparison + the review-the-reviewers rotation. ADDED 2026-08-15 (audit finding #8): both were fully built, marked capability-SUPPLIED, and reachable ONLY by a manual admin trigger, so as far as that audit could tell NEITHER HAD EVER RUN in production. 09:30 is a FREE Friday tick with nothing else on it — chosen for the same reason closing_qa_review was moved to 15:30 on 2026-08-15, and it is before the 12:00 weekly close so the finding exists when the weekly package is built. Rides improvement_loop_enabled; carries NO switch of its own, deliberately — see processQaInstrumentsBlock()'s header. One D1 SELECT, one markdown commit, ZERO model calls.", "ref": "qa_instruments_program" },
-      { "time": "10:30", "type": "report", "label": "Daily AI-experience reports + model-education case studies", "ref": "model_education_program" },
-      { "time": "11:00", "type": "owner_channel", "label": "Owner channel: record what was read from channel/from-owner/, then notify the client (gated by owner_channel_enabled — SHIPPED OFF 2026-08-10)", "ref": "owner_channel_program" },
-{ "time": "11:00", "type": "architect_liaison", "label": "Architect liaison: file last night's headless run as a D1 report (gated, SEE architect_liaison_program — SHIPPED OFF 2026-08-07) MOVED OFF THE 08:00 TICK on 2026-08-16 (OB-074): it shared 08:00 with the day's largest case_batch, and under the invocation budget the case floor (cases run first, by design) left too little for it -- verified on a live tick, where it was deferred with 11 of 38 usable subrequests left. A block deferred every single day is a block that never runs, so it gets its own tick instead of a daily refusal.", "ref": "architect_liaison_program" },
-{ "time": "11:30", "type": "spare_time", "label": "Spare time: coworker interaction or idle (token-saving) MOVED HERE FROM 12:00 on 2026-08-16 (OB-074): the Friday 12:00 tick was measured at 89 subrequests against Cloudflare's 50-per-invocation cap, because weekly_summary alone costs ~78 and left nothing for the blocks sharing its invocation. weekly_summary stays at 12:00 and remains a KNOWN single-block overflow (it cannot fit in one invocation and is run rather than refused -- see subrequest-budget.js admitBlock() 'oversize'); these two moved off it so they are not starved by it.", "ref": "spare_time_program" },
-      { "time": "12:00", "type": "weekly_summary", "label": "Weekly executive summary: the 10-section markdown, the per-agent CSV and the public excerpt, plus the product version bumps. SESSION 35, ITEM D (2026-08-29) -- THE SPLIT. This block used to run the template trio AND runMeeting('weekly') AND runReportPipeline() in ONE invocation. Measured in D1 block_admissions across its only two real runs: 53.25 and 48 weighted subrequests against a usable 47 -- the first EXCEEDED Cloudflare's 50-per-invocation platform limit outright. admitBlock() classified it 'oversize', which in this estate means it RUNS ANYWAY (a silently missing weekly report is a worse failure than a known overflow), so the overflow was a standing bet that the cheap part happened to run first. The ceiling was NOT raised. The work was split along its own seams instead: this tick keeps the template trio + product version bumps, 12:30 runs the meeting, 13:00 runs the reviewed report. Same three outputs, same order, produced in parts.", "ref": "weekly_summary_program" },
-      { "time": "12:30", "type": "weekly_meeting", "label": "Weekly meeting -- runMeeting('weekly'). SPLIT OFF weekly_summary 2026-08-29 (SESSION 35, ITEM D). It is the expensive third: BLOCK_COST.meeting is 34 against a usable 47 and was measured live at 31 on a real tick, and it had been sharing one invocation with two other pieces of work of comparable size. Its own tick is its own invocation budget -- the same remedy closing_qa_review took on 2026-08-15 and owner_channel, spare_time and guide_review took on 2026-08-16.", "ref": "weekly_summary_program" },
-      { "time": "13:00", "type": "weekly_report", "label": "Weekly written report -- runReportPipeline('weekly'), behind report_pipeline_enabled. SPLIT OFF weekly_summary 2026-08-29 (SESSION 35, ITEM D). It runs AFTER the meeting, exactly as it did inside the combined block, so the meeting's decisions are already filed when the fact pack is built. It recomputes agentRows and the pipeline summary rather than carrying them across ticks: the only carrier would be the KV day cycle, which is the very thing an overflowing tick was already failing to persist -- see workers/subrequest-budget.js's header.", "ref": "weekly_summary_program" },
-      { "time": "13:30", "type": "meeting", "meeting_type": "closing_qa_review", "label": "Closing QA review — same wiring as full_day_schedule's 15:30 entry; Friday is a work day (short) so today's output still gets reviewed before the week closes. MOVED HERE FROM 12:00 on 2026-08-15 (OB-073), for the same reason as the weekday move: it had been grouped with weekly_summary, daily_standup, spare_time AND guide_review all at 12:00 -- the single most crowded tick in either schedule, immediately preceding finalizeScheduledDay(). Split across 12:00 (3 blocks) and 12:30 (2 blocks) instead of 5 at one tick. MOVED 12:30 -> 13:30 on 2026-08-29 (SESSION 35, ITEM D). It is the day's LAST block and blocks[last] finalizes the day (block_order_is_load_bearing above), so it moves to stay last once weekly_meeting took 12:30 and weekly_report took 13:00. Friday now closes at 13:30 instead of 12:30. Running the closing review AFTER the weekly package is complete is also the more correct order: it reviews more of the day than it used to." }
+      {
+        "time": "08:30",
+        "type": "meeting",
+        "meeting_type": "daily_standup",
+        "label": "Daily standup (existing meeting-engine.js type) MOVED HERE FROM 12:00 on 2026-08-16 (OB-074): the Friday 12:00 tick was measured at 89 subrequests against Cloudflare's 50-per-invocation cap, because weekly_summary alone costs ~78 and left nothing for the blocks sharing its invocation. weekly_summary stays at 12:00 and remains a KNOWN single-block overflow (it cannot fit in one invocation and is run rather than refused -- see subrequest-budget.js admitBlock() 'oversize'); these two moved off it so they are not starved by it."
+      },
+      {
+        "time": "09:30",
+        "type": "qa_instruments",
+        "label": "Weekly QA instruments: the Lead QA's cross-embodiment comparison + the review-the-reviewers rotation. ADDED 2026-08-15 (audit finding #8): both were fully built, marked capability-SUPPLIED, and reachable ONLY by a manual admin trigger, so as far as that audit could tell NEITHER HAD EVER RUN in production. 09:30 is a FREE Friday tick with nothing else on it — chosen for the same reason closing_qa_review was moved to 15:30 on 2026-08-15, and it is before the 12:00 weekly close so the finding exists when the weekly package is built. Rides improvement_loop_enabled; carries NO switch of its own, deliberately — see processQaInstrumentsBlock()'s header. One D1 SELECT, one markdown commit, ZERO model calls.",
+        "ref": "qa_instruments_program"
+      },
+      {
+        "time": "10:30",
+        "type": "report",
+        "label": "Daily AI-experience reports + model-education case studies",
+        "ref": "model_education_program"
+      },
+      {
+        "time": "11:00",
+        "type": "owner_channel",
+        "label": "Owner channel: record what was read from channel/from-owner/, then notify the client (gated by owner_channel_enabled — SHIPPED OFF 2026-08-10)",
+        "ref": "owner_channel_program"
+      },
+      {
+        "time": "11:00",
+        "type": "architect_liaison",
+        "label": "Architect liaison: file last night's headless run as a D1 report (gated, SEE architect_liaison_program — SHIPPED OFF 2026-08-07) MOVED OFF THE 08:00 TICK on 2026-08-16 (OB-074): it shared 08:00 with the day's largest case_batch, and under the invocation budget the case floor (cases run first, by design) left too little for it -- verified on a live tick, where it was deferred with 11 of 38 usable subrequests left. A block deferred every single day is a block that never runs, so it gets its own tick instead of a daily refusal.",
+        "ref": "architect_liaison_program"
+      },
+      {
+        "time": "11:30",
+        "type": "spare_time",
+        "label": "Spare time: coworker interaction or idle (token-saving) MOVED HERE FROM 12:00 on 2026-08-16 (OB-074): the Friday 12:00 tick was measured at 89 subrequests against Cloudflare's 50-per-invocation cap, because weekly_summary alone costs ~78 and left nothing for the blocks sharing its invocation. weekly_summary stays at 12:00 and remains a KNOWN single-block overflow (it cannot fit in one invocation and is run rather than refused -- see subrequest-budget.js admitBlock() 'oversize'); these two moved off it so they are not starved by it.",
+        "ref": "spare_time_program"
+      },
+      {
+        "time": "12:00",
+        "type": "weekly_summary",
+        "label": "Weekly executive summary: the 10-section markdown, the per-agent CSV and the public excerpt, plus the product version bumps. SESSION 35, ITEM D (2026-08-29) -- THE SPLIT. This block used to run the template trio AND runMeeting('weekly') AND runReportPipeline() in ONE invocation. Measured in D1 block_admissions across its only two real runs: 53.25 and 48 weighted subrequests against a usable 47 -- the first EXCEEDED Cloudflare's 50-per-invocation platform limit outright. admitBlock() classified it 'oversize', which in this estate means it RUNS ANYWAY (a silently missing weekly report is a worse failure than a known overflow), so the overflow was a standing bet that the cheap part happened to run first. The ceiling was NOT raised. The work was split along its own seams instead: this tick keeps the template trio + product version bumps, 12:30 runs the meeting, 13:00 runs the reviewed report. Same three outputs, same order, produced in parts.",
+        "ref": "weekly_summary_program"
+      },
+      {
+        "time": "12:30",
+        "type": "weekly_meeting",
+        "label": "Weekly meeting -- runMeeting('weekly'). SPLIT OFF weekly_summary 2026-08-29 (SESSION 35, ITEM D). It is the expensive third: BLOCK_COST.meeting is 34 against a usable 47 and was measured live at 31 on a real tick, and it had been sharing one invocation with two other pieces of work of comparable size. Its own tick is its own invocation budget -- the same remedy closing_qa_review took on 2026-08-15 and owner_channel, spare_time and guide_review took on 2026-08-16.",
+        "ref": "weekly_summary_program"
+      },
+      {
+        "time": "13:00",
+        "type": "weekly_report",
+        "label": "Weekly written report -- runReportPipeline('weekly'), behind report_pipeline_enabled. SPLIT OFF weekly_summary 2026-08-29 (SESSION 35, ITEM D). It runs AFTER the meeting, exactly as it did inside the combined block, so the meeting's decisions are already filed when the fact pack is built. It recomputes agentRows and the pipeline summary rather than carrying them across ticks: the only carrier would be the KV day cycle, which is the very thing an overflowing tick was already failing to persist -- see workers/subrequest-budget.js's header.",
+        "ref": "weekly_summary_program"
+      },
+      {
+        "time": "13:30",
+        "type": "meeting",
+        "meeting_type": "closing_qa_review",
+        "label": "Closing QA review — same wiring as full_day_schedule's 15:30 entry; Friday is a work day (short) so today's output still gets reviewed before the week closes. MOVED HERE FROM 12:00 on 2026-08-15 (OB-073), for the same reason as the weekday move: it had been grouped with weekly_summary, daily_standup, spare_time AND guide_review all at 12:00 -- the single most crowded tick in either schedule, immediately preceding finalizeScheduledDay(). Split across 12:00 (3 blocks) and 12:30 (2 blocks) instead of 5 at one tick. MOVED 12:30 -> 13:30 on 2026-08-29 (SESSION 35, ITEM D). It is the day's LAST block and blocks[last] finalizes the day (block_order_is_load_bearing above), so it moves to stay last once weekly_meeting took 12:30 and weekly_report took 13:00. Friday now closes at 13:30 instead of 12:30. Running the closing review AFTER the weekly package is complete is also the more correct order: it reviews more of the day than it used to."
+      }
     ]
   },
-
   "saturday_schedule": {
-    "applies_to_day_of_week": [7],
+    "applies_to_day_of_week": [
+      7
+    ],
     "label": "REST DAY — genuinely zero-write since 2026-08-10. No case batches, no meetings, no model calls of any kind, and NO REPO WRITE. One idle block, which makes no model call and commits nothing.",
     "_rest_day_2026_08_10": {
       "what": "TWO Saturday writes were removed, not one. `guide_verify` moved to Friday 11:30, and the day-finalize repo commit is suppressed on an off day (workers/agent-runner.js finalizeScheduledDay(), guarded on the isOffDay argument it already received and had never used).",
@@ -76,10 +204,15 @@
       "guide_verify_new_home": "Friday 11:30 Israel — a free cron tick, after the Friday report/guide_draft at 10:30 and the owner_channel at 11:00, and before the 12:00 weekly close. The pass is still WEEKLY and still one run; only the day moved."
     },
     "blocks": [
-      { "time": "08:00", "type": "spare_time", "label": "Full-day idle (rest day) — no model call, no commit", "force_idle": true, "ref": "spare_time_program" }
+      {
+        "time": "08:00",
+        "type": "spare_time",
+        "label": "Full-day idle (rest day) — no model call, no commit",
+        "force_idle": true,
+        "ref": "spare_time_program"
+      }
     ]
   },
-
   "model_education_program": {
     "description": "Stress-tests Claude (data-center) and Gemini (Notebook-X) — the two production AI systems the office exists to evaluate. Runs once per work day at the 'report' block, after that day's question batches.",
     "daily_ai_experience_report": {
@@ -95,7 +228,6 @@
       "permission_level": "special (AI staff + owner) — internal, Hebrew, not business-facing."
     }
   },
-
   "_tool_task_window_retired_2026_08_17": {
     "what": "The Sun-Thu 11:30 `tool_task_window` block was REMOVED from full_day_schedule.blocks on 2026-08-17 (OB-132). `maybeOpenAssetTask()` in agent-runner.js is NOT deleted and is still reachable — see `asset_task_window` under trigger types.",
     "why": "It fired every weekday, was admitted with `decision: run`, and returned `not_eligible` every time since simulation day 6. The cause was not a bug: `maybeOpenAssetTask()` refuses when `item.stage !== 'queued' || item.asset_task_issue_filed`, and ALL FOUR standing_project_ref items in reports/asset-pipeline/board.json — qa-knowledge-base, archives-app, designer-tooling-suite, architect-org-products — carry `asset_task_issue_filed: true`, stamped on simulation days 5, 6, 7 and 8. There are exactly four standing projects across the five rotation days (Thursday reuses archives-app), each files its Issue ONCE, and nothing ever un-files the flag. The block did its whole job by day 8 and has been firing 5x a week ever since with nothing it could possibly do.",
@@ -103,7 +235,6 @@
     "not_the_third_state": "The rejected option was to leave it scheduled and make it silent. A block that fires, records success and does nothing is the shape this project has named repeatedly (OB-131, OB-132, KFM). Making it quiet would have removed the evidence without removing the block.",
     "how_to_run_it_when_there_is_real_work": "POST /api/agents/trigger {\"type\":\"asset_task_window\",\"dayOfWeek\":1} — the capability is intact, it is just no longer on a timer. The day a human returns an asset and a session queues a new board item, that trigger files its Issue."
   },
-
   "admin_desk_program": {
     "description": "The admin tier's scheduled draw from real queues. ADDED 2026-08-17. Sun-Thu 10:00 Israel only — NOT Friday: every Friday tick from 08:00 to 12:30 already carries a block, and blocks[last] finalizes the day (see block_order_is_load_bearing above), so a Friday entry would either share a crowded tick or move the day's close. Five days a week is the honest scope and is stated rather than implied by an absent entry.",
     "why_it_exists": "On 2026-08-11 `in_case_rotation: false` correctly removed agents 5-9 and 11 from the daily Q&A case rotation — admins were solving support cases while their real roles went unenforced. NOTHING REPLACED IT. Measured against live D1 on 2026-08-17: none of those six agents had a `reports` row later than 2026-08-11 13:00. Six days, half the office, zero output.",
@@ -117,9 +248,8 @@
     "no_kill_switch": "Deliberate, same decision deliverable-lifecycle.js and office-policy.js took: it rides on `office_context_enabled` (live ON), which three of the four desks genuinely need. A block built to end a six-day output drought and deployed defaulting OFF ends nothing.",
     "toggle_and_test": "Supervised single run with the gate bypassed: POST /api/agents/trigger {\"type\":\"admin_desk_block\"}. Deliberately NOT via {\"type\":\"block\",\"israelTime\":\"10:00\"}, which would be the honest scheduled path but is also fine — 10:00 carries nothing else."
   },
-
   "build_chain_program": {
-    "description": "Sun-Thu 11:30 (repair) and 13:00 (architect_approval). Session 33, Item B. The two halves of Session 31's build chain, put on the tick. Both were built, both ran live, and NEITHER was schedulable -- not because nobody wrote the cron line, but because each takes {slug, agentId, findingText} as arguments and a tick has no arguments. The missing piece was somewhere for the chain to remember what it was in the middle of; that is D1 `build_chain` (workers/build-chain.js).",
+    "description": "Sun-Thu 10:30 (build_artifact), 11:00 (build_notes), 11:30 (repair) and 13:00 (architect_approval). The first two were added 2026-09-05 (Session 44, Item A); the last two by Session 33, Item B. THE CHAIN IS NOW CLOSED END TO END ON THE TICK. Until Session 44 the two blocks that actually WRITE a deliverable were supervised-only under Session 31's graduated rollout, which nobody lifted for nine sessions -- so the two CONSUMERS were scheduled and their PRODUCER was not, and a task like OB-043 could sit IN-PROGRESS indefinitely with nothing ever writing a file for it. Sun-Thu 11:30 (repair) and 13:00 (architect_approval). Session 33, Item B. The two halves of Session 31's build chain, put on the tick. Both were built, both ran live, and NEITHER was schedulable -- not because nobody wrote the cron line, but because each takes {slug, agentId, findingText} as arguments and a tick has no arguments. The missing piece was somewhere for the chain to remember what it was in the middle of; that is D1 `build_chain` (workers/build-chain.js).",
     "the_queue_fills_itself": "There is no source of blocking findings for a warehouse artifact -- the Worker holds no warehouse READ token, so the admin desk records every warehouse-located deliverable as unreadable and draws no review slot for it (session 30, item A). So the Architect's approval is BOTH the consumer and the producer of findings on this path: a `block` verdict's reasoning IS the next repair's finding. Session 31 proved that empirically, twice, with two correct blocks that each named a real defect. build_artifact -> AWAITING-APPROVAL -> (block) -> AWAITING-REPAIR -> (repaired) -> AWAITING-APPROVAL -> (approve+merge) -> MERGED. Bounded by admin-desk.js repairDecision(): the THIRD attempt at the same finding is refused and the row STALLS, surfaced once to the owner rather than spending the budget forever.",
     "the_ceilings_and_where_they_come_from": {
       "repair": "MAX_REPAIRS_PER_TICK = 1. A repair is one Cerebras build_artifact-lane call producing a COMPLETE file -- Session 31 measured that lane's real output at up to 371 lines and set its max_tokens from that measurement. Two per invocation would be two whole-file generations plus four GitHub commits against Cloudflare's 50-subrequest ceiling. It is also right for a non-budget reason: a repair addresses ONE named finding, and the next finding is not known until the Architect has seen the repaired file, so two per tick would mean the second repairing against a finding raised before the first landed.",
@@ -127,23 +257,35 @@
     },
     "the_spend_guard_is_enforced_on_this_path": "Checked INSIDE runArchitectApprovalCall() (workers/architect-spec.js): getClaudeBudgetStatus(env, {component:'architect'}) runs before callClaudeMessages() and returns a REFUSAL, not a degrade -- there is no fallback model for the Architect. It is not at any call site, so the supervised trigger and this scheduled block are guarded by one check in one place and a third caller added later cannot bypass it. scripts/verify-build-chain.js runs the real function against an over-budget D1 double with globalThis.fetch as a tripwire, so the guard has been WATCHED refusing something. KNOWN LIMIT, stated rather than discovered: with no D1 binding getClaudeBudgetStatus() treats spend as $0 and does NOT refuse ('degrades open', its own words). The guard depends on D1 being readable.",
     "the_entry_point_is_still_supervised": "`build_artifact` -- the block that CREATES an AWAITING-APPROVAL row -- is NOT on this schedule. Session 31 gave it exactly one supervised live run, and CLAUDE.md's graduated-rollout rule is not satisfied by one. Putting the office's first autonomous code-artifact writer on a timer is a separate owner decision and Session 33 did not take it. CONSEQUENCE, said here rather than discovered: once the seeded queue drains, these two blocks have no autonomous source of work and will correctly report an empty queue -- which the daily obligation check (Item A) will then record as a day that produced nothing.",
-    "not_on_friday": "Same reason admin_desk_program gives: every Friday tick from 08:00 to 12:30 already carries a block, and blocks[last] finalizes the day (block_order_is_load_bearing), so a Friday entry would either share a crowded invocation or displace the finalize."
+    "not_on_friday": "Same reason admin_desk_program gives: every Friday tick from 08:00 to 12:30 already carries a block, and blocks[last] finalizes the day (block_order_is_load_bearing), so a Friday entry would either share a crowded invocation or displace the finalize.",
+    "session_44_the_measurement": {
+      "why_it_was_measured_first": "Session 43's own confidence ledger flagged its arithmetic as INFERRED: ~6 fixed subrequests plus ~5 per file, with a 3-file round never metered end to end. The first task in the queue names FIVE paths, so scheduling on that estimate risked the office's first unattended build hitting Cloudflare's 50-per-invocation platform limit. It was metered instead, on the live Worker, through a new meterSupervised() wrapper that puts the same two meters runScheduledBlock() uses around one supervised call.",
+      "what_it_cost": {
+        "build_artifact_refreshing_snapshot_zero_files": 44,
+        "build_artifact_cached_snapshot_zero_files": 11,
+        "office_snapshot_refresh_alone": 33,
+        "per_file_one_provider_call_plus_one_commit": 3,
+        "build_notes_one_note_cached_snapshot": 3,
+        "ceiling": 50
+      },
+      "what_changed_because_of_it": "BOTH blocks now read the CACHED office snapshot and never refresh it (allowFetch:false) -- the refresh is three quarters of a tick's budget and a build queue does not need a board fresh to the minute. Both are scheduled AFTER admin_desk (10:00), which does refresh. build_artifact's remaining reads are bounded by MAX_RESOLUTION_FETCHES_PER_BLOCK (20), because the fixed cost SCALES with the number of warehouse-paired IN-PROGRESS tasks -- 11 covers today's three, and an unbounded term is exactly what put weekly_summary over the platform limit. Tasks not reached are DEFERRED with the reason, never dropped.",
+      "does_five_files_fit": "On budget, yes: 11 + 5x3 = 26 of 47 usable. It still takes TWO ROUNDS, and not for a budget reason -- MAX_SPEC_TARGETS_PER_BLOCK caps a round at 4 files, the fifth is reported in deferredTargets, and the NEXT tick takes it because a build skips paths it has already committed. A five-file round on a REFRESHING tick would have been 44 + 15 = 59, over the platform limit, which is why the snapshot change matters more here than the file cap does.",
+      "the_overwrite_guard": "MEASURED, not hypothesised, and it is why this schedule is safe to turn on. build_artifact's idempotency source is this Worker's OWN repo_writes history, and 'I did not write it' was being acted on as 'so it is not there'. OB-043 is paired to tasks/office-site/, whose spec names five files; ALL FIVE EXIST, built across four phases in August, and repo_writes holds exactly one of them. The first unattended run would have asked Cerebras for the other four whole and committed the answers over index.html, styles.css, data.js (52,621 bytes) and generate-data.js (25,973 bytes), against a 6,000-token lane budget that cannot reach either of the last two. That is the 2026-07-11 notebook_backend.py incident with a different file name. A build now refuses any path that already exists on main without a repo_writes row, reports it in `preexisting`, and leaves it to the repair loop -- which is whose job changing an existing file always was."
+    }
   },
-
   "spare_time_program": {
     "description": "Fires whenever an agent has no more assigned cases for the day and no meeting to attend. Two outcomes, chosen per agent:",
-    "coworker_interaction_chance": 0.20,
+    "coworker_interaction_chance": 0.2,
     "coworker_interaction": {
       "what": "one short Gemini call generating a brief in-character exchange between this agent and a related agent (relationships.json partnerships/rivalries preferred), logged as an `interactions` row (type='coworker_chat'). Costs exactly 1 Gemini call.",
       "permission_level": "private"
     },
     "idle": {
-      "chance": 0.80,
+      "chance": 0.8,
       "what": "agent goes idle: state is saved as-is, an `interactions` row (type='idle', no query/response) is logged for the daily summary, and ZERO Gemini/Claude calls are made. This is the default and MUST be the only path on Saturdays (force_idle).",
       "token_savings": "this is the primary token-discipline lever for spare time, per Launch Decisions."
     }
   },
-
   "qa_instruments_program": {
     "description": "Friday 09:30. Runs the office's two cross-agent QA instruments and files one markdown finding into back-office. Added 2026-08-15 to close audit finding #8 / KFM-10: cross-embodiment comparison and review-the-reviewers were both built, both marked capability-SUPPLIED, and both reachable only via /api/agents/trigger — no scheduled block referenced either, so neither had ever run on its own. The office's entire quality argument rests on cross-agent review, and the two instruments that perform it had no autonomous caller.",
     "gate": "improvement_loop_enabled. NO SWITCH OF ITS OWN, deliberately: the defect being closed here is a built capability with no autonomous caller, and shipping it behind a fresh OFF switch would reproduce that defect on the very feature meant to fix it. Riding improvement_loop_enabled is an honest dependency, not a borrowed one — the comparison reads exactly the rows workers/improvement-loop.js writes, and with the loop off there is nothing to compare.",
@@ -188,14 +330,12 @@
       }
     ]
   },
-
   "product_versioning": {
     "description": "Each admin-tier agent (5-11, can_generate_assets: true) may own at most one 'weekly project' at a time, tracked as an agents/reports/asset-pipeline/board.json entry with a `product_id`. On the Friday weekly_summary_program, any board item whose stage advanced to 'implemented' this week bumps that product's version by +0.01 (starting at 1.00) in year_stats.stats.product_versions, and the board entry's `version` field is updated to match.",
     "version_format": "X.YY (e.g. 1.00 -> 1.01 -> 1.02 ... -> 1.99 -> 2.00)",
     "increment": 0.01,
-    "starting_version": 1.00
+    "starting_version": 1.0
   },
-
   "architect_liaison_program": {
     "_meta": "Added 2026-08-07 (phase-2 Architect-automation build session). SHIPPED OFF — SIM_KV simulation-state `architect_liaison_enabled` is absent from production KV, which workers/architect-liaison.js's architectLiaisonEnabled() treats as false, same as every other key in this simulation-state pattern. This build session did not call the architect_liaison_toggle trigger and did not deploy this code to the live Worker; the block below exists in the schedule file and the bundle would recognise it once deployed, but recognising it is exactly what the flag gates.",
     "description": "Recognises the Architect's (agent 10) headless midnight Claude Code run (back-office-AI-agents/campus/agents/10-the-architect/automation/, NOT part of this repo's own scheduled-claude.yml or the Worker's own guides pipeline) as a real office session. When enabled, reads the Architect's latest SESSION-RECORD-CONTRACT.md-shaped record from back-office-AI-agents via the GitHub Contents API (read-only) and files it as a D1 `reports` row attributed to agent_id 10, so agent context and the meeting engine can see the run happened.",
@@ -203,7 +343,6 @@
     "gate_shape": "Gated at the CALL SITE in agent-runner.js's block dispatch, not just inside the module — see workers/architect-liaison.js's header for why this is stricter than guides_program's own gating.",
     "known_mismatch_flagged_not_fixed": "The office's simulated work hours and this cron's actual window were mismatched before 2026-08-06 (case_batch blocks sat at 02:00/04:30/07:00 while work_hours declared 08:00 start) and were retimed into the 08:00-18:00 window that day — see _office_hours_retime_2026_08_06 above. This block was added AFTER that retime and sits at 08:00, the window's own first tick, specifically so it does not reintroduce a pre-dawn mismatch. Whether the Architect's own 00:00 midnight run and this 08:00 read create a useful gap (headless run finishes hours before anyone reads it) or too long a lag is unverified — flagged for the owner, not decided here."
   },
-
   "guides_program": {
     "description": "Owner-directed special task for the dormant Architect persona (agent 10) — see CLAUDE.md 'Guides'. Two model calls per guide: a writer persona (chosen by domain, workers/guide-engine.js pickWriterAgentId()) drafts via Gemini; the Architect reviews/finalizes via a DIRECT Anthropic API call (workers/claude-client.js, model claude-sonnet-5, tracked against its OWN $4.50/mo sub-budget — config/token-economy.json guides_claude_budget, workers/model-router.js component:'guides'). Output: markdown files under guides/<domain>/<slug>.md, committed through the existing guarded commitFileToRepo() — same class of write as gap digests.",
     "guide_draft": {
@@ -217,7 +356,6 @@
       "_moved_off_saturday_2026_08_10": "Was Saturday 08:00. Moved because docs/OFFICE-POLICY.md A13 (owner-approved 2026-08-10, and NEWER than this program) makes Saturday a rest day with no automated writing, and this block both calls a model and commits a guide. Still weekly, still one run, still the last thing before the week closes — only the day changed. See saturday_schedule._rest_day_2026_08_10 for the second Saturday write that was removed at the same time."
     }
   },
-
   "owner_channel_program": {
     "description": "REQ-001's base — the owner↔office channel, built 2026-08-10 under owner supervision. THE BASE ONLY: the presentation layer, the visual page over the channel and its security review are the office's work and are on the delegation board. The split is a trust boundary, not a division of labour — an office that builds its own instruction channel builds the pipe that feeds it.",
     "code": "workers/owner-channel.js (parsers, the read record, the age ladder), workers/owner-notify.js (the GitHub-Issue hop and the weekly heartbeat), wired into prompts by workers/office-context.js and run by processOwnerChannelBlock() in workers/agent-runner.js.",

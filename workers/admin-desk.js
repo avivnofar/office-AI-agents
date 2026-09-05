@@ -485,7 +485,16 @@ export function buildArtifactAssignments(boardTasks = [], opts = {}) {
       continue;
     }
     if (alreadyBuilt[task.id]) {
-      skipped.push({ taskId: task.id, agentId, slug: task.warehouse, why: 'the artifact this spec names is already committed — nothing to draw' });
+      // SESSION 44 — `alreadyBuilt` may carry a STRING saying why nothing is
+      // owed, not just `true`. "Already committed" and "already there, and
+      // this office did not write it" are different facts about a warehouse
+      // directory and the second is the one worth reading; flattening both to
+      // one sentence is how the overwrite risk stayed invisible until it was
+      // measured. A bare `true` keeps the original wording.
+      const why = typeof alreadyBuilt[task.id] === 'string'
+        ? alreadyBuilt[task.id]
+        : 'the artifact this spec names is already committed — nothing to draw';
+      skipped.push({ taskId: task.id, agentId, slug: task.warehouse, why });
       continue;
     }
 

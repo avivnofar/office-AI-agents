@@ -48,20 +48,46 @@
  * third attempt at the same finding, so a task that cannot converge STALLS and
  * is surfaced once, rather than spending the budget forever.
  *
- * ── THE ENTRY POINT IS STILL SUPERVISED, AND THAT IS SAID HERE, NOT HIDDEN ─
+ * ── THE ENTRY POINT IS NOW SCHEDULED TOO (SESSION 44, 2026-09-05) ─────────
  *
- * `build_artifact` — the block that CREATES an `AWAITING-APPROVAL` row — is
- * **not on the schedule.** Session 31 gave it exactly one supervised live run,
- * and CLAUDE.md's graduated-rollout rule ("supervised run -> small unattended
- * window -> full schedule") is not satisfied by one. Putting the office's
- * first autonomous code-artifact writer on a timer is a separate owner
- * decision and this session does not take it.
+ * This header used to read, correctly for its day:
  *
- * **The consequence, stated rather than discovered later: once the seeded
- * queue drains, these two blocks have no autonomous source of work.** They
- * will report an empty queue and write nothing, which is correct behaviour and
- * is exactly what Item A's daily check will then catch as a day that produced
- * nothing. That is the intended sequence, not an oversight.
+ * > `build_artifact` — the block that CREATES an `AWAITING-APPROVAL` row — is
+ * > **not on the schedule.** Session 31 gave it exactly one supervised live
+ * > run, and CLAUDE.md's graduated-rollout rule ("supervised run -> small
+ * > unattended window -> full schedule") is not satisfied by one. Putting the
+ * > office's first autonomous code-artifact writer on a timer is a separate
+ * > owner decision and this session does not take it.
+ * >
+ * > **The consequence, stated rather than discovered later: once the seeded
+ * > queue drains, these two blocks have no autonomous source of work.**
+ *
+ * **The consequence arrived, and it lasted nine sessions.** The rollout stage
+ * this paragraph describes was never lifted by anyone, so the office had two
+ * scheduled CONSUMERS of a queue and no scheduled PRODUCER for it: `OB-043`
+ * could sit `IN-PROGRESS`, correctly dispatched and correctly paired, with
+ * nothing that would ever write a file for it.
+ *
+ * `build_artifact` is on `full_day_schedule` at **10:30 Sun-Thu** and
+ * `build_notes` at **11:00**, both after `admin_desk` (10:00) — which is what
+ * refreshes the office snapshot both of them now read rather than fetch — and
+ * both before `architect_approval` (13:00), so an artifact built in the
+ * morning is judged the same afternoon.
+ *
+ * **What made that safe was measurement, not confidence.** Both blocks were
+ * metered on the live Worker first (`meterSupervised()`, agent-runner.js). The
+ * two numbers that changed the design: a build round costs 44 of 50
+ * subrequests when it refreshes the office snapshot and 11 when it reads the
+ * cached one, and one file costs 3. A four-file round on a refreshing tick is
+ * 56 — over Cloudflare's platform limit outright, on the first unattended run.
+ *
+ * **And a build no longer writes over a file it did not write.** The
+ * idempotency source is this Worker's own `repo_writes` history, and "I did
+ * not write it" was being acted on as "so it is not there". `tasks/office-site/`
+ * holds five files this office did not build and `repo_writes` knows of one,
+ * so the first unattended round would have regenerated four working files —
+ * two of them larger than the lane's whole output budget — over the originals.
+ * See `processBuildArtifactBlock()`'s `pendingTargets()` for the guard.
  */
 
 /* ─────────────────────────────── The states ─────────────────────────────── */

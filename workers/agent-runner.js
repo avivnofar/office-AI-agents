@@ -90,12 +90,14 @@ import {
   probationDecisionDraw, recentIncidents, deskSummary, producedAnything,
   PROBATION_TEAM_LEAD, PROBATION_QA, PROBATION_DECIDER, IT_CHIEF_ID,
   CEO_ID as DESK_CEO_ID, INCIDENT_WINDOW_HOURS, MAX_INCIDENTS_PER_NOTE,
-  // Desk 5 (session 30 / OB-146) — see processBuildNotesBlock() below, which
-  // is a SEPARATE supervised-only function, not wired into the scheduled
-  // admin-desk tick. Graduated rollout (CLAUDE.md): supervised run first.
+  // Desk 5 (session 30 / OB-146) — see processBuildNotesBlock() below. Still a
+  // SEPARATE function from the admin-desk tick, but no longer supervised-only:
+  // SESSION 44 put it on its OWN tick (11:00 Sun-Thu). The graduated rollout
+  // was completed, not abandoned.
   buildAssignments, MAX_BUILD_NOTES_PER_TICK,
-  // Desk 6 (session 31, Item B) — see processBuildArtifactBlock() below,
-  // same supervised-only posture as Desk 5 above.
+  // Desk 6 (session 31, Item B) — see processBuildArtifactBlock() below. Also
+  // scheduled by SESSION 44, at 10:30 Sun-Thu: it is the PRODUCER the already-
+  // scheduled repair (11:30) and architect_approval (13:00) blocks had none of.
   buildArtifactAssignments, MAX_BUILD_ARTIFACTS_PER_TICK,
   // The repair loop (session 31, Item E) — pure decision logic only; the
   // fetching, model call and writes are in processRepairBlock() below.
@@ -2365,9 +2367,22 @@ async function processAdminDeskBlock(env, opts = {}) {
  * rollout for anything that runs on a schedule ("supervised run → small
  * unattended window → full schedule"), and this is the office's FIRST
  * capability that lets any persona other than the Architect write to the
- * warehouse. Reachable only via the `build_notes_block` admin trigger below,
+ * warehouse. ~~Reachable only via the `build_notes_block` admin trigger below,
  * same posture `admin_desk_block` already has for testing its own desk.
- * Putting it on a timer is a separate, later, owner-approved step.
+ * Putting it on a timer is a separate, later, owner-approved step.~~
+ *
+ * **SCHEDULED 2026-09-05 (SESSION 44, ITEM A): Sun-Thu 11:00.** The supervised
+ * trigger stays and is unchanged. The rollout stage above was reached and the
+ * paragraph is struck rather than deleted, because the reasoning was right and
+ * only its conclusion has moved on.
+ *
+ * The "separate, later, owner-approved step" it names is the thing that never
+ * happened for nine sessions. The owner does not work on this project day to
+ * day; a step that waits for him is a step the office does not take. What
+ * changed on the day it was scheduled is that its real cost was MEASURED (3
+ * subrequests for one note, cached snapshot) rather than assumed — and the
+ * measurement immediately found that this desk had not been writing anything
+ * at all. See the D1 LIKE-limit note in its idempotency query below.
  *
  * ── WHAT IT WRITES, AND WHY THAT IS SAFE ───────────────────────────────────
  *
@@ -2484,13 +2499,18 @@ async function processBuildNotesBlock(env, opts = {}) {
 
   let snapshot = null;
   try {
-    snapshot = await getOfficeSnapshot(env, { allowFetch: true });
+    // SESSION 44 — `allowFetch: false`, the same change and the same
+    // measurement as processBuildArtifactBlock() below: the refresh is 33 of
+    // this tick's 50 subrequests, and this desk's whole real cost with a
+    // cached snapshot was measured at 3 (one provider call, one commit).
+    // Scheduled after admin_desk (10:00), which does refresh.
+    snapshot = await getOfficeSnapshot(env, { allowFetch: false });
   } catch (err) {
     out.errors.push(`office snapshot threw: ${err?.message}`);
   }
   const boardTasks = snapshot?.board?.tasks || null;
   if (!Array.isArray(boardTasks)) {
-    out.errors.push('the board could not be read from the office snapshot — this desk produced nothing because its queue was UNREADABLE, which is not the same fact as empty');
+    out.errors.push('the board could not be read from the cached office snapshot — this desk produced nothing because its queue was UNREADABLE, which is not the same fact as empty. This block deliberately does not refresh the snapshot itself (measured at 33 subrequests); the 10:00 admin_desk tick does.');
     return out;
   }
 
@@ -2503,10 +2523,42 @@ async function processBuildNotesBlock(env, opts = {}) {
     try {
       await env.DB.prepare(REPO_WRITE_TABLE_SQL).run();
       for (const t of candidates) {
-        const likePath = `tasks/${t.warehouse}/notes/${today}-agent%.md`;
+        /*
+         * ── NO `LIKE`, AND THAT IS NOT A STYLE PREFERENCE (SESSION 44) ────
+         *
+         * This query was `path LIKE 'tasks/<slug>/notes/<date>-agent%.md'`,
+         * and **D1 refuses a LIKE pattern longer than 50 characters** with
+         * `LIKE or GLOB pattern too complex: SQLITE_ERROR`. Measured against
+         * live D1 on 2026-09-05: a 50-character pattern runs, a 51-character
+         * pattern is refused. The pattern here is 33 characters of fixed text
+         * plus the slug, so **any warehouse slug longer than 17 characters
+         * threw**, and the `catch` below correctly refused to draw anything.
+         *
+         * Two of the three warehouse-paired board tasks carry such a slug —
+         * `daily-report-agent-names` (24) and `session-34-cache-measurement`
+         * (28) — and the loop threw on the FIRST of them, so the whole desk
+         * returned an error and wrote nothing, INCLUDING for `office-site`
+         * (11), whose own pattern was legal. A short slug's note was lost to a
+         * long slug's query.
+         *
+         * It never looked like an outage: `build_notes` was supervised-only,
+         * its failure was a line inside a JSON response nobody was scheduled
+         * to read, and the fail-closed posture below is correct and stayed
+         * correct throughout. This was found by METERING the block before
+         * scheduling it (Session 44, Item A) — the measurement's first finding
+         * was that the thing being measured did not run.
+         *
+         * A PREFIX RANGE has no pattern-length limit at all, uses the index
+         * the same way a left-anchored LIKE would, and is exact. `\uffff` is
+         * the upper sentinel: every string starting with `prefix` sorts before
+         * `prefix + \uffff`. The `-agentN.md` shape is then matched by the
+         * regex below, which was already doing the real matching — the LIKE's
+         * `%.md` was only ever a coarse pre-filter.
+         */
+        const prefix = `tasks/${t.warehouse}/notes/${today}-agent`;
         const rows = await env.DB.prepare(
-          `SELECT path FROM repo_writes WHERE repo = ? AND path LIKE ? AND committed = 1`
-        ).bind(WAREHOUSE_REPO_NAME, likePath).all();
+          `SELECT path FROM repo_writes WHERE repo = ? AND path >= ? AND path < ? AND committed = 1`
+        ).bind(WAREHOUSE_REPO_NAME, prefix, `${prefix}\uffff`).all();
         alreadyLogged[t.id] = (rows.results || [])
           .map((r) => /-agent(\d+)\.md$/.exec(r.path || ''))
           .filter(Boolean)
@@ -2599,8 +2651,15 @@ async function processBuildNotesBlock(env, opts = {}) {
 /**
  * Desk 6 (session 31, Item B) — own-build's SECOND mode: producing the real
  * artifact a spec names, not a status note about it (processBuildNotesBlock()
- * above, unchanged). SUPERVISED ONLY, not on the schedule — same graduated-
- * rollout posture session 30 set for Desk 5.
+ * above, unchanged). ~~SUPERVISED ONLY, not on the schedule — same graduated-
+ * rollout posture session 30 set for Desk 5.~~
+ *
+ * **SCHEDULED 2026-09-05 (SESSION 44, ITEM A): Sun-Thu 10:30, after
+ * `admin_desk` (10:00) and before `architect_approval` (13:00).** This is the
+ * last link in the build chain. `repair` and `architect_approval` have been on
+ * the tick since Session 33 — this block is what puts anything on the queue
+ * they read, and while it was supervised-only they were two scheduled
+ * consumers with an unscheduled producer.
  *
  * Two ways in, same pattern this file's other supervised triggers use:
  *  - opts.taskId + opts.slug + opts.agentId: build ONE named task directly,
@@ -2643,6 +2702,55 @@ async function processBuildNotesBlock(env, opts = {}) {
 const MAX_SPEC_TARGETS_PER_BLOCK = 4;
 
 /**
+ * ── THE OTHER HALF OF THE COST, AND IT IS THE BIGGER ONE (SESSION 44) ─────
+ *
+ * The cap above bounds the FILES a round writes. Nothing bounded the reading
+ * this block does before it writes anything — and that is where its budget
+ * actually goes.
+ *
+ * MEASURED LIVE, twice, 2026-09-05, through the metered supervised trigger
+ * (`meterSupervised()`), weighted exactly as a real tick weights:
+ *
+ *   whole round, COLD office snapshot, 0 files built     44 of 50
+ *   whole round, WARM office snapshot, 0 files built     11 of 50
+ *   one artifact: one provider call + one commit          3   (measured on
+ *                                                             build_notes,
+ *                                                             the identical
+ *                                                             call+commit pair)
+ *
+ * So the office-snapshot refresh is **33** — three quarters of a tick's whole
+ * budget — and Session 43's estimate of "~6 fixed plus ~5 per file" was wrong
+ * in both terms and wrong in the direction that matters: it understated the
+ * fixed cost by 7x and overstated the per-file cost.
+ *
+ * **A four-file round on a tick that refreshes the snapshot is 44 + 12 = 56,
+ * over Cloudflare's 50-per-invocation platform limit outright.** That is what
+ * scheduling this block on Session 43's arithmetic would have bought.
+ *
+ * TWO CHANGES FOLLOW FROM THE MEASUREMENT, and neither raises a ceiling:
+ *
+ * 1. **This block no longer refreshes the snapshot** (`allowFetch: false`).
+ *    It reads whichever one is cached — the same posture the per-LLM-call
+ *    agent path in `office-context.js` already takes, and for the same reason.
+ *    A build queue does not need a board that is fresh to the minute; it needs
+ *    to know which tasks are IN-PROGRESS, which changes on the order of days.
+ *    An ABSENT cache is still reported as UNREADABLE, never as empty. The
+ *    schedule puts this block AFTER `admin_desk` (10:00), which does refresh,
+ *    so a cached snapshot exists by the time this runs.
+ *
+ * 2. **The remaining reads are budgeted.** The 11 above is 3 spec reads plus 8
+ *    existence probes, for the 3 warehouse-paired tasks the board carries
+ *    TODAY — it grows with the board, and an unbounded term is exactly what
+ *    put `weekly_summary` over the platform limit. Resolution stops at
+ *    `MAX_RESOLUTION_FETCHES_PER_BLOCK` and the tasks not reached are DEFERRED
+ *    WITH THE REASON, never silently dropped.
+ *
+ * 20 leaves 12 for a full four-file round (32 of 47 usable) and covers today's
+ * board nearly twice over.
+ */
+const MAX_RESOLUTION_FETCHES_PER_BLOCK = 20;
+
+/**
  * The ONE place a spec's target files are resolved, shared by the build, the
  * repair and the approval blocks below.
  *
@@ -2666,10 +2774,27 @@ async function processBuildArtifactBlock(env, opts = {}) {
 
   const out = {
     desk: 'build_artifact', mode: 'board', queued: 0, produced: 0,
-    filed: [], deferred: [], deferredTargets: [], skipped: [], errors: [],
+    // SESSION 44 — paths NOT built because a file is already there and this
+    // office did not put it there. Its own array, not folded into `skipped`:
+    // `skipped` is about TASKS the desk declined to draw, and a reader who
+    // cannot tell "I drew nothing" from "I drew it and refused to overwrite
+    // four files" has been told the wrong thing.
+    filed: [], deferred: [], deferredTargets: [], preexisting: [], skipped: [], errors: [],
   };
 
-  const resolveTarget = (slug) => resolveSpecTargets(env, slug);
+  // Every GitHub read this block makes before it writes anything is counted
+  // here, against MAX_RESOLUTION_FETCHES_PER_BLOCK. See that constant.
+  const reads = { spent: 0, exhausted: false };
+  const spendRead = () => {
+    if (reads.spent >= MAX_RESOLUTION_FETCHES_PER_BLOCK) { reads.exhausted = true; return false; }
+    reads.spent += 1;
+    return true;
+  };
+
+  const resolveTarget = async (slug) => {
+    if (!spendRead()) return { ok: false, budget: true, reason: `the ${MAX_RESOLUTION_FETCHES_PER_BLOCK}-read resolution budget for this tick was spent before this task's spec could be read — deferred, not dropped; the next tick reaches it` };
+    return resolveSpecTargets(env, slug);
+  };
 
   // Same idempotency source build_note uses (this Worker's OWN write
   // history) and the same fail-closed posture on a read it cannot verify —
@@ -2684,6 +2809,23 @@ async function processBuildArtifactBlock(env, opts = {}) {
   };
 
   /*
+   * ── DOES THIS PATH ALREADY HOLD A FILE THIS OFFICE DID NOT WRITE? ────────
+   *
+   * SESSION 44, 2026-09-05. Three-valued on purpose: `true` it is there,
+   * `false` GitHub said 404, `null` NOBODY KNOWS — a network error, a missing
+   * token, a 403. The third is not a "no", and the caller below treats it as a
+   * stop rather than a green light, the same posture `alreadyCommitted()`
+   * already takes on an unreadable `repo_writes`.
+   */
+  const existsOnMain = async (targetPath) => {
+    if (!spendRead()) return 'budget';
+    const f = await fetchWarehouseFile(env, targetPath);
+    if (!f.reason) return true;
+    if (/HTTP 404/.test(f.reason)) return false;
+    return null;
+  };
+
+  /*
    * WHICH OF A SPEC'S FILES ARE STILL OWED (2026-09-05).
    *
    * The idempotency question used to be asked once, about the first path, and
@@ -2695,15 +2837,70 @@ async function processBuildArtifactBlock(env, opts = {}) {
    *
    * A `null` from `alreadyCommitted()` still means CANNOT TELL and still stops
    * the task, per path — an unreadable record must never read as "not built".
+   *
+   * ══════════════════════════════════════════════════════════════════════
+   * SESSION 44 — `repo_writes` IS THIS OFFICE'S MEMORY, NOT THE REPO'S STATE
+   * ══════════════════════════════════════════════════════════════════════
+   *
+   * The check above asks "did *I* write this?". Until today, "no" was acted on
+   * as "so the file is not there" — and those are different facts about a
+   * shared repository that four other things write to (the Architect's own
+   * automation, `run-controller.js`, the owner, and every session before
+   * `repo_writes` existed at all).
+   *
+   * **MEASURED, not hypothesised, on the task this block was about to be
+   * scheduled against.** `OB-043` is paired to `tasks/office-site/`, whose spec
+   * names five files. All five exist, built across four phases in August and
+   * recorded in that task's own `STATE.json` at 129/129 checks. `repo_writes`
+   * holds exactly ONE of them (`app.js`, three rows, 2026-08-10). So the first
+   * unattended run of this block would have found FOUR files "not built",
+   * asked Cerebras for each one whole, and committed the answers over
+   * `index.html`, `styles.css`, `data.js` (52,621 bytes) and `generate-data.js`
+   * (25,973 bytes) — against a lane budget of 6,000 output tokens, which
+   * cannot reach either of the last two. A working deliverable replaced by a
+   * fraction of itself, silently, with `finish_reason: "stop"`.
+   *
+   * That is `notebook_backend.py` (CLAUDE.md, "Incident: 2026-07-11/12") with
+   * a different file name, and the rule that incident left behind is in this
+   * repo's own words: a plausibility check must run BEFORE the push, not after.
+   * This is that check, in the only form that is cheap and certain — don't
+   * write a build over a file that is already there.
+   *
+   * **A BUILD IS NOT A REPAIR, and that is why this is safe to make absolute.**
+   * `build_artifact` exists to produce a file that does not exist yet. Changing
+   * a file that DOES exist is the repair loop's job (`processRepairBlock()`),
+   * it is driven by a named finding, it lands on a branch, and the Architect
+   * looks at it. Nothing this block can no longer do was ever this block's to
+   * do.
+   *
+   * **REPORTED, NEVER SILENT.** A path skipped here comes back in
+   * `out.preexisting` with its reason, and the desk's summary says so. A cap
+   * that says nothing is the `re.exec()` defect wearing new clothes — see
+   * MAX_SPEC_TARGETS_PER_BLOCK's own note directly above.
+   *
+   * The cost is one GET per path, and ONLY for paths `repo_writes` does not
+   * already account for — a file this office built is answered from D1 for
+   * free. On the steady state that is zero extra fetches; on a first encounter
+   * with a directory somebody else built it is one per file, once, and then
+   * the task is skipped for good.
    */
   const pendingTargets = async (paths) => {
     const pending = [];
+    const preexisting = [];
     for (const p of paths) {
-      const exists = await alreadyCommitted(p);
-      if (exists === null) return { ok: false, reason: `${p}: repo_writes could not be read — idempotency could not be checked` };
-      if (!exists) pending.push(p);
+      const committedByUs = await alreadyCommitted(p);
+      if (committedByUs === null) return { ok: false, reason: `${p}: repo_writes could not be read — idempotency could not be checked` };
+      if (committedByUs) continue;
+      const onMain = await existsOnMain(p);
+      if (onMain === 'budget') return { ok: false, budget: true, reason: `${p}: the ${MAX_RESOLUTION_FETCHES_PER_BLOCK}-read resolution budget for this tick was spent before this path could be checked — deferred, not dropped` };
+      if (onMain === null) return { ok: false, reason: `${p}: could not establish whether the file already exists on main — a build here might overwrite it, and "cannot tell" is not permission` };
+      if (onMain) {
+        preexisting.push({ path: p, why: `already on main and NOT in this office's own repo_writes history — somebody else built it, so a build here would overwrite work this office did not do. Changing an existing file is the repair loop's job, not this desk's.` });
+        continue;
+      }
+      pending.push(p);
     }
-    return { ok: true, pending };
+    return { ok: true, pending, preexisting };
   };
 
   let candidates;
@@ -2719,12 +2916,17 @@ async function processBuildArtifactBlock(env, opts = {}) {
       out.errors.push(`${owed.reason}, nothing drawn`);
       return out;
     }
+    for (const pre of owed.preexisting) out.preexisting.push({ taskId: opts.taskId, ...pre });
     if (!owed.pending.length) {
       out.skipped.push({
         taskId: opts.taskId, slug: opts.slug,
-        why: `all ${resolved.targetPaths.length} file(s) this spec names are already committed`,
+        why: owed.preexisting.length
+          ? `nothing owed: ${resolved.targetPaths.length - owed.preexisting.length} of ${resolved.targetPaths.length} file(s) this spec names were built by this office, and the other ${owed.preexisting.length} already exist on main without a repo_writes row — see out.preexisting`
+          : `all ${resolved.targetPaths.length} file(s) this spec names are already committed`,
       });
-      out.summary = 'already committed — nothing drawn.';
+      out.summary = owed.preexisting.length
+        ? `nothing drawn — ${owed.preexisting.length} file(s) already on main were NOT overwritten.`
+        : 'already committed — nothing drawn.';
       return out;
     }
     const take = owed.pending.slice(0, MAX_SPEC_TARGETS_PER_BLOCK);
@@ -2740,14 +2942,20 @@ async function processBuildArtifactBlock(env, opts = {}) {
   } else {
     let snapshot = null;
     try {
-      snapshot = await getOfficeSnapshot(env, { allowFetch: true });
+      // SESSION 44 — `allowFetch: false`. A refresh here was MEASURED at 33 of
+      // this tick's 50 subrequests, three quarters of the budget spent before
+      // a single file was written. See MAX_RESOLUTION_FETCHES_PER_BLOCK.
+      snapshot = await getOfficeSnapshot(env, { allowFetch: false });
     } catch (err) {
       out.errors.push(`office snapshot threw: ${err?.message}`);
       return out;
     }
     const boardTasks = snapshot?.board?.tasks || null;
     if (!Array.isArray(boardTasks)) {
-      out.errors.push('the board could not be read from the office snapshot — this desk produced nothing because its queue was UNREADABLE, which is not the same fact as empty');
+      // Unchanged in substance and now true of one more case: no CACHED
+      // snapshot is still UNREADABLE, not empty. `admin_desk` at 10:00
+      // refreshes it and this block is scheduled after that, deliberately.
+      out.errors.push('the board could not be read from the cached office snapshot — this desk produced nothing because its queue was UNREADABLE, which is not the same fact as empty. This block deliberately does not refresh the snapshot itself (measured at 33 subrequests); the 10:00 admin_desk tick does.');
       return out;
     }
 
@@ -2763,12 +2971,34 @@ async function processBuildArtifactBlock(env, opts = {}) {
     const owedBySlug = {};
     for (const t of building) {
       const r = resolvedBySlug[t.warehouse];
-      if (!r.ok) { noTarget[t.id] = r.reason; continue; }
+      if (!r.ok) {
+        // A read-budget stop is a DEFERRAL, not a defect in the task's spec,
+        // and conflating the two would put "your spec names no file" against a
+        // task whose spec was never opened. See A3's own rule: a round that
+        // stops early must say so in its own record.
+        if (r.budget) out.deferred.push({ taskId: t.id, slug: t.warehouse, why: r.reason });
+        else noTarget[t.id] = r.reason;
+        continue;
+      }
       // Per PATH, not per task — see pendingTargets()'s own note. A task counts
       // as built only when every file its spec names has been committed.
+      const seen = !!owedBySlug[t.warehouse];
       const owed = owedBySlug[t.warehouse] || (owedBySlug[t.warehouse] = await pendingTargets(r.targetPaths));
-      if (!owed.ok) { noTarget[t.id] = owed.reason; continue; }
-      if (!owed.pending.length) alreadyBuilt[t.id] = true;
+      if (!owed.ok) {
+        if (owed.budget) out.deferred.push({ taskId: t.id, slug: t.warehouse, why: owed.reason });
+        else noTarget[t.id] = owed.reason;
+        continue;
+      }
+      // SESSION 44 — recorded once per SLUG (two board tasks can share one
+      // warehouse directory), and recorded even when the task is then drawn:
+      // a task with two owed files and three untouchable ones is a partial
+      // build, and the record has to say which three and why.
+      if (!seen) for (const pre of owed.preexisting) out.preexisting.push({ taskId: t.id, slug: t.warehouse, ...pre });
+      if (!owed.pending.length) {
+        alreadyBuilt[t.id] = owed.preexisting.length
+          ? `nothing owed: ${owed.preexisting.length} of ${r.targetPaths.length} file(s) this spec names already exist on main and were NOT written by this office — a build here would overwrite them`
+          : true;
+      }
     }
 
     const assigned = buildArtifactAssignments(boardTasks, { noTarget, alreadyBuilt });
@@ -2888,10 +3118,19 @@ async function processBuildArtifactBlock(env, opts = {}) {
     }
   }
 
-  out.summary = out.produced > 0
+  // SESSION 44 — an empty queue and a queue emptied by the overwrite guard are
+  // different days, and the summary is where a reader looks first.
+  const preNote = (out.preexisting.length
+    ? ` ${out.preexisting.length} path(s) left alone: already on main, not this office's work.`
+    : '')
+    + (reads.exhausted
+      ? ` READ BUDGET SPENT: ${reads.spent} of ${MAX_RESOLUTION_FETCHES_PER_BLOCK} reads used and the queue was NOT fully inspected — see out.deferred. This tick's view of the board is partial and says so.`
+      : '');
+  out.reads = { spent: reads.spent, budget: MAX_RESOLUTION_FETCHES_PER_BLOCK, exhausted: reads.exhausted };
+  out.summary = (out.produced > 0
     ? `${out.produced} produced from a queue of ${out.queued}.`
-    : (out.queued === 0 ? 'queue empty — nothing written, nothing recorded.' : `${out.queued} queued and 0 produced.`);
-  console.log(`[build-artifact] ${out.mode}: ${out.produced} produced, ${out.queued} queued, ${out.errors.length} error(s)`);
+    : (out.queued === 0 ? 'queue empty — nothing written, nothing recorded.' : `${out.queued} queued and 0 produced.`)) + preNote;
+  console.log(`[build-artifact] ${out.mode}: ${out.produced} produced, ${out.queued} queued, ${out.preexisting.length} pre-existing left alone, ${out.errors.length} error(s)`);
   return out;
 }
 
@@ -7307,6 +7546,58 @@ async function runCaseBatchBlockInner(env, cycle, block, agentInstances, agentSt
 function num0(v) { return typeof v === 'number' && Number.isFinite(v) ? v : 0; }
 function clamp0(v, hi) { return Math.min(hi, Math.max(0, v)); }
 
+/* ════ SESSION 44, ITEM A — A SUPERVISED RUN THAT REPORTS WHAT IT SPENT ════
+ *
+ * `runScheduledBlock()` below meters every tick and writes the number to D1
+ * `block_admissions`. The SUPERVISED triggers did not, so the only way to size
+ * a block before scheduling it was to count `fetch()` call sites by hand — and
+ * `subrequest-budget.js`'s own BLOCK_COST header is a twelve-entry record of
+ * how badly that goes: `report` estimated 40 against a worst real 10.25,
+ * `owner_channel` estimated 14 against a real 41.
+ *
+ * This wrapper is the same two meters `runScheduledBlock()` puts on, on the
+ * same weights, around one supervised call. It changes nothing about what the
+ * handler does — there is no budget, nothing is refused, no lane is set. It
+ * only COUNTS, and returns the count on the result as `subrequests`.
+ *
+ * It exists because Item A of this session was asked for a measured number and
+ * a measured number needs an instrument. Scheduling `build_artifact` on the
+ * strength of "~6 fixed plus ~5 per file, INFERRED" is the thing the previous
+ * session's own confidence ledger flagged.
+ *
+ * The weights are `subrequest-budget.js`'s, so this number is directly
+ * comparable to a `block_admissions` `actual` and can be written into
+ * BLOCK_COST as-is. `fetch` is 1, a Durable Object call 0.25, D1 and KV 0 —
+ * measured, not assumed; see WEIGHTS.
+ */
+async function meterSupervised(env, fn) {
+  let total = 0;
+  const byKind = {};
+  const spend = (n, kind) => {
+    total += n;
+    byKind[kind || 'other'] = (byKind[kind || 'other'] || 0) + n;
+  };
+  const metered = meterEnv(env, spend);
+  const restoreFetch = meterGlobalFetch(spend);
+  let result;
+  try {
+    result = await fn(metered);
+  } finally {
+    restoreFetch();
+  }
+  // Attached, never replacing — a caller reading `produced` must not have to
+  // know this wrapper exists. A non-object result is returned untouched.
+  if (result && typeof result === 'object') {
+    result.subrequests = {
+      total: Math.round(total * 100) / 100,
+      byKind,
+      ceiling: SUBREQUEST_CEILING,
+      note: 'weighted the same way workers/subrequest-budget.js weights a real tick (fetch 1, DO 0.25, D1/KV 0) — directly comparable to a block_admissions `actual`.',
+    };
+  }
+  return result;
+}
+
 /**
  * Cron entry point for one Israel-time tick (called from `scheduled()` with
  * the tick's { time, dayOfWeek }). Looks up which daily-schedule.json
@@ -7430,6 +7721,8 @@ async function runScheduledBlockInner(env, israelTime, dayOfWeek, ctx) {
         ownerChannel: null, qaInstruments: null, adminDesk: null,
         // SESSION 33, ITEM B — the build chain's two scheduled blocks.
         repair: null, architectApproval: null,
+        // SESSION 44, ITEM A — the two that WRITE. Same shape, same reason.
+        buildArtifact: null, buildNotes: null,
       },
     };
   }
@@ -7576,6 +7869,39 @@ async function runScheduledBlockInner(env, israelTime, dayOfWeek, ctx) {
         // inside the handler on `office_context_enabled`, like the guide_*
         // blocks — it has no switch of its own, see processAdminDeskBlock().
         cycle.results.adminDesk = await processAdminDeskBlock(env);
+      } else if (block.type === 'build_artifact') {
+        /*
+         * ── SESSION 44, ITEM A — THE LAST LINK ─────────────────────────────
+         *
+         * The block that WRITES. Everything downstream of it — repair (11:30),
+         * architect_approval (13:00) — has been scheduled since Session 33 and
+         * has been running against a queue only a supervised human could fill.
+         *
+         * It was supervised-only under Session 31's graduated-rollout posture
+         * ("supervised run -> small unattended window -> full schedule"), which
+         * was correct then and which nobody lifted for nine sessions. Lifting
+         * it is this session's whole point: the owner does not work on this
+         * project day to day, so a gate that waits for him stops the office
+         * indefinitely.
+         *
+         * Self-gating inside the handler on `office_context_enabled`, like
+         * repair and architect_approval below and for the identical reason: a
+         * block whose first act is to read a queue must be able to report that
+         * the queue was unreadable, and a gate that refuses to enter cannot
+         * report anything.
+         *
+         * Placed at 10:30, AFTER admin_desk at 10:00, and that ordering is
+         * load-bearing rather than tidy — this block no longer refreshes the
+         * office snapshot (measured at 33 of a tick's 50 subrequests) and
+         * admin_desk is what refreshes it.
+         */
+        cycle.results.buildArtifact = await processBuildArtifactBlock(env);
+      } else if (block.type === 'build_notes') {
+        // SESSION 44, ITEM A. Desk 5, off supervised-only for the same reason
+        // and by the same decision as build_artifact above. Its idempotency
+        // query was ALSO broken — see processBuildNotesBlock()'s own note on
+        // D1's 50-character LIKE limit; it had been fail-closed and silent.
+        cycle.results.buildNotes = await processBuildNotesBlock(env);
       } else if (block.type === 'repair') {
         // SESSION 33, ITEM B. Self-gating inside the handler on
         // `office_context_enabled`, like the guide_* and admin_desk blocks —
@@ -10182,7 +10508,8 @@ export default {
             // is checked against this Worker's own repo_writes history, so a
             // second run the same day for the same task+agent draws nothing
             // new for that pair.
-            result = await processBuildNotesBlock(env, { bypassGate: body.bypassGate !== false });
+            // SESSION 44 — METERED, same reason as build_artifact_block below.
+            result = await meterSupervised(env, (metered) => processBuildNotesBlock(metered, { bypassGate: body.bypassGate !== false }));
             break;
           case 'architect_spec_block':
             // Session 31, Item A — SUPERVISED ONLY, not on the schedule.
@@ -10202,10 +10529,16 @@ export default {
             // processBuildArtifactBlock()'s own header) or {} to draw from
             // the live board instead. bypassGate?: false to honour
             // office_context_enabled.
-            result = await processBuildArtifactBlock(env, {
+            // SESSION 44 — METERED. This trigger is how this block's real cost
+            // was established before it went on the schedule; see
+            // meterSupervised(). The measurement rides on the ordinary
+            // supervised run rather than needing a separate instrumented one,
+            // so a future change to this block can be re-measured the same way
+            // instead of re-argued from its call sites.
+            result = await meterSupervised(env, (metered) => processBuildArtifactBlock(metered, {
               taskId: body.taskId, slug: body.slug, agentId: body.agentId, title: body.title,
               bypassGate: body.bypassGate !== false,
-            });
+            }));
             break;
           case 'repair_block':
             // Session 31, Item E — SUPERVISED ONLY, not on the schedule.

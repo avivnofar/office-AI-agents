@@ -391,6 +391,51 @@ export const BLOCK_COST = {
    */
   repair: 14,             // ARITHMETIC, not measured
   architect_approval: 10, // ARITHMETIC, not measured
+  /*
+   * ── SESSION 44 — THE FIRST TWO ENTRIES HERE THAT WERE MEASURED FIRST ─────
+   *
+   * Every other number above was a harness run scaled by a ratio, or
+   * arithmetic over call sites, and this file's own header is the record of
+   * how far those land from the truth (`report` 40 against a real 10.25;
+   * `owner_channel` 14 against a real 41). These two were metered on the LIVE
+   * Worker through the supervised trigger, before either went on the
+   * schedule — see `meterSupervised()` in agent-runner.js.
+   *
+   * MEASURED, 2026-09-05, weighted exactly as a tick weights:
+   *
+   *   build_artifact, whole round, COLD office snapshot, 0 files    44
+   *   build_artifact, whole round, WARM office snapshot, 0 files    11
+   *   build_notes,    whole round, warm snapshot, 1 note filed       3
+   *
+   * The 33 between the first two is the office-snapshot refresh, and finding
+   * it is what changed the design: **both blocks now read the CACHED snapshot
+   * and never refresh it**, and both are scheduled AFTER `admin_desk` (10:00),
+   * which does. Without that, a four-file build round would have cost
+   * 44 + 4x3 = 56 — over Cloudflare's 50 platform limit outright, on its first
+   * unattended run.
+   *
+   * `build_artifact` 32 — the reading is now bounded by
+   *   MAX_RESOLUTION_FETCHES_PER_BLOCK (20, agent-runner.js) and the writing by
+   *   MAX_SPEC_TARGETS_PER_BLOCK (4 files) x 3 measured each = 12. 32 is the
+   *   worst case both caps allow, not an average: today's real board spends 11
+   *   of the 20. Sized AT the worst case rather than above it, because
+   *   `admitBlock()` treats anything over `USABLE_MAX` as `oversize` and runs
+   *   it ANYWAY — an inflated estimate here would not make the block safer, it
+   *   would only make it refuse ticks it can afford.
+   *
+   * `build_notes` 10 — 3 measured for one note, x2 for MAX_BUILD_NOTES_PER_TICK,
+   *   plus 4 for a provider retry and the fallback lane. It draws at most two
+   *   notes and does nothing else.
+   *
+   * Both are on their OWN free Sun-Thu tick (10:30 and 11:00), so each has a
+   * full ~47 usable rather than sharing one — the same remedy `repair` and
+   * `architect_approval` took above. The derived-estimate path (§8) replaces
+   * both from `block_admissions` once each has MIN_MEASURED_RUNS real runs,
+   * which is the point: these are the starting numbers, and unlike their
+   * neighbours they start from a measurement.
+   */
+  build_artifact: 32,     // MEASURED — see the block above
+  build_notes: 10,        // MEASURED — see the block above
 };
 
 /** Conservative default for a block type nobody has measured yet. */

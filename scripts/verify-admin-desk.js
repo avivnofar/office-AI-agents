@@ -366,9 +366,28 @@ section('§9e the wiring — asserted against the real files, session 30 item B'
 const runnerB = readFileSync(path.join(ROOT, 'workers/agent-runner.js'), 'utf8');
 const routingConfig = JSON.parse(readFileSync(path.join(ROOT, 'config/model-routing.json'), 'utf8'));
 check('processBuildNotesBlock() exists', /async function processBuildNotesBlock\(/.test(runnerB));
-check('it is reachable only via a SUPERVISED trigger, not the scheduled admin_desk tick',
+/*
+ * ── THIS CHECK WAS INVERTED ON 2026-09-05, AND THAT IS THE POINT ──────────
+ *
+ * It used to assert `build_notes` is reachable ONLY from a supervised trigger
+ * and NOT from a scheduled tick. That was Session 30's graduated-rollout
+ * posture, it was correct when written, and Session 44 lifted it deliberately:
+ * the owner does not work on this project day to day, so a step that waits for
+ * a human at a keyboard is a step the office never takes. The block is now on
+ * `full_day_schedule` at 11:00, Sun-Thu.
+ *
+ * The assertion is INVERTED rather than deleted. A rollout stage that has been
+ * reached is still a fact worth holding a check on — this one now fails if the
+ * schedule entry is removed without the trigger, or the trigger without the
+ * schedule entry, which are the two ways this desk could quietly become
+ * unreachable again.
+ */
+check('it is reachable BOTH ways — the supervised trigger AND the scheduled tick (SESSION 44: the graduated rollout was completed, not abandoned)',
   /case 'build_notes_block'/.test(runnerB)
-  && !/block\.type === 'build_notes'/.test(runnerB));
+  && /block\.type === 'build_notes'/.test(runnerB));
+check('...and the schedule actually carries the block, so the wiring above is reachable in production',
+  JSON.parse(readFileSync(path.join(ROOT, 'config/daily-schedule.json'), 'utf8'))
+    .full_day_schedule.blocks.some((b) => b.type === 'build_notes'));
 check('it routes through the DEDICATED build_note lane, not a silent reuse of judgment',
   /taskType: 'build_note'/.test(runnerB));
 check('the build_note lane exists in model-routing.json and declares a kind (never lane_kind_unstated)',
@@ -377,8 +396,27 @@ check('the build_note lane is explicitly flagged as an unmeasured placeholder, n
   /_placeholder_unmeasured/.test(JSON.stringify(routingConfig.lanes.build_note)));
 check('it writes markdown only — no explicitCodeTask, so no code-write-warehouse capability is touched',
   !/processBuildNotesBlock[\s\S]{0,4000}explicitCodeTask/.test(runnerB));
+/*
+ * ── AND THE QUERY IT ASSERTS ON CHANGED, FOR A MEASURED REASON ────────────
+ *
+ * The pattern was `repo_writes WHERE repo = ? AND path LIKE ?`. **D1 refuses a
+ * LIKE pattern longer than 50 characters** — measured against live D1 on
+ * 2026-09-05: 50 runs, 51 is refused with `LIKE or GLOB pattern too complex:
+ * SQLITE_ERROR`. This query's pattern was 33 fixed characters plus the
+ * warehouse slug, so every slug over 17 characters threw and the desk
+ * fail-closed and wrote nothing. Two of the board's three warehouse slugs are
+ * longer than that.
+ *
+ * A prefix range (`path >= ? AND path < ?`) has no pattern-length limit, uses
+ * the index the same way a left-anchored LIKE does, and is exact. The claim
+ * this check is really making — idempotency comes from this Worker's OWN write
+ * history, never from a warehouse it cannot read back — is unchanged, so the
+ * check follows the query rather than the query being kept for the check.
+ */
 check('idempotency is read from this Worker\'s OWN repo_writes history, not from the (unreadable) warehouse',
-  /repo_writes WHERE repo = \? AND path LIKE \?/.test(runnerB));
+  /repo_writes WHERE repo = \? AND path >= \? AND path < \?/.test(runnerB));
+check('...and it does NOT use LIKE, whose pattern D1 caps at 50 characters (measured 2026-09-05) — a cap this query\'s slug-length would exceed again',
+  !/repo_writes WHERE repo = \? AND path LIKE \?/.test(runnerB));
 
 /* ═══════════════ done ═══════════════ */
 console.log(`\n${fail === 0 ? '✅' : '❌'} verify-admin-desk: ${pass} passed, ${fail} failed`);
