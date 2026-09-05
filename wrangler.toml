@@ -338,4 +338,36 @@ custom_domain = true
 # RESTORED 2026-08-11 after plan 0.4 stage 1 (meeting reports -> back-office)
 # verified live: real write landed in back-office, read back via git pull;
 # public repo's reports/meetings/ confirmed unaffected.
-crons = ["*/30 5-14 * * *", "0 15 * * *"]
+#
+# == STOOD DOWN 2026-09-05 (SESSION 45) =====================================
+#
+# The owner decided to stand the office down. The record is
+# `back-office-AI-agents/docs/decisions/RETIRED-CAPABILITIES.md` R-002, and its
+# RESTART section is what a future session follows to bring this back.
+#
+# NOTHING IS DELETED. The two expressions this Worker ran on are preserved
+# verbatim on the line below, commented, and restoring them is uncommenting one
+# line and deploying:
+#
+#   crons = ["*/30 5-14 * * *", "0 15 * * *"]
+#
+# WHY AN EMPTY ARRAY AND NOT A DELETED BLOCK. An ABSENT `[triggers]` block does
+# not remove anything -- wrangler leaves the account's existing schedules alone,
+# so deleting these lines would have left both crons armed while the config
+# looked stopped. That is this estate's most-documented failure shape and the
+# reason the `[observability]` and `[[routes]]` blocks are in this file at all.
+# An explicit empty array is a deploy-time instruction to remove every schedule,
+# and it is read back from the Cloudflare API after the deploy rather than
+# assumed.
+#
+# THIS IS THE SECOND LOCK, NOT THE FIRST. The first is SIM_KV
+# `simulation-state.paused = true`, set the same day, which makes
+# runScheduledBlockInner() return `{skipped:true, reason:'paused'}` before any
+# block is entered. The switch was preferred -- a cleaner reversal, and no
+# deploy -- and this exists so the tick does not fire at all rather than firing
+# into a no-op. EITHER ONE ALONE STOPS THE OFFICE. Both must be reversed to
+# restart it, and the RESTART section says so in that order.
+#
+# The 21-tick office-hours window above, its arithmetic and its DST caveat are
+# deliberately left intact: they are what the restored line means.
+crons = []

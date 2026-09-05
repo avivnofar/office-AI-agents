@@ -1,5 +1,25 @@
 # 🏢 Office AI Agents
 
+> ## ⏹ Stood down — 2026-09-05
+>
+> **This office no longer runs.** Its automation was stopped on 5 September
+> 2026 by an owner decision: the Worker's scheduled ticks are unarmed, every
+> GitHub Actions workflow here is disabled, and nothing in this repository is
+> being produced or updated any more.
+>
+> **Nothing was deleted.** The code, the thirteen personas, the board, the
+> reports, the guides and the whole history are exactly where they were, and
+> every switch that was flipped can be flipped back. The site at
+> [office.avivnofar.com](https://office.avivnofar.com) is still served — its
+> figures are live-read from a database that stopped changing on 2026-09-05,
+> and the page says so on its own front.
+>
+> **Why, what it produced, and exactly how to start it again** are recorded in
+> `back-office-AI-agents/docs/decisions/RETIRED-CAPABILITIES.md` (entry
+> **R-002**, with a RESTART section). Everything below this notice describes
+> the office as it ran and is left unedited.
+
+
 > An office of AI personas whose job is to **use and stress-test two
 > production AI systems** — Claude (in [Data Center](https://avivnofar.github.io/data-center/))
 > and Gemini (in [Notebook-X](https://notebook-x.vercel.app)) — by

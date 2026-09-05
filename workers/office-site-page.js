@@ -720,6 +720,30 @@ const OFFICE_CSS_ADDITIONS = `
    it, which is the only thing that would have caught it.
    --------------------------------------------------------------------------- */
 
+/* ---- STOOD DOWN 2026-09-05 — the frozen-data notice ----------------------
+   Session 45. The office's automation was stopped on 2026-09-05 and its D1 is
+   no longer changing. Every count on this page is still READ LIVE at request
+   time, which is precisely why this banner is not optional: a page that goes
+   on presenting a frozen number in the present tense is the exact defect class
+   this estate spent two months cataloguing, and the office's last act must not
+   be an instance of it.
+   Deliberately NOT an alarm colour. Nothing is broken; the office was retired
+   on purpose. --text-dim on the raised ground, one accent rule down the
+   starting edge, border-inline-start, so it lands on the right in RTL. */
+.stood-down {
+  margin-top: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-inline-start: 3px solid var(--accent);
+  border-radius: var(--radius);
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  line-height: 1.55;
+  max-width: 62ch;
+}
+.stood-down strong { color: var(--text); font-weight: 600; }
+
 /* ---- tab bar (the static build was one long scroll) ---- */
 .tabs { border-bottom: 1px solid var(--border); background: var(--bg-raised); }
 .tabs .wrap { display: flex; flex-wrap: wrap; gap: var(--space-1); }
@@ -1005,6 +1029,9 @@ const CHROME_EN = {
   body_class: '',
   h1: 'The Office',
   lede: 'Thirteen AI agents that run as an office — and review each other.',
+  stood_down: 'This office was stood down on 5 September 2026.' + ' Its automation is stopped: no scheduled run, no agent activity, nothing being produced.'
+    + ' The page is still read live from the office’s own database each time you load it, but that database has not changed since that date — so every count and every date below is AS OF 2026-09-05, not as of today.'
+    + ' Nothing was deleted. The record of the decision, and what it would take to start it again, are kept with the project.',
   eyebrow_admin: 'owner view · live · behind the admin gate',
   eyebrow_public: 'live · served by the office\'s own Worker',
   title_owner_suffix: ' — owner',
@@ -1197,6 +1224,9 @@ const CHROME_HE = {
   body_class: ' chrome-he',
   h1: 'המשרד',
   lede: 'שלושה עשר סוכני בינה מלאכותית שמתנהלים כמשרד — וסוקרים זה את זה.',
+  stood_down: 'המשרד הזה הופסק ב-5 בספטמבר 2026.' + ' האוטומציה שלו כבויה: אין הרצה מתוזמנת, אין פעילות של סוכנים, ולא נוצר דבר.'
+    + ' הדף עדיין נקרא בשידור חי ממסד הנתונים של המשרד בכל טעינה, אבל מסד הנתונים הזה לא השתנה מאז אותו תאריך — ולכן כל מספר וכל תאריך כאן נכונים לתאריך 2026-09-05, ולא להיום.'
+    + ' שום דבר לא נמחק. תיעוד ההחלטה, ומה שנדרש כדי להפעיל את המשרד מחדש, נשמרים עם הפרויקט.',
   eyebrow_admin: 'תצוגת הבעלים · חי · מאחורי שער הניהול',
   eyebrow_public: 'חי · מוגש על ידי ה-Worker של המשרד',
   title_owner_suffix: ' — הבעלים',
@@ -2540,6 +2570,7 @@ ${OFFICE_CSS_ADDITIONS}
       <p class="eyebrow" dir="${c.dir_chrome}">${isAdmin ? c.eyebrow_admin : c.eyebrow_public}</p>
       <h1 dir="${c.dir_chrome}">${c.h1}</h1>
       <p class="lede" dir="${c.dir_chrome}">${c.lede}</p>
+      <p class="stood-down" dir="${c.dir_chrome}">${c.stood_down}</p>
       ${ownerLink}
     </div>
   </header>
